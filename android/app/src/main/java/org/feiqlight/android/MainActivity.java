@@ -41,6 +41,8 @@ public final class MainActivity extends Activity implements ChatService.Observer
     private RadioGroup wallpaperChoices;
     private String editorSavedText="";
     private boolean bound, visible, rendering, sending;
+    private String sendingPeer="";
+    private TextView sendStatus;
     private boolean restoreAttempted;
     private Bitmap backgroundBitmap;
     private String loadedBackground="";
@@ -132,7 +134,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
     private void renderPage() {
         historyAppliedVersion=++historyRequestVersion;
         finishSelection();
-        applyTheme(); historySignature=""; displayedOutgoing.clear(); forceLatest=false; editor=null; search=null; messages=null; list=null; chatAvatar=null;
+        applyTheme(); historySignature=""; displayedOutgoing.clear(); forceLatest=false; editor=null; search=null; messages=null; list=null; chatAvatar=null;sendStatus=null;sendButton=null;
         root=column(); root.setBackgroundColor(SURFACE); setContentView(root);
         root.setOnApplyWindowInsetsListener((view,insets)->{
             if(Build.VERSION.SDK_INT>=30) { Insets i=insets.getInsets(WindowInsets.Type.systemBars()|WindowInsets.Type.displayCutout()|WindowInsets.Type.ime()); view.setPadding(i.left,i.top,i.right,i.bottom); }
@@ -180,6 +182,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         body.setBackground(chatWallpaper()); scroll=new ScrollView(this); scroll.setFillViewport(true); scroll.setClipToPadding(false);
         messages=column(); messages.setPadding(dp(12),dp(18),dp(12),dp(18)); scroll.addView(messages,new ScrollView.LayoutParams(-1,-2)); body.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
         transferStatus=text("",12,BLUE); transferStatus.setMaxLines(2); transferStatus.setEllipsize(TextUtils.TruncateAt.END); transferStatus.setPadding(dp(16),dp(8),dp(16),dp(8)); transferStatus.setBackgroundColor(SURFACE); transferStatus.setOnClickListener(v->{ if(service!=null&&service.busy()) confirm("文件传输","取消当前任务？","取消任务",()->service.cancelTransfer()); }); body.addView(transferStatus);
+        sendStatus=text("正在发送…",12,MUTED);sendStatus.setPadding(dp(16),dp(4),dp(16),dp(4));sendStatus.setBackgroundColor(SURFACE);sendStatus.setVisibility(View.GONE);sendStatus.setContentDescription("消息发送状态");body.addView(sendStatus);
         LinearLayout composer=new LinearLayout(this) {
             @Override protected void onMeasure(int width,int height) {
                 if(editor!=null&&editor.getParent()==this) {
@@ -211,6 +214,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         });
         sendButton=new IconButton("send","发送消息",Color.WHITE); sendButton.setBackground(shape(BLUE,28)); LinearLayout.LayoutParams sendParams=new LinearLayout.LayoutParams(dp(48),dp(48)); sendParams.leftMargin=dp(8); composer.addView(sendButton,sendParams);
         sendButton.setOnClickListener(v->send());
+        updateSendFeedback();
     }
     private static final String[] EMOJI_GROUPS={
         "😀 😃 😄 😁 😆 😅 😂 🤣 😊 😇 🙂 🙃 😉 😌 😍 🥰 😘 😋 😎 🤔 😭 😴 😡 🥺",
@@ -420,14 +424,20 @@ public final class MainActivity extends Activity implements ChatService.Observer
         fileAction(options,dialog,"转发…",()->forward(message,source));
     }
     private void send() {
-        ChatStore.Conversation current=conversation(selected); if(service==null||current==null||sending) return;
+        ChatStore.Conversation current=conversation(selected); if(sending)return;
+        if(service==null||!service.online()){error("请先连接局域网");return;}
+        if(current==null){error("会话尚未就绪，请稍后重试");return;}
         String value=editor.getText().toString(); if(value.trim().isEmpty()) return;
-        sending=true; sendButton.setEnabled(false); String peer=selected; saveDraft();
+        sending=true;sendingPeer=selected;updateSendFeedback();String peer=selected;saveDraft();
         service.send(current.peer,value,success->{
             if(isDestroyed() || isFinishing()) return;
-            sending=false; if(sendButton!=null) sendButton.setEnabled(true);
+            sending=false;sendingPeer="";updateSendFeedback();
             if(success && selected.equals(peer)) { forceLatest=true; changed(); }
         });
+    }
+    private void updateSendFeedback() {
+        if(sendButton!=null){sendButton.setEnabled(!sending);sendButton.setAlpha(sending?.5f:1f);sendButton.setContentDescription(sending?"正在发送，请勿重复点击":"发送消息");}
+        if(sendStatus!=null)sendStatus.setVisibility(sending&&selected.equals(sendingPeer)?View.VISIBLE:View.GONE);
     }
     private void connect() {
         if(Build.VERSION.SDK_INT>=33&&checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)!=PackageManager.PERMISSION_GRANTED) requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS},10);

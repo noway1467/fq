@@ -15,6 +15,24 @@ import static org.robolectric.Shadows.shadowOf;
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk=35)
 public final class LanNetworkTest {
+    @org.robolectric.annotation.Implements(ConnectivityManager.class)
+    public static class CountingConnectivity extends ShadowConnectivityManager {
+        int queries;
+        @org.robolectric.annotation.Implementation protected Network[] getAllNetworks() {queries++;return super.getAllNetworks();}
+    }
+    @org.robolectric.annotation.Implements(Network.class)
+    public static class CountingNetwork extends ShadowNetwork {
+        int binds;
+        @org.robolectric.annotation.Implementation protected void bindSocket(DatagramSocket socket) {binds++;super.bindSocket(socket);}
+    }
+    @Test @Config(shadows={CountingConnectivity.class,CountingNetwork.class})
+    public void discoveryBurstDoesNotQueryAndRebindTheSameSocketForEveryPacket() throws Exception {
+        ConnectivityManager cm=(ConnectivityManager)RuntimeEnvironment.getApplication().getSystemService(Context.CONNECTIVITY_SERVICE);shadowOf(cm).clearAllNetworks();
+        Network wifi=add(cm,904,NetworkCapabilities.TRANSPORT_WIFI,"192.0.2.8",24);LanNetwork route=new LanNetwork(cm);
+        try(DatagramSocket udp=new DatagramSocket(null)) {for(int i=0;i<200;i++)route.bind(udp);}
+        CountingConnectivity manager=org.robolectric.shadow.api.Shadow.extract(cm);CountingNetwork network=org.robolectric.shadow.api.Shadow.extract(wifi);
+        assertEquals("同一轮发现重复查询全部系统网络",1,manager.queries);assertEquals("同一 UDP socket 重复绑定",1,network.binds);
+    }
     private Network add(ConnectivityManager cm,int id,int transport,String ip,int prefix) throws Exception {
         Network network=ShadowNetwork.newInstance(id);NetworkCapabilities caps=ShadowNetworkCapabilities.newInstance();
         shadowOf(caps).addTransportType(transport);
@@ -34,8 +52,9 @@ public final class LanNetworkTest {
         try(DatagramSocket udp=new DatagramSocket(null);Socket tcp=new Socket()) {
             route.bind(udp);route.bind(tcp);assertTrue(shadowOf(wifi).isSocketBound(udp));assertTrue(shadowOf(wifi).isSocketBound(tcp));assertEquals(0,shadowOf(vpn).boundSocketCount());
             shadowOf(cm).removeNetwork(wifi);Network next=add(cm,903,NetworkCapabilities.TRANSPORT_ETHERNET,"198.51.100.12",23);
+            route.changed();
             route.bind(udp);assertTrue(shadowOf(next).isSocketBound(udp));assertEquals("198.51.101.255",route.broadcasts().iterator().next().getHostAddress());
-            shadowOf(cm).removeNetwork(next);try {route.bind(tcp);fail("VPN 单网络被当成局域网");}catch(IOException expected){assertTrue(expected.getMessage().contains("VPN"));}
+            shadowOf(cm).removeNetwork(next);route.changed();try {route.bind(tcp);fail("VPN 单网络被当成局域网");}catch(IOException expected){assertTrue(expected.getMessage().contains("VPN"));}
         }
         assertNull("不应更改进程/系统默认路由",cm.getBoundNetworkForProcess());
     }

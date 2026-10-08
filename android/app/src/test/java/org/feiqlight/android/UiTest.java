@@ -23,6 +23,22 @@ import static org.robolectric.Shadows.shadowOf;
 @Config(sdk=35, qualifiers="w393dp-h852dp-xhdpi")
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 public final class UiTest {
+    @Test public void sendClickShowsImmediatePendingWithoutClearingDraftOrDuplicatingMessage() throws Exception {
+        ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();CountDownLatch release=new CountDownLatch(1),blocked=new CountDownLatch(1);ActivityController<MainActivity> ac=null;
+        try(java.net.DatagramSocket target=new java.net.DatagramSocket(0,java.net.InetAddress.getLoopbackAddress())) {
+            settle(service);int port;try(java.net.ServerSocket socket=new java.net.ServerSocket(0,1,java.net.InetAddress.getLoopbackAddress())){port=socket.getLocalPort();}
+            service.connectionFactory=(prefs,listener)->new LanNode(port,true,"pending-test","test","发送方","test",listener);service.onStartCommand(new Intent(),0,1);settle(service);
+            LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:"+target.getLocalPort()),"pending-peer","test","发送反馈测试","");peer.utf8=true;
+            LanNode.Message initial=new LanNode.Message();initial.number=1;initial.time=System.currentTimeMillis();initial.state="已收到";initial.text="发送消息时立即反馈，不会误认为没有点到。";service.incoming(peer,initial,false);settle(service);
+            shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));
+            ac=Robolectric.buildActivity(MainActivity.class).create().start().resume().visible();MainActivity activity=ac.get();settle(service);invoke(activity,"open",String.class,peer.id());settle(service);
+            ExecutorService io=(ExecutorService)field(service,"io");io.execute(()->{blocked.countDown();try{release.await(10,TimeUnit.SECONDS);}catch(InterruptedException e){Thread.currentThread().interrupt();}});assertTrue(blocked.await(3,TimeUnit.SECONDS));
+            EditText input=(EditText)field(activity,"editor");input.setText("发送中的测试消息");View send=(View)field(activity,"sendButton");send.performClick();send.performClick();
+            assertEquals(View.VISIBLE,((TextView)field(activity,"sendStatus")).getVisibility());assertEquals("发送中的测试消息",input.getText().toString());assertFalse(send.isEnabled());screenshot(activity,"android-send-pending");
+            release.countDown();settle(service);assertEquals(View.GONE,((TextView)field(activity,"sendStatus")).getVisibility());assertTrue(send.isEnabled());assertEquals("",input.getText().toString());
+            ChatStore store=(ChatStore)field(service,"store");assertEquals(1L,io.submit(()->store.history(peer.id()).stream().filter(m->m.outgoing).count()).get().longValue());
+        } finally {release.countDown();if(ac!=null)ac.pause().stop().destroy();sc.destroy();}
+    }
     @Test public void fileProgressRendersPerCardAndUpdatesWithoutRebuildingOrStealingScroll() throws Exception {
         ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();
         shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));

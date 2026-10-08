@@ -30,7 +30,7 @@ try {
     & $gradle @tasks
     if ($LASTEXITCODE -ne 0) { throw 'Android 构建或验证失败，未更新交付 APK。' }
     $out = Join-Path $root 'dist'; New-Item -ItemType Directory -Force -Path $out | Out-Null
-    $apk = Join-Path $out '飞Q-android-0.2.17-preview.apk'
+    $apk = Join-Path $out '飞Q-android-0.2.18-preview.apk'
     Copy-Item -LiteralPath "$android\app\build\outputs\apk\preview\app-preview.apk" -Destination $apk -Force
     Get-Item -LiteralPath $apk | Select-Object FullName,Length
     Get-FileHash -LiteralPath $apk -Algorithm SHA256

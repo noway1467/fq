@@ -44,9 +44,11 @@ public final class LanNode implements AutoCloseable {
         void bind(DatagramSocket socket) throws IOException;
         void bind(Socket socket) throws IOException;
         default Collection<InetAddress> broadcasts() throws IOException { return null; }
+        default void changed() { }
     }
     private volatile SocketBinding socketBinding;
     public void setSocketBinding(SocketBinding binding) { if(udp!=null) throw new IllegalStateException("需在启动前设置网络"); socketBinding=binding; }
+    public void networkChanged() {SocketBinding binding=socketBinding;if(binding!=null)binding.changed();}
     public interface Progress { void update(int percent); }
     public static final class Transfer implements AutoCloseable {
         private volatile boolean cancelled;
@@ -119,7 +121,7 @@ public final class LanNode implements AutoCloseable {
         if (closed || udp==null) throw new IOException("尚未连接局域网");
         if (!(to.getAddress() instanceof Inet4Address) || (loopback && !to.getAddress().isLoopbackAddress())) throw new IOException("无效的目标地址");
         synchronized(udp) {
-            // 每次发送重新选择实体网络，VPN 开关和 Wi-Fi 切换后不能继续沿用旧默认路由。
+            // 适配层只在实体网络改变后重绑，同一轮发现/ACK 复用绑定。
             if(!loopback && socketBinding!=null) socketBinding.bind(udp);
             udp.send(new DatagramPacket(bytes,bytes.length,to));
         }

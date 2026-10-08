@@ -27,6 +27,37 @@ import static org.robolectric.Shadows.shadowOf;
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk=35,qualifiers="w393dp-h852dp-xhdpi")
 public final class ReliabilityTest {
+    @Test public void delayedDiscoveryQueueDoesNotDelayRealTextSend() throws Exception {
+        ServiceController<ChatService> controller=Robolectric.buildService(ChatService.class).create();ChatService service=controller.get();CountDownLatch release=new CountDownLatch(1),entered=new CountDownLatch(1);
+        try(DatagramSocket target=new DatagramSocket(0,InetAddress.getLoopbackAddress());LanNode node=node()) {
+            settle(service);set(service,"node",node);LanNode.Peer peer=peer(target.getLocalPort());
+            block((ExecutorService)field(service,"discovery"),entered,release);assertTrue(entered.await(3,TimeUnit.SECONDS));
+            for(int i=0;i<200;i++)service.refresh();
+            List<Boolean> result=new ArrayList<>();new DraftStore(service).save(peer.id(),"不等发现扫描");service.send(peer,"不等发现扫描",result::add);
+            io(service).submit(()->{}).get(2,TimeUnit.SECONDS);shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(100));
+            assertEquals(Collections.singletonList(true),result);assertEquals("不等发现扫描",forwardedPacket(target).body);assertEquals(1,release.getCount());
+        } finally {release.countDown();controller.destroy();}
+    }
+    @Test public void stagingReportsActualBytesBeforeSendingAndKeepsSpaceChecks() throws Exception {
+        ServiceController<ChatService> controller=Robolectric.buildService(ChatService.class).create();ChatService service=controller.get();
+        try {
+            settle(service);byte[] content=new byte[1024*1024];List<Long> progress=new ArrayList<>();ByteArrayOutputStream output=new ByteArrayOutputStream();
+            InputStream slow=new ByteArrayInputStream(content){@Override public synchronized int read(byte[] b,int off,int len){try{Thread.sleep(25);}catch(InterruptedException e){Thread.currentThread().interrupt();}return super.read(b,off,len);}};
+            Method copy=ChatService.class.getDeclaredMethod("copy",InputStream.class,OutputStream.class,LanNode.Transfer.class,long.class,String.class,java.util.function.Consumer.class);copy.setAccessible(true);
+            copy.invoke(service,slow,output,new LanNode.Transfer(),(long)content.length,"容量不足",(java.util.function.Consumer<Long>)progress::add);
+            assertEquals(Long.valueOf(0),progress.get(0));assertEquals(Long.valueOf(content.length),progress.get(progress.size()-1));assertTrue(progress.stream().anyMatch(n->n>0&&n<content.length));assertEquals(content.length,output.size());
+            try {copy.invoke(service,new ByteArrayInputStream(content),new ByteArrayOutputStream(),new LanNode.Transfer(),1L,"容量不足",null);fail();}catch(InvocationTargetException expected){assertTrue(expected.getCause() instanceof IOException);}
+        } finally {controller.destroy();}
+    }
+    @Test public void continuousChangesDoNotStarveVisibleSendFeedback() throws Exception {
+        ServiceController<ChatService> controller=Robolectric.buildService(ChatService.class).create();ChatService service=controller.get();
+        try {
+            settle(service);int[] calls={0};ChatService.Observer observer=new ChatService.Observer(){public void changed(){calls[0]++;}public void error(String text){}};
+            service.observe(observer);calls[0]=0;Method changed=ChatService.class.getDeclaredMethod("changed");changed.setAccessible(true);
+            for(int i=0;i<30;i++){changed.invoke(service);shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(20));}
+            assertTrue("连续网络事件使界面一直等到安静后才刷新",calls[0]>=5);service.remove(observer);
+        } finally {controller.destroy();}
+    }
     @Test public void diagnosticLogIsOptInBoundedAndDoesNotContainUserData() throws Exception {
         Context context=RuntimeEnvironment.getApplication();Diagnostics log=new Diagnostics(context);log.clear();
         SharedPreferences prefs=context.getSharedPreferences("settings",0);prefs.edit().putBoolean("diagnostics",false).apply();
@@ -44,6 +75,7 @@ public final class ReliabilityTest {
             Object noOp=java.lang.reflect.Proxy.newProxyInstance(jobType.getClassLoader(),new Class<?>[]{jobType},(proxy,method,args)->null);
             ExecutorService worker=(ExecutorService)field(service,"transferWorker");
             start.invoke(service,noOp,(Runnable)()->{},"旧任务完成","旧任务取消");worker.submit(()->{}).get(5,TimeUnit.SECONDS);
+            assertFalse(service.busy());assertEquals("主线程回调未执行时也应读到完成状态","旧任务完成",service.transferStatus());
             start.invoke(service,noOp,(Runnable)()->{},"新任务完成","新任务取消");worker.submit(()->{}).get(5,TimeUnit.SECONDS);
             // 两个任务均已结束但 UI 回调尚未执行：只运行第一个，旧结果也不得覆盖当前准备状态。
             shadowOf(Looper.getMainLooper()).runOneTask();assertNotEquals("旧任务完成",field(service,"transferStatus"));
@@ -60,7 +92,13 @@ public final class ReliabilityTest {
     private static void transferDone(ChatService s)throws Exception { ((ExecutorService)field(s,"transferWorker")).submit(()->{}).get(5,TimeUnit.SECONDS); settle(s); assertFalse(s.busy()); }
     private static LanNode.Peer peer(int port)throws Exception { LanNode.Peer p=new LanNode.Peer(LanNode.endpoint("127.0.0.1:"+port),"test","host","审查联系人","测试"); p.utf8=true; return p; }
     private static LanNode.Message message() { LanNode.Message m=new LanNode.Message(); m.number=1; m.time=System.currentTimeMillis(); m.text="未读消息"; m.state="已收到"; return m; }
-    private static int freePort()throws Exception { try(DatagramSocket s=new DatagramSocket(0,InetAddress.getLoopbackAddress())) { return s.getLocalPort(); } }
+    private static int freePort()throws Exception {
+        // Windows 的 TCP/UDP 占用区间不同；测试节点同时监听两者，不能仅检查 UDP。
+        for(int i=0;i<20;i++)try(ServerSocket tcp=new ServerSocket(0,1,InetAddress.getLoopbackAddress())) {
+            try(DatagramSocket udp=new DatagramSocket(tcp.getLocalPort(),InetAddress.getLoopbackAddress())){return tcp.getLocalPort();}catch(BindException occupied){/* 只在测试选端口阶段换候选。 */}
+        }
+        throw new IOException("没有空闲的 TCP/UDP 测试端口");
+    }
     private static LanNode node()throws Exception {
         LanNode n=new LanNode(freePort(),true,"android-regression","host","测试","测试",new LanNode.Listener() { public void peersChanged(){} public void message(LanNode.Peer p,LanNode.Message m,boolean update){} public void error(String text){} }); n.start(); return n;
     }
@@ -161,7 +199,9 @@ public final class ReliabilityTest {
             shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(s,ChatService.class),s.onBind(new Intent()));
             ac=Robolectric.buildActivity(MainActivity.class).create().start().resume().visible(); MainActivity old=ac.get(); settle(s); open(old,p.id()); settle(s);
             CountDownLatch blocked=new CountDownLatch(1); block(io(s),blocked,release); assertTrue(blocked.await(5,TimeUnit.SECONDS));
-            EditText oldEditor=(EditText)field(old,"editor"); oldEditor.setText("A：点击发送的消息"); invoke(old,"send"); if(editNext) oldEditor.setText("B：旋转前草稿");
+            EditText oldEditor=(EditText)field(old,"editor"); oldEditor.setText("A：点击发送的消息"); invoke(old,"send");
+            assertEquals(android.view.View.VISIBLE,((android.view.View)field(old,"sendStatus")).getVisibility());assertFalse(((android.view.View)field(old,"sendButton")).isEnabled());invoke(old,"send");
+            if(editNext) oldEditor.setText("B：旋转前草稿");
             Bundle state=new Bundle(); ac.saveInstanceState(state).pause().stop().destroy();
             ac=Robolectric.buildActivity(MainActivity.class).create(state).start().resume().visible(); MainActivity fresh=ac.get();
             EditText freshEditor=(EditText)field(fresh,"editor"); if(editNext) freshEditor.setText("C：旋转后新草稿");
@@ -169,6 +209,7 @@ public final class ReliabilityTest {
             DraftStore drafts=new DraftStore(fresh); assertEquals(editNext?"C：旋转后新草稿":"",drafts.read(p.id()));
             ac.restart().start().resume().visible(); settle(s);
             assertEquals(editNext?"C：旋转后新草稿":"",((EditText)field(ac.get(),"editor")).getText().toString());
+            assertEquals(android.view.View.GONE,((android.view.View)field(ac.get(),"sendStatus")).getVisibility());
         } finally { release.countDown(); if(ac!=null) ac.pause().stop().destroy(); sc.destroy(); }
     }
     @Test public void draftVersionProtectsEditBackToSameTextAndSupportsOldData() {

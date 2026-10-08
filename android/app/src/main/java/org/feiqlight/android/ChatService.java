@@ -24,6 +24,8 @@ public final class ChatService extends Service {
     public final class LocalBinder extends Binder { ChatService service() { return ChatService.this; } }
     private final Handler main=new Handler(Looper.getMainLooper());
     private final ExecutorService io=Executors.newSingleThreadExecutor();
+    private final ExecutorService discovery=Executors.newSingleThreadExecutor();
+    private final AtomicBoolean refreshQueued=new AtomicBoolean(),publishQueued=new AtomicBoolean();
     private final ExecutorService transferWorker=Executors.newSingleThreadExecutor();
     private final AtomicBoolean busy=new AtomicBoolean();
     private final Set<Observer> observers=new HashSet<>();
@@ -52,6 +54,7 @@ public final class ChatService extends Service {
     private ConnectivityManager.NetworkCallback callback;
     private List<ChatStore.Conversation> conversations=new ArrayList<>();
     private String status="未连接", transferStatus="";
+    private volatile String transferOutcome="";
     static final class FileProgress {
         final int percent; final String state; final LanNode.Transfer task;
         FileProgress(int percent,String state,LanNode.Transfer task) {this.percent=percent;this.state=state;this.task=task;}
@@ -70,7 +73,8 @@ public final class ChatService extends Service {
     }
     void cancelFile(String peer,long packet,long file) {FileProgress p=progress(peer,packet,file,false);if(p!=null&&p.task!=null&&p.task==transfer)p.task.close();}
     boolean offering(String peer,long packet,long file) {LanNode current=node;return current!=null&&current.offering(peer,packet,file);}
-    private final Runnable notifyChanges=()->{ for (Observer observer:new ArrayList<>(observers)) observer.changed(); };
+    private boolean notificationQueued;
+    private final Runnable notifyChanges=()->{notificationQueued=false;for (Observer observer:new ArrayList<>(observers)) observer.changed();};
     @Override public void onCreate() {
         super.onCreate(); store=new ChatStore(this); storage=new ReceivedStorage(this);diagnostics=new Diagnostics(this);
         NotificationManager manager=getSystemService(NotificationManager.class);
@@ -119,7 +123,7 @@ public final class ChatService extends Service {
                 if(!prefs.contains("connection_enabled")) prefs.edit().putBoolean("connection_enabled",prefs.contains("login")).apply();
                 String login=prefs.getString("login",null); if(login==null) { login="android-"+UUID.randomUUID().toString().substring(0,8); prefs.edit().putString("login",login).apply(); }
                 next=connectionFactory.apply(prefs,new LanNode.Listener() {
-                    @Override public void peersChanged() { if(currentConnection(epoch)) queue(()->publish()); }
+                    @Override public void peersChanged() { if(currentConnection(epoch)) requestPublish(); }
                     @Override public void error(String text) { if(currentConnection(epoch)) showError(text); }
                     @Override public void message(LanNode.Peer peer,LanNode.Message message,boolean update) { if(currentConnection(epoch)||update) incoming(peer,message,update,epoch); }
                     @Override public void fileProgress(LanNode.Peer peer,long packet,long file,int percent,String state) {
@@ -142,9 +146,11 @@ public final class ChatService extends Service {
                         if (wifi!=null) { multicast=wifi.createMulticastLock("FeiqLight"); multicast.setReferenceCounted(false); multicast.acquire(); }
                         connectivity=getSystemService(ConnectivityManager.class);
                         callback=new ConnectivityManager.NetworkCallback() {
-                            @Override public void onAvailable(Network network) { diagnostics.record(Diagnostics.Event.NetworkChanged);refresh(); }
-                            @Override public void onLost(Network network) { refresh(); }
-                            @Override public void onLinkPropertiesChanged(Network network,LinkProperties properties) { refresh(); }
+                            private void update() {if(currentConnection(epoch)&&node==connected){connected.networkChanged();refresh();}}
+                            @Override public void onAvailable(Network network) { diagnostics.record(Diagnostics.Event.NetworkChanged);update(); }
+                            @Override public void onLost(Network network) { update(); }
+                            @Override public void onLinkPropertiesChanged(Network network,LinkProperties properties) { update(); }
+                            @Override public void onCapabilitiesChanged(Network network,NetworkCapabilities capabilities) { update(); }
                         };
                         connectivity.registerNetworkCallback(new NetworkRequest.Builder().addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN).build(),callback);
                     } catch (RuntimeException e) { showError("自动发现可能受限，可尝试手动 IP："+e.getMessage()); }
@@ -197,34 +203,49 @@ public final class ChatService extends Service {
     boolean online() { return node!=null && !connecting; }
     boolean busy() { return busy.get(); }
     String status() { return status; }
-    String transferStatus() { return transferStatus; }
+    // 工作线程结束到主线程终态回调之间，不能继续显示“尚未发送”的旧准备提示。
+    String transferStatus() { return busy()?transferStatus:transferOutcome; }
     void active(String peer) {
         String target=peer==null?"":peer; activePeer=target;
         if(!target.isEmpty()) queue(()->{ store.read(target); publish(); });
     }
     void history(String peer,Consumer<List<LanNode.Message>> result) { queue(()->{ List<LanNode.Message> rows=store.history(peer); main.post(()->result.accept(rows)); }); }
-    private void changed() { main.removeCallbacks(notifyChanges); main.postDelayed(notifyChanges,60); }
+    private void changed() { if(!notificationQueued){notificationQueued=true;main.postDelayed(notifyChanges,60);} }
+    private void requestPublish() {
+        if(stopped||!publishQueued.compareAndSet(false,true))return;
+        queue(()->{publishQueued.set(false);publish();});
+    }
     private void queue(Runnable job) {
         if (stopped) return;
         try { io.execute(()->{ try { job.run(); } catch (Exception e) { fail(e); } }); } catch (RejectedExecutionException ignored) { }
     }
     private void publish() {
         LanNode current=node; Map<String,LanNode.Peer> live=new HashMap<>();
-        if (current!=null) for (LanNode.Peer p:current.peers()) { store.peer(p); live.put(p.id(),p); }
+        if (current!=null) {List<LanNode.Peer> peers=current.peers();store.peers(peers);for(LanNode.Peer p:peers)live.put(p.id(),p);}
         List<ChatStore.Conversation> list=store.conversations();
         for (ChatStore.Conversation item:list) if (live.containsKey(item.peer.id())) item.peer=live.get(item.peer.id());
         main.post(()->{ if (!stopped) { conversations=list; changed(); } });
     }
-    void refresh() { queue(()->{ try { if (node!=null) node.refresh(); } catch (IOException e) { fail(e); } }); }
-    void probe(String address) { queue(()->{ try { requireNode().probe(LanNode.endpoint(address)); } catch (IOException e) { fail(e); } }); }
+    void refresh() {
+        if(stopped||!refreshQueued.compareAndSet(false,true))return;
+        LanNode current=node;long epoch=connectionEpoch;
+        try {discovery.execute(()->{try {if(current!=null&&node==current&&currentConnection(epoch))current.refresh();}catch(IOException e){if(currentConnection(epoch))fail(e);}finally{refreshQueued.set(false);}});}
+        catch(RejectedExecutionException ignored){refreshQueued.set(false);}
+    }
+    void probe(String address) {
+        if(stopped)return;long epoch=connectionEpoch;
+        try {discovery.execute(()->{try {if(currentConnection(epoch))requireNode().probe(LanNode.endpoint(address));}catch(IOException e){if(currentConnection(epoch))fail(e);}});}catch(RejectedExecutionException ignored){}
+    }
     private LanNode requireNode() throws IOException { LanNode current=node; if (current==null||stopped||disconnecting) throw new IOException("请先连接局域网"); return current; }
     void send(LanNode.Peer peer,String text,Consumer<Boolean> done) {
         DraftStore drafts=new DraftStore(this); DraftStore.Snapshot sent=drafts.snapshot(peer.id());
-        queue(()->{ try { requireNode().sendMessage(peer,text,Collections.emptyList()); main.post(()->{
+        if(stopped){main.post(()->done.accept(false));return;}
+        try {io.execute(()->{ try { requireNode().sendMessage(peer,text,Collections.emptyList()); main.post(()->{
                 if(sent.text.equals(text)) drafts.clearIfUnchanged(peer.id(),sent);
                 changed(); done.accept(true);
             }); }
-            catch (IOException | IllegalArgumentException e) { fail(e); main.post(()->done.accept(false)); } });
+            catch (Exception e) { fail(e); main.post(()->done.accept(false)); } });}
+        catch(RejectedExecutionException e){main.post(()->done.accept(false));}
     }
     void retryMessage(LanNode.Peer peer,LanNode.Message original,Consumer<Boolean> done) {
         queue(()->{
@@ -313,7 +334,7 @@ public final class ChatService extends Service {
             catch(Exception e) { result=completion.isEmpty()&&cancellation.isEmpty()?"":task.isCancelled()?cancellation:"文件任务失败："+e.getMessage();diagnostics.record(task.isCancelled()?Diagnostics.Event.TaskCancelled:Diagnostics.Event.TaskFailed); fail(e); }
             finally {
                 cleanup.run(); if(transferCleanup==cleanup) transferCleanup=null;
-                String outcome=result; transfer=null; busy.set(false);
+                String outcome=result; transferOutcome=outcome;transfer=null;busy.set(false);
                 main.post(()->{ if(!stopped&&transferEpoch.get()==epoch) { transferStatus=outcome; changed(); drainReceives(); } });
             }
         }); return true; } catch(RejectedExecutionException e) { cleanup.run(); transferCleanup=null; transfer=null; busy.set(false); if(!stopped) showError("文件服务已停止，请重新连接"); return false; }
@@ -390,8 +411,12 @@ public final class ChatService extends Service {
                     if(declared>available) throw new IOException("暂存空间不足，请清理发送缓存或释放设备空间");
                     File folder=new File(offers,UUID.randomUUID().toString()); if(!folder.mkdir()) throw new IOException("无法暂存文件");
                     File file=new File(folder,name); staged.add(file);
+                    final String displayName=name;final long declaredSize=declared;
+                    Consumer<Long> copying=bytes->main.post(()->{if(!stopped&&transfer==task&&!task.isCancelled()){
+                        transferStatus="本地准备 "+index+" / "+batch.size()+" · "+displayName+" · "+String.format(Locale.ROOT,"%.1f MiB",bytes/1048576.0)+(declaredSize>0?" / "+String.format(Locale.ROOT,"%.1f MiB",declaredSize/1048576.0):"")+"（尚未发送）";changed();
+                    }});
                         // 不信任提供方上报大小：未知/错误大小同样在每次写入前受剩余容量限制。
-                        try(InputStream input=getContentResolver().openInputStream(uri); OutputStream output=new BufferedOutputStream(new FileOutputStream(file),65536)) { copy(input,output,task,available,"暂存空间不足，请清理发送缓存或释放设备空间"); }
+                        try(InputStream input=getContentResolver().openInputStream(uri); OutputStream output=new BufferedOutputStream(new FileOutputStream(file),65536)) { copy(input,output,task,available,"暂存空间不足，请清理发送缓存或释放设备空间",copying); }
                         if(task.isCancelled()) throw new IOException("已取消发送");
                 }
             // 全批暂存完成后只发一条邀请；中途失败不会留下半批已发消息。
@@ -467,8 +492,16 @@ public final class ChatService extends Service {
         copy(input,output,task,limit,"文件超过可用存储空间");
     }
     private void copy(InputStream input,OutputStream output,LanNode.Transfer task,long limit,String limitError) throws IOException {
+        copy(input,output,task,limit,limitError,null);
+    }
+    private void copy(InputStream input,OutputStream output,LanNode.Transfer task,long limit,String limitError,Consumer<Long> progress) throws IOException {
         if(input==null) throw new IOException("无法读取所选文件"); byte[] buffer=new byte[65536]; long total=0; int count;
-        while(true) { checkTransfer(task); count=input.read(buffer); checkTransfer(task); if(count==-1) break; if(count>limit-total) throw new IOException(limitError); total+=count; output.write(buffer,0,count); }
+        long last=System.nanoTime();if(progress!=null)progress.accept(0L);
+        while(true) {
+            checkTransfer(task); count=input.read(buffer); checkTransfer(task); if(count==-1) break; if(count>limit-total) throw new IOException(limitError); total+=count; output.write(buffer,0,count);
+            if(progress!=null&&System.nanoTime()-last>=TimeUnit.MILLISECONDS.toNanos(100)){progress.accept(total);last=System.nanoTime();}
+        }
+        if(progress!=null)progress.accept(total);
     }
     void clearFiles() {
         if(busy()) { showError("请先完成或取消文件任务"); return; }
@@ -497,7 +530,7 @@ public final class ChatService extends Service {
             io.execute(()->{ try { if(old!=null) old.close(); } finally { try { store.recoverPending(); } finally { store.close(); } } }); io.shutdown();
         }
         waiting.clear(); cancelTransfer();
-        releaseNetwork(); main.removeCallbacks(notifyChanges); main.removeCallbacks(notifyTransfers); observers.clear(); transferWorker.shutdownNow();
+        releaseNetwork(); main.removeCallbacks(notifyChanges); main.removeCallbacks(notifyTransfers); observers.clear(); transferWorker.shutdownNow();discovery.shutdownNow();
         // shutdownNow 会丢弃尚未执行的复制任务，它们不会进入 finally；销毁时也需归还 IME 授权。
         Runnable cleanup=transferCleanup; if(cleanup!=null) cleanup.run();
         super.onDestroy();

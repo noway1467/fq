@@ -38,6 +38,11 @@ final class ChatStore extends SQLiteOpenHelper {
         v.put("login",p.login); v.put("host",p.host); v.put("name",p.name); v.put("grp",p.group); v.put("utf8",p.utf8?1:0);
         SQLiteDatabase db=getWritableDatabase(); if (db.update("peers",v,"id=?",new String[]{p.id()})==0) db.insertOrThrow("peers",null,v);
     }
+    void peers(List<LanNode.Peer> peers) {
+        // 一批发现只提交一次事务，避免联系人数量放大磁盘同步延迟。
+        SQLiteDatabase db=getWritableDatabase();db.beginTransaction();
+        try {for(LanNode.Peer peer:peers)peer(peer);db.setTransactionSuccessful();}finally{db.endTransaction();}
+    }
     boolean message(LanNode.Peer p,LanNode.Message m,boolean update,boolean visible) {
         SQLiteDatabase db=getWritableDatabase(); db.beginTransaction();
         try {
