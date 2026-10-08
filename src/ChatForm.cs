@@ -41,6 +41,7 @@ namespace FeiqLight
         private readonly TableLayoutPanel middle, root, side, queue;
         private readonly List<string> attachments = new List<string>();
         private CancellationTokenSource receiving;
+        private ReceivedFile activeFile;
         private readonly System.Windows.Forms.Timer draftTimer = new System.Windows.Forms.Timer { Interval = 500 };
         private bool drawer;
         private ContextMenuStrip chatMenu, fileMenu;
@@ -63,6 +64,12 @@ namespace FeiqLight
             Button menu = Theme.IconButton("more", "会话菜单", ShowMenu, false); menu.Dock = DockStyle.Fill; menu.Margin = Padding.Empty; head.Controls.Add(menu, 4, 0); root.Controls.Add(head, 0, 0);
             middle = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty }; middle.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); middle.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 0)); middle.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             history.RetryRequested += RetryMessage;
+            history.FileRequested += (record, id) => {
+                ReceivedFile item = files.Items.Cast<ReceivedFile>().FirstOrDefault(f => f.Packet == record.Packet && f.File.Id == id);
+                if (item == null) { main.FileReceiveStatus("此文件邀请已结束；未保存的附件请让对方重新发送。"); return; }
+                if (receiving != null) { if (activeFile == item) receiving.Cancel(); return; }
+                files.SelectedItem = item; ReceiveFile(this, EventArgs.Empty);
+            };
             history.ForwardRequested += delegate(ChatRecord record) { main.Forward(record); };
             history.Dock = DockStyle.Fill; history.Margin = Padding.Empty; middle.Controls.Add(history, 0, 0);
             side = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, Padding = new Padding(12), Margin = Padding.Empty, BackColor = Theme.Surface }; side.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); side.RowStyles.Add(new RowStyle(SizeType.Absolute, 40)); side.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); side.RowStyles.Add(new RowStyle(SizeType.Absolute, 48)); side.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
@@ -93,7 +100,7 @@ namespace FeiqLight
             Button send = Theme.IconButton("send", "发送消息", delegate { SendMessage(); }, true); send.Dock = DockStyle.Fill; send.Margin = new Padding(3); compose.Controls.Add(send, 3, 0); root.Controls.Add(compose, 0, 3);
             AllowDrop = true; DragEnter += delegate(object sender, DragEventArgs e) { if (e.Data.GetDataPresent(DataFormats.FileDrop)) e.Effect = DragDropEffects.Copy; }; DragDrop += delegate(object sender, DragEventArgs e) { string[] paths = e.Data.GetData(DataFormats.FileDrop) as string[]; if (paths != null) QueueFiles(paths); };
             ApplyAppearance();
-            try { foreach (ChatRecord record in store.History(peer.Id, 150)) Append(record); editor.Text = store.LoadDraft(peer.Id); } catch (Exception e) { Error("本地记录", e.Message); }
+            try { foreach (ChatRecord record in store.History(peer.Id, 150)) Append(record.Outgoing ? network.OutgoingRecord(peer.Id, record.Packet) ?? record : record); editor.Text = store.LoadDraft(peer.Id); } catch (Exception e) { Error("本地记录", e.Message); }
         }
         private bool resizingComposer;
         private void ResizeComposer()
@@ -239,16 +246,18 @@ namespace FeiqLight
         {
             if (receiving != null || IsDisposed) return;
             selected.AutomaticPending = false; selected.Status = "接收中"; files.SelectedItem = selected;
-            CancellationTokenSource cancel = new CancellationTokenSource(); receiving = cancel;
+            CancellationTokenSource cancel = new CancellationTokenSource(); receiving = cancel; activeFile = selected;
+            FileState(selected, 0, "连接中 · 点击取消");
             receive.Text = "取消"; receive.Enabled = true; reject.Enabled = false; files.Enabled = false; files.Invalidate();
             try
             {
                 string destination = ReceiveStorage.Destination(network.Settings.ReceiveFolder, selected.File.Name);
                 selected.PartialPaths.Add(LanService.PartialPath(peer, selected.Packet, selected.File, destination));
                 fileStatus.Text = "连接中";
-                string saved = await network.ReceiveFileAsync(peer, selected.Packet, selected.File, destination, new Progress<int>(p => { if (!IsDisposed && receiving == cancel) fileStatus.Text = p + "%"; }), cancel.Token, true);
+                string saved = await network.ReceiveFileAsync(peer, selected.Packet, selected.File, destination, new Progress<int>(p => { if (!IsDisposed && receiving == cancel && activeFile == selected) FileState(selected, p, "接收中 · 点击取消"); }), cancel.Token, true);
                 if (IsDisposed) return;
                 selected.Record.LocalFiles = selected.Record.GetLocalFiles().Concat(new[] { saved }).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+                FileState(selected, 100, "已保存", saved);
                 int remaining=files.Items.Cast<ReceivedFile>().Count(f=>f.Packet==selected.Packet)-1;
                 selected.Record.State=remaining==0?"已保存":"已接收 "+selected.Record.GetLocalFiles().Length+" / "+(selected.Record.GetLocalFiles().Length+remaining);
                 // 完成状态与本地附件回写原邀请，不另造一条聊天消息或重复媒体卡片。
@@ -256,12 +265,13 @@ namespace FeiqLight
                 files.Items.Remove(selected); if (files.Items.Count > 0 && files.SelectedIndex < 0) files.SelectedIndex = 0;
                 UpdateFilesPanel(); fileStatus.Text = "已保存"; main.FileReceiveStatus("文件已保存：" + Path.GetFileName(saved));
             }
-            catch (OperationCanceledException) { if (!IsDisposed) { selected.Status = "已取消，可重试"; fileStatus.Text = "已取消，可重新接收"; } }
+            catch (OperationCanceledException) { if (!IsDisposed) { selected.Status = "已取消，可重试"; fileStatus.Text = "已取消，可重新接收"; FileState(selected, 0, "已取消 · 点击重试"); main.TrySave(selected.Record); } }
             catch (Exception error)
             {
                 if (!IsDisposed)
                 {
                     selected.Status = "失败，可续传"; fileStatus.Text = "重试时继续已有断点";
+                    FileState(selected, null, "接收失败 · 点击续传"); main.TrySave(selected.Record);
                     main.FileReceiveStatus("接收失败：" + selected.File.Name + " — " + error.GetBaseException().Message);
                     // 后台自动接收失败不能弹窗抢焦点，也不能无限重试同一个失败任务。
                     if (!automatic) Error("接收失败", error.GetBaseException().Message);
@@ -269,7 +279,7 @@ namespace FeiqLight
             }
             finally
             {
-                cancel.Dispose(); receiving = null;
+                cancel.Dispose(); receiving = null; activeFile = null;
                 if (!IsDisposed) { receive.Text = "接收"; receive.Enabled = reject.Enabled = files.SelectedItem != null; files.Enabled = true; files.Invalidate(); main.ReceiveAutomatically(); }
             }
         }
@@ -280,12 +290,20 @@ namespace FeiqLight
             {
                 network.RejectFiles(peer, selected.Packet);
                 foreach (ReceivedFile item in files.Items.Cast<ReceivedFile>().Where(f => f.Packet == selected.Packet).ToList())
-                { foreach (string part in item.PartialPaths) if (File.Exists(part)) File.Delete(part); files.Items.Remove(item); }
+                { foreach (string part in item.PartialPaths) if (File.Exists(part)) File.Delete(part); FileState(item, 0, "已拒绝"); files.Items.Remove(item); }
+                main.TrySave(selected.Record);
                 UpdateFilesPanel(); fileStatus.Text = "已拒绝";
             }
             catch (Exception error) { Error("拒绝失败", error.Message); }
         }
         protected override void OnFormClosing(FormClosingEventArgs e) { if (e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; main.CloseChat(this); return; } if (receiving != null) receiving.Cancel(); base.OnFormClosing(e); }
+        private void FileState(ReceivedFile item, int? percent, string status, string path = null)
+        {
+            FileTransferState state = item.Record.Transfers == null ? null : item.Record.Transfers.FirstOrDefault(f => f.Id == item.File.Id);
+            if (state == null) return;
+            if (percent.HasValue) state.Percent = percent.Value; state.Status = status; if (path != null) state.LocalPath = path;
+            history.Delivery(item.Record);
+        }
         protected override void Dispose(bool disposing) { if (disposing && !IsDisposed) { SaveDraft(); draftTimer.Dispose(); if (emojiPicker != null) emojiPicker.Dispose(); if (chatMenu != null) chatMenu.Dispose(); if (fileMenu != null) fileMenu.Dispose(); if (receiving != null) receiving.Cancel(); if (avatar != null && avatar.Image != null) avatar.Image.Dispose(); } base.Dispose(disposing); if(disposing&&chatFont!=null){chatFont.Dispose();chatFont=null;} }
     }
 }

@@ -23,6 +23,7 @@ namespace FeiqLight
         {
             public string Path; public long Size; public DateTime Modified;
             public string Address; public DateTime Expires;
+            public ChatRecord Record; public int FileId, Percent; public long ProgressVersion; public string TransferState;
         }
         private readonly object gate = new object();
         private readonly Dictionary<string, Peer> peers = new Dictionary<string, Peer>();
@@ -48,6 +49,7 @@ namespace FeiqLight
         public event Action<ChatRecord> DeliveryChanged;
         public event Action<string> Error;
         public event Action<string> TransferNotice;
+        public event Action<ChatRecord, int, int, string> TransferChanged;
 
         public LanService(AppSettings settings, int port, bool loopbackOnly, string login)
         {
@@ -74,6 +76,7 @@ namespace FeiqLight
             return result;
         }
         public List<Peer> Peers { get { lock (gate) return peers.Values.OrderByDescending(p => p.Online).ThenBy(p => p.Nickname).ToList(); } }
+        public ChatRecord OutgoingRecord(string peer, long packet) { lock(gate) { Offer offer=offers.Values.FirstOrDefault(o=>o.Record.PeerId==peer&&o.Record.Packet==packet&&o.Expires>DateTime.UtcNow);return offer==null?null:offer.Record; } }
         public void Start()
         {
             if (udp != null) throw new InvalidOperationException("通信服务已启动。");
@@ -195,7 +198,7 @@ namespace FeiqLight
                 long messageId;
                 if (!Int64.TryParse(packet.Body, out messageId)) return;
                 lock (gate)
-                    foreach (string key in offers.Where(p => p.Key.StartsWith(messageId + ":", StringComparison.Ordinal) && p.Value.Address == remote.Address.ToString()).Select(p => p.Key).ToList()) offers.Remove(key);
+                    foreach (string key in offers.Where(p => p.Key.StartsWith(messageId + ":", StringComparison.Ordinal) && p.Value.Address == remote.Address.ToString()).Select(p => p.Key).ToList()) { EndOffer(offers[key], "对方已拒绝"); offers.Remove(key); }
                 return;
             }
             if (packet.Mode != Protocol.Entry && packet.Mode != Protocol.AnswerEntry && packet.Mode != Protocol.Absence && packet.Mode != Protocol.Exit && packet.Mode != Protocol.SendMessage) return;
@@ -246,6 +249,9 @@ namespace FeiqLight
             string display = text ?? "";
             if (files.Count > 0) display += (display.Length > 0 ? "\n" : "") + "[文件] " + String.Join("、", files.Select(f => f.Name));
             ChatRecord record = new ChatRecord { Packet = number, PeerId = peer.Id, Sender = Settings.Nickname, Text = display, Time = DateTime.Now, Outgoing = true, State = "等待确认", LocalFiles = paths == null ? null : paths.Select(Path.GetFullPath).ToArray() };
+            record.HasAttachments = files.Count > 0; record.AttachmentNames = files.Select(f => f.Name).ToArray();
+            record.Transfers = files.Select(f => new FileTransferState { Id = f.Id, Name = f.Name, Size = f.Size, Status = "等待对方接收", LocalPath = record.LocalFiles[f.Id] }).ToArray();
+            foreach (Attachment file in files) { Offer offer = additions[number + ":" + file.Id]; offer.Record = record; offer.FileId = file.Id; }
             lock (gate)
             {
                 if (pending.Count >= 256 || offers.Count + additions.Count > 1000) throw new InvalidOperationException("待处理消息或文件过多，请稍后再试。");
@@ -276,7 +282,7 @@ namespace FeiqLight
                         else { item.Attempts++; item.Last = now; retry.Add(item); }
                     }
                     foreach (string key in seen.Where(p => (now - p.Value).TotalMinutes > 10).Select(p => p.Key).ToList()) seen.Remove(key);
-                    foreach (string key in offers.Where(p => p.Value.Expires < now).Select(p => p.Key).ToList()) offers.Remove(key);
+                    foreach (string key in offers.Where(p => p.Value.Expires < now).Select(p => p.Key).ToList()) { EndOffer(offers[key], "邀请已过期，请重新发送"); offers.Remove(key); }
                     foreach (Peer peer in peers.Values) if (peer.Online && (now - peer.LastSeen).TotalSeconds > 120) { peer.Online = false; changed = true; }
                 }
                 foreach (Pending item in retry) try { Send(item.Bytes, item.Peer.Endpoint); } catch (SocketException) { }
@@ -303,6 +309,7 @@ namespace FeiqLight
         }
         private void ServeFile(TcpClient client)
         {
+            Offer active = null; int percent = 0; long version = 0;
             try
             {
                 client.ReceiveTimeout = 5000; client.SendTimeout = 15000;
@@ -317,13 +324,21 @@ namespace FeiqLight
                     Offer offer;
                     lock (gate) if (!offers.TryGetValue(messageId + ":" + fileId, out offer)) return;
                     if (offer.Expires < DateTime.UtcNow || offer.Address != ((IPEndPoint)client.Client.RemoteEndPoint).Address.ToString() || offset < 0 || offset > offer.Size) return;
+                    // 保留重复下载能力，但只让最新连接更新这一文件的显示进度。
+                    lock (gate) { version = ++offer.ProgressVersion; active = offer; }
                     FileInfo current = new FileInfo(offer.Path);
-                    if (!current.Exists || current.Length != offer.Size || current.LastWriteTimeUtc != offer.Modified) return;
+                    if (!current.Exists || current.Length != offer.Size || current.LastWriteTimeUtc != offer.Modified) throw new IOException("原文件已改变");
+                    percent = offer.Size == 0 ? 0 : (int)(offset * 100.0 / offer.Size); Transfer(offer, version, percent, "发送中");
                     using (FileStream file = new FileStream(offer.Path, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, FileOptions.SequentialScan))
                     {
-                        file.Position = offset; byte[] buffer = new byte[65536]; int count;
-                        while (!disposed && (count = file.Read(buffer, 0, buffer.Length)) > 0) { stream.Write(buffer, 0, count); lock (gate) offer.Expires = DateTime.UtcNow.AddMinutes(30); }
+                        file.Position = offset; byte[] buffer = new byte[65536]; int count; long sent = offset;
+                        while (!disposed && sent < offer.Size && (count = file.Read(buffer, 0, (int)Math.Min(buffer.Length, offer.Size - sent))) > 0) {
+                            stream.Write(buffer, 0, count); sent += count; lock (gate) offer.Expires = DateTime.UtcNow.AddMinutes(30);
+                            int next = (int)(sent * 100.0 / offer.Size); if (next != percent) { percent = next; Transfer(offer, version, percent, "发送中"); }
+                        }
+                        if (disposed || sent != offer.Size) throw new IOException("发送中断");
                     }
+                    Transfer(offer, version, 100, "已发送（非保存确认）"); active = null;
                     Action<string> notice = TransferNotice; if (!disposed && notice != null) notice("文件已发送：" + current.Name);
                 }
             }
@@ -331,8 +346,16 @@ namespace FeiqLight
             catch (SocketException) { }
             catch (ObjectDisposedException) { }
             catch (UnauthorizedAccessException e) { Report("无法读取发送文件：" + e.Message); }
-            finally { lock (gate) connections.Remove(client); client.Close(); }
+            finally { if (active != null) Transfer(active, version, percent, "发送中断，等待对方重试"); lock (gate) connections.Remove(client); client.Close(); }
         }
+        private void Transfer(Offer offer, long version, int percent, string status)
+        {
+            lock(gate) {
+                if(version != offer.ProgressVersion) return; offer.Percent=percent; offer.TransferState=status;
+                var handler = TransferChanged; if (!disposed && handler != null) handler(offer.Record, offer.FileId, percent, status);
+            }
+        }
+        private void EndOffer(Offer offer, string state) { if(offer.TransferState != "已发送（非保存确认）") Transfer(offer, ++offer.ProgressVersion, offer.Percent, state); }
         public void RejectFiles(Peer peer, long packet)
         {
             Send(Encode(Protocol.ReleaseFiles, packet.ToString(CultureInfo.InvariantCulture), null), peer.Endpoint);

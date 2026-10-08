@@ -137,6 +137,22 @@ namespace FeiqLight
         public DateTime LastSeen;
         public override string ToString() { return Nickname; }
     }
+    public sealed class FileTransferState
+    {
+        private static readonly string currentSession = Guid.NewGuid().ToString("N");
+        public FileTransferState() { Session = currentSession; }
+        public string Session { get; set; }
+        public int Id { get; set; }
+        public string Name { get; set; }
+        public long Size { get; set; }
+        public int Percent { get; set; }
+        public string Status { get; set; }
+        public string LocalPath { get; set; }
+        public string DisplayStatus() {
+            if (Session != currentSession && (Status == "等待对方接收" || (Status ?? "").Contains("中") || (Status ?? "").StartsWith("待接收"))) return "历史邀请 · 无活动传输";
+            return Status;
+        }
+    }
     public sealed class ChatRecord
     {
         public long Packet { get; set; }
@@ -150,6 +166,14 @@ namespace FeiqLight
         public string[] LocalFiles { get; set; }
         public bool HasAttachments { get; set; }
         public string[] AttachmentNames { get; set; }
+        public FileTransferState[] Transfers { get; set; }
+        public string DisplayText()
+        {
+            string text = Text ?? "";
+            if (Transfers == null || Transfers.Length == 0) return text;
+            string suffix = "[文件] " + String.Join("、", Transfers.Select(f => f.Name));
+            return text.EndsWith(suffix, StringComparison.Ordinal) ? text.Substring(0, text.Length - suffix.Length).TrimEnd('\r', '\n') : text;
+        }
         public string ForwardText()
         {
             string[] paths = GetLocalFiles();

@@ -13,6 +13,8 @@ public final class CoreTest {
     private static final class Inbox implements LanNode.Listener {
         final BlockingQueue<LanNode.Message> messages=new LinkedBlockingQueue<>();
         final BlockingQueue<LanNode.Message> updates=new LinkedBlockingQueue<>();
+        final BlockingQueue<String> progress=new LinkedBlockingQueue<>();
+        public void fileProgress(LanNode.Peer peer,long packet,long file,int percent,String state) {progress.add(packet+"/"+file+"/"+percent+"/"+state);}
         public void peersChanged() { }
         public void error(String text) { }
         public void message(LanNode.Peer peer,LanNode.Message message,boolean update) { (update?updates:messages).add(message); }
@@ -153,16 +155,31 @@ public final class CoreTest {
         }
     }
     @Test public void realTcpFilesAndZeroBytes() throws Exception {
+        String oldProxy=System.getProperty("socksProxyHost"),oldPort=System.getProperty("socksProxyPort");
+        System.setProperty("socksProxyHost","127.0.0.1");System.setProperty("socksProxyPort","9");
         Path dir=Files.createTempDirectory("feiq-java-test-"); Inbox ia=new Inbox(), ib=new Inbox(); int pa=port(),pb=port();
         try(LanNode a=node(ia,pa,"a"); LanNode b=node(ib,pb,"b")) {
             a.probe(LanNode.endpoint("127.0.0.1:"+pb)); LanNode.Peer ab=waitPeer(a,"b"), ba=waitPeer(b,"a");
             for(int size:new int[]{3*1024*1024+7,0}) {
                 byte[] payload=new byte[size]; new Random(42).nextBytes(payload); File source=dir.resolve("源"+size+".bin").toFile(); Files.write(source.toPath(),payload);
                 a.sendMessage(ab,"文件",Collections.singletonList(source)); LanNode.Message received=ib.messages.poll(3,TimeUnit.SECONDS); File target=dir.resolve("接收"+size+".bin").toFile();
+                assertNotNull(ia.updates.poll(3,TimeUnit.SECONDS));assertTrue("ACK 不能成为文件进度",ia.progress.isEmpty());
                 b.receiveFile(ba,received.number,received.files.get(0),target,new LanNode.Transfer(),null); assertArrayEquals(payload,Files.readAllBytes(target.toPath()));
+                boolean intermediate=false;int last=-1;
+                while(true) {
+                    String event=ia.progress.poll(3,TimeUnit.SECONDS);assertNotNull("缺少发送进度",event);String[] fields=event.split("/");
+                    assertEquals(received.number,Long.parseLong(fields[0]));assertEquals(0,Integer.parseInt(fields[1]));int percent=Integer.parseInt(fields[2]);
+                    assertTrue(percent>=last&&percent<=100);last=percent;intermediate|=percent>0&&percent<100;
+                    if(fields[3].equals("已发送（非保存确认）")){assertEquals(100,percent);break;}
+                }
+                if(size>0)assertTrue("大文件只有开始/完成，没有中间进度",intermediate);
                 try { b.receiveFile(ba,received.number,received.files.get(0),target,new LanNode.Transfer(),null); fail("覆盖已有文件"); } catch(IOException expected) { }
             }
-        } finally { try(java.util.stream.Stream<Path> paths=Files.walk(dir)) { paths.sorted(Comparator.reverseOrder()).forEach(path->{ try { Files.delete(path); } catch(IOException e) { throw new UncheckedIOException(e); } }); } }
+        } finally {
+            if(oldProxy==null)System.clearProperty("socksProxyHost");else System.setProperty("socksProxyHost",oldProxy);
+            if(oldPort==null)System.clearProperty("socksProxyPort");else System.setProperty("socksProxyPort",oldPort);
+            try(java.util.stream.Stream<Path> paths=Files.walk(dir)) { paths.sorted(Comparator.reverseOrder()).forEach(path->{ try { Files.delete(path); } catch(IOException e) { throw new UncheckedIOException(e); } }); }
+        }
     }
     @Test public void changedSourceAndCancellationLeaveNoPartialFile() throws Exception {
         Path dir=Files.createTempDirectory("feiq-java-cancel-"); Inbox ia=new Inbox(),ib=new Inbox(); int pa=port(),pb=port();

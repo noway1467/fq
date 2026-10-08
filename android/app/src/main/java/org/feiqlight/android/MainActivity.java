@@ -59,6 +59,8 @@ public final class MainActivity extends Activity implements ChatService.Observer
     private TextView selectionOwner;
     private String selected="", pickerPeer="", exportPath="", historySignature="";
     private final Set<Long> displayedOutgoing=new HashSet<>();
+    private final List<Runnable> fileProgressViews=new ArrayList<>();
+    private String progressPeer="";
     private boolean forceLatest;
     private LinearLayout root, body, toolbar, messages, connectionBar;
     private TextView title, subtitle, transferStatus, empty, chatAvatar;
@@ -286,7 +288,8 @@ public final class MainActivity extends Activity implements ChatService.Observer
         ChatStore.Conversation conversation=conversation(selected);
         for(LanNode.Message m:rows) { fingerprint.append(m.number).append(m.outgoing).append(m.state); if(conversation!=null) for(int i=0;i<m.files.size();i++) { File local=service.receivedFile(conversation.peer,m.number,m.files.get(i)); fingerprint.append(m.outgoing?outgoingUri(m,i):local.isFile()).append(m.outgoing?null:receivedStorage.saved(local)); } }
         boolean newOutgoing=!historySignature.isEmpty()&&rows.stream().anyMatch(m->m.outgoing&&!displayedOutgoing.contains(m.number));
-        if(fingerprint.toString().equals(historySignature)) { if(forceLatest) {forceLatest=false;scrollToLatest();} return; }
+        if(fingerprint.toString().equals(historySignature)) { transfersChanged(); if(forceLatest) {forceLatest=false;scrollToLatest();} return; }
+        fileProgressViews.clear(); progressPeer=selected;
         displayedOutgoing.clear(); for(LanNode.Message m:rows) if(m.outgoing) displayedOutgoing.add(m.number);
         int previousY=scroll.getScrollY();
         boolean bottom=scroll.getChildAt(0).getHeight()-previousY-scroll.getHeight()<dp(100); boolean first=historySignature.isEmpty(); historySignature=fingerprint.toString(); messages.removeAllViews();
@@ -296,12 +299,12 @@ public final class MainActivity extends Activity implements ChatService.Observer
             String date=new SimpleDateFormat("M月d日",Locale.CHINA).format(new Date(m.time));
             if(!date.equals(lastDate)) { TextView day=text(date,11,MUTED); day.setGravity(Gravity.CENTER); LinearLayout.LayoutParams d=new LinearLayout.LayoutParams(-1,dp(36)); messages.addView(day,d); lastDate=date; }
             LinearLayout bubble=column(); bubble.setBackground(new BubbleDrawable(m.outgoing?BUBBLE:SURFACE,getResources().getDisplayMetrics().density,m.outgoing));
-            bubble.setPadding(dp(m.outgoing?14:21),dp(10),dp(m.outgoing?21:14),dp(8));
+            bubble.setPadding(dp(m.outgoing?14:21),dp(8),dp(m.outgoing?21:14),dp(6));
             LinearLayout.LayoutParams bp=new LinearLayout.LayoutParams(-2,-2); bp.gravity=m.outgoing?Gravity.END:Gravity.START; bp.bottomMargin=dp(9); messages.addView(bubble,bp);
             if(!m.text.isEmpty()) { TextView content=text(m.text,messageSize(),INK); selectable(content); MessageLinks.apply(content,BLUE); content.setMaxWidth(maxWidth-dp(35)); content.setLineSpacing(dp(3),1); bubble.addView(content); }
             for(int fileIndex=0;fileIndex<m.files.size();fileIndex++) {
                 Protocol.Attachment f=m.files.get(fileIndex);
-                TextView attachment=text("▤  "+f.name+"\n"+size(f.size),14,BLUE); attachment.setMaxWidth(maxWidth-dp(35)); attachment.setPadding(0,dp(5),0,dp(8)); bubble.addView(attachment); attachment.setOnLongClickListener(v->{ copyText("文件名",f.name); return true; });
+                TextView attachment=text("▤  "+f.name+"\n"+size(f.size),14,BLUE); attachment.setMaxWidth(maxWidth-dp(35)); attachment.setPadding(0,dp(3),0,dp(3)); bubble.addView(attachment); attachment.setOnLongClickListener(v->{ copyText("文件名",f.name); return true; });
                 if(m.outgoing) {
                     Uri sentUri=outgoingUri(m,fileIndex);
                     if(sentUri!=null&&MediaPreview.supported(f.name)&&previewCount++<24)
@@ -316,10 +319,11 @@ public final class MainActivity extends Activity implements ChatService.Observer
                         Uri mediaUri=saved.isFile()?ReceivedFileProvider.uri(this,saved,f.name):receivedStorage.saved(saved);
                         bubble.addView(media.thumbnail(mediaUri,f.name,Math.min(dp(260),maxWidth-dp(35)),()->openFile(mediaUri,f.name,false),()->fileActions(conversation.peer,m.number,f)),bubble.getChildCount()-1);
                     }
-                    attachment.append(available?" · 已接收":" · 点击接收"); attachment.setContentDescription(f.name+(available?"，文件操作":"，接收文件"));
+                    attachment.setContentDescription(f.name+(available?"，文件操作":"，接收文件"));
                     attachment.setOnClickListener(v->{ if(available) fileActions(conversation.peer,m.number,f); else fileInvite(conversation.peer,m.number,f); });
                     attachment.setOnLongClickListener(v->{ fileActions(conversation.peer,m.number,f); return true; });
                 }
+                addFileProgress(bubble,attachment,m,f,conversation,maxWidth);
             }
             if(m.outgoing&&(m.state.contains("未确认")||m.state.equals("发送失败"))) {
                 TextView retry=text("发送未确认 · 点击重试",13,BLUE);retry.setPadding(0,dp(8),0,dp(8));bubble.addView(retry);
@@ -334,7 +338,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
             TextView stamp=text(new SimpleDateFormat("HH:mm",Locale.CHINA).format(new Date(m.time))+(m.outgoing?"  "+m.state:""),10,MUTED); stamp.setMaxWidth(maxWidth-dp(35)); stamp.setGravity(Gravity.END); stamp.setPadding(0,dp(6),0,0); bubble.addView(stamp,new LinearLayout.LayoutParams(-1,-2));
             final LanNode.Peer source=conversation==null?null:conversation.peer;
             bubble.setOnLongClickListener(v->{ if(source!=null) forward(m,source); return true; });
-            stamp.append("  ···"); stamp.setContentDescription("消息操作：复制、转发"); stamp.setMinHeight(dp(48));
+            stamp.append("  ···"); stamp.setContentDescription("消息操作：复制、转发"); stamp.setMinHeight(dp(m.files.isEmpty()?40:32));
             stamp.setOnClickListener(v->{if(source!=null) messageActions(m,source);});
         }
         boolean latest=first||bottom||newOutgoing||forceLatest; forceLatest=false;
@@ -342,6 +346,31 @@ public final class MainActivity extends Activity implements ChatService.Observer
     }
     private void scrollToLatest() {
         positionBeforeDraw(true,0);
+    }
+    @Override public void transfersChanged() {
+        // 进度只更新当前卡片，不重新查询历史/创建全部气泡，也不改变用户的阅读位置。
+        if(!visible||service==null||!selected.equals(progressPeer))return;
+        for(Runnable update:new ArrayList<>(fileProgressViews))update.run();
+    }
+    private void addFileProgress(LinearLayout bubble,TextView attachment,LanNode.Message message,Protocol.Attachment file,ChatStore.Conversation conversation,int maxWidth) {
+        String peer=selected;ChatService source=service;
+        TextView label=text("",12,MUTED);label.setMaxLines(2);label.setMinHeight(dp(22));label.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        int width=Math.min(dp(260),maxWidth-dp(35));bubble.addView(label,new LinearLayout.LayoutParams(width,-2));
+        ProgressBar bar=new ProgressBar(this,null,android.R.attr.progressBarStyleHorizontal);bar.setMax(100);bar.setIndeterminate(false);
+        bar.setProgressTintList(android.content.res.ColorStateList.valueOf(BLUE));bar.setProgressBackgroundTintList(android.content.res.ColorStateList.valueOf(PALE));
+        LinearLayout.LayoutParams bp=new LinearLayout.LayoutParams(width,dp(5));bp.topMargin=dp(2);bp.bottomMargin=dp(5);bubble.addView(bar,bp);
+        Runnable update=()->{
+            if(service!=source||source==null||!selected.equals(peer))return;
+            ChatService.FileProgress progress=source.progress(peer,message.number,file.id,message.outgoing);
+            boolean saved=false;
+            if(!message.outgoing&&conversation!=null) {File local=source.receivedFile(conversation.peer,message.number,file);saved=local.isFile()||receivedStorage.saved(local)!=null;}
+            int percent=progress!=null?progress.percent:saved?100:0;
+            String state=progress!=null?progress.state:message.outgoing?(source.offering(peer,message.number,file.id)?"等待对方接收":"历史邀请 · 无活动传输"):saved?"已保存":"待接收 · 点击接收";
+            label.setText(percent+"% · "+state);bar.setProgress(percent);
+            bar.setContentDescription(file.name+"，"+percent+"%，"+state);
+        };
+        label.setOnClickListener(v->{if(service!=source||source==null||!selected.equals(peer))return;ChatService.FileProgress p=source.progress(peer,message.number,file.id,false);if(!message.outgoing&&p!=null&&p.task!=null)source.cancelFile(peer,message.number,file.id);else attachment.performClick();});
+        fileProgressViews.add(update);update.run();
     }
     private long scrollPositionVersion;
     private void positionBeforeDraw(boolean latest,int previousY) {

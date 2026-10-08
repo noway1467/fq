@@ -72,7 +72,7 @@ namespace FeiqLight
             tray = new NotifyIcon { Icon = Theme.AppIcon, Text = "飞Q", Visible = true };
             ContextMenuStrip trayMenu = Theme.Menu(); trayMenu.Items.Add("打开", null, delegate { Restore(); }); trayMenu.Items.Add("设置", null, delegate { OpenSettings(); }); trayMenu.Items.Add("退出", null, delegate { Ui(ExitApplication); }); tray.ContextMenuStrip = trayMenu;
             tray.DoubleClick += delegate { Restore(); }; tray.BalloonTipClicked += delegate { Restore(); if (latestSender != null) OpenChat(latestSender); };
-            network.PeersChanged += OnPeersChanged; network.MessageReceived += OnMessage; network.DeliveryChanged += OnDelivery; network.Error += OnError; network.TransferNotice += OnError;
+            network.PeersChanged += OnPeersChanged; network.MessageReceived += OnMessage; network.DeliveryChanged += OnDelivery; network.Error += OnError; network.TransferChanged += OnTransfer;
             RefreshFilters();
         }
         private void Ui(Action action)
@@ -108,6 +108,7 @@ namespace FeiqLight
         {
             Ui(() =>
             {
+                message.Record.Transfers = message.Files.Select(f => new FileTransferState { Id = f.Id, Name = f.Name, Size = f.Size, Status = "待接收 · 点击接收" }).ToArray();
                 if (message.Files.Count > 0) { message.Record.HasAttachments = true; message.Record.AttachmentNames = message.Files.Select(f => f.Name).ToArray(); message.Record.Text += (String.IsNullOrEmpty(message.Record.Text) ? "" : "\n") + "[文件] " + String.Join("、", message.Files.Select(f => f.Name)); }
                 message.Peer.Hidden=false; TrySave(message.Record); Remember(message.Peer, message.Record);
                 ChatForm chat; chats.TryGetValue(message.Peer.Id, out chat); bool visible = chat != null && chat == ActiveChat && ContainsFocus;
@@ -126,6 +127,15 @@ namespace FeiqLight
             });
         }
         private void OnDelivery(ChatRecord record) { diagnostics.Record(DiagnosticEvent.DeliveryChanged); Ui(() => { TrySave(record); ChatForm chat; if (chats.TryGetValue(record.PeerId, out chat) && !chat.IsDisposed) chat.Delivery(record); }); }
+        private void OnTransfer(ChatRecord record, int id, int percent, string status)
+        {
+            Ui(() => {
+                FileTransferState file = record.Transfers == null ? null : record.Transfers.FirstOrDefault(f => f.Id == id);
+                if (file == null) return; file.Percent = percent; file.Status = status;
+                if (status != "发送中") TrySave(record);
+                ChatForm chat; if (chats.TryGetValue(record.PeerId, out chat) && !chat.IsDisposed) chat.Delivery(record);
+            });
+        }
         internal void TrySave(ChatRecord record) { try { store.Append(record); } catch (Exception e) { status.Text = "记录保存失败：" + e.Message; } }
         internal void SaveDraft(string peerId, string text) { try { store.SaveDraft(peerId, text); } catch (Exception e) { status.Text = "草稿保存失败：" + e.Message; } }
         internal void Sent(Peer peer, ChatRecord record) { TrySave(record); Remember(peer, record); RefreshPeers(); }
@@ -326,7 +336,7 @@ namespace FeiqLight
                 try { store.CompletePending(); } catch (IOException e) { status.Text = "记录保存失败：" + e.Message; }
                 catch (UnauthorizedAccessException e) { status.Text = "记录保存失败：" + e.Message; }
             }
-            if (disposing) { network.PeersChanged -= OnPeersChanged; network.MessageReceived -= OnMessage; network.DeliveryChanged -= OnDelivery; network.Error -= OnError; network.TransferNotice -= OnError; if (mainMenu != null) mainMenu.Dispose(); if(conversationMenu!=null)conversationMenu.Dispose(); if (tray != null) { tray.Visible = false; if (tray.ContextMenuStrip != null) tray.ContextMenuStrip.Dispose(); tray.Dispose(); } foreach (ChatForm chat in chats.Values) chat.Dispose(); }
+            if (disposing) { network.PeersChanged -= OnPeersChanged; network.MessageReceived -= OnMessage; network.DeliveryChanged -= OnDelivery; network.Error -= OnError; network.TransferChanged -= OnTransfer; if (mainMenu != null) mainMenu.Dispose(); if(conversationMenu!=null)conversationMenu.Dispose(); if (tray != null) { tray.Visible = false; if (tray.ContextMenuStrip != null) tray.ContextMenuStrip.Dispose(); tray.Dispose(); } foreach (ChatForm chat in chats.Values) chat.Dispose(); }
             base.Dispose(disposing);
         }
     }

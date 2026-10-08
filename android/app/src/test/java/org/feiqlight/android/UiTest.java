@@ -23,6 +23,35 @@ import static org.robolectric.Shadows.shadowOf;
 @Config(sdk=35, qualifiers="w393dp-h852dp-xhdpi")
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 public final class UiTest {
+    @Test public void fileProgressRendersPerCardAndUpdatesWithoutRebuildingOrStealingScroll() throws Exception {
+        ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();
+        shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));
+        ActivityController<MainActivity> ac=Robolectric.buildActivity(MainActivity.class).create().start().resume().visible();MainActivity activity=ac.get();
+        try {
+            settle(service);LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:32425"),"progress","test","文件传输测试","");
+            LanNode.Message sent=new LanNode.Message();sent.number=88;sent.outgoing=true;sent.time=System.currentTimeMillis();sent.state="已送达";sent.text="";
+            sent.files.add(new Protocol.Attachment(0,"大文件.zip",1073741824,0));sent.files.add(new Protocol.Attachment(1,"报告.pdf",2048,0));
+            LanNode.Message received=new LanNode.Message();received.number=88;received.time=sent.time;received.state="已收到";received.text="";received.files.add(new Protocol.Attachment(0,"接收文件.mp4",1073741824,0));
+            service.incoming(peer,sent,false);service.incoming(peer,received,false);settle(service);invoke(activity,"open",String.class,peer.id());settle(service);service.remove(activity);
+            Method progress=ChatService.class.getDeclaredMethod("fileProgress",String.class,long.class,long.class,boolean.class,int.class,String.class,LanNode.Transfer.class);progress.setAccessible(true);
+            progress.invoke(service,peer.id(),88L,0L,true,47,"发送中",null);progress.invoke(service,peer.id(),88L,1L,true,0,"等待对方接收",null);
+            LanNode.Transfer task=new LanNode.Transfer();Field active=ChatService.class.getDeclaredField("transfer");active.setAccessible(true);active.set(service,task);
+            progress.invoke(service,peer.id(),88L,0L,false,26,"接收中 · 点击取消",task);
+            List<LanNode.Message> rows=new ArrayList<>(Arrays.asList(sent,received));invoke(activity,"renderMessages",List.class,rows);
+            View root=(View)field(activity,"root");measure(root,786,1704,true);activity.transfersChanged();
+            LinearLayout messages=(LinearLayout)field(activity,"messages");List<ProgressBar> bars=new ArrayList<>();for(View v:descendants(messages))if(v instanceof ProgressBar)bars.add((ProgressBar)v);
+            assertEquals(3,bars.size());assertEquals(47,bars.get(0).getProgress());assertEquals(0,bars.get(1).getProgress());assertEquals(26,bars.get(2).getProgress());
+            screenshot(activity,"android-file-progress");
+            List<View> bubbles=new ArrayList<>();for(View v:descendants(messages))if(v.getBackground() instanceof BubbleDrawable)bubbles.add(v);
+            float density=activity.getResources().getDisplayMetrics().density;
+            assertTrue("发送气泡留白过大",bubbles.get(0).getHeight()<260*density);assertTrue("接收气泡留白过大",bubbles.get(1).getHeight()<150*density);
+            for(int i=0;i<16;i++){LanNode.Message m=new LanNode.Message();m.number=100+i;m.time=sent.time;m.text="用于检查阅读位置的旧消息";m.state="已收到";rows.add(m);}
+            invoke(activity,"renderMessages",List.class,rows);measure(root,786,1704,true);ScrollView scroll=(ScrollView)field(activity,"scroll");scroll.scrollTo(0,150);int y=scroll.getScrollY();View first=messages.getChildAt(1);
+            progress.invoke(service,peer.id(),88L,0L,true,83,"发送中",null);activity.transfersChanged();assertSame(first,messages.getChildAt(1));assertEquals(y,scroll.getScrollY());assertEquals(26,service.progress(peer.id(),88,0,false).percent);
+            service.cancelFile("other-peer",88,0);assertFalse(task.isCancelled());service.cancelFile(peer.id(),88,0);assertTrue(task.isCancelled());active.set(service,null);
+            TextView common=(TextView)field(activity,"transferStatus");assertEquals(View.GONE,common.getVisibility());
+        } finally {ac.pause().stop().destroy();sc.destroy();}
+    }
     @Test public void sentImagePreviewPersistsAndMissingCacheKeepsFileActions() throws Exception {
         ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();
         shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));

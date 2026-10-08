@@ -236,6 +236,26 @@ namespace FeiqLight.Tests
         }
         public static void Run(string directory, Action<string, Action> test)
         {
+            test("文件进度卡片：逐文件渲染、方向隔离与更新不抢滚动", () => {
+                using(Form window=new Form {ClientSize=new Size(620,660)})
+                using(BubbleHistory history=new BubbleHistory {Dock=DockStyle.Fill}) {
+                    window.Controls.Add(history);window.Show();
+                    ChatRecord sent=new ChatRecord {Packet=42,PeerId="progress",Text="[文件] 大文件.zip、报告.pdf",Sender="本机",Outgoing=true,State="已确认送达",Time=DateTime.Now,
+                        Transfers=new[]{new FileTransferState{Id=0,Name="大文件.zip",Size=1073741824,Percent=47,Status="发送中"},new FileTransferState{Id=1,Name="报告.pdf",Size=2048,Percent=0,Status="等待对方接收"}}};
+                    history.Append(sent);
+                    ChatRecord received=new ChatRecord {Packet=42,PeerId="progress",Text="",Sender="对端",State="已收到",Time=DateTime.Now,
+                        Transfers=new[]{new FileTransferState{Id=0,Name="接收文件.mp4",Size=1073741824,Percent=26,Status="接收中 · 点击取消"}}};
+                    history.Append(received);Application.DoEvents();Render(window,"preview-file-progress-light");
+                    var rectangles=(List<Rectangle>)typeof(BubbleHistory).GetField("bounds",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(history);
+                    // 与自绘控件相同，使用实际 Graphics DPI；系统缩放下 DeviceDpi 不一定等于绘图 DPI。
+                    using(Graphics graphics=history.CreateGraphics())Check(rectangles[0].Height<=200*graphics.DpiY/96F&&rectangles[1].Height<=135*graphics.DpiY/96F,"文件气泡残留过大固定空白");
+                    var hits=(System.Collections.ICollection)typeof(BubbleHistory).GetField("fileHits",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(history);Check(hits.Count==3,"缺少每个文件的独立卡片");
+                    for(int i=0;i<12;i++)history.Append(new ChatRecord{Packet=100+i,Text="旧消息阅读位置",Sender="测试",Time=DateTime.Now});
+                    history.AutoScrollPosition=new Point(0,40);int y=history.AutoScrollPosition.Y;sent.Transfers[0].Percent=83;history.Delivery(sent);Application.DoEvents();
+                    Check(history.AutoScrollPosition.Y==y,"发送进度抢走旧消息位置");Check(received.Transfers[0].Percent==26,"同号入站进度被出站覆盖");
+                    history.Clear();Check(sent.DisplayText()=="","重复显示附件清单");window.Close();
+                }
+            });
             test("会话菜单：备注、置顶、移除恢复和清空隔离真实控件交互",()=>{
                 string folder=Path.Combine(directory,"conversation-ui");LocalStore store=new LocalStore(folder);AppSettings settings=new AppSettings {CloseToTray=false,ReceiveFolder=Path.Combine(folder,"received")};
                 settings.Conversations=new[]{new SavedConversation {Endpoint="127.0.0.1:32425",Login="a",Nickname="项目讨论"},new SavedConversation {Endpoint="127.0.0.1:32426",Login="b",Nickname="设计同事"}};

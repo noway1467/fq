@@ -38,7 +38,15 @@ public final class LanNode implements AutoCloseable {
         void peersChanged();
         void message(Peer peer, Message message, boolean update);
         void error(String text);
+        default void fileProgress(Peer peer,long packet,long file,int percent,String state) { }
     }
+    public interface SocketBinding {
+        void bind(DatagramSocket socket) throws IOException;
+        void bind(Socket socket) throws IOException;
+        default Collection<InetAddress> broadcasts() throws IOException { return null; }
+    }
+    private volatile SocketBinding socketBinding;
+    public void setSocketBinding(SocketBinding binding) { if(udp!=null) throw new IllegalStateException("需在启动前设置网络"); socketBinding=binding; }
     public interface Progress { void update(int percent); }
     public static final class Transfer implements AutoCloseable {
         private volatile boolean cancelled;
@@ -54,6 +62,7 @@ public final class LanNode implements AutoCloseable {
     }
     private static final class Offer {
         File file; long size, modified, expires; InetAddress address;
+        Peer peer; long packet, id, progressVersion; int percent; String state;
     }
     private final Object gate=new Object();
     private final Map<String,Peer> peers=new LinkedHashMap<>();
@@ -85,6 +94,7 @@ public final class LanNode implements AutoCloseable {
         try {
             InetAddress address=InetAddress.getByName(loopback?"127.0.0.1":"0.0.0.0");
             udp=new DatagramSocket(null); udp.setReuseAddress(false); udp.setBroadcast(!loopback); udp.bind(new InetSocketAddress(address,port));
+            if(!loopback && socketBinding!=null) socketBinding.bind(udp);
             tcp=new ServerSocket(); tcp.setReuseAddress(false); tcp.bind(new InetSocketAddress(address,port),4);
             Thread rx=new Thread(this::receiveLoop,"feiq-udp"), accept=new Thread(this::acceptLoop,"feiq-files");
             rx.setDaemon(true); accept.setDaemon(true); rx.start(); accept.start();
@@ -108,7 +118,11 @@ public final class LanNode implements AutoCloseable {
     private void send(byte[] bytes,InetSocketAddress to) throws IOException {
         if (closed || udp==null) throw new IOException("尚未连接局域网");
         if (!(to.getAddress() instanceof Inet4Address) || (loopback && !to.getAddress().isLoopbackAddress())) throw new IOException("无效的目标地址");
-        udp.send(new DatagramPacket(bytes,bytes.length,to));
+        synchronized(udp) {
+            // 每次发送重新选择实体网络，VPN 开关和 Wi-Fi 切换后不能继续沿用旧默认路由。
+            if(!loopback && socketBinding!=null) socketBinding.bind(udp);
+            udp.send(new DatagramPacket(bytes,bytes.length,to));
+        }
     }
     public void probe(InetSocketAddress to) throws IOException {
         send(encode(Protocol.ENTRY|Protocol.CAP_UTF8|Protocol.FILE,Protocol.field(nickname),Protocol.field(group)),to);
@@ -125,11 +139,15 @@ public final class LanNode implements AutoCloseable {
         refreshAt=System.nanoTime();
         Set<InetAddress> addresses=new HashSet<>();
         if (!loopback) {
+            Collection<InetAddress> physical=socketBinding==null?null:socketBinding.broadcasts();
+            if(physical!=null) addresses.addAll(physical);
+            else {
             addresses.add(InetAddress.getByName("255.255.255.255"));
             Enumeration<NetworkInterface> interfaces=NetworkInterface.getNetworkInterfaces();
             if (interfaces!=null) while (interfaces.hasMoreElements()) {
                 NetworkInterface net=interfaces.nextElement(); if (!net.isUp() || net.isLoopback()) continue;
                 for (InterfaceAddress a:net.getInterfaceAddresses()) if (a.getBroadcast()!=null) addresses.add(a.getBroadcast());
+            }
             }
         }
         for (InetAddress address:addresses) try { probe(new InetSocketAddress(address,port)); } catch (IOException e) { listener.error("广播不可用，可尝试手动添加 IP"); }
@@ -159,7 +177,7 @@ public final class LanNode implements AutoCloseable {
                 } catch (NumberFormatException ignored) { } return;
             }
             if (p.mode()==Protocol.RELEASE) {
-                try { String prefix=Long.parseLong(p.body)+":"; offers.entrySet().removeIf(e->e.getKey().startsWith(prefix) && e.getValue().address.equals(from.getAddress())); }
+                try { String prefix=Long.parseLong(p.body)+":"; offers.entrySet().removeIf(e->{boolean remove=e.getKey().startsWith(prefix)&&e.getValue().address.equals(from.getAddress());if(remove)endOffer(e.getValue(),"对方已拒绝");return remove;}); }
                 catch (NumberFormatException ignored) { } return;
             }
             if (p.mode()!=Protocol.ENTRY && p.mode()!=Protocol.ANSWER && p.mode()!=Protocol.ABSENCE && p.mode()!=Protocol.EXIT && p.mode()!=Protocol.MESSAGE) return;
@@ -196,6 +214,7 @@ public final class LanNode implements AutoCloseable {
             int id=m.files.size(); m.files.add(new Protocol.Attachment(id,file.getName(),file.length(),file.lastModified()/1000));
             m.localPaths.add(file.getCanonicalPath());
             Offer o=new Offer(); o.file=file; o.size=file.length(); o.modified=file.lastModified(); o.address=peer.endpoint.getAddress(); o.expires=System.nanoTime()+TimeUnit.MINUTES.toNanos(30); additions.put(m.number+":"+id,o);
+            o.peer=peer; o.packet=m.number; o.id=id;
         }
         byte[] bytes=Protocol.encode(m.number,login,host,Protocol.MESSAGE|Protocol.CHECK|(peer.utf8?Protocol.UTF8:0)|(paths.isEmpty()?0:Protocol.FILE),text,paths.isEmpty()?null:Protocol.files(m.files));
         synchronized (gate) {
@@ -221,7 +240,7 @@ public final class LanNode implements AutoCloseable {
                     else { p.attempts++; p.last=now; try { send(p.bytes,p.peer.endpoint); } catch (IOException ignored) { } }
                 }
                 seen.entrySet().removeIf(e->now-e.getValue()>TimeUnit.MINUTES.toNanos(10));
-                offers.entrySet().removeIf(e->e.getValue().expires<now);
+                offers.entrySet().removeIf(e->{if(e.getValue().expires>=now)return false;endOffer(e.getValue(),"邀请已过期，请重新发送");return true;});
                 for (Peer p:peers.values()) if (p.online && now-p.lastSeen>TimeUnit.SECONDS.toNanos(120)) { p.online=false; changed=true; }
             }
             if (changed) listener.peersChanged();
@@ -236,6 +255,7 @@ public final class LanNode implements AutoCloseable {
         } catch (IOException e) { if (!closed) listener.error("文件监听失败："+e.getMessage()); }
     }
     private void serve(Socket client) {
+        Offer active=null; int percent=0; long version=0;
         try (Socket socket=client) {
             socket.setSoTimeout(5000); ByteArrayOutputStream request=new ByteArrayOutputStream();
             int c; while (request.size()<4096 && (c=socket.getInputStream().read())!=-1) { request.write(c); if (c==0) break; }
@@ -244,7 +264,9 @@ public final class LanNode implements AutoCloseable {
             long number=Long.parseLong(f[0],16), id=Long.parseLong(f[1],16), offset=Long.parseLong(f[2],16); Offer offer;
             synchronized (gate) { offer=offers.get(number+":"+id); }
             if (offer==null || offset<0 || offset>offer.size || !offer.address.equals(socket.getInetAddress()) || offer.expires<System.nanoTime()) return;
-            if (!offer.file.isFile() || offer.file.length()!=offer.size || offer.file.lastModified()!=offer.modified) return;
+            synchronized(gate) { version=++offer.progressVersion; active=offer; }
+            if (!offer.file.isFile() || offer.file.length()!=offer.size || offer.file.lastModified()!=offer.modified) throw new IOException("原文件已改变");
+            percent=offer.size==0?0:(int)(offset*100.0/offer.size); progress(offer,version,percent,"发送中");
             // 只限制无进展的连接，正常大文件不再因总时长超过五分钟而中断。
             AtomicLong lastWrite=new AtomicLong(System.nanoTime());
             ScheduledFuture<?> deadline=timer.scheduleWithFixedDelay(()->{ if(System.nanoTime()-lastWrite.get()>TimeUnit.SECONDS.toNanos(30)) try { socket.close(); } catch (IOException ignored) { } },5,5,TimeUnit.SECONDS);
@@ -253,17 +275,27 @@ public final class LanNode implements AutoCloseable {
                 while (left>0 && (read=input.read(buffer,0,(int)Math.min(buffer.length,left)))!=-1) {
                     socket.getOutputStream().write(buffer,0,read); left-=read; lastWrite.set(System.nanoTime());
                     synchronized(gate) { offer.expires=System.nanoTime()+TimeUnit.MINUTES.toNanos(30); }
+                    int next=(int)((offer.size-left)*100.0/offer.size); if(next!=percent) {percent=next;progress(offer,version,percent,"发送中");}
                 }
+                if(left!=0) throw new IOException("发送中断");
+                progress(offer,version,100,"已发送（非保存确认）"); active=null;
             } finally { deadline.cancel(false); }
         } catch (IOException | RuntimeException ignored) { /* 对方取消、报价失效和非法请求都关闭连接。 */ }
-        finally { synchronized (gate) { connections.remove(client); } }
+        finally { if(active!=null) progress(active,version,percent,"发送中断，等待对方重试"); synchronized (gate) { connections.remove(client); } }
     }
+    private void progress(Offer offer,long version,int percent,String state) {
+        synchronized(gate) {if(version!=offer.progressVersion)return;offer.percent=percent;offer.state=state;if(!closed)listener.fileProgress(offer.peer,offer.packet,offer.id,percent,state);}
+    }
+    private void endOffer(Offer offer,String state) {if(!"已发送（非保存确认）".equals(offer.state))progress(offer,++offer.progressVersion,offer.percent,state);}
     public void reject(Peer peer,long packet) throws IOException { send(encode(Protocol.RELEASE,Long.toString(packet),null),peer.endpoint); }
+    public boolean offering(String peer,long packet,long file) {
+        synchronized(gate) {Offer offer=offers.get(packet+":"+file);return !closed&&offer!=null&&offer.peer.id().equals(peer)&&offer.expires>=System.nanoTime();}
+    }
     public void revokeOffers() throws IOException {
         synchronized(gate) {
             // 已接入的文件连接可能正在读副本，不能先删文件再中断对端。
             if(!connections.isEmpty()) throw new IOException("仍有文件连接，请待传输结束后清理发送缓存");
-            offers.clear();
+            for(Offer offer:offers.values())endOffer(offer,"邀请已撤销");offers.clear();
         }
     }
     public boolean isOffered(File file) {
@@ -282,7 +314,7 @@ public final class LanNode implements AutoCloseable {
         if (loopback && !peer.endpoint.getAddress().isLoopbackAddress()) throw new IOException("测试模式不能访问局域网");
         if (destination.exists()) throw new IOException("目标已存在，不会覆盖");
         File part=partialFile(peer,packet,file,destination);
-        Socket socket=new Socket();
+        Socket socket=new Socket(Proxy.NO_PROXY);
         synchronized (gate) { if (closed || connections.size()>=4) { socket.close(); throw new IOException("服务已关闭或传输任务过多"); } connections.add(socket); }
         boolean owned=false,complete=false;
         try (Socket active=socket;
@@ -292,7 +324,9 @@ public final class LanNode implements AutoCloseable {
             owned=true; long offset=output.size();
             if(offset>file.size) { output.truncate(0); offset=0; }
             output.position(offset); requireSpace(destination.getAbsoluteFile().getParentFile(),file.size-offset);
-            transfer.attach(active); active.connect(peer.endpoint,8000); active.setSoTimeout(15000);
+            transfer.attach(active);
+            if(!loopback && socketBinding!=null) socketBinding.bind(active);
+            active.connect(peer.endpoint,8000); active.setSoTimeout(15000);
             byte[] request=encode(Protocol.GET_FILE,Long.toHexString(packet)+":"+Integer.toHexString(file.id)+":"+Long.toHexString(offset)+":",null);
             active.getOutputStream().write(request);
             OutputStream out=new BufferedOutputStream(java.nio.channels.Channels.newOutputStream(output),65536);

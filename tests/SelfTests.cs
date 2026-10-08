@@ -414,6 +414,27 @@ namespace FeiqLight.Tests
                     ExpectFailure(() => b.ReceiveFileAsync(alice, record.Packet, message.Files[0], destination, null, CancellationToken.None).GetAwaiter().GetResult(), "覆盖了已有文件");
                     Assert(EqualFiles(source, destination), "已有文件被损坏");
                 });
+                Run("发送进度：真实多文件 TCP、中间百分比、空文件与 ACK 语义", () =>
+                {
+                    string first=Path.Combine(root,"progress-large.bin"),empty=Path.Combine(root,"progress-empty.bin");
+                    File.WriteAllBytes(first,new byte[8*1024*1024+17]);File.WriteAllBytes(empty,new byte[0]);
+                    List<Tuple<long,int,int,string>> progress=new List<Tuple<long,int,int,string>>();
+                    Action<ChatRecord,int,int,string> handler=(r,id,p,s)=>{lock(progress)progress.Add(Tuple.Create(r.Packet,id,p,s));};
+                    a.TransferChanged+=handler;
+                    try {
+                        ChatRecord sent=a.SendMessage(bob,"",new[]{first,empty});
+                        Wait(()=>sent.State!="等待确认","邀请未确认",4000);
+                        lock(progress)Assert(progress.Count==0,"ACK 被误当作文件进度");
+                        Assert(sent.Transfers.Length==2&&sent.Transfers.All(f=>f.Percent==0),"逐文件初始状态错误");
+                        for(int i=0;i<2;i++)b.ReceiveFileAsync(alice,sent.Packet,new Attachment{Id=i,Name=i==0?"progress-large.bin":"progress-empty.bin",Size=i==0?new FileInfo(first).Length:0},Path.Combine(root,"progress-copy-"+i),null,CancellationToken.None).GetAwaiter().GetResult();
+                        Wait(()=>{lock(progress)return progress.Count(p=>p.Item4=="已发送（非保存确认）")==2;},"缺少逐文件完成事件",4000);
+                        lock(progress) {
+                            Assert(progress.All(p=>p.Item1==sent.Packet&&p.Item3>=0&&p.Item3<=100),"进度关联错消息或越界");
+                            Assert(progress.Any(p=>p.Item2==0&&p.Item3>0&&p.Item3<100),"大文件没有中间进度");
+                            foreach(int id in new[]{0,1}) {int previous=-1;foreach(var p in progress.Where(p=>p.Item2==id)){Assert(p.Item3>=previous,"进度倒退");previous=p.Item3;}Assert(previous==100,"完成未到100%");}
+                        }
+                    } finally {a.TransferChanged-=handler;}
+                });
                 Run("同名接收：并发提交自动改名，不覆盖文件或同名目录", () =>
                 {
                     string folder = Path.Combine(root, "collision"); Directory.CreateDirectory(folder);

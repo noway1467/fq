@@ -16,6 +16,7 @@ namespace FeiqLight
         private readonly List<Rectangle> bounds = new List<Rectangle>();
         private readonly List<MessageLayout> textLayouts=new List<MessageLayout>();
         private readonly List<Tuple<Rectangle,string>> linkHits=new List<Tuple<Rectangle,string>>();
+        private readonly List<Tuple<Rectangle,ChatRecord,int>> fileHits=new List<Tuple<Rectangle,ChatRecord,int>>();
         private int selected = -1;
         private string wallpaperPattern="none";
         private ChatWallpaper.Asset wallpaperImage;
@@ -42,6 +43,7 @@ namespace FeiqLight
         private int previousHeight;
         public event Action<ChatRecord> RetryRequested;
         public event Action<ChatRecord> ForwardRequested;
+        public event Action<ChatRecord,int> FileRequested;
         public int TextLength { get { return Text.Length; } }
         public BubbleHistory()
         {
@@ -104,7 +106,7 @@ namespace FeiqLight
         public void Delivery(ChatRecord record)
         {
             ChatRecord current = records.FirstOrDefault(r => r.Packet == record.Packet && r.Outgoing == record.Outgoing);
-            if (current != null) { current.State = record.State; current.LocalFiles = record.LocalFiles; Arrange(); Invalidate(); }
+            if (current != null) { current.State = record.State; current.LocalFiles = record.LocalFiles; current.Transfers = record.Transfers; Arrange(); Invalidate(); }
         }
         protected override void OnResize(EventArgs e)
         {
@@ -121,13 +123,16 @@ namespace FeiqLight
             bounds.Clear(); textLayouts.Clear(); int y = D(22), max = Math.Max(D(100), (int)((ClientSize.Width - SystemInformation.VerticalScrollBarWidth) * .77));
             foreach (ChatRecord r in records)
             {
-                MessageLayout layout=MessageLinks.Find(r.Text).Count>0||ColorEmoji.Contains(r.Text)?new MessageLayout(r.Text,Font,max-D(28)):null;
+                string display = r.DisplayText();
+                MessageLayout layout=MessageLinks.Find(display).Count>0||ColorEmoji.Contains(display)?new MessageLayout(display,Font,max-D(28)):null;
                 textLayouts.Add(layout);
-                Size text = layout==null?TextRenderer.MeasureText(r.Text, Font, new Size(max - D(28), Int32.MaxValue), MessageFormat):new Size(layout.Width,layout.Height);
+                Size text = display.Length == 0 ? Size.Empty : layout==null?TextRenderer.MeasureText(display, Font, new Size(max - D(28), Int32.MaxValue), MessageFormat):new Size(layout.Width,layout.Height);
                 Size state = TextRenderer.MeasureText(Stamp(r), Theme.Small, new Size(max - D(28), Int32.MaxValue), MessageFormat);
                 int width = Math.Max(D(110), Math.Min(max, Math.Max(text.Width, state.Width) + D(28)));
                 if(r.GetLocalFiles().Any(MediaPreview.Supported)) width=Math.Min(max,Math.Max(width,D(260)));
-                int height = text.Height + state.Height + D(36) + r.GetLocalFiles().Count(MediaPreview.Supported) * D(150);
+                bool cards = r.Transfers != null && r.Transfers.Length > 0;
+                if(cards) width=Math.Min(max,Math.Max(width,D(320)));
+                int height = text.Height + state.Height + D(24) + (cards ? r.Transfers.Sum(f => D(64) + (CardMedia(f) ? D(150) : 0)) : r.GetLocalFiles().Count(MediaPreview.Supported) * D(150));
                 bounds.Add(new Rectangle(r.Outgoing ? ClientSize.Width - SystemInformation.VerticalScrollBarWidth - D(16) - width : D(16), y, width, height)); y += height + D(12);
             }
             AutoScrollMinSize = new Size(0, y + D(18));
@@ -148,9 +153,10 @@ namespace FeiqLight
             return path;
         }
         private static string Stamp(ChatRecord r) { return r.Time.ToString("HH:mm") + (r.Outgoing ? "  " + r.State : "  " + r.Sender + (r.GetLocalFiles().Length>0 && r.State!="已收到" ? " · "+r.State : "")); }
+        private static bool CardMedia(FileTransferState file) { return !String.IsNullOrEmpty(file.LocalPath) && MediaPreview.Supported(file.LocalPath); }
         protected override void OnPaint(PaintEventArgs e)
         {
-            mediaHits.Clear(); linkHits.Clear(); base.OnPaint(e); e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            mediaHits.Clear(); linkHits.Clear(); fileHits.Clear(); base.OnPaint(e); e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
             for (int i = 0; i < records.Count && i < bounds.Count; i++)
             {
                 Rectangle r = bounds[i]; r.Offset(AutoScrollPosition); if (!r.IntersectsWith(ClientRectangle)) continue;
@@ -160,10 +166,13 @@ namespace FeiqLight
                     using (SolidBrush b = new SolidBrush(record.Outgoing ? Theme.Sky : Theme.Surface)) e.Graphics.FillPath(b, path);
                     if (i == selected && Focused) using (Pen p = new Pen(Theme.Blue)) e.Graphics.DrawPath(p, path);
                 }
-                Rectangle content = new Rectangle(r.X + D(14), r.Y + D(12), r.Width - D(28), r.Height - D(30));
+                Rectangle content = new Rectangle(r.X + D(14), r.Y + D(12), r.Width - D(28), r.Height - D(24));
                 Size stamp = TextRenderer.MeasureText(Stamp(record), Theme.Small, new Size(content.Width, Int32.MaxValue), MessageFormat);
                 content.Height -= stamp.Height;
-                string[] media=record.GetLocalFiles().Where(MediaPreview.Supported).ToArray();
+                bool cards = record.Transfers != null && record.Transfers.Length > 0;
+                string[] media=cards ? new string[0] : record.GetLocalFiles().Where(MediaPreview.Supported).ToArray();
+                int cardHeight = cards ? record.Transfers.Sum(f => D(64) + (CardMedia(f) ? D(150) : 0)) : 0;
+                content.Height -= cardHeight;
                 content.Height-=media.Length*D(150);
                 for(int n=0;n<media.Length;n++) {
                     Rectangle preview=new Rectangle(content.X,content.Bottom+n*D(150),content.Width,D(140));
@@ -176,7 +185,22 @@ namespace FeiqLight
                     mediaHits.Add(Tuple.Create(preview,media[n]));
                 }
                 if(i<textLayouts.Count&&textLayouts[i]!=null)textLayouts[i].Draw(e.Graphics,content.Location,Font,linkHits);
-                else TextRenderer.DrawText(e.Graphics, record.Text, Font, content, Theme.Ink, MessageFormat);
+                else TextRenderer.DrawText(e.Graphics, record.DisplayText(), Font, content, Theme.Ink, MessageFormat);
+                if(cards) {
+                    int y=content.Bottom;
+                    foreach(FileTransferState file in record.Transfers) {
+                        int top=y;
+                        TextRenderer.DrawText(e.Graphics,file.Name,Font,new Rectangle(content.X,y,content.Width,D(24)),Theme.Ink,TextFormatFlags.EndEllipsis|TextFormatFlags.NoPrefix); y+=D(25);
+                        if(CardMedia(file)) { DrawCardPreview(e.Graphics,new Rectangle(content.X,y,content.Width,D(140)),file.LocalPath); y+=D(150); }
+                        string label=Theme.SizeText(file.Size)+" · "+file.Percent+"% · "+file.DisplayStatus();
+                        TextRenderer.DrawText(e.Graphics,label,Theme.Small,new Rectangle(content.X,y,content.Width,D(23)),Theme.Muted,TextFormatFlags.EndEllipsis|TextFormatFlags.NoPrefix); y+=D(25);
+                        Rectangle bar=new Rectangle(content.X,y,content.Width,D(4));
+                        using(SolidBrush track=new SolidBrush(Theme.Line)) e.Graphics.FillRectangle(track,bar);
+                        bar.Width=(int)(bar.Width*Math.Max(0,Math.Min(100,file.Percent))/100.0);
+                        using(SolidBrush fill=new SolidBrush(Theme.Blue)) e.Graphics.FillRectangle(fill,bar);
+                        y+=D(14); fileHits.Add(Tuple.Create(new Rectangle(content.X,top,content.Width,y-top),record,file.Id));
+                    }
+                }
                 TextRenderer.DrawText(e.Graphics, Stamp(record), Theme.Small, new Rectangle(content.X, r.Bottom - stamp.Height - D(9), content.Width, stamp.Height), Theme.Muted, TextFormatFlags.Right | MessageFormat);
             }
         }
@@ -188,6 +212,24 @@ namespace FeiqLight
                 if(path.IsVisible(point)) { selected=i;break; }
             Invalidate();
             if(e.Button==MouseButtons.Left) {var link=linkHits.FirstOrDefault(item=>item.Item1.Contains(e.Location));if(link!=null){MessageLinks.Open(this,link.Item2);return;}var hit=mediaHits.FirstOrDefault(item=>item.Item1.Contains(e.Location));if(hit!=null)MediaPreview.Open(this,hit.Item2);}
+            if(e.Button==MouseButtons.Left) {
+                var hit=fileHits.FirstOrDefault(item=>item.Item1.Contains(e.Location));
+                if(hit!=null && !mediaHits.Any(item=>item.Item1.Contains(e.Location))) {
+                    FileTransferState file=hit.Item2.Transfers.First(f=>f.Id==hit.Item3);
+                    if(!String.IsNullOrEmpty(file.LocalPath)) MediaPreview.OpenFile(this,file.LocalPath,false);
+                    else if(!hit.Item2.Outgoing && FileRequested!=null) FileRequested(hit.Item2,hit.Item3);
+                }
+            }
+        }
+        private void DrawCardPreview(Graphics g, Rectangle preview, string path)
+        {
+            using(SolidBrush background=new SolidBrush(Theme.Ice)) g.FillRectangle(background,preview);
+            Bitmap bitmap;
+            if(previews.TryGetValue(path,out bitmap)&&bitmap!=null) {
+                double ratio=Math.Min((double)preview.Width/bitmap.Width,(double)preview.Height/bitmap.Height);int w=(int)(bitmap.Width*ratio),h=(int)(bitmap.Height*ratio);
+                g.DrawImage(bitmap,new Rectangle(preview.X+(preview.Width-w)/2,preview.Y+(preview.Height-h)/2,w,h));
+            } else {LoadPreview(path);TextRenderer.DrawText(g,"预览不可用 / 加载中",Theme.Small,preview,Theme.Muted,TextFormatFlags.HorizontalCenter|TextFormatFlags.VerticalCenter);}
+            mediaHits.Add(Tuple.Create(preview,path));
         }
         protected override void OnMouseMove(MouseEventArgs e) { base.OnMouseMove(e); Cursor=linkHits.Any(h=>h.Item1.Contains(e.Location))?Cursors.Hand:Cursors.Default; }
         protected override void OnFontChanged(EventArgs e) { base.OnFontChanged(e);if(records!=null&&bounds!=null&&textLayouts!=null){Arrange();Invalidate();} }

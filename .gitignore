@@ -1,6 +1,7 @@
 # 默认不发布工作区资料，只允许源码、测试及构建入口。
 /*
 !/.gitignore
+!/README.md
 !/src/
 !/tests/
 !/tools/
