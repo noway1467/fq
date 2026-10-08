@@ -4,6 +4,8 @@
 
 当前版本：**Windows 0.3.18 / Android 0.2.19 预览版**。
 
+下载独立安装/运行包：[GitHub Releases](https://github.com/noway1467/fq/releases)。选择 Windows EXE 或 Android APK，无需下载源码。
+
 ## 功能
 
 - 自动发现和手动 IPv4 连接，中文、表情、消息确认、历史与草稿。
@@ -19,7 +21,7 @@
 ## 使用
 
 1. 双端连接同一个可互访的可信局域网。Windows 需要 **.NET Framework 4.8**；Android 需要 **8.0 或更高版本**。
-2. Windows 运行 `dist/飞Q.exe`；Android 安装 `dist/飞Q-android-0.2.19-preview.apk`，首次点击「连接」。安装包在本地构建，不纳入源码仓库。
+2. 下载后，Windows 直接运行 EXE；Android 安装 APK，首次点击「连接」。本地构建包也位于 `dist/`；二进制包作为 Release 附件提供，不纳入 Git 源码历史。
 3. 未自动发现时，用「+」添加对方 IPv4 地址。默认端口为 **UDP/TCP 2425**，检查防火墙及路由器的客户端隔离。
 4. 用回形针选文件。接收中的附件可点击其进度提示取消，失败可重试。Windows 也保留文件抽屉；Android 保存目录通过系统文件选择器授权。
 5. Windows 关闭窗口默认收起到托盘，从菜单「退出」结束。更新前正常退出旧程序，不必删除聊天数据。
