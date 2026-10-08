@@ -19,6 +19,13 @@ public final class AndroidInterop {
             for(int i=0;i<500&&peer==null;i++) { for(LanNode.Peer p:node.peers()) if(p.login.equals("windows-test")) peer=p; Thread.sleep(10); }
             if(peer==null) throw new AssertionError("Windows 发现失败");
             if(!peer.name.equals("Windows 测试👩🏽‍💻")) throw new AssertionError("Windows 昵称乱码");
+            for(int i=0;i<5;i++) {
+                Thread.sleep(150);long started=System.nanoTime();node.sendMessage(peer,"0",Collections.emptyList());
+                LanNode.Message echo=incoming.poll(2,TimeUnit.SECONDS),confirm=updates.poll(2,TimeUnit.SECONDS);
+                long elapsed=TimeUnit.NANOSECONDS.toMillis(System.nanoTime()-started);
+                if(echo==null||!echo.text.equals("IDLE_ECHO:0")||confirm==null||!confirm.state.equals("已送达")||elapsed>=1000)throw new AssertionError("空闲单字符往返延迟 "+elapsed+" ms");
+                System.out.println("WINDOWS_ZERO_ROUNDTRIP_MS="+elapsed);
+            }
             long size=Long.parseLong(args[3]); byte[] bytes=new byte[65536]; for(int i=0;i<bytes.length;i++) bytes[i]=(byte)(i*17+3);
             File source=root.resolve("安卓资料👩🏽‍💻.bin").toFile();
             try(OutputStream out=new BufferedOutputStream(new FileOutputStream(source))) { for(long left=size;left>0;) { int count=(int)Math.min(left,bytes.length);out.write(bytes,0,count);left-=count; } }

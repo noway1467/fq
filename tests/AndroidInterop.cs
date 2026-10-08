@@ -21,6 +21,7 @@ public static class AndroidInteropHost
             {
                 try
                 {
+                    if (message.Record.Text == "0") { node.SendMessage(message.Peer, "IDLE_ECHO:0", null); return; }
                     if (message.Record.Text == "ANDROID_COMPLETE")
                     {
                         if (!received) throw new Exception("尚未收到安卓文件");

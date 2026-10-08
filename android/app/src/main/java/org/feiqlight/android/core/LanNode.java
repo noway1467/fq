@@ -67,6 +67,8 @@ public final class LanNode implements AutoCloseable {
         Peer peer; long packet, id, progressVersion; int percent; String state;
     }
     private final Object gate=new Object();
+    // Android/旧 JDK 的 receive() 持有 socket 自身监视器；发送绝不能争用这把阻塞锁。
+    private final Object udpSendGate=new Object();
     private final Map<String,Peer> peers=new LinkedHashMap<>();
     private final Set<InetSocketAddress> remembered=new LinkedHashSet<>();
     private final Map<Long,Pending> pending=new HashMap<>();
@@ -120,7 +122,7 @@ public final class LanNode implements AutoCloseable {
     private void send(byte[] bytes,InetSocketAddress to) throws IOException {
         if (closed || udp==null) throw new IOException("尚未连接局域网");
         if (!(to.getAddress() instanceof Inet4Address) || (loopback && !to.getAddress().isLoopbackAddress())) throw new IOException("无效的目标地址");
-        synchronized(udp) {
+        synchronized(udpSendGate) {
             // 适配层只在实体网络改变后重绑，同一轮发现/ACK 复用绑定。
             if(!loopback && socketBinding!=null) socketBinding.bind(udp);
             udp.send(new DatagramPacket(bytes,bytes.length,to));

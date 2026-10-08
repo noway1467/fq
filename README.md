@@ -2,7 +2,7 @@
 
 轻量的 Windows / Android 局域网聊天与文件传输工具。功能方向参考飞秋，界面布局参考 Telegram；独立实现，非官方产品。
 
-当前版本：**Windows 0.3.18 / Android 0.2.18 预览版**。
+当前版本：**Windows 0.3.18 / Android 0.2.19 预览版**。
 
 ## 功能
 
@@ -14,11 +14,12 @@
 - 会话备注、置顶、移除/恢复、夜间模式、字号和聊天背景。
 - Android 优先将发现、消息和下载套接字绑定到非 VPN 的 Wi-Fi/以太网，避免跟随 TUN 默认路由；不修改系统代理设置。
 - Android 发送立即显示处理中，发现刷新不阻塞文字发送；文件先安全暂存并显示本地准备进度，再发送邀请。
+- Android 0.2.19 修复空闲发送被阻塞接收锁卡住的问题，避免等到下一次广播才发出消息。
 
 ## 使用
 
 1. 双端连接同一个可互访的可信局域网。Windows 需要 **.NET Framework 4.8**；Android 需要 **8.0 或更高版本**。
-2. Windows 运行 `dist/飞Q.exe`；Android 安装 `dist/飞Q-android-0.2.18-preview.apk`，首次点击「连接」。安装包在本地构建，不纳入源码仓库。
+2. Windows 运行 `dist/飞Q.exe`；Android 安装 `dist/飞Q-android-0.2.19-preview.apk`，首次点击「连接」。安装包在本地构建，不纳入源码仓库。
 3. 未自动发现时，用「+」添加对方 IPv4 地址。默认端口为 **UDP/TCP 2425**，检查防火墙及路由器的客户端隔离。
 4. 用回形针选文件。接收中的附件可点击其进度提示取消，失败可重试。Windows 也保留文件抽屉；Android 保存目录通过系统文件选择器授权。
 5. Windows 关闭窗口默认收起到托盘，从菜单「退出」结束。更新前正常退出旧程序，不必删除聊天数据。
@@ -36,6 +37,8 @@ Windows 使用系统 C# 编译器；Android 使用 JDK 17+、SDK platform 36 / b
 .\build-android.ps1 -SdkRoot '你的 Android SDK 目录' -JavaHome '你的 JDK 目录' -Test
 # 双端真实 UDP/TCP 回环、文件校验与大文件续传
 .\tests\android-interop.ps1 -LargeFiles
+# 可选：用本机已有 JDK 11 验证与 Android 相同的阻塞接收锁行为
+.\tests\android-idle-latency.ps1 -JavaHome '你的 JDK 11 目录'
 # Windows 便携包及包内程序验证
 .\package.ps1
 .\tests\package-smoke.ps1

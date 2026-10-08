@@ -10,6 +10,21 @@ import java.util.*;
 import java.util.concurrent.*;
 
 public final class CoreTest {
+    @Test public void outgoingZeroDoesNotWaitForAndroidStyleReceiveMonitor() throws Exception {
+        ExecutorService workers=Executors.newFixedThreadPool(2);CountDownLatch entered=new CountDownLatch(1),release=new CountDownLatch(1);
+        try(LanNode sender=node(new Inbox(),port(),"idle-sender");DatagramSocket remote=new DatagramSocket(0,InetAddress.getLoopbackAddress())) {
+            java.lang.reflect.Field field=LanNode.class.getDeclaredField("udp");field.setAccessible(true);DatagramSocket socket=(DatagramSocket)field.get(sender);
+            // JDK 17 的 DatagramSocket 与 Android 实现不同，固定模拟 Android 接收持锁以免宿主测试漏报。
+            workers.submit(()->{synchronized(socket){entered.countDown();try{release.await(5,TimeUnit.SECONDS);}catch(InterruptedException e){Thread.currentThread().interrupt();}}});
+            assertTrue(entered.await(2,TimeUnit.SECONDS));LanNode.Peer peer=new LanNode.Peer(new InetSocketAddress(InetAddress.getLoopbackAddress(),remote.getLocalPort()),"target","host","target","");
+            try {
+                Future<LanNode.Message> sent=workers.submit(()->sender.sendMessage(peer,"0",Collections.emptyList()));
+                LanNode.Message message=sent.get(1,TimeUnit.SECONDS);assertEquals("0",message.text);assertEquals(1,release.getCount());
+                remote.setSoTimeout(1000);DatagramPacket packet=new DatagramPacket(new byte[2048],2048);remote.receive(packet);
+                assertEquals("0",Protocol.parse(Arrays.copyOf(packet.getData(),packet.getLength())).body);
+            } finally {release.countDown();}
+        } finally {release.countDown();workers.shutdownNow();assertTrue(workers.awaitTermination(5,TimeUnit.SECONDS));}
+    }
     private static final class Inbox implements LanNode.Listener {
         final BlockingQueue<LanNode.Message> messages=new LinkedBlockingQueue<>();
         final BlockingQueue<LanNode.Message> updates=new LinkedBlockingQueue<>();
