@@ -1,0 +1,44 @@
+plugins { id 'com.android.application' }
+android {
+    namespace 'org.feiqlight.android'
+    compileSdk 36
+    buildToolsVersion '35.0.0'
+    defaultConfig {
+        applicationId 'org.feiqlight.android'
+        minSdk 26
+        targetSdk 36
+        versionCode 19
+        versionName '0.2.16'
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    buildFeatures { buildConfig true }
+    buildTypes {
+        release {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt')
+        }
+        preview {
+            initWith release
+            signingConfig signingConfigs.debug
+            matchingFallbacks = ['release']
+        }
+    }
+    lint { abortOnError true; checkReleaseBuilds true }
+    testOptions {
+        unitTests.includeAndroidResources = true
+        unitTests.all {
+            systemProperty 'java.io.tmpdir', file('../../build/tmp').absolutePath
+            systemProperty 'maven.repo.local', file('../../build/maven-repo').absolutePath
+            systemProperty 'robolectric.dependency.repo.url', 'https://repo.maven.apache.org/maven2'
+            systemProperty 'feiq.previewDir', file('../../build/android-preview').absolutePath
+        }
+    }
+}
+dependencies {
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.robolectric:robolectric:4.16'
+}
