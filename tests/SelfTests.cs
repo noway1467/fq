@@ -87,6 +87,24 @@ namespace FeiqLight.Tests
             root = Path.Combine(Path.GetFullPath(dataRoot), "FeiqLight-tests-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(root);
             try
             {
+                Run("同名会话：固定编号、旧配置迁移、隐藏备注及新增身份不重排", () => {
+                    LocalStore store=new LocalStore(Path.Combine(root,"conversation-numbers"));
+                    Peer[] peers=Enumerable.Range(1,5).Select(i=>new Peer {Endpoint=Endpoint(32425),Login="phone-"+i,Nickname="phone"}).ToArray();
+                    Peer.UpdateConversationNames(peers);Assert(peers.Select(p=>p.DisplayName).Distinct().Count()==5&&peers.All(p=>p.ConversationNumber>0),"同地址不同登录身份仍重名");
+                    var names=peers.ToDictionary(p=>p.Id,p=>p.DisplayName);peers[0].Online=true;peers[1].Hidden=true;
+                    Peer.UpdateConversationNames(peers.Reverse());Assert(peers.All(p=>p.DisplayName==names[p.Id]),"上下线、隐藏或重排改变编号");
+                    AppSettings settings=new AppSettings {Conversations=peers.Select(p=>new SavedConversation {Endpoint=p.Endpoint.ToString(),Login=p.Login,Nickname=p.Nickname,ConversationNumber=p.ConversationNumber,Hidden=p.Hidden}).ToArray()};
+                    store.SaveSettings(settings);Peer[] restored=store.LoadSettings().Conversations.Select(c=>c.OfflinePeer()).ToArray();Peer.UpdateConversationNames(restored);
+                    Assert(restored.All(p=>p.DisplayName==names[p.Id]),"重启后编号变化");
+                    Peer added=new Peer {Endpoint=Endpoint(32424),Login="new",Nickname="phone"};Peer.UpdateConversationNames(restored.Concat(new[]{added}));
+                    Assert(added.ConversationNumber==6&&restored.All(p=>p.DisplayName==names[p.Id]),"新增身份抢占旧编号");
+                    restored[0].Note="我的手机";Peer.UpdateConversationNames(restored);Assert(restored[0].DisplayName=="我的手机","独有备注仍带多余编号");
+                    restored[1].Note="我的手机";Peer.UpdateConversationNames(restored);Assert(restored[0].DisplayName!=restored[1].DisplayName&&restored[0].DuplicateName,"同名备注未区分");
+                    restored[0].ConversationNumber=restored[1].ConversationNumber;restored[2].ConversationNumber=-1;Peer.UpdateConversationNames(restored);
+                    Assert(restored.Select(p=>p.ConversationNumber).Distinct().Count()==5&&restored.All(p=>p.ConversationNumber>0),"损坏或重复编号未修复");
+                    restored[0].ConversationNumber=1000000;restored[1].ConversationNumber=0;Peer.UpdateConversationNames(restored);var repaired=restored.Select(p=>p.ConversationNumber).ToArray();Peer.UpdateConversationNames(restored.Reverse());
+                    Assert(restored.Select(p=>p.ConversationNumber).SequenceEqual(repaired)&&repaired.All(n=>n>0&&n<=1000000),"编号边界导致每次刷新重新编号");
+                });
                 Run("会话管理：备注与置顶持久化、隐藏不丢历史、清空隔离及迟到 ACK", () => {
                     LocalStore store=new LocalStore(Path.Combine(root,"conversation-management"));AppSettings settings=new AppSettings();
                     SavedConversation saved=new SavedConversation {Endpoint="127.0.0.1:32425",Login="alice",Nickname="对方昵称",Note="我的备注",Pinned=true,Hidden=true};

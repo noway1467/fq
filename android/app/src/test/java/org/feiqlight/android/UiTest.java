@@ -23,6 +23,58 @@ import static org.robolectric.Shadows.shadowOf;
 @Config(sdk=35, qualifiers="w393dp-h852dp-xhdpi")
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 public final class UiTest {
+    @Test public void duplicateConversationNamesStayDistinctAcrossSearchAndOpen() throws Exception {
+        shadowOf(RuntimeEnvironment.getApplication()).grantPermissions(android.Manifest.permission.POST_NOTIFICATIONS);
+        ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));
+        ActivityController<MainActivity> ac=Robolectric.buildActivity(MainActivity.class).create().start().resume().visible();MainActivity activity=ac.get();
+        try {
+            settle(service);
+            for(int i=1;i<=5;i++) {LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:"+(32424+i)),"phone","host","phone","");LanNode.Message message=new LanNode.Message();message.number=1;message.time=i;message.text="历史 #"+i;message.state="已收到";service.incoming(peer,message,false);settle(service);}
+            List<ChatStore.Conversation> all=service.conversations();assertEquals(5,all.stream().map(ChatStore.Conversation::displayName).distinct().count());
+            android.app.Notification notification=shadowOf(service.getSystemService(android.app.NotificationManager.class)).getNotification(2);assertNotNull(notification);assertEquals("phone · #5",notification.extras.getString(android.app.Notification.EXTRA_TITLE));
+            View root=(View)field(activity,"root");BaseAdapter adapter=(BaseAdapter)field(activity,"adapter");assertEquals(5,adapter.getCount());
+            for(int i=0;i<5;i++) {ChatStore.Conversation c=(ChatStore.Conversation)adapter.getItem(i);View row=adapter.getView(i,null,new LinearLayout(activity));measure(row,640,200,false);TextView nameView=(TextView)descendants(row).stream().filter(v->v instanceof TextView&&((TextView)v).getText().toString().equals(c.displayName())).findFirst().get();assertTrue(nameView.getWidth()>0);assertTrue(nameView.getRight()<=((View)nameView.getParent()).getWidth());}
+            screenshot(activity,"android-duplicate-conversations");EditText search=(EditText)field(activity,"search");ChatStore.Conversation chosen=all.get(0);String name=chosen.displayName();search.setText("#"+chosen.number);assertEquals(1,adapter.getCount());assertEquals(name,((ChatStore.Conversation)adapter.getItem(0)).displayName());search.setText("");
+            ListView list=(ListView)descendants(root).stream().filter(v->v instanceof ListView).findFirst().get();list.performItemClick(adapter.getView(0,null,list),0,adapter.getItemId(0));settle(service);assertEquals(chosen.peer.id(),field(activity,"selected"));assertEquals(name,((TextView)field(activity,"title")).getText().toString());
+            assertTrue(descendants((View)field(activity,"messages")).stream().anyMatch(v->v instanceof TextView&&((TextView)v).getText().toString().contains("历史 #"+chosen.number)));
+            invoke(activity,"open",String.class,"");
+            for(ChatStore.Conversation c:all)service.editConversation(c.peer.id(),"很长很长的同名手机联系人备注",false);settle(service);screenshot(activity,"android-duplicate-long-names");
+            adapter=(BaseAdapter)field(activity,"adapter");ChatStore.Conversation longName=(ChatStore.Conversation)adapter.getItem(0);View row=adapter.getView(0,null,new LinearLayout(activity));measure(row,640,200,false);
+            TextView caption=(TextView)descendants(row).stream().filter(v->v instanceof TextView&&longName.displayName().contentEquals(((TextView)v).getText())).findFirst().get();android.text.Layout layout=caption.getLayout();assertTrue("长名称未触发窄屏省略",layout.getEllipsisCount(0)>0);assertTrue("省略吞掉会话编号",layout.getEllipsisStart(0)+layout.getEllipsisCount(0)<=caption.length()-longName.nameSuffix().length());
+        } finally {ac.pause().stop().destroy();sc.destroy();}
+    }
+    @Test public void duplicateNamesIncludePeersBeyondTheListLimit() throws Exception {
+        try(ChatStore store=new ChatStore(RuntimeEnvironment.getApplication())) {
+            android.database.sqlite.SQLiteDatabase db=store.getWritableDatabase();db.beginTransaction();
+            try {
+                for(int i=0;i<=1000;i++) {String name=i==0||i==1000?"phone":"peer-"+i;db.execSQL("INSERT INTO peers(id,endpoint,login,host,name,grp,time,hidden,conversation_number) VALUES(?,?,?,?,?,?,?,?,?)",new Object[]{"127.0.0.1:32425/test-"+i,"127.0.0.1:32425","test-"+i,"host",name,"",1001-i,i==1000?1:0,i+1});}
+                db.setTransactionSuccessful();
+            } finally {db.endTransaction();}
+            List<ChatStore.Conversation> list=store.conversations();assertEquals(1000,list.size());assertEquals("phone · #1",list.get(0).displayName());assertEquals(1,list.stream().filter(c->c.baseDisplayName().equals("phone")).count());
+            db.execSQL("UPDATE peers SET pinned=1 WHERE login='test-1000'");list=store.conversations();assertEquals("phone · #1",list.stream().filter(c->c.peer.login.equals("test-0")).findFirst().get().displayName());
+        }
+    }
+    @Test public void versionFourDuplicateNamesMigrateAndNumbersSurviveRestartAndDiscovery() throws Exception {
+        Context context=RuntimeEnvironment.getApplication();
+        try(android.database.sqlite.SQLiteDatabase db=context.openOrCreateDatabase("chat.db",0,null)) {
+            db.execSQL("CREATE TABLE peers (id TEXT PRIMARY KEY,endpoint TEXT,login TEXT,host TEXT,name TEXT,grp TEXT,preview TEXT DEFAULT '',time INTEGER DEFAULT 0,unread INTEGER DEFAULT 0,utf8 INTEGER DEFAULT 0,note TEXT DEFAULT '',pinned INTEGER DEFAULT 0,hidden INTEGER DEFAULT 0)");
+            db.execSQL("CREATE TABLE messages (id INTEGER PRIMARY KEY,peer TEXT,packet INTEGER,outgoing INTEGER,time INTEGER,text TEXT,state TEXT,files TEXT,local_files TEXT DEFAULT '[]',UNIQUE(peer,packet,outgoing))");
+            for(int i=1;i<=2;i++) {String id="127.0.0.1:32425/phone-"+i;db.execSQL("INSERT INTO peers(id,endpoint,login,host,name,grp,hidden,pinned) VALUES(?,?,?,?,?,?,?,?)",new Object[]{id,"127.0.0.1:32425","phone-"+i,"host","phone","",i==1?1:0,i==1?1:0});db.execSQL("INSERT INTO messages(peer,packet,outgoing,time,text,state,files) VALUES(?,1,0,1,?,'已收到','')",new Object[]{id,"历史 #"+i});}
+            db.setVersion(4);
+        }
+        Map<String,String> names=new HashMap<>();
+        try(ChatStore store=new ChatStore(context)) {
+            List<ChatStore.Conversation> all=store.conversations();assertEquals(5,store.getReadableDatabase().getVersion());assertEquals(2,all.stream().map(ChatStore.Conversation::displayName).distinct().count());
+            for(ChatStore.Conversation c:all) {assertTrue(c.number>0);names.put(c.peer.id(),c.displayName());assertEquals("历史 #"+c.number,store.history(c.peer.id()).get(0).text);store.peer(c.peer);}
+            assertTrue(all.get(0).hidden);assertTrue(all.get(0).pinned);
+            LanNode.Peer fresh=new LanNode.Peer(LanNode.endpoint("127.0.0.1:32424"),"fresh","host","phone","");store.peer(fresh);assertEquals(3,store.conversations().stream().filter(c->c.peer.id().equals(fresh.id())).findFirst().get().number);
+            store.getWritableDatabase().execSQL("VACUUM");
+        }
+        try(ChatStore store=new ChatStore(context)) {
+            for(ChatStore.Conversation c:store.conversations())if(names.containsKey(c.peer.id()))assertEquals(names.get(c.peer.id()),c.displayName());
+            List<ChatStore.Conversation> all=store.conversations();store.edit(all.get(0).peer.id(),"我的手机",true);assertEquals("我的手机",store.conversations().get(0).displayName());store.edit(all.get(1).peer.id(),"我的手机",false);assertEquals(2,store.conversations().stream().filter(c->c.baseDisplayName().equals("我的手机")).map(ChatStore.Conversation::displayName).distinct().count());
+        }
+    }
     @Test public void sendClickShowsImmediatePendingWithoutClearingDraftOrDuplicatingMessage() throws Exception {
         ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();CountDownLatch release=new CountDownLatch(1),blocked=new CountDownLatch(1);ActivityController<MainActivity> ac=null;
         try(java.net.DatagramSocket target=new java.net.DatagramSocket(0,java.net.InetAddress.getLoopbackAddress())) {
@@ -440,7 +492,7 @@ public final class UiTest {
             db.execSQL("CREATE TABLE messages (id INTEGER PRIMARY KEY,peer TEXT,packet INTEGER,outgoing INTEGER,time INTEGER,text TEXT,state TEXT,files TEXT,local_files TEXT DEFAULT '[]',UNIQUE(peer,packet,outgoing))");
             db.execSQL("INSERT INTO peers(id,endpoint,login,host,name,grp) VALUES('127.0.0.1:32425/old','127.0.0.1:32425','old','host','旧联系人','')");db.execSQL("INSERT INTO messages(peer,packet,outgoing,time,text,state,files) VALUES('127.0.0.1:32425/old',1,0,1,'升级前消息','已收到','')");db.setVersion(3);
         }
-        try(ChatStore store=new ChatStore(context)){ChatStore.Conversation c=store.conversations().get(0);assertEquals("旧联系人",c.displayName());assertEquals("升级前消息",store.history(c.peer.id()).get(0).text);assertFalse(c.pinned);assertFalse(c.hidden);assertEquals(4,store.getReadableDatabase().getVersion());store.edit(c.peer.id(),"升级后备注",true);assertEquals("升级后备注",store.conversations().get(0).displayName());}
+        try(ChatStore store=new ChatStore(context)){ChatStore.Conversation c=store.conversations().get(0);assertEquals("旧联系人",c.displayName());assertEquals("升级前消息",store.history(c.peer.id()).get(0).text);assertFalse(c.pinned);assertFalse(c.hidden);assertEquals(5,store.getReadableDatabase().getVersion());store.edit(c.peer.id(),"升级后备注",true);assertEquals("升级后备注",store.conversations().get(0).displayName());}
     }
     @Test public void conversationMetadataSurvivesDiscoveryAndClearDoesNotResurrectAck() throws Exception {
         Context context=RuntimeEnvironment.getApplication();

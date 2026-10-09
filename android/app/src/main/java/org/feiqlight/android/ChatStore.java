@@ -3,6 +3,7 @@ package org.feiqlight.android;
 import android.content.ContentValues;
 import android.content.Context;
 import android.database.Cursor;
+import android.database.DatabaseUtils;
 import android.database.sqlite.SQLiteDatabase;
 import android.database.sqlite.SQLiteOpenHelper;
 import org.feiqlight.android.core.LanNode;
@@ -10,6 +11,9 @@ import org.feiqlight.android.core.Protocol;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Locale;
 
 /** 数据库只在 ChatService 的单线程队列使用，避免网络回调与界面写入乱序。 */
 final class ChatStore extends SQLiteOpenHelper {
@@ -20,11 +24,16 @@ final class ChatStore extends SQLiteOpenHelper {
         int unread;
         String note="";
         boolean pinned, hidden;
-        String displayName() { return note==null||note.trim().isEmpty()?peer.name:note; }
+        long number;
+        boolean duplicateName;
+        String baseDisplayName() { return displayBase(peer.name,note); }
+        String nameSuffix() { return duplicateName?" · #"+number:""; }
+        String displayName() { return baseDisplayName()+nameSuffix(); }
     }
-    ChatStore(Context context) { super(context,"chat.db",null,4); }
+    private static String displayBase(String name,String note) {return note==null||note.trim().isEmpty()?(name==null?"":name):note;}
+    ChatStore(Context context) { super(context,"chat.db",null,5); }
     @Override public void onCreate(SQLiteDatabase db) {
-        db.execSQL("CREATE TABLE peers (id TEXT PRIMARY KEY, endpoint TEXT, login TEXT, host TEXT, name TEXT, grp TEXT, preview TEXT DEFAULT '', time INTEGER DEFAULT 0, unread INTEGER DEFAULT 0, utf8 INTEGER DEFAULT 0, note TEXT DEFAULT '', pinned INTEGER DEFAULT 0, hidden INTEGER DEFAULT 0)");
+        db.execSQL("CREATE TABLE peers (id TEXT PRIMARY KEY, endpoint TEXT, login TEXT, host TEXT, name TEXT, grp TEXT, preview TEXT DEFAULT '', time INTEGER DEFAULT 0, unread INTEGER DEFAULT 0, utf8 INTEGER DEFAULT 0, note TEXT DEFAULT '', pinned INTEGER DEFAULT 0, hidden INTEGER DEFAULT 0, conversation_number INTEGER NOT NULL DEFAULT 0)");
         db.execSQL("CREATE TABLE messages (id INTEGER PRIMARY KEY, peer TEXT, packet INTEGER, outgoing INTEGER, time INTEGER, text TEXT, state TEXT, files TEXT, local_files TEXT DEFAULT '[]', UNIQUE(peer,packet,outgoing))");
         db.execSQL("CREATE INDEX messages_peer_time ON messages(peer,time)");
     }
@@ -32,11 +41,15 @@ final class ChatStore extends SQLiteOpenHelper {
         if(oldVersion<2) db.execSQL("ALTER TABLE peers ADD COLUMN utf8 INTEGER DEFAULT 0");
         if(oldVersion<3) db.execSQL("ALTER TABLE messages ADD COLUMN local_files TEXT DEFAULT '[]'");
         if(oldVersion<4) { db.execSQL("ALTER TABLE peers ADD COLUMN note TEXT DEFAULT ''"); db.execSQL("ALTER TABLE peers ADD COLUMN pinned INTEGER DEFAULT 0"); db.execSQL("ALTER TABLE peers ADD COLUMN hidden INTEGER DEFAULT 0"); }
+        // 只补本地显示编号，不改联系人主键、消息归属或原有备注。
+        if(oldVersion<5) { db.execSQL("ALTER TABLE peers ADD COLUMN conversation_number INTEGER NOT NULL DEFAULT 0"); db.execSQL("UPDATE peers SET conversation_number=rowid"); }
     }
     void peer(LanNode.Peer p) {
         ContentValues v=new ContentValues(); v.put("id",p.id()); v.put("endpoint",p.endpoint.getAddress().getHostAddress()+":"+p.endpoint.getPort());
         v.put("login",p.login); v.put("host",p.host); v.put("name",p.name); v.put("grp",p.group); v.put("utf8",p.utf8?1:0);
-        SQLiteDatabase db=getWritableDatabase(); if (db.update("peers",v,"id=?",new String[]{p.id()})==0) db.insertOrThrow("peers",null,v);
+        SQLiteDatabase db=getWritableDatabase(); if (db.update("peers",v,"id=?",new String[]{p.id()})==0) {
+            v.put("conversation_number",DatabaseUtils.longForQuery(db,"SELECT COALESCE(MAX(conversation_number),0)+1 FROM peers",null));db.insertOrThrow("peers",null,v);
+        }
     }
     void peers(List<LanNode.Peer> peers) {
         // 一批发现只提交一次事务，避免联系人数量放大磁盘同步延迟。
@@ -82,12 +95,19 @@ final class ChatStore extends SQLiteOpenHelper {
     }
     List<Conversation> conversations() {
         List<Conversation> result=new ArrayList<>();
-        try (Cursor c=getReadableDatabase().rawQuery("SELECT endpoint,login,host,name,grp,preview,time,unread,utf8,note,pinned,hidden FROM peers ORDER BY pinned DESC,time DESC,name LIMIT 1000",null)) {
+        try (Cursor c=getReadableDatabase().rawQuery("SELECT endpoint,login,host,name,grp,preview,time,unread,utf8,note,pinned,hidden,conversation_number FROM peers ORDER BY pinned DESC,time DESC,name LIMIT 1000",null)) {
             while (c.moveToNext()) try {
                 Conversation item=new Conversation(); item.peer=new LanNode.Peer(LanNode.endpoint(c.getString(0)),c.getString(1),c.getString(2),c.getString(3),c.getString(4));
-                item.preview=c.getString(5); item.time=c.getLong(6); item.unread=c.getInt(7); item.peer.utf8=c.getInt(8)!=0; item.note=c.getString(9);item.pinned=c.getInt(10)!=0;item.hidden=c.getInt(11)!=0;result.add(item);
+                item.preview=c.getString(5); item.time=c.getLong(6); item.unread=c.getInt(7); item.peer.utf8=c.getInt(8)!=0; item.note=c.getString(9);item.pinned=c.getInt(10)!=0;item.hidden=c.getInt(11)!=0;item.number=c.getLong(12);result.add(item);
             } catch (IOException ignored) { }
-        } return result;
+        }
+        // 重名判断不能被列表的 1000 条上限截断，否则旧会话进出窗口会让编号反复消失。
+        Map<String,Integer> counts=new HashMap<>();
+        try(Cursor c=getReadableDatabase().rawQuery("SELECT name,note FROM peers",null)) {
+            while(c.moveToNext()) {String name=displayBase(c.getString(0),c.getString(1)).trim().toLowerCase(Locale.ROOT);counts.put(name,counts.getOrDefault(name,0)+1);}
+        }
+        for(Conversation item:result)item.duplicateName=counts.get(item.baseDisplayName().trim().toLowerCase(Locale.ROOT))>1;
+        return result;
     }
     List<LanNode.Message> history(String peer) {
         List<LanNode.Message> result=new ArrayList<>();

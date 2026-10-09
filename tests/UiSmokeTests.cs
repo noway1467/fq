@@ -236,6 +236,25 @@ namespace FeiqLight.Tests
         }
         public static void Run(string directory, Action<string, Action> test)
         {
+            test("同名会话界面：五条 phone 区分、筛选不改名、标题与历史及转发一致",()=>{
+                string folder=Path.Combine(directory,"duplicate-names");LocalStore store=new LocalStore(folder);
+                AppSettings settings=new AppSettings {CloseToTray=false,ReceiveFolder=Path.Combine(folder,"received"),Conversations=Enumerable.Range(1,5).Select(i=>new SavedConversation {Endpoint="127.0.0.1:"+(32424+i),Login="phone",Nickname="phone",Preview="历史 "+i}).ToArray()};
+                using(LanService network=new LanService(settings,Port(),true,"name-test"))using(MainForm main=new MainForm(network,store)) {
+                    main.Show();main.NetworkStarted();Application.DoEvents();ConversationList list=Find<ConversationList>(main,"会话列表");
+                    Peer[] peers=network.Peers.OrderBy(p=>p.ConversationNumber).ToArray();Check(peers.Select(p=>p.DisplayName).Distinct().Count()==5,"五条 phone 仍无法区分");
+                    foreach(Peer peer in peers)store.Append(new ChatRecord {PeerId=peer.Id,Packet=1,Text="历史 #"+peer.ConversationNumber,Sender="phone",State="已收到",Time=DateTime.Now});
+                    for(int i=0;i<list.Items.Count;i++){Peer target=list.Items[i].Peer;list.ActivatePeer(i);Check(main.ActiveChat.Text==target.DisplayName,"点击后标题不是同一编号");Check(store.History(target.Id,10).Single().Text=="历史 #"+target.ConversationNumber,"同名会话历史串线");}
+                    TextBox query=All(main).OfType<TextBox>().Single();query.Text="#"+peers[0].ConversationNumber;Application.DoEvents();Check(list.Items.Count==1&&list.Items[0].Peer==peers[0],"搜索编号未命中原会话");query.Clear();Application.DoEvents();
+                    using(ForwardDialog dialog=new ForwardDialog(peers)) {ListBox targets=All(dialog).OfType<ListBox>().Single();Check(targets.Items.Cast<string>().All(t=>t.Contains(" · #")),"转发入口丢失编号");}
+                    Render(main,"preview-duplicate-conversations");
+                    using(Form narrow=new Form {ClientSize=new Size(330,520)})using(ConversationList preview=new ConversationList {Dock=DockStyle.Fill}) {
+                        narrow.Controls.Add(preview);preview.SetItems(list.Items);narrow.Show();Application.DoEvents();Render(narrow,"preview-duplicate-list");
+                        foreach(Peer peer in peers)peer.Note="很长很长的同名手机联系人备注";Peer.UpdateConversationNames(peers);preview.Invalidate();Application.DoEvents();Render(narrow,"preview-duplicate-long-names");narrow.Close();
+                    }
+                    foreach(Peer peer in peers)peer.Note=null;main.Close();
+                }
+                Peer[] reloaded=store.LoadSettings().Conversations.Select(c=>c.OfflinePeer()).ToArray();Peer.UpdateConversationNames(reloaded);Check(reloaded.All(p=>p.DisplayName=="phone · #"+p.ConversationNumber),"重启未恢复编号");
+            });
             test("文件进度卡片：逐文件渲染、方向隔离与更新不抢滚动", () => {
                 using(Form window=new Form {ClientSize=new Size(620,660)})
                 using(BubbleHistory history=new BubbleHistory {Dock=DockStyle.Fill}) {

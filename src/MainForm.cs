@@ -84,11 +84,12 @@ namespace FeiqLight
         internal void PrepareNetworkCallbacks() { if(!IsHandleCreated)CreateHandle(); }
         private bool RememberPeerAddresses()
         {
+            List<Peer> peers=network.Peers;Peer.UpdateConversationNames(peers);
             string[] previous = network.Settings.KnownPeers ?? new string[0];
-            string[] next = AppSettings.NormalizeKnownPeers(network.Peers.Select(p => p.Endpoint.ToString()).Concat(previous));
+            string[] next = AppSettings.NormalizeKnownPeers(peers.Select(p => p.Endpoint.ToString()).Concat(previous));
             SavedConversation[] old=SavedConversation.Normalize(network.Settings.Conversations);
-            SavedConversation[] current=SavedConversation.Normalize(network.Peers.Select(p=>new SavedConversation {
-                Endpoint=p.Endpoint.ToString(),Login=p.Login,Host=p.Host,Nickname=p.Nickname,Group=p.Group,Note=p.Note,Pinned=p.Pinned,Hidden=p.Hidden,
+            SavedConversation[] current=SavedConversation.Normalize(peers.Select(p=>new SavedConversation {
+                Endpoint=p.Endpoint.ToString(),Login=p.Login,Host=p.Host,Nickname=p.Nickname,Group=p.Group,Note=p.Note,Pinned=p.Pinned,Hidden=p.Hidden,ConversationNumber=p.ConversationNumber,
                 Preview=previews.ContainsKey(p.Id)?previews[p.Id]:"",Unread=unread.ContainsKey(p.Id)?unread[p.Id]:0,
                 MessageUtcTicks=times.ContainsKey(p.Id)&&times[p.Id]!=default(DateTime)?times[p.Id].ToUniversalTime().Ticks:0 }));
             if (new HashSet<string>(previous).SetEquals(next)&&old.Length==current.Length&&old.Zip(current,(a,b)=>a.SameAs(b)).All(equal=>equal)) return true;
@@ -122,8 +123,8 @@ namespace FeiqLight
                     else status.Text = "待接收文件已达 100 个，请处理后让对方重发。";
                 }
                 latestSender = message.Peer;
-                if (!visible && network.Settings.Notifications) { tray.BalloonTipTitle = message.Peer.Nickname; tray.BalloonTipText = message.Files.Count > 0 ? "收到文件" : "收到新消息"; tray.ShowBalloonTip(3000); }
                 RefreshPeers();
+                if (!visible && network.Settings.Notifications) { tray.BalloonTipTitle = message.Peer.DisplayName; tray.BalloonTipText = message.Files.Count > 0 ? "收到文件" : "收到新消息"; tray.ShowBalloonTip(3000); }
             });
         }
         private void OnDelivery(ChatRecord record) { diagnostics.Record(DiagnosticEvent.DeliveryChanged); Ui(() => { TrySave(record); ChatForm chat; if (chats.TryGetValue(record.PeerId, out chat) && !chat.IsDisposed) chat.Delivery(record); }); }
@@ -201,7 +202,8 @@ namespace FeiqLight
                 .Where(p => (p.DisplayName + " " + p.Nickname + " " + p.Group + " " + p.Host + " " + p.Endpoint + " " + (previews.ContainsKey(p.Id) ? previews[p.Id] : "")).IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0)
                 .OrderByDescending(p=>p.Pinned).ThenBy(p => recent.Contains(p.Id) ? recent.IndexOf(p.Id) : Int32.MaxValue).ThenByDescending(p => p.Online).ThenBy(p => p.Nickname)
                 .Select(p => new ConversationList.Item { Peer = p, Preview = previews.ContainsKey(p.Id) ? previews[p.Id] : (p.Online ? "在线" : "离线"), Unread = unread.ContainsKey(p.Id) ? unread[p.Id] : 0, Time = times.ContainsKey(p.Id) ? times[p.Id] : default(DateTime) });
-            contacts.SetItems(rows); if (started&&persisted) status.Text = all.Count(p => p.Online) + " 人在线";
+            contacts.SetItems(rows); foreach(ChatForm chat in chats.Values)if(!chat.IsDisposed)chat.RefreshPeer();
+            if (started&&persisted) status.Text = all.Count(p => p.Online) + " 人在线";
         }
         internal void ShowConversationMenu(Peer peer)
         {

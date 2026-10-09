@@ -62,14 +62,14 @@ namespace FeiqLight
             Text = attachments<0?"恢复已移除的联系人":"转发到"; ClientSize = new Size(420, 460); MinimumSize = new Size(380, 300); ResizeWindow = false; StartPosition = FormStartPosition.CenterParent;
             Panel footer = new Panel { Dock = DockStyle.Bottom, Height = 68, Padding = new Padding(18) };
             ListBox list = new ListBox { Dock = DockStyle.Fill, BorderStyle = BorderStyle.None, Font = Theme.Body, BackColor = Theme.Surface, ForeColor = Theme.Ink, IntegralHeight = false };
-            foreach (Peer peer in peers) list.Items.Add(peer.Nickname + "  ·  " + peer.Endpoint);
+            foreach (Peer peer in peers) list.Items.Add(peer.DisplayName + "  ·  " + peer.Endpoint);
             list.DrawMode = DrawMode.OwnerDrawFixed; list.ItemHeight = 68;
             list.DrawItem += delegate(object sender, DrawItemEventArgs e) {
                 if (e.Index < 0) return; Peer peer = peers[e.Index];
                 using (SolidBrush brush = new SolidBrush((e.State & DrawItemState.Selected) != 0 ? Theme.Sky : Theme.Surface)) e.Graphics.FillRectangle(brush, e.Bounds);
-                using (Bitmap avatar = Theme.ContactAvatar(42, peer.DisplayName, peer.Online)) e.Graphics.DrawImage(avatar, e.Bounds.Left + 8 - Theme.AvatarHalo(42), e.Bounds.Top + 13 - Theme.AvatarHalo(42));
-                TextRenderer.DrawText(e.Graphics, peer.Nickname, Theme.Body, new Rectangle(e.Bounds.Left + 62, e.Bounds.Top + 12, e.Bounds.Width - 72, 24), Theme.Ink, TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
-                TextRenderer.DrawText(e.Graphics, peer.Endpoint.ToString(), Theme.Small, new Rectangle(e.Bounds.Left + 62, e.Bounds.Top + 36, e.Bounds.Width - 72, 22), Theme.Muted, TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+                using (Bitmap avatar = Theme.ContactAvatar(42, peer.BaseDisplayName, peer.Online)) e.Graphics.DrawImage(avatar, e.Bounds.Left + 8 - Theme.AvatarHalo(42), e.Bounds.Top + 13 - Theme.AvatarHalo(42));
+                TextRenderer.DrawText(e.Graphics, peer.DisplayName, Theme.Body, new Rectangle(e.Bounds.Left + 62, e.Bounds.Top + 12, e.Bounds.Width - 72, 24), Theme.Ink, TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+                TextRenderer.DrawText(e.Graphics, (peer.DuplicateName?"#"+peer.ConversationNumber+" · ":"")+peer.Endpoint, Theme.Small, new Rectangle(e.Bounds.Left + 62, e.Bounds.Top + 36, e.Bounds.Width - 72, 22), Theme.Muted, TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
                 e.DrawFocusRectangle();
             };
             Button send = Theme.Button(attachments<0?"恢复会话":"确认转发", delegate { if (list.SelectedIndex >= 0) { Target = peers[list.SelectedIndex]; DialogResult = DialogResult.OK; } }, true);

@@ -44,9 +44,17 @@ namespace FeiqLight
                 bool selected = item.Peer.Id == SelectedId;
                 Rectangle highlight = new Rectangle(row.Left + (int)(8*s), row.Top + (int)(3*s), Math.Max(1,row.Width - (int)(16*s)), row.Height - (int)(6*s));
                 using (GraphicsPath path = Theme.Rounded(highlight,(int)(Theme.ControlRadius*s))) using (SolidBrush b = new SolidBrush(selected ? Theme.Sky : i == hover ? Theme.Ice : Theme.Surface)) e.Graphics.FillPath(b, path);
-                using (Bitmap image = Theme.ContactAvatar(avatar, item.Peer.DisplayName, item.Peer.Online)) e.Graphics.DrawImageUnscaled(image, pad - Theme.AvatarHalo(avatar), row.Top + (RowHeight - avatar) / 2 - Theme.AvatarHalo(avatar));
+                using (Bitmap image = Theme.ContactAvatar(avatar, item.Peer.BaseDisplayName, item.Peer.Online)) e.Graphics.DrawImageUnscaled(image, pad - Theme.AvatarHalo(avatar), row.Top + (RowHeight - avatar) / 2 - Theme.AvatarHalo(avatar));
                 int right = (int)(60 * s); Rectangle name = new Rectangle(pad * 2 + avatar, row.Top + (int)(17 * s), Math.Max(20, row.Width - pad * 3 - avatar - right), (int)(25 * s));
-                using (Font font = new Font(Theme.Body.FontFamily, 10F, FontStyle.Bold)) TextRenderer.DrawText(e.Graphics, (item.Peer.Pinned?"↑ ":"")+item.Peer.DisplayName, font, name, Theme.Ink, TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
+                using (Font font = new Font(Theme.Body.FontFamily, 10F, FontStyle.Bold))
+                {
+                    // 为编号单独留宽，长昵称省略时仍能分清同名会话。
+                    string caption=(item.Peer.Pinned?"↑ ":"")+item.Peer.BaseDisplayName, suffix=item.Peer.NameSuffix;
+                    int suffixWidth=String.IsNullOrEmpty(suffix)?0:TextRenderer.MeasureText(e.Graphics,suffix,Theme.Small).Width;
+                    Rectangle captionBounds=name;captionBounds.Width=Math.Max(1,name.Width-suffixWidth);
+                    TextRenderer.DrawText(e.Graphics,caption,font,captionBounds,Theme.Ink,TextFormatFlags.NoPrefix|TextFormatFlags.EndEllipsis|TextFormatFlags.SingleLine);
+                    if(suffixWidth>0) { int offset=Math.Min(captionBounds.Width,TextRenderer.MeasureText(e.Graphics,caption,font).Width);Rectangle tag=new Rectangle(name.X+offset,name.Y,suffixWidth,name.Height);TextRenderer.DrawText(e.Graphics,suffix,Theme.Small,tag,Theme.Muted,TextFormatFlags.NoPrefix|TextFormatFlags.VerticalCenter|TextFormatFlags.SingleLine); }
+                }
                 name.Y += (int)(27 * s); name.Width += right - (item.Unread > 0 ? (int)(35 * s) : 0);
                 TextRenderer.DrawText(e.Graphics, item.Preview.Replace('\n', ' '), Theme.Body, name, Theme.Muted, TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine);
                 if (item.Time != default(DateTime)) TextRenderer.DrawText(e.Graphics, item.Time.ToString("HH:mm"), Theme.Small, new Rectangle(row.Right - right - pad, row.Top + (int)(17 * s), right, (int)(22 * s)), Theme.Muted, TextFormatFlags.Right);

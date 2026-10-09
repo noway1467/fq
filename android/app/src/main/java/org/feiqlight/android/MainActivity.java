@@ -275,7 +275,8 @@ public final class MainActivity extends Activity implements ChatService.Observer
                 ChatStore.Conversation item=conversation(selected);
                 title.setText(item==null?"聊天":item.displayName());
                 if(chatAvatar!=null) bindAvatar(chatAvatar,selected,item==null?"?":item.displayName(),item!=null&&item.peer.online);
-                subtitle.setText(item==null?"正在读取会话…":(item.peer.online?"在线":"离线")+" · "+item.peer.endpoint.getAddress().getHostAddress());
+                subtitle.setText(item==null?"正在读取会话…":(item.peer.online?"在线":"离线")+item.nameSuffix()+" · "+item.peer.endpoint.getAddress().getHostAddress()+":"+item.peer.endpoint.getPort());
+                if(item!=null)title.setContentDescription(item.displayName()+" · "+item.peer.id());
                 if(service!=null) {
                     transferStatus.setText(service.transferStatus().isEmpty()?"":service.transferStatus()+ (service.busy()?" · 点击取消":""));
                     transferStatus.setVisibility(service.transferStatus().isEmpty()?View.GONE:View.VISIBLE);
@@ -400,10 +401,10 @@ public final class MainActivity extends Activity implements ChatService.Observer
         final Dialog[] chooser={null};
         for(ChatStore.Conversation target:service.conversations()) {
             if(!target.peer.online)continue;
-            Button pick=button(target.peer.name+" · "+target.peer.id(),false);options.addView(pick,new LinearLayout.LayoutParams(-1,-2));
+            Button pick=button(target.displayName()+" · "+target.peer.id(),false);options.addView(pick,new LinearLayout.LayoutParams(-1,-2));
             pick.setOnClickListener(v->{
                 if(submitted[0]||service==null)return;
-                confirm("确认转发","发送给 "+target.peer.name+"？","转发",()->{
+                confirm("确认转发","发送给 "+target.displayName()+"？","转发",()->{
                     if(submitted[0]||service==null)return;submitted[0]=true;
                     hint.setText("正在转发，请稍候…");for(int i=0;i<options.getChildCount();i++)if(options.getChildAt(i) instanceof Button)options.getChildAt(i).setEnabled(false);
                     service.forward(source,message,target.peer,success->{
@@ -822,7 +823,11 @@ public final class MainActivity extends Activity implements ChatService.Observer
             TextView avatar=text(c.displayName().isEmpty()?"?":c.displayName().substring(0,c.displayName().offsetByCodePoints(0,1)),21,Color.WHITE); avatar.setGravity(Gravity.CENTER); avatar.setTypeface(null,Typeface.BOLD);
             bindAvatar(avatar,c.peer.id(),c.displayName(),c.peer.online); row.addView(avatar,new LinearLayout.LayoutParams(dp(68),dp(68)));
             LinearLayout center=column(); LinearLayout.LayoutParams cp=weight(); cp.leftMargin=dp(8); row.addView(center,cp);
-            TextView name=text((c.pinned?"↑ ":"")+c.displayName(),16,INK); name.setTypeface(null,Typeface.BOLD); name.setSingleLine(); name.setEllipsize(TextUtils.TruncateAt.END); center.addView(name);
+            TextView name=text((c.pinned?"↑ ":"")+c.displayName(),16,INK); name.setTypeface(null,Typeface.BOLD); name.setSingleLine();
+            // 中间省略保留末尾编号，短名称时编号紧跟昵称，不挤到消息时间旁。
+            name.setEllipsize(c.duplicateName?TextUtils.TruncateAt.MIDDLE:TextUtils.TruncateAt.END);name.setContentDescription(c.displayName());
+            if(c.duplicateName) {SpannableString caption=new SpannableString(name.getText());int start=caption.length()-c.nameSuffix().length();caption.setSpan(new android.text.style.ForegroundColorSpan(MUTED),start,caption.length(),Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);caption.setSpan(new android.text.style.RelativeSizeSpan(.8f),start,caption.length(),Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);name.setText(caption);}
+            center.addView(name);
             TextView preview=text(c.preview.isEmpty()?(c.peer.online?"在线 · ":"离线 · ")+c.peer.endpoint.getAddress().getHostAddress():c.preview.replace('\n',' '),14,MUTED); preview.setSingleLine(); preview.setEllipsize(TextUtils.TruncateAt.END); preview.setPadding(0,dp(5),0,0); center.addView(preview);
             LinearLayout right=column(); right.setGravity(Gravity.END); LinearLayout.LayoutParams rp=new LinearLayout.LayoutParams(-2,-2); rp.leftMargin=dp(8); row.addView(right,rp);
             TextView time=text(c.time==0?"":new SimpleDateFormat("HH:mm",Locale.CHINA).format(new Date(c.time)),11,MUTED); right.addView(time);

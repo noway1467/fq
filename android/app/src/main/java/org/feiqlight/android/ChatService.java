@@ -178,8 +178,10 @@ public final class ChatService extends Service {
                     waiting.putIfAbsent(key,new ReceiveRequest(peer,message.number,file));
                 }
                 drainReceives();
-                if(!peer.id().equals(activePeer)&&(Build.VERSION.SDK_INT<33||checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)==PackageManager.PERMISSION_GRANTED))
-                    getSystemService(NotificationManager.class).notify(2,notification("messages",peer.name,message.files.isEmpty()?"收到一条局域网消息":storage.automatic()?"收到文件，正在自动接收":"收到文件邀请",false));
+                if(!peer.id().equals(activePeer)&&(Build.VERSION.SDK_INT<33||checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)==PackageManager.PERMISSION_GRANTED)) {
+                    String sender=conversations.stream().filter(c->c.peer.id().equals(peer.id())).map(ChatStore.Conversation::displayName).findFirst().orElse(peer.name);
+                    getSystemService(NotificationManager.class).notify(2,notification("messages",sender,message.files.isEmpty()?"收到一条局域网消息":storage.automatic()?"收到文件，正在自动接收":"收到文件邀请",false));
+                }
             });
         });
     }

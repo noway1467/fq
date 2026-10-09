@@ -54,11 +54,11 @@ namespace FeiqLight
             root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); root.RowStyles.Add(new RowStyle(SizeType.Absolute, 72)); root.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); root.RowStyles.Add(new RowStyle(SizeType.Absolute, 0)); root.RowStyles.Add(new RowStyle(SizeType.Absolute, 76)); Controls.Add(root);
             TableLayoutPanel head = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 5, RowCount = 1, Padding = new Padding(18, 8, 14, 8), Margin = Padding.Empty, BackColor = Theme.Surface };
             head.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 58)); head.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); for (int i = 0; i < 3; i++) head.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 42)); head.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            avatar = new PictureBox { Image = Theme.ContactAvatar(46, peer.DisplayName, peer.Online), AccessibleName = "聊天联系人头像", Size = new Size(56, 56), Margin = Padding.Empty, SizeMode = PictureBoxSizeMode.Zoom, Anchor = AnchorStyles.Left }; head.Controls.Add(avatar, 0, 0);
+            avatar = new PictureBox { Image = Theme.ContactAvatar(46, peer.BaseDisplayName, peer.Online), AccessibleName = "聊天联系人头像", Size = new Size(56, 56), Margin = Padding.Empty, SizeMode = PictureBoxSizeMode.Zoom, Anchor = AnchorStyles.Left }; head.Controls.Add(avatar, 0, 0);
             TableLayoutPanel identity = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 2, ColumnCount = 1, Margin = Padding.Empty }; identity.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); identity.RowStyles.Add(new RowStyle(SizeType.Percent, 55)); identity.RowStyles.Add(new RowStyle(SizeType.Percent, 45));
             peerName.Dock = DockStyle.Fill; peerName.AutoEllipsis = true; peerName.AccessibleName = "聊天联系人昵称"; identity.Controls.Add(peerName, 0, 0);
             peerStatus.Dock = DockStyle.Fill; peerStatus.AccessibleName = "聊天联系人状态"; identity.Controls.Add(peerStatus, 0, 1); head.Controls.Add(identity, 1, 0);
-            avatarName = peer.DisplayName; avatarOnline = peer.Online; RefreshPeer();
+            avatarName = peer.BaseDisplayName; avatarOnline = peer.Online; RefreshPeer();
             Button search = Theme.IconButton("search", "聊天记录", ShowHistory, false); search.Dock = DockStyle.Fill; search.Margin = Padding.Empty; head.Controls.Add(search, 2, 0);
             fileButton = Theme.IconButton("inbox", "收到的文件", delegate { drawer = !drawer; UpdateFilesPanel(); }, false); fileButton.Dock = DockStyle.Fill; fileButton.Margin = Padding.Empty; head.Controls.Add(fileButton, 3, 0);
             Button menu = Theme.IconButton("more", "会话菜单", ShowMenu, false); menu.Dock = DockStyle.Fill; menu.Margin = Padding.Empty; head.Controls.Add(menu, 4, 0); root.Controls.Add(head, 0, 0);
@@ -117,12 +117,13 @@ namespace FeiqLight
         public void SaveDraft() { draftTimer.Stop(); main.SaveDraft(peer.Id, editor.Text); }
         public void RefreshPeer()
         {
-            Text = peer.DisplayName; peerName.Text = peer.DisplayName; peerStatus.Text = peer.Online ? "在线" : "离线";
+            Text = peer.DisplayName; peerName.Text = peer.DisplayName; peerStatus.Text = (peer.Online ? "在线" : "离线") + (peer.DuplicateName ? peer.NameSuffix+" · "+peer.Endpoint : "");
+            peerName.AccessibleDescription=peer.DisplayName+" · "+peer.Id;
             avatar.AccessibleDescription = peer.Online ? "在线" : "离线";
-            if (avatarName != peer.DisplayName || avatarOnline != peer.Online)
+            if (avatarName != peer.BaseDisplayName || avatarOnline != peer.Online)
             {
-                Image old = avatar.Image; avatar.Image = Theme.ContactAvatar(46, peer.DisplayName, peer.Online);
-                avatarName = peer.DisplayName; avatarOnline = peer.Online; if (old != null) old.Dispose();
+                Image old = avatar.Image; avatar.Image = Theme.ContactAvatar(46, peer.BaseDisplayName, peer.Online);
+                avatarName = peer.BaseDisplayName; avatarOnline = peer.Online; if (old != null) old.Dispose();
             }
         }
         public void FocusEditor() { editor.Focus(); }

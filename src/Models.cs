@@ -62,15 +62,16 @@ namespace FeiqLight
         public string Note { get; set; }
         public bool Pinned { get; set; }
         public bool Hidden { get; set; }
+        public int ConversationNumber { get; set; }
         [ScriptIgnore] public string Id { get { return Endpoint + "/" + Login; } }
         public Peer OfflinePeer()
         {
             // 历史资料不是当前在线或编码能力的证据；真正收到报文后再更新同一个 Peer。
-            return new Peer { Endpoint=AppSettings.ParseKnownPeer(Endpoint),Login=Login,Host=Host,Nickname=Nickname,Group=Group,Online=false,Utf8=false,Note=Note,Pinned=Pinned,Hidden=Hidden };
+            return new Peer { Endpoint=AppSettings.ParseKnownPeer(Endpoint),Login=Login,Host=Host,Nickname=Nickname,Group=Group,Online=false,Utf8=false,Note=Note,Pinned=Pinned,Hidden=Hidden,ConversationNumber=ConversationNumber };
         }
         public bool SameAs(SavedConversation other)
         {
-            return Endpoint==other.Endpoint&&Login==other.Login&&Host==other.Host&&Nickname==other.Nickname&&Group==other.Group&&Preview==other.Preview&&MessageUtcTicks==other.MessageUtcTicks&&Unread==other.Unread&&Note==other.Note&&Pinned==other.Pinned&&Hidden==other.Hidden;
+            return Endpoint==other.Endpoint&&Login==other.Login&&Host==other.Host&&Nickname==other.Nickname&&Group==other.Group&&Preview==other.Preview&&MessageUtcTicks==other.MessageUtcTicks&&Unread==other.Unread&&Note==other.Note&&Pinned==other.Pinned&&Hidden==other.Hidden&&ConversationNumber==other.ConversationNumber;
         }
         public static SavedConversation[] Normalize(IEnumerable<SavedConversation> values)
         {
@@ -80,7 +81,7 @@ namespace FeiqLight
                 if(item==null||item.Login==null||item.Login.Length>128||Protocol.Field(item.Login)!=item.Login)continue;
                 IPEndPoint endpoint=AppSettings.ParseKnownPeer(item.Endpoint);if(endpoint==null)continue;
                 SavedConversation clean=new SavedConversation { Endpoint=endpoint.ToString(),Login=item.Login,
-                    Note=Protocol.Prefix((item.Note??"").Trim(),64),Pinned=item.Pinned,Hidden=item.Hidden,
+                    Note=Protocol.Prefix((item.Note??"").Trim(),64),Pinned=item.Pinned,Hidden=item.Hidden,ConversationNumber=item.ConversationNumber>0&&item.ConversationNumber<=1000000?item.ConversationNumber:0,
                     Host=Protocol.Prefix(item.Host??"",128),Nickname=Protocol.Prefix(String.IsNullOrWhiteSpace(item.Nickname)?item.Login:item.Nickname,128),
                     Group=Protocol.Prefix(item.Group??"我的局域网",128),Preview=Protocol.Prefix((item.Preview??"").Replace('\0',' ').Replace('\r',' ').Replace('\n',' '),160),
                     MessageUtcTicks=item.MessageUtcTicks>0&&item.MessageUtcTicks<=DateTime.MaxValue.Ticks?item.MessageUtcTicks:0,Unread=Math.Max(0,Math.Min(1000000,item.Unread)) };
@@ -131,7 +132,30 @@ namespace FeiqLight
         public string Group;
         public string Note;
         public bool Pinned, Hidden;
-        public string DisplayName { get { return String.IsNullOrWhiteSpace(Note) ? Nickname : Note; } }
+        public int ConversationNumber;
+        public bool DuplicateName;
+        public string BaseDisplayName { get { return (String.IsNullOrWhiteSpace(Note) ? Nickname : Note) ?? ""; } }
+        public string NameSuffix { get { return DuplicateName ? " · #" + ConversationNumber : ""; } }
+        public string DisplayName { get { return BaseDisplayName + NameSuffix; } }
+        public static void UpdateConversationNames(IEnumerable<Peer> peers)
+        {
+            // 使用完整联系人集合（含隐藏项），编号不随筛选、上线或列表排序变化。
+            List<Peer> all=peers.ToList(); HashSet<int> seen=new HashSet<int>();
+            HashSet<int> used=new HashSet<int>(all.Where(p=>p.ConversationNumber>0&&p.ConversationNumber<=1000000).Select(p=>p.ConversationNumber));
+            int next=used.DefaultIfEmpty(0).Max();
+            foreach(Peer peer in all.OrderBy(p=>p.Id,StringComparer.Ordinal))
+            {
+                if(peer.ConversationNumber<=0||peer.ConversationNumber>1000000||!seen.Add(peer.ConversationNumber))
+                {
+                    // 损坏配置带来极大编号时回填空号，不能生成下次读取又被判无效的值。
+                    do {next=next>=1000000?1:next+1;} while(used.Contains(next));
+                    peer.ConversationNumber=next;used.Add(next);seen.Add(next);
+                }
+                peer.DuplicateName=false;
+            }
+            foreach(var group in all.GroupBy(p=>p.BaseDisplayName.Trim(),StringComparer.OrdinalIgnoreCase))
+                if(group.Skip(1).Any())foreach(Peer peer in group)peer.DuplicateName=true;
+        }
         public bool Utf8;
         public bool Online;
         public DateTime LastSeen;
