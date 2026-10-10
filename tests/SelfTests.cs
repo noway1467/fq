@@ -276,6 +276,34 @@ namespace FeiqLight.Tests
                     ChatRecord legacy = new ChatRecord { Sender = "文件", State = "已保存", Text = "已保存：" + file };
                     Assert(legacy.GetLocalFiles().Single() == file, "旧完成记录未兼容"); legacy.State = "已收到"; Assert(legacy.GetLocalFiles().Length == 0, "把网络文本当作本地附件");
                 });
+                Run("入站持久去重：状态更新、同号方向、重启、写入失败和清空兼容", () =>
+                {
+                    string folder=Path.Combine(root,"incoming-dedup"); LocalStore store=new LocalStore(folder);
+                    ChatRecord incoming=new ChatRecord {PeerId="peer",Packet=42,Text="邀请",Time=DateTime.Now,State="已收到"};
+                    store.Append(new ChatRecord {PeerId="peer",Packet=42,Text="同号发出",Outgoing=true,State="已送达"});
+                    Assert(store.AppendIncoming(incoming),"同号出站消息挡住入站消息");
+                    incoming.State="已保存";incoming.LocalFiles=new[]{Path.Combine(folder,"saved.txt")};store.Append(incoming);
+                    store=new LocalStore(folder);string history=Directory.GetFiles(folder,"history-*.jsonl").Single();byte[] before=File.ReadAllBytes(history);
+                    Assert(!store.AppendIncoming(new ChatRecord {PeerId="peer",Packet=42,Text="重复邀请",Time=DateTime.Now,State="已收到"}),"重启后重复入站被接受");
+                    Assert(File.ReadAllBytes(history).SequenceEqual(before),"重复入站修改了历史原文");
+                    Assert(store.History("peer",20).Single(r=>!r.Outgoing).GetLocalFiles().Length==1,"重复入站丢失已保存关联");
+                    ChatRecord next=new ChatRecord {PeerId="peer",Packet=43,Text="后续",Time=DateTime.Now};
+                    using(FileStream locked=new FileStream(history,FileMode.Open,FileAccess.Read,FileShare.None)) ExpectFailure(()=>store.AppendIncoming(next),"未检测到历史写入失败");
+                    Assert(store.AppendIncoming(next),"失败写入污染去重索引");
+                    store.ClearHistory("peer");Assert(!store.AppendIncoming(incoming),"清空后的旧回调复活记录");
+                    incoming.Time=DateTime.Now.AddSeconds(1);Assert(store.AppendIncoming(incoming),"清空后索引未失效");
+                    ExpectFailure(()=>store.AppendIncoming(new ChatRecord {Outgoing=true}),"入站入口接受出站更新");
+                });
+                Run("入站去重覆盖历史显示窗口之外，且兼容坏尾行", () =>
+                {
+                    string folder=Path.Combine(root,"incoming-old");LocalStore store=new LocalStore(folder);
+                    ChatRecord old=new ChatRecord {PeerId="peer",Packet=7,Text="较早已保存邀请",Time=DateTime.Now,State="已保存"};store.Append(old);
+                    for(int i=0;i<245;i++)store.Append(new ChatRecord {PeerId="peer",Packet=100+i,Text=new string('x',18000),Outgoing=true,State="已送达"});
+                    string history=Directory.GetFiles(folder,"history-*.jsonl").Single();File.AppendAllText(history,"{broken");long length=new FileInfo(history).Length;
+                    Assert(length>4*1024*1024,"未覆盖历史尾部窗口");store=new LocalStore(folder);
+                    Assert(!store.AppendIncoming(old)&&new FileInfo(history).Length==length,"较早重复邀请被追加");
+                    Assert(store.AppendIncoming(new ChatRecord {PeerId="peer",Packet=9,Text="新入站",Time=DateTime.Now}),"坏尾行阻断合法新消息");
+                });
                 Run("聊天历史写入、送达更新去重、尾部恢复", () =>
                 {
                     LocalStore store = new LocalStore(Path.Combine(root, "history"));

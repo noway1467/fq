@@ -118,6 +118,43 @@ namespace FeiqLight.Tests
                 finally { timer.Stop(); Application.ThreadException -= handler; SelfTests.InstallUiExceptionHandler(); }
             }
         }
+        private static void PersistentIncomingWorkflow(string directory, Action<string, Action> test)
+        {
+            test("真实重复附件邀请：重启及去重过期后保留已保存/拒绝状态，不重新排队或增加未读", () =>
+            {
+                foreach(string state in new[]{"已保存","已拒绝"})
+                using(UdpClient sender=new UdpClient(new IPEndPoint(IPAddress.Loopback,0)))
+                {
+                    string folder=Path.Combine(directory,"persisted-"+state);Directory.CreateDirectory(folder);string saved=Path.Combine(folder,"same.txt");File.WriteAllText(saved,"payload");
+                    Peer peer=new Peer {Endpoint=(IPEndPoint)sender.Client.LocalEndPoint,Login="persisted-peer",Host="host",Nickname="peer"};
+                    new LocalStore(folder).Append(new ChatRecord {PeerId=peer.Id,Packet=42,Text="[文件] same.txt",Time=DateTime.Now.AddSeconds(-5),State=state,HasAttachments=true,AttachmentNames=new[]{"same.txt"},LocalFiles=state=="已保存"?new[]{saved}:new string[0],Transfers=new[]{new FileTransferState {Id=0,Name="same.txt",Size=7,Status=state,LocalPath=state=="已保存"?saved:null}}});
+                    LocalStore store=new LocalStore(folder);string history=Directory.GetFiles(folder,"history-*.jsonl").Single();byte[] before=File.ReadAllBytes(history);
+                    AppSettings settings=new AppSettings {Nickname="接收方",Notifications=false,AutoReceiveFiles=true,ReceiveFolder=folder,Conversations=new[]{new SavedConversation {Endpoint=peer.Endpoint.ToString(),Login=peer.Login,Host=peer.Host,Nickname=peer.Nickname,Hidden=true,Preview="更新的预览",Unread=4,MessageUtcTicks=DateTime.UtcNow.Ticks}}};
+                    using(LanService network=new LanService(settings,Port(),true,"persisted-receiver"))
+                    using(MainForm main=new MainForm(network,store))
+                    {
+                        typeof(MainForm).GetMethod("PrepareNetworkCallbacks",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(main,null);network.Start();main.NetworkStarted();int delivered=0;network.MessageReceived+=m=>Interlocked.Increment(ref delivered);
+                        byte[] bytes=Protocol.Encode(42,peer.Login,peer.Host,Protocol.SendMessage|Protocol.SendCheck|Protocol.FileAttach|Protocol.Utf8,"",Protocol.FileList(new[]{new Attachment {Id=0,Name="same.txt",Size=7,Modified=1}}));
+                        for(int round=1;round<=2;round++)
+                        {
+                            sender.Send(bytes,bytes.Length,new IPEndPoint(IPAddress.Loopback,network.Port));Pump(()=>Volatile.Read(ref delivered)==round,"重复邀请未到达网络层");
+                            bool drained=false;main.BeginInvoke((MethodInvoker)(()=>drained=true));Pump(()=>drained,"UI 队列未处理");
+                            Check(File.ReadAllBytes(history).SequenceEqual(before),"重复邀请回写了历史");
+                            var chats=(Dictionary<string,ChatForm>)typeof(MainForm).GetField("chats",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(main);Check(chats.Count==0,"重复邀请创建聊天或重新入队");
+                            var unread=(Dictionary<string,int>)typeof(MainForm).GetField("unread",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(main);Check(unread[peer.Id]==4,"重复邀请增加未读");
+                            Check(network.Peers.Single().Hidden&&network.Settings.Conversations.Single().Preview=="更新的预览","重复邀请取消隐藏或回退预览");
+                            object gate=typeof(LanService).GetField("gate",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(network);
+                            lock(gate)((Dictionary<string,DateTime>)typeof(LanService).GetField("seen",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(network)).Clear();
+                        }
+                        sender.Client.ReceiveTimeout=2000;IPEndPoint remote=null;int acknowledgements=0;
+                        // 启动会先探测历史地址；允许发现包穿插，但两次重复邀请都必须收到自己的 ACK。
+                        for(int i=0;i<20&&acknowledgements<2;i++) {Packet ack;if(Protocol.TryParse(sender.Receive(ref remote),out ack)&&ack.Mode==Protocol.ReceiveMessage&&ack.Body=="42")acknowledgements++;}
+                        Check(acknowledgements==2,"重复邀请未返回 ACK");
+                        Check(File.ReadAllText(saved)=="payload","原附件被修改");
+                    }
+                }
+            });
+        }
         private static void ReceiveWorkflow(string directory, Action<string, Action> test)
         {
             int senderPort = Port(), receiverPort = Port(); while (senderPort == receiverPort) receiverPort = Port();
@@ -434,6 +471,7 @@ namespace FeiqLight.Tests
                 using (MainForm window = new MainForm(node, placementStore))
                 { window.Show(); Application.DoEvents(); Check(Screen.FromControl(window).WorkingArea.Contains(window.Bounds), "窗口仍在显示器外"); window.ExitApplication(); }
             });
+            PersistentIncomingWorkflow(directory, test);
             ReceiveWorkflow(directory, test);
             int portA = Port(), portB = Port(); while (portA == portB) portB = Port();
             LocalStore storeA = new LocalStore(Path.Combine(directory, "ui-a")), storeB = new LocalStore(Path.Combine(directory, "ui-b"));

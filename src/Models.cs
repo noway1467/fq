@@ -242,6 +242,7 @@ namespace FeiqLight
         private readonly JavaScriptSerializer json = new JavaScriptSerializer { MaxJsonLength=16*1024*1024 };
         private readonly Dictionary<string, ChatRecord> activePending = new Dictionary<string, ChatRecord>();
         private readonly Dictionary<string, DateTime> clearedThrough = new Dictionary<string, DateTime>();
+        private readonly Dictionary<string, HashSet<long>> incomingPackets = new Dictionary<string, HashSet<long>>();
         private volatile bool preserveUnreadableSettings;
         public string Warning { get; private set; }
         public LocalStore(string root) { Root = Path.GetFullPath(root); Directory.CreateDirectory(Root); }
@@ -312,6 +313,37 @@ namespace FeiqLight
                 finally { if (File.Exists(temporary)) File.Delete(temporary); }
             }
         }
+        public bool AppendIncoming(ChatRecord record)
+        {
+            if (record == null || record.Outgoing) throw new ArgumentException("这里只接受入站消息。", "record");
+            lock (gate)
+            {
+                DateTime cutoff;
+                if (clearedThrough.TryGetValue(record.PeerId, out cutoff) && record.Time <= cutoff) return false;
+                HashSet<long> packets;
+                if (!incomingPackets.TryGetValue(record.PeerId, out packets))
+                {
+                    packets = new HashSet<long>();
+                    string path = HistoryPath(record.PeerId);
+                    // 显示历史只读尾部，但查重不能漏掉尾部窗口外已保存的邀请。每个缓存会话只流式建索引一次。
+                    if (File.Exists(path))
+                        foreach (string line in File.ReadLines(path, Encoding.UTF8))
+                            try
+                            {
+                                ChatRecord item = json.Deserialize<ChatRecord>(line);
+                                if (item != null && !item.Outgoing && item.PeerId == record.PeerId && item.Text != null) packets.Add(item.Packet);
+                            }
+                            catch (ArgumentException) { /* 保留原始坏行，不让残缺记录阻断后续合法消息。 */ }
+                            catch (InvalidOperationException) { }
+                    // 不为所有离线联系人常驻索引；被逐出的会话下次从原历史重建，不牺牲去重正确性。
+                    if (incomingPackets.Count >= 32) incomingPackets.Clear();
+                    incomingPackets[record.PeerId] = packets;
+                }
+                if (packets.Contains(record.Packet)) return false;
+                Append(record);
+                return true;
+            }
+        }
         public void Append(ChatRecord record)
         {
             lock (gate)
@@ -326,6 +358,8 @@ namespace FeiqLight
                     stream.Position = stream.Length; stream.Write(bytes, 0, bytes.Length);
                 }
                 string key = record.PeerId + "/" + record.Packet;
+                HashSet<long> packets;
+                if (!record.Outgoing && incomingPackets.TryGetValue(record.PeerId, out packets)) packets.Add(record.Packet);
                 if (record.Outgoing)
                 {
                     if (record.State == "等待确认") activePending[key] = record;
@@ -350,6 +384,7 @@ namespace FeiqLight
             {
                 string path=HistoryPath(peerId);
                 if(File.Exists(path))File.Delete(path);
+                incomingPackets.Remove(peerId);
                 // ACK 和退出收尾不应把刚清空的旧消息重新写回。
                 clearedThrough[peerId]=DateTime.Now;
                 foreach(string key in activePending.Where(p=>p.Value.PeerId==peerId).Select(p=>p.Key).ToArray())activePending.Remove(key);

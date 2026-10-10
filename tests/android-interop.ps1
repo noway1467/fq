@@ -1,4 +1,4 @@
-param([string]$JavaHome = $env:JAVA_HOME, [switch]$LargeFiles)
+﻿param([string]$JavaHome = $env:JAVA_HOME, [switch]$LargeFiles)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $workspaceTemp=Join-Path $root 'build\tmp'; New-Item -ItemType Directory -Force -Path $workspaceTemp | Out-Null
@@ -24,6 +24,8 @@ $process=$null
 $size = if ($LargeFiles) { 273L*1024*1024+7 } else { 3L*1024*1024+7 }
 try {
     $process=Start-Process -FilePath "$out\InteropHost.exe" -ArgumentList @($a,('"'+$temp+'"'),$size) -PassThru -WindowStyle Hidden -RedirectStandardOutput "$out\windows.log" -RedirectStandardError "$out\windows-errors.log"
+    # PowerShell 5.1 必须在进程退出前保留句柄，否则已退出进程的 ExitCode 可能为 null，误判真实互通失败。
+    $null=$process.Handle
     $ready=$false
     for($i=0;$i -lt 100;$i++) { if ((Test-Path -LiteralPath "$out\windows.log") -and ((Get-Content -LiteralPath "$out\windows.log" -Raw) -match 'READY')) { $ready=$true; break }; if($process.HasExited) { break }; Start-Sleep -Milliseconds 50 }
     if(!$ready) { throw '桌面测试节点未就绪' }

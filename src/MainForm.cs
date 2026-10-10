@@ -111,7 +111,10 @@ namespace FeiqLight
             {
                 message.Record.Transfers = message.Files.Select(f => new FileTransferState { Id = f.Id, Name = f.Name, Size = f.Size, Status = "待接收 · 点击接收" }).ToArray();
                 if (message.Files.Count > 0) { message.Record.HasAttachments = true; message.Record.AttachmentNames = message.Files.Select(f => f.Name).ToArray(); message.Record.Text += (String.IsNullOrEmpty(message.Record.Text) ? "" : "\n") + "[文件] " + String.Join("、", message.Files.Select(f => f.Name)); }
-                message.Peer.Hidden=false; TrySave(message.Record); Remember(message.Peer, message.Record);
+                // ACK 已由网络层返回；重复邀请不能回退本机状态、增加未读或再次触发自动接收。
+                try { if (!store.AppendIncoming(message.Record)) return; }
+                catch (Exception e) { status.Text = "记录保存失败：" + e.Message; }
+                message.Peer.Hidden=false; Remember(message.Peer, message.Record);
                 ChatForm chat; chats.TryGetValue(message.Peer.Id, out chat); bool visible = chat != null && chat == ActiveChat && ContainsFocus;
                 if (!visible) { if (!unread.ContainsKey(message.Peer.Id)) unread[message.Peer.Id] = 0; unread[message.Peer.Id]++; }
                 bool loaded = false;

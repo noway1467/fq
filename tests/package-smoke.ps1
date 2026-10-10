@@ -4,7 +4,7 @@ $root = Split-Path $PSScriptRoot -Parent
 $workspaceTemp=Join-Path $root 'build\tmp'; New-Item -ItemType Directory -Force -Path $workspaceTemp | Out-Null
 $env:TEMP=$workspaceTemp;$env:TMP=$workspaceTemp;$env:TMPDIR=$workspaceTemp
 $env:JAVA_TOOL_OPTIONS='-Djava.io.tmpdir="'+$workspaceTemp+'"'
-$zip = if($ArchivePath) { [IO.Path]::GetFullPath($ArchivePath) } else { Join-Path $root 'build\archives\飞Q-0.3.19-portable.zip' }
+$zip = if($ArchivePath) { [IO.Path]::GetFullPath($ArchivePath) } else { Join-Path $root 'build\archives\飞Q-0.3.20-portable.zip' }
 if(!$ExecutablePath) { $ExecutablePath=Join-Path $root 'dist\飞Q.exe' }
 $sandbox = Join-Path $env:TEMP ('FeiqLight-package-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $sandbox | Out-Null

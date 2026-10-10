@@ -249,6 +249,50 @@ public final class ReliabilityTest {
             Files.delete(local.toPath());result.clear();s.forward(source,original,target,result::add);transferDone(s);assertEquals(Collections.singletonList(false),result);
         }finally{sc.destroy();}
     }
+    @Test public void forwardSameNameReceivedAndOutgoingAttachmentsKeepsNamesBytesAndSeparateOffers()throws Exception {
+        ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService s=sc.get();
+        try(DatagramSocket socket=new DatagramSocket(0,InetAddress.getLoopbackAddress());LanNode n=node()) {
+            settle(s);set(s,"node",n);LanNode.Peer source=peer(32425),target=peer(socket.getLocalPort());
+            for(boolean outgoing:new boolean[]{false,true}) {
+                LanNode.Message original=message();original.outgoing=outgoing;original.number=outgoing?44:42;
+                List<byte[]> contents=Arrays.asList(new byte[]{1,2,3},new byte[]{4,5});
+                for(int i=0;i<2;i++) {
+                    Protocol.Attachment a=new Protocol.Attachment(i,"same.txt",contents.get(i).length,1);original.files.add(a);
+                    File local=s.receivedFile(source,original.number,a);assertTrue(local.getParentFile().isDirectory()||local.getParentFile().mkdirs());Files.write(local.toPath(),contents.get(i));original.localPaths.add(local.getPath());
+                }
+                DraftStore drafts=new DraftStore(s);drafts.save(target.id(),"保留目标草稿");List<Boolean> result=new ArrayList<>();
+                s.forward(source,original,target,result::add);transferDone(s);assertEquals(Collections.singletonList(true),result);
+                Protocol.Packet packet=forwardedPacket(socket);List<Protocol.Attachment> files=Protocol.parseFiles(packet.extra);assertEquals(2,files.size());assertNotEquals(files.get(0).id,files.get(1).id);assertNotEquals(original.number,packet.number);
+                for(int i=0;i<2;i++) {
+                    assertEquals("same.txt",files.get(i).name);File download=new File(s.getCacheDir(),"forward-"+outgoing+"-"+i);
+                    n.receiveFile(peer((Integer)field(n,"port")),packet.number,files.get(i),download,new LanNode.Transfer(),percent->{});
+                    assertArrayEquals(contents.get(i),Files.readAllBytes(download.toPath()));assertArrayEquals(contents.get(i),Files.readAllBytes(new File(original.localPaths.get(i)).toPath()));
+                }
+                assertEquals("保留目标草稿",drafts.read(target.id()));
+            }
+        }finally {sc.destroy();}
+    }
+    @Test public void failedMultiAttachmentForwardRemovesOnlyItsStagedCopies()throws Exception {
+        ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService s=sc.get();
+        try(DatagramSocket socket=new DatagramSocket(0,InetAddress.getLoopbackAddress());LanNode n=node()) {
+            settle(s);set(s,"node",n);File keep=cache(s,3);LanNode.Peer source=peer(32425);LanNode.Message original=message();
+            original.files.add(new Protocol.Attachment(0,"same.txt",1,1));original.files.add(new Protocol.Attachment(1,"same.txt",1,1));
+            File local=s.receivedFile(source,original.number,original.files.get(0));assertTrue(local.getParentFile().isDirectory()||local.getParentFile().mkdirs());Files.write(local.toPath(),new byte[]{7});
+            List<Boolean> result=new ArrayList<>();s.forward(source,original,peer(socket.getLocalPort()),result::add);transferDone(s);
+            assertEquals(Collections.singletonList(false),result);assertEquals(1,new File(s.getFilesDir(),"offers").list().length);assertTrue(keep.isFile());assertArrayEquals(new byte[]{7},Files.readAllBytes(local.toPath()));assertTrue(((Map<?,?>)field(n,"offers")).isEmpty());
+        }finally {sc.destroy();}
+    }
+    @Test public void cancellingForwardDuringAuthorizedReadCleansItsFolder()throws Exception {
+        ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService s=sc.get();CountDownLatch release=new CountDownLatch(1);
+        try(DatagramSocket socket=new DatagramSocket(0,InetAddress.getLoopbackAddress());LanNode n=node()) {
+            settle(s);set(s,"node",n);TestProvider provider=provider(s,1L,1);provider.openedGate=new CountDownLatch(1);provider.releaseGate=release;
+            LanNode.Peer source=peer(32425);LanNode.Message original=message();Protocol.Attachment a=new Protocol.Attachment(0,"saved.txt",1,1);original.files.add(a);
+            s.getSharedPreferences("received_locations",0).edit().putString(s.receivedFile(source,original.number,a).getName(),"content://feiq.test/file").commit();
+            List<Boolean> result=new ArrayList<>();s.forward(source,original,peer(socket.getLocalPort()),result::add);assertTrue(provider.openedGate.await(5,TimeUnit.SECONDS));
+            s.cancelTransfer();release.countDown();transferDone(s);assertEquals(Collections.singletonList(false),result);
+            assertEquals(0,new File(s.getFilesDir(),"offers").list().length);assertTrue(provider.source.isFile());assertTrue(((Map<?,?>)field(n,"offers")).isEmpty());
+        }finally {release.countDown();sc.destroy();}
+    }
     @Test public void outgoingAttachmentPathsSurviveStoreAndAckCopy()throws Exception {
         ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService s=sc.get();
         try(DatagramSocket socket=new DatagramSocket(0,InetAddress.getLoopbackAddress());LanNode n=node()){
@@ -260,10 +304,14 @@ public final class ReliabilityTest {
         }finally{sc.destroy();}
     }
     public static final class TestProvider extends ContentProvider {
-        File source; Long declared; int opened; boolean metadataUnsupported;
+        File source; Long declared; int opened; boolean metadataUnsupported; CountDownLatch openedGate,releaseGate;
         @Override public boolean onCreate() { return true; }
         @Override public Cursor query(Uri uri,String[] projection,String selection,String[] args,String order) { if(metadataUnsupported)throw new UnsupportedOperationException("metadata unsupported");MatrixCursor c=new MatrixCursor(new String[]{OpenableColumns.DISPLAY_NAME,OpenableColumns.SIZE}); c.addRow(new Object[]{"测试文件.bin",declared}); return c; }
-        @Override public ParcelFileDescriptor openFile(Uri uri,String mode)throws FileNotFoundException { opened++; return ParcelFileDescriptor.open(source,ParcelFileDescriptor.MODE_READ_ONLY); }
+        @Override public ParcelFileDescriptor openFile(Uri uri,String mode)throws FileNotFoundException {
+            opened++;
+            if(openedGate!=null) {openedGate.countDown();try {if(!releaseGate.await(5,TimeUnit.SECONDS))throw new FileNotFoundException("测试读取未释放");}catch(InterruptedException e){Thread.currentThread().interrupt();throw new FileNotFoundException("测试读取被中断");}}
+            return ParcelFileDescriptor.open(source,ParcelFileDescriptor.MODE_READ_ONLY);
+        }
         @Override public String getType(Uri uri) { return "application/octet-stream"; }
         @Override public Uri insert(Uri uri,ContentValues values) { throw new UnsupportedOperationException(); }
         @Override public int delete(Uri uri,String selection,String[] args) { throw new UnsupportedOperationException(); }

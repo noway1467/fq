@@ -2,7 +2,7 @@
 
 轻量的 Windows / Android 局域网聊天与文件传输工具。功能方向参考飞秋，界面布局参考 Telegram；独立实现，非官方产品。
 
-当前版本：**Windows 0.3.19 / Android 0.2.20 预览版**。
+当前版本：**Windows 0.3.20 / Android 0.2.21 预览版**。
 
 下载独立安装/运行包：[GitHub Releases](https://github.com/noway1467/fq/releases)。选择 Windows EXE 或 Android APK，无需下载源码。
 
@@ -18,6 +18,7 @@
 - Android 优先将发现、消息和下载套接字绑定到非 VPN 的 Wi-Fi/以太网，避免跟随 TUN 默认路由；不修改系统代理设置。
 - Android 发送立即显示处理中，发现刷新不阻塞文字发送；文件先安全暂存并显示本地准备进度，再发送邀请。
 - Android 0.2.19 修复空闲发送被阻塞接收锁卡住的问题，避免等到下一次广播才发出消息。
+- Windows 0.3.20 对重复入站消息做持久化去重，重启后不会让旧邀请覆盖已保存状态或重复排队；Android 0.2.21 支持转发同条消息中的同名附件。
 
 ## 使用
 

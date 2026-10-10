@@ -269,8 +269,6 @@ public final class ChatService extends Service {
         }
         AtomicBoolean success=new AtomicBoolean();
         transferJob(task->{
-            File folder=new File(directory("offers"),UUID.randomUUID().toString());
-            if(!folder.mkdir())throw new IOException("无法暂存转发附件");
             List<File> files=new ArrayList<>();
             try {
                 // 转发不走普通输入发送的草稿清理路径；为目标重新生成消息号及授权。
@@ -282,8 +280,10 @@ public final class ChatService extends Service {
                     File local=message.outgoing?new File(message.localPaths.get(index++)):receivedFile(source,message.number,attachment);
                     Uri exported=!message.outgoing&&!local.isFile()?storage.saved(local):null;
                     if(exported==null&&(!local.isFile()||local.length()!=attachment.size))throw new IOException("附件尚未接收或副本已清理，请先接收或重新选择文件");
+                    // 与普通批量发送一样逐文件隔离；同名附件仍保留原名和独立授权。
+                    File folder=new File(directory("offers"),UUID.randomUUID().toString());
+                    if(!folder.mkdir())throw new IOException("无法暂存转发附件");
                     File copy=new File(folder,attachment.name);
-                    if(!copy.createNewFile())throw new IOException("附件名称重复，请分别转发");
                     files.add(copy);
                     try(InputStream input=exported==null?new FileInputStream(local):getContentResolver().openInputStream(exported);OutputStream output=new FileOutputStream(copy)){
                         copy(input,output,task,remaining(folder),"暂存空间不足");
@@ -293,7 +293,14 @@ public final class ChatService extends Service {
                 checkTransfer(task);
                 requireNode().sendMessage(target,message.text,files);
                 success.set(true);
-            }finally {if(!success.get()){for(File file:files)Files.deleteIfExists(file.toPath());Files.deleteIfExists(folder.toPath());}}
+            }finally {
+                if(!success.get()) {
+                    IOException cleanupFailure=null;
+                    for(File file:files) try {Files.deleteIfExists(file.toPath());Files.deleteIfExists(file.getParentFile().toPath());}
+                    catch(IOException e) {if(cleanupFailure==null)cleanupFailure=new IOException("转发失败，部分暂存副本未清除，可在设置中清理发送缓存");cleanupFailure.addSuppressed(e);}
+                    if(cleanupFailure!=null)throw cleanupFailure;
+                }
+            }
         },()->main.post(()->done.accept(success.get())));
     }
     void disconnect() {
