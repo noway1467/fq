@@ -435,6 +435,23 @@ namespace FeiqLight.Tests
                     foreach(string bad in new[]{"COM¹.txt","LPT².zip","CON .txt",new string('中',81)+".txt","bad\ud800.txt"}) Assert(!Protocol.SafeFileName(bad),"接受不兼容文件名");
                     Assert(Protocol.SafeFileName("👩🏽‍💻最终稿.tar.gz"),"错误拒绝 emoji 文件名");
                 });
+                Run("长文本：折叠不改原文、UTF-8 阈值、TXT 真实传输与失败清理", () =>
+                {
+                    Assert(!MessageText.AsFile(new string('a',16384)) && MessageText.AsFile(new string('a',16385)), "字节阈值错误");
+                    Assert(MessageText.AsFile(new string('中',6000)), "中文未按 UTF-8 字节计算");
+                    string text=String.Concat(Enumerable.Repeat("正文 👩🏽‍💻\r\n第二行\t保留空格  ",3000));
+                    Assert(MessageText.Preview(text).Length<640 && MessageText.Preview("短消息")=="短消息", "折叠错误");
+                    string folder=Path.Combine(root,"long-text");LocalStore drafts=new LocalStore(folder);drafts.SaveDraft("peer",text);Assert(drafts.LoadDraft("peer")==text,"长草稿被截断");
+                    ChatRecord record=a.SendContent(bob,text,null,folder);IncomingMessage message=null;
+                    Wait(()=>{lock(inboxGate){message=inbox.FirstOrDefault(m=>m.Record.Packet==record.Packet);return message!=null;}},"TXT 邀请未到达",5000);
+                    Assert(message.Files.Count==1&&message.Files[0].Name.EndsWith(".txt"),"未转换 TXT");
+                    string destination=Path.Combine(folder,"received.txt");b.ReceiveFileAsync(alice,record.Packet,message.Files[0],destination,null,CancellationToken.None).GetAwaiter().GetResult();
+                    Assert(File.ReadAllText(destination,Encoding.UTF8)==text,"TXT 未保留完整原文");
+                    int before=Directory.GetFiles(Path.Combine(folder,"text-offers")).Length;
+                    ExpectFailure(()=>a.SendContent(bob,text,new[]{Path.Combine(folder,"missing.bin")},folder),"缺失附件未失败");
+                    ExpectFailure(()=>a.SendContent(bob,text+"\ud800",null,folder),"非法 Unicode 被替换");
+                    Assert(Directory.GetFiles(Path.Combine(folder,"text-offers")).Length==before,"失败留下 TXT 缓存");
+                });
                 Run("UDP 重复消息去重，同时返回 ACK", () =>
                 {
                     using (UdpClient sender = new UdpClient(Endpoint(0)))

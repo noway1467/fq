@@ -19,6 +19,21 @@ namespace FeiqLight
             Panel footer = new Panel { Dock = DockStyle.Bottom, Height = 58, Padding = new Padding(18, 8, 18, 10) }; Button done = Theme.Button("确定", delegate { DialogResult = DialogResult.OK; }, true); done.Dock = DockStyle.Right; footer.Controls.Add(done); Surface.Controls.Add(body); Surface.Controls.Add(footer); AcceptButton = done;
         }
     }
+    public sealed class MessageTextDialog : ModernWindow
+    {
+        public MessageTextDialog(string text)
+        {
+            Text = "消息全文"; ClientSize = new Size(620, 540); MinimumSize = new Size(380, 280); StartPosition = FormStartPosition.CenterParent;
+            Panel footer = new Panel { Dock = DockStyle.Bottom, Height = 62, Padding = new Padding(20, 10, 20, 10) };
+            Button close = Theme.Button("关闭", delegate { DialogResult = DialogResult.OK; }, false); close.Dock = DockStyle.Right; footer.Controls.Add(close);
+            Label hint = Theme.Label("拖动选择文字 · Ctrl+C 复制 · Ctrl+A 全选", Theme.Small, Theme.Muted); hint.Dock = DockStyle.Fill; hint.AutoEllipsis = true; footer.Controls.Add(hint); hint.BringToFront();
+            RichTextBox content = new RichTextBox { Dock = DockStyle.Fill, ReadOnly = true, BorderStyle = BorderStyle.None, Font = Theme.Body,
+                BackColor = Theme.Surface, ForeColor = Theme.Ink, DetectUrls = false, HideSelection = false, ScrollBars = RichTextBoxScrollBars.Vertical,
+                Text = text ?? "", AccessibleName = "消息全文（可选择复制）" };
+            Theme.AttachEditMenu(content); Surface.Padding = new Padding(20, 8, 20, 0); Surface.Controls.Add(content); Surface.Controls.Add(footer);
+            CancelButton = close; Shown += delegate { content.Focus(); content.Select(0, 0); };
+        }
+    }
     public sealed class ConversationDialog : ModernWindow
     {
         public string Note { get { return note.Text.Trim(); } }

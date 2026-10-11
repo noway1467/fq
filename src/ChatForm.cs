@@ -86,7 +86,7 @@ namespace FeiqLight
             compose.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 44)); compose.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); compose.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 44)); compose.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 52)); compose.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             Button emoji = Theme.IconButton("smile", "表情", ShowEmoji, false); emoji.Dock = DockStyle.Fill; emoji.Margin = Padding.Empty; compose.Controls.Add(emoji, 0, 0);
             RoundedPanel input = new RoundedPanel { Dock = DockStyle.Fill, Fill = Theme.Ice, Radius = Theme.ControlRadius, Padding = new Padding(15, 13, 12, 6), Margin = new Padding(4, 1, 6, 1) };
-            editor.BorderStyle = BorderStyle.None; editor.Dock = DockStyle.Fill; editor.BackColor = Theme.Ice; editor.Font = new Font(Theme.Body.FontFamily, 10F); editor.MaxLength = 18000; editor.AccessibleName = "消息输入框"; editor.DetectUrls = false; editor.ScrollBars = RichTextBoxScrollBars.None;
+            editor.BorderStyle = BorderStyle.None; editor.Dock = DockStyle.Fill; editor.BackColor = Theme.Ice; editor.Font = new Font(Theme.Body.FontFamily, 10F); editor.MaxLength = MessageText.InputLimit; editor.AccessibleName = "消息输入框"; editor.DetectUrls = false; editor.ScrollBars = RichTextBoxScrollBars.None;
             Theme.AttachEditMenu(editor);
             editor.KeyDown += delegate(object sender, KeyEventArgs e)
             {
@@ -94,7 +94,7 @@ namespace FeiqLight
                 else if (e.KeyCode == Keys.Enter && !e.Shift) { e.SuppressKeyPress = true; SendMessage(); }
             }; input.Controls.Add(editor); compose.Controls.Add(input, 1, 0);
             draftTimer.Tick += delegate { draftTimer.Stop(); SaveDraft(); };
-            editor.TextChanged += delegate { draftTimer.Stop(); draftTimer.Start(); ResizeComposer(); };
+            editor.TextChanged += delegate { draftTimer.Stop(); draftTimer.Start(); ResizeComposer(); UpdateQueued(); };
             editor.Resize += delegate { ResizeComposer(); };
             Button file = Theme.IconButton("clip", "发送文件", SelectFiles, false); file.Dock = DockStyle.Fill; file.Margin = Padding.Empty; compose.Controls.Add(file, 2, 0);
             Button send = Theme.IconButton("send", "发送消息", delegate { SendMessage(); }, true); send.Dock = DockStyle.Fill; send.Margin = new Padding(3); compose.Controls.Add(send, 3, 0); root.Controls.Add(compose, 0, 3);
@@ -151,13 +151,13 @@ namespace FeiqLight
         private void SendMessage()
         {
             if (String.IsNullOrWhiteSpace(editor.Text) && attachments.Count == 0) return;
-            try { ChatRecord record = network.SendMessage(peer, editor.Text, attachments); main.Sent(peer, record); Append(record); Delivery(record); editor.Clear(); SaveDraft(); attachments.Clear(); UpdateQueued(); editor.Focus(); history.ScrollToLatest(); }
+            try { ChatRecord record = network.SendContent(peer, editor.Text, attachments, store.Root); main.Sent(peer, record); Append(record); Delivery(record); editor.Clear(); SaveDraft(); attachments.Clear(); UpdateQueued(); editor.Focus(); history.ScrollToLatest(); }
             catch (Exception e) { Error("发送失败", e.Message); }
         }
         internal void ForwardContent(string text, string[] paths)
         {
             // 转发独立发送，不读取或清空目标会话正在编辑的草稿和附件。
-            ChatRecord record = network.SendMessage(peer, text, paths);
+            ChatRecord record = network.SendContent(peer, text, paths, store.Root);
             main.Sent(peer, record); Append(record); Delivery(record); history.ScrollToLatest();
         }
         private void RetryMessage(ChatRecord previous)
@@ -172,7 +172,7 @@ namespace FeiqLight
                     if(text.EndsWith(suffix,StringComparison.Ordinal)) { text=text.Substring(0,text.Length-suffix.Length); if(text.EndsWith("\n")) text=text.Substring(0,text.Length-1); }
                 }
                 // 新报价使用新的消息号；原记录立即标记，防止重复点击同一条失败消息。
-                ChatRecord sent=network.SendMessage(peer,text,paths);main.Sent(peer,sent);Append(sent);history.ScrollToLatest();
+                ChatRecord sent=network.SendContent(peer,text,paths,store.Root);main.Sent(peer,sent);Append(sent);history.ScrollToLatest();
                 previous.State="已重新发送（新消息）";main.TrySave(previous);Delivery(previous);
             } catch(Exception e) {Error("重发失败",e.Message);}
         }
@@ -185,7 +185,7 @@ namespace FeiqLight
                 if (File.Exists(path) && !attachments.Contains(path)) attachments.Add(path);
             } UpdateQueued();
         }
-        private void UpdateQueued() { queue.Visible = attachments.Count > 0; root.RowStyles[2].Height = attachments.Count > 0 ? 42 * DeviceDpi / 96F : 0; queued.Text = String.Join("、", attachments.Select(Path.GetFileName)); }
+        private void UpdateQueued() { bool longText=MessageText.AsFile(editor.Text);bool show=attachments.Count > 0 || longText;queue.Visible = show; root.RowStyles[2].Height = show ? 42 * DeviceDpi / 96F : 0; queued.Text = (longText?"长文本将作为 TXT 附件发送  ":"")+String.Join("、", attachments.Select(Path.GetFileName)); }
         private void SelectFiles(object sender, EventArgs e) { using (OpenFileDialog dialog = new OpenFileDialog { Title = "发送文件", Multiselect = true, CheckFileExists = true }) if (dialog.ShowDialog(this) == DialogResult.OK) QueueFiles(dialog.FileNames); }
         private void ShowEmoji(object sender, EventArgs e)
         {

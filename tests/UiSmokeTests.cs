@@ -273,6 +273,28 @@ namespace FeiqLight.Tests
         }
         public static void Run(string directory, Action<string, Action> test)
         {
+            test("全文窗口：只读选段复制、尾部可达、气泡有界折叠",()=>{
+                string text=String.Concat(Enumerable.Repeat("首行 中文 👩🏽‍💻\n第二行  保留空格\n",2000));
+                using(Form host=new Form{ClientSize=new Size(560,450)})using(BubbleHistory history=new BubbleHistory{Dock=DockStyle.Fill}) {
+                    host.Controls.Add(history);host.Show();history.Append(new ChatRecord{Text=text,Time=DateTime.Now,State="已收到"});Application.DoEvents();
+                    Check(history.Text.Contains(text),"折叠改写了原文");Check(history.AutoScrollMinSize.Height<800,"摘要没有限制高度");Render(host,"preview-collapsed-text");
+                    var rectangles=(List<Rectangle>)typeof(BubbleHistory).GetField("bounds",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(history);Rectangle bubble=rectangles[0];
+                    history.AutoScrollPosition=Point.Empty;Application.DoEvents();MouseEventArgs click=new MouseEventArgs(MouseButtons.Left,2,bubble.Left+30,bubble.Top+20,0);
+                    typeof(BubbleHistory).GetMethod("OnMouseDown",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(history,new object[]{click});
+                    bool opened=false;using(System.Windows.Forms.Timer timer=new System.Windows.Forms.Timer{Interval=50}) {
+                        timer.Tick+=delegate {MessageTextDialog full=Application.OpenForms.OfType<MessageTextDialog>().FirstOrDefault();if(full!=null){opened=true;full.Close();}};timer.Start();
+                        typeof(BubbleHistory).GetMethod("OnMouseDoubleClick",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(history,new object[]{click});timer.Stop();
+                    }
+                    Check(opened,"双击气泡没有打开全文");host.Close();
+                }
+                using(MessageTextDialog dialog=new MessageTextDialog(text)) {
+                    dialog.Show();Application.DoEvents();RichTextBox content=Find<RichTextBox>(dialog,"消息全文（可选择复制）");
+                    Check(content.ReadOnly&&content.Text==text,"全文截断或可编辑");content.Select(3,2);Check(content.SelectedText=="中文","选区不是指定文字");
+                    IDataObject clipboard=Clipboard.GetDataObject();try{content.Copy();Check(Clipboard.GetText()=="中文","复制了全文而非选区");}finally{if(clipboard!=null)Clipboard.SetDataObject(clipboard,true,10,100);else Clipboard.Clear();}
+                    content.Select(content.TextLength,0);content.ScrollToCaret();Point end=content.GetPositionFromCharIndex(content.TextLength-1);Check(end.Y>=0&&end.Y<content.ClientSize.Height,"全文不能滚到尾部");
+                    content.Select(0,0);content.ScrollToCaret();Button close=All(dialog).OfType<Button>().Single(b=>b.Text=="关闭");Check(!All(dialog).OfType<Label>().Any(l=>l.Parent==close.Parent&&l.Bounds.IntersectsWith(close.Bounds)),"全文底栏遮住关闭按钮");Render(dialog,"preview-full-text-selection");dialog.Close();
+                }
+            });
             test("同名会话界面：五条 phone 区分、筛选不改名、标题与历史及转发一致",()=>{
                 string folder=Path.Combine(directory,"duplicate-names");LocalStore store=new LocalStore(folder);
                 AppSettings settings=new AppSettings {CloseToTray=false,ReceiveFolder=Path.Combine(folder,"received"),Conversations=Enumerable.Range(1,5).Select(i=>new SavedConversation {Endpoint="127.0.0.1:"+(32424+i),Login="phone",Nickname="phone",Preview="历史 "+i}).ToArray()};
@@ -840,7 +862,7 @@ namespace FeiqLight.Tests
                         // 同时支持源码同程序集测试和引用交付 EXE 的外部包测试，不扩大产品 API 可见性。
                         MethodInfo insert=typeof(ChatForm).GetMethod("InsertEmoji",BindingFlags.Instance|BindingFlags.NonPublic);
                         Check((bool)insert.Invoke(chatA,new object[]{"👨‍👩‍👧‍👦"}),"插入失败");Check(input.Text=="前👨‍👩‍👧‍👦后","光标插入错误");
-                        input.Text=new string('x',17999);input.Select(input.TextLength,0);Check(!(bool)insert.Invoke(chatA,new object[]{"😀"}),"边界插入截断了 emoji");Check(input.TextLength==17999,"拒绝后内容被修改");input.Clear();
+                        input.Text=new string('x',(input.MaxLength-1));input.Select(input.TextLength,0);Check(!(bool)insert.Invoke(chatA,new object[]{"😀"}),"边界插入截断了 emoji");Check(input.TextLength==(input.MaxLength-1),"拒绝后内容被修改");input.Clear();
                         Find<Button>(chatA,"表情").PerformClick();Application.DoEvents();
                         ToolStripDropDown menu=OpenMenu();Control panel=((ToolStripControlHost)menu.Items[0]).Control;
                         ComboBox category=Find<ComboBox>(panel,"表情分类");FlowLayoutPanel grid=Find<FlowLayoutPanel>(panel,"表情网格");

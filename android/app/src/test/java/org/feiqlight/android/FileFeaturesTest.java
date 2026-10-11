@@ -31,6 +31,24 @@ import static org.robolectric.Shadows.shadowOf;
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk=35,qualifiers="w393dp-h852dp-xhdpi")
 public final class FileFeaturesTest {
+    @Test public void longTextUsesLosslessTxtAndKeepsDraftOnFailure() throws Exception {
+        ServiceController<ChatService> controller=Robolectric.buildService(ChatService.class).create();ChatService service=controller.get();
+        List<LanNode.Message> received=new CopyOnWriteArrayList<>();
+        LanNode.Listener quiet=new LanNode.Listener(){public void peersChanged(){}public void error(String t){}public void message(LanNode.Peer p,LanNode.Message m,boolean update){}};
+        LanNode.Listener listener=new LanNode.Listener(){public void peersChanged(){}public void error(String t){}public void message(LanNode.Peer p,LanNode.Message m,boolean update){if(!update&&!m.outgoing)received.add(m);}};
+        int a=port(),b=port();while(a==b)b=port();
+        try(LanNode sender=new LanNode(a,true,"text-sender","host","发送方","test",quiet);LanNode receiver=new LanNode(b,true,"text-receiver","host","接收方","test",listener)) {
+            settle(service);set(service,"node",sender);sender.start();receiver.start();sender.probe(LanNode.endpoint("127.0.0.1:"+b));waitFor(service,()->sender.peers().size()==1&&receiver.peers().size()==1);
+            String text="中文 👩🏽‍💻\r\n 保留空格  \t".repeat(5000);LanNode.Peer peer=sender.peers().get(0);DraftStore drafts=new DraftStore(service);drafts.save(peer.id(),text);
+            assertFalse(MessageText.asFile("a".repeat(16384)));assertTrue(MessageText.asFile("a".repeat(16385)));assertTrue(MessageText.asFile("中".repeat(6000)));
+            List<Boolean> result=new ArrayList<>();service.send(peer,text,result::add);waitFor(service,()->!result.isEmpty()&&!received.isEmpty());assertEquals(Collections.singletonList(true),result);assertEquals("",drafts.read(peer.id()));
+            LanNode.Message message=received.get(0);assertEquals(1,message.files.size());assertTrue(message.files.get(0).name.endsWith(".txt"));
+            File target=new File(service.getCacheDir(),"long-text-received.txt");receiver.receiveFile(receiver.peers().get(0),message.number,message.files.get(0),target,new LanNode.Transfer(),percent->{});assertEquals(text,new String(Files.readAllBytes(target.toPath()),StandardCharsets.UTF_8));
+            File offers=new File(service.getFilesDir(),"offers");File[] folders=offers.listFiles();assertNotNull(folders);File original=Arrays.stream(folders).flatMap(f->Arrays.stream(Objects.requireNonNull(f.listFiles()))).filter(f->f.getName().equals(message.files.get(0).name)).findFirst().orElseThrow();
+            Uri uri=ReceivedFileProvider.uri(service,original,original.getName());assertNotNull(uri);
+            int before=folders.length;result.clear();String invalid=text+"\ud800";drafts.save(peer.id(),invalid);service.send(peer,invalid,result::add);waitFor(service,()->!result.isEmpty());assertEquals(Collections.singletonList(false),result);assertEquals(invalid,drafts.read(peer.id()));assertEquals(before,Objects.requireNonNull(offers.list()).length);
+        } finally {controller.destroy();}
+    }
     @Test public void multiPickerAcceptsClipOnlyDeduplicatesAndRejectsInvalidItems() {
         Uri a=Uri.parse("content://feiq.documents/a"),b=Uri.parse("content://feiq.documents/b");
         ClipData clip=ClipData.newRawUri("文件",a);clip.addItem(new ClipData.Item(b));clip.addItem(new ClipData.Item(a));

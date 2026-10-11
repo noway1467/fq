@@ -38,6 +38,15 @@ public final class AndroidInterop {
             try(OutputStream out=new FileOutputStream(LanNode.partialFile(peer,reply.number,reply.files.get(0),destination))) { for(long left=prefix;left>0;) {int count=(int)Math.min(left,bytes.length);out.write(bytes,0,count);left-=count;} }
             node.receiveFile(peer,reply.number,reply.files.get(0),destination,new LanNode.Transfer(),null);
             if(destination.length()!=size||!Arrays.equals(hash(source),hash(destination))) throw new AssertionError("Windows→Android 文件不一致");
+            node.sendMessage(peer,"REQUEST_TEXT_FILE",Collections.emptyList());
+            LanNode.Message textFile=incoming.poll(10,TimeUnit.SECONDS);
+            if(textFile==null||textFile.files.size()!=1||!textFile.files.get(0).name.endsWith(".txt"))throw new AssertionError("Windows 自动 TXT 邀请失败");
+            File textTarget=root.resolve("android-long-text.txt").toFile();node.receiveFile(peer,textFile.number,textFile.files.get(0),textTarget,new LanNode.Transfer(),null);
+            if(!new String(Files.readAllBytes(textTarget.toPath()),java.nio.charset.StandardCharsets.UTF_8).equals("Windows 自动 TXT："+UNICODE))throw new AssertionError("Windows 自动 TXT 原文不一致");
+            File androidText=root.resolve("安卓长文本.txt").toFile();Files.write(androidText.toPath(),("Android 自动 TXT："+UNICODE).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            node.sendMessage(peer,"ANDROID_TXT",Collections.singletonList(androidText));LanNode.Message textDone=incoming.poll(10,TimeUnit.SECONDS);
+            if(textDone==null||!textDone.text.equals("ANDROID_TXT_OK"))throw new AssertionError("Android TXT 接收验证失败");
+            System.out.println("LONG_TEXT_INTEROP PASS: Windows 自动 TXT 与 Android TXT 双向传输，Unicode 原文一致");
             node.sendMessage(peer,"ANDROID_COMPLETE",Collections.emptyList());
             LanNode.Message done=incoming.poll(10,TimeUnit.SECONDS); if(done==null||!done.text.equals("WINDOWS_COMPLETE")) throw new AssertionError("Android→Windows 文件验证未完成");
             System.out.println("INTEROP PASS: 发现、双向中文/表情/换行、ACK、Android 多附件同条邀请、双向 "+size+" 字节文件非零偏移续传，SHA-256 一致");

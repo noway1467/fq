@@ -51,6 +51,7 @@ namespace FeiqLight
             Font=Theme.Body; AccessibleRole = AccessibleRole.List; AccessibleName = "聊天记录";
             ContextMenuStrip menu = Theme.Menu();
             ToolStripItem copy = menu.Items.Add("复制消息", null, delegate { CopySelected(); });
+            ToolStripItem full = menu.Items.Add("查看全文 / 选段复制", null, delegate { ShowFullText(); });
             ToolStripItem forward = menu.Items.Add("转发…", null, delegate { if (SelectedRecord != null && ForwardRequested != null) ForwardRequested(SelectedRecord); });
             ToolStripMenuItem open=new ToolStripMenuItem("打开文件"),openWith=new ToolStripMenuItem("打开方式…");
             menu.Items.Add(open);menu.Items.Add(openWith);
@@ -64,6 +65,7 @@ namespace FeiqLight
             menu.Opening += delegate
             {
                 forward.Enabled = SelectedRecord != null && ForwardRequested != null;
+                full.Enabled = SelectedRecord != null && !String.IsNullOrEmpty(SelectedRecord.DisplayText());
                 ChatRecord record = SelectedRecord; retry.Visible=RetryRequested!=null&&record!=null&&record.Outgoing&&(record.State??"").Contains("未确认"); copy.Enabled = record != null && !String.IsNullOrEmpty(record.Text);
                 string[] paths = record == null ? new string[0] : record.GetLocalFiles();
                 folder.Visible = path.Visible = open.Visible = openWith.Visible = paths.Length > 0; folder.Tag = null;
@@ -123,7 +125,7 @@ namespace FeiqLight
             bounds.Clear(); textLayouts.Clear(); int y = D(22), max = Math.Max(D(100), (int)((ClientSize.Width - SystemInformation.VerticalScrollBarWidth) * .77));
             foreach (ChatRecord r in records)
             {
-                string display = r.DisplayText();
+                string display = MessageText.Preview(r.DisplayText());
                 MessageLayout layout=MessageLinks.Find(display).Count>0||ColorEmoji.Contains(display)?new MessageLayout(display,Font,max-D(28)):null;
                 textLayouts.Add(layout);
                 Size text = display.Length == 0 ? Size.Empty : layout==null?TextRenderer.MeasureText(display, Font, new Size(max - D(28), Int32.MaxValue), MessageFormat):new Size(layout.Width,layout.Height);
@@ -185,7 +187,7 @@ namespace FeiqLight
                     mediaHits.Add(Tuple.Create(preview,media[n]));
                 }
                 if(i<textLayouts.Count&&textLayouts[i]!=null)textLayouts[i].Draw(e.Graphics,content.Location,Font,linkHits);
-                else TextRenderer.DrawText(e.Graphics, record.DisplayText(), Font, content, Theme.Ink, MessageFormat);
+                else TextRenderer.DrawText(e.Graphics, MessageText.Preview(record.DisplayText()), Font, content, Theme.Ink, MessageFormat);
                 if(cards) {
                     int y=content.Bottom;
                     foreach(FileTransferState file in record.Transfers) {
@@ -221,6 +223,17 @@ namespace FeiqLight
                 }
             }
         }
+        private void ShowFullText()
+        {
+            ChatRecord record = SelectedRecord;
+            if (record != null && !String.IsNullOrEmpty(record.DisplayText()))
+                using (MessageTextDialog dialog = new MessageTextDialog(record.DisplayText())) dialog.ShowDialog(FindForm());
+        }
+        protected override void OnMouseDoubleClick(MouseEventArgs e)
+        {
+            base.OnMouseDoubleClick(e);
+            if (e.Button == MouseButtons.Left && !mediaHits.Any(h => h.Item1.Contains(e.Location)) && !fileHits.Any(h => h.Item1.Contains(e.Location))) ShowFullText();
+        }
         private void DrawCardPreview(Graphics g, Rectangle preview, string path)
         {
             using(SolidBrush background=new SolidBrush(Theme.Ice)) g.FillRectangle(background,preview);
@@ -236,6 +249,7 @@ namespace FeiqLight
         protected override void OnKeyDown(KeyEventArgs e)
         {
             if (e.Control && e.KeyCode == Keys.C) { CopySelected(); e.Handled = true; }
+            if (e.KeyCode == Keys.Enter) { ShowFullText(); e.Handled = true; }
             if (e.KeyCode == Keys.End) AutoScrollPosition = new Point(0, AutoScrollMinSize.Height);
             if (e.KeyCode == Keys.Home) AutoScrollPosition = Point.Empty;
             base.OnKeyDown(e);

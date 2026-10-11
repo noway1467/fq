@@ -14,7 +14,7 @@ $core = @(Get-ChildItem -LiteralPath "$root\android\app\src\main\java\org\feiqli
 & $javac -encoding UTF-8 -d $out @core "$PSScriptRoot\AndroidInterop.java"
 if ($LASTEXITCODE -ne 0) { throw '安卓通信核心编译失败' }
 $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
-& $csc /nologo /utf8output /target:exe /r:System.dll /r:System.Core.dll /r:System.Web.Extensions.dll "/out:$out\InteropHost.exe" "$root\src\Protocol.cs" "$root\src\Models.cs" "$root\src\LanService.cs" "$PSScriptRoot\AndroidInterop.cs"
+& $csc /nologo /utf8output /target:exe /r:System.dll /r:System.Core.dll /r:System.Web.Extensions.dll "/out:$out\InteropHost.exe" "$root\src\Protocol.cs" "$root\src\Models.cs" "$root\src\MessageText.cs" "$root\src\LanService.cs" "$PSScriptRoot\AndroidInterop.cs"
 if ($LASTEXITCODE -ne 0) { throw '桌面互通测试入口编译失败' }
 $temp = Join-Path ([IO.Path]::GetTempPath()) ('FeiqLight-interop-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $temp | Out-Null

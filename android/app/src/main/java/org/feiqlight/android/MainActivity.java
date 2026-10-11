@@ -205,11 +205,11 @@ public final class MainActivity extends Activity implements ChatService.Observer
             return target!=null && service.sendKeyboardImage(target.peer,uri,mime,release);
         }); configureInput(editor); editor.setContentDescription("消息输入框"); editor.setHint("消息"); editor.setTextSize(messageSize()); editor.setTextColor(INK); editor.setHintTextColor(MUTED); editor.setBackground(shape(PALE,CONTROL_RADIUS)); editor.setPadding(dp(16),dp(12),dp(16),dp(12));
         editor.setInputType(android.text.InputType.TYPE_CLASS_TEXT|android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE|android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES); editor.setMaxLines(5); editor.setMinHeight(dp(48));
-        editor.setFilters(new InputFilter[]{new InputFilter.LengthFilter(18000)});
+        editor.setFilters(new InputFilter[]{new InputFilter.LengthFilter(MessageText.INPUT_LIMIT)});
         editorSavedText=drafts.read(selected); editor.setText(editorSavedText); composer.addView(editor,weight());
         editor.addTextChangedListener(new TextWatcher() {
             public void beforeTextChanged(CharSequence s,int start,int count,int after) { }
-            public void onTextChanged(CharSequence s,int start,int before,int count) { saveDraft(); }
+            public void onTextChanged(CharSequence s,int start,int before,int count) { saveDraft(); updateSendFeedback(); }
             public void afterTextChanged(Editable value) { }
         });
         sendButton=new IconButton("send","发送消息",Color.WHITE); sendButton.setBackground(shape(BLUE,28)); LinearLayout.LayoutParams sendParams=new LinearLayout.LayoutParams(dp(48),dp(48)); sendParams.leftMargin=dp(8); composer.addView(sendButton,sendParams);
@@ -306,7 +306,10 @@ public final class MainActivity extends Activity implements ChatService.Observer
             LinearLayout bubble=column(); bubble.setBackground(new BubbleDrawable(m.outgoing?BUBBLE:SURFACE,getResources().getDisplayMetrics().density,m.outgoing));
             bubble.setPadding(dp(m.outgoing?14:21),dp(8),dp(m.outgoing?21:14),dp(6));
             LinearLayout.LayoutParams bp=new LinearLayout.LayoutParams(-2,-2); bp.gravity=m.outgoing?Gravity.END:Gravity.START; bp.bottomMargin=dp(9); messages.addView(bubble,bp);
-            if(!m.text.isEmpty()) { TextView content=text(m.text,messageSize(),INK); selectable(content); MessageLinks.apply(content,BLUE); content.setMaxWidth(maxWidth-dp(35)); content.setLineSpacing(dp(3),1); bubble.addView(content); }
+            if(!m.text.isEmpty()) {
+                String preview=MessageText.preview(m.text);TextView content=text(preview,messageSize(),INK);selectable(content);MessageLinks.apply(content,BLUE);content.setMaxWidth(maxWidth-dp(35));content.setLineSpacing(dp(3),1);bubble.addView(content);
+                if(!preview.equals(m.text)){TextView more=text("查看全文",14,BLUE);more.setMinHeight(dp(44));more.setGravity(Gravity.CENTER_VERTICAL);more.setFocusable(true);more.setOnClickListener(v->showFullText(m.text));bubble.addView(more);}
+            }
             for(int fileIndex=0;fileIndex<m.files.size();fileIndex++) {
                 Protocol.Attachment f=m.files.get(fileIndex);
                 TextView attachment=text("▤  "+f.name+"\n"+size(f.size),14,BLUE); attachment.setMaxWidth(maxWidth-dp(35)); attachment.setPadding(0,dp(3),0,dp(3)); bubble.addView(attachment); attachment.setOnLongClickListener(v->{ copyText("文件名",f.name); return true; });
@@ -396,32 +399,51 @@ public final class MainActivity extends Activity implements ChatService.Observer
     private void forward(LanNode.Message message,LanNode.Peer source) {
         if(service==null||!service.online()) {error("请先连接局域网");return;}
         LinearLayout options=column();
-        TextView hint=text("选择联系人，转发为一条新消息；不会清空草稿。",13,MUTED);options.addView(hint);
-        final boolean[] submitted={false};
-        final Dialog[] chooser={null};
-        for(ChatStore.Conversation target:service.conversations()) {
-            if(!target.peer.online)continue;
-            Button pick=button(target.displayName()+" · "+target.peer.id(),false);options.addView(pick,new LinearLayout.LayoutParams(-1,-2));
-            pick.setOnClickListener(v->{
-                if(submitted[0]||service==null)return;
-                confirm("确认转发","发送给 "+target.displayName()+"？","转发",()->{
-                    if(submitted[0]||service==null)return;submitted[0]=true;
-                    hint.setText("正在转发，请稍候…");for(int i=0;i<options.getChildCount();i++)if(options.getChildAt(i) instanceof Button)options.getChildAt(i).setEnabled(false);
-                    service.forward(source,message,target.peer,success->{
-                        if(isDestroyed()||isFinishing())return;
-                        submitted[0]=success;
-                        if(success){if(chooser[0]!=null)chooser[0].dismiss();error("已转发");if(selected.equals(target.peer.id())){forceLatest=true;changed();}}
-                        else {hint.setText("转发未完成，请检查附件或连接后重试。");for(int i=0;i<options.getChildCount();i++)if(options.getChildAt(i) instanceof Button)options.getChildAt(i).setEnabled(true);}
-                    });
-                });
+        TextView hint=text(message.files.isEmpty()?"转发文本 · 选择联系人后确认发送":"转发 "+message.files.size()+" 个附件及正文 · 选择联系人",13,MUTED);
+        hint.setPadding(dp(6),dp(4),dp(6),dp(14));options.addView(hint);
+        LinearLayout contacts=column();ScrollView list=new ScrollView(this);list.addView(contacts);
+        options.addView(list,new LinearLayout.LayoutParams(-1,dp(280)));
+        final ChatStore.Conversation[] target={null};final boolean[] submitted={false};
+        List<View> rows=new ArrayList<>();List<TextView> marks=new ArrayList<>();
+        Button send=button("确认转发",true);send.setEnabled(false);send.setAlpha(.45f);
+        LinearLayout footer=row();footer.setGravity(Gravity.END);footer.setPadding(0,dp(16),0,0);footer.addView(send,new LinearLayout.LayoutParams(-2,-2));options.addView(footer);
+        for(ChatStore.Conversation c:service.conversations()) {
+            if(!c.peer.online)continue;
+            LinearLayout item=row();item.setMinimumHeight(dp(72));item.setPadding(dp(4),dp(6),dp(10),dp(6));item.setBackground(shape(SURFACE,CONTROL_RADIUS));
+            TextView avatar=text("",19,Color.WHITE);avatar.setGravity(Gravity.CENTER);bindAvatar(avatar,c.peer.id(),c.displayName(),true);item.addView(avatar,new LinearLayout.LayoutParams(dp(56),dp(56)));
+            LinearLayout identity=column();LinearLayout.LayoutParams ip=weight();ip.leftMargin=dp(10);item.addView(identity,ip);
+            TextView name=text(c.displayName(),16,INK);name.setSingleLine();name.setEllipsize(c.duplicateName?TextUtils.TruncateAt.MIDDLE:TextUtils.TruncateAt.END);identity.addView(name);
+            TextView address=text(c.peer.endpoint.getAddress().getHostAddress()+":"+c.peer.endpoint.getPort(),12,MUTED);address.setSingleLine();address.setEllipsize(TextUtils.TruncateAt.END);address.setPadding(0,dp(4),0,0);identity.addView(address);
+            TextView mark=text("",18,BLUE);mark.setGravity(Gravity.CENTER);item.addView(mark,new LinearLayout.LayoutParams(dp(28),dp(40)));marks.add(mark);
+            item.setContentDescription("转发给 "+c.displayName());item.setFocusable(true);rows.add(item);contacts.addView(item,new LinearLayout.LayoutParams(-1,-2));
+            item.setOnClickListener(v->{
+                if(submitted[0])return;target[0]=c;
+                for(int i=0;i<rows.size();i++){boolean chosen=rows.get(i)==v;rows.get(i).setSelected(chosen);rows.get(i).setBackground(shape(chosen?BUBBLE:SURFACE,CONTROL_RADIUS));marks.get(i).setText(chosen?"✓":"");}
+                send.setEnabled(true);send.setAlpha(1f);
             });
         }
-        if(options.getChildCount()==1)options.addView(text("没有在线联系人",14,MUTED));
-        chooser[0]=sheet("转发到",options,"关闭",dialog->dialog.dismiss());
+        if(rows.isEmpty()){contacts.addView(text("没有在线联系人，请先连接或添加联系人。",14,MUTED));list.getLayoutParams().height=dp(100);}
+        Dialog chooser=sheet("转发到",options,null,null);
+        send.setOnClickListener(v->{
+            if(submitted[0]||target[0]==null||service==null)return;
+            ChatStore.Conversation chosen=target[0];int page=editorGeneration;submitted[0]=true;send.setEnabled(false);send.setText("正在转发…");
+            for(View item:rows)item.setEnabled(false);
+            service.forward(source,message,chosen.peer,success->{
+                if(isDestroyed()||isFinishing())return;
+                submitted[0]=success;
+                if(success){chooser.dismiss();error("已转发");if(page==editorGeneration&&selected.equals(chosen.peer.id())){forceLatest=true;changed();}}
+                else if(chooser.isShowing()){hint.setText("转发未完成，请检查附件或连接后重试。");send.setText("确认转发");send.setEnabled(true);for(View item:rows)item.setEnabled(true);}
+            });
+        });
+    }
+    private void showFullText(String value) {
+        TextView content=text(value,messageSize(),INK);selectable(content);content.setPadding(dp(4),dp(10),dp(4),dp(12));
+        sheet("消息全文（长按选择复制）",content,"关闭",Dialog::dismiss);
     }
     private void messageActions(LanNode.Message message,LanNode.Peer source){
         LinearLayout options=column();Dialog dialog=sheet("消息",options,null,null);
         if(!message.text.isEmpty())fileAction(options,dialog,"复制消息",()->copyText("消息",message.text));
+        if(!message.text.isEmpty())fileAction(options,dialog,"查看全文 / 选段复制",()->showFullText(message.text));
         fileAction(options,dialog,"转发…",()->forward(message,source));
     }
     private void send() {
@@ -438,7 +460,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
     }
     private void updateSendFeedback() {
         if(sendButton!=null){sendButton.setEnabled(!sending);sendButton.setAlpha(sending?.5f:1f);sendButton.setContentDescription(sending?"正在发送，请勿重复点击":"发送消息");}
-        if(sendStatus!=null)sendStatus.setVisibility(sending&&selected.equals(sendingPeer)?View.VISIBLE:View.GONE);
+        if(sendStatus!=null){boolean pending=sending&&selected.equals(sendingPeer),longText=editor!=null&&MessageText.asFile(editor.getText().toString());sendStatus.setText(pending?"正在发送…":"长文本将作为 TXT 附件发送");sendStatus.setVisibility(pending||longText?View.VISIBLE:View.GONE);}
     }
     private void connect() {
         if(Build.VERSION.SDK_INT>=33&&checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)!=PackageManager.PERMISSION_GRANTED) requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS},10);

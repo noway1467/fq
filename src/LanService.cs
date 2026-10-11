@@ -226,6 +226,29 @@ namespace FeiqLight
         {
             record.State = state; Action<ChatRecord> handler = DeliveryChanged; if (!disposed && handler != null) handler(record);
         }
+        public ChatRecord SendContent(Peer peer, string text, IList<string> paths, string dataRoot)
+        {
+            if (!MessageText.AsFile(text)) return SendMessage(peer, text, paths);
+            if (text.Length > MessageText.InputLimit || text.IndexOf('\0') >= 0) throw new ArgumentException("正文超过 1,048,576 个字符或含有空字符，请直接选择文件发送。");
+            if (paths != null && paths.Count >= 20) throw new ArgumentException("超长正文需要一个 TXT 附件位置，请最多选择 19 个其他文件。");
+            string folder = Path.Combine(dataRoot, "text-offers"); Directory.CreateDirectory(folder);
+            string generated = Path.Combine(folder, "消息-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + "-" + Guid.NewGuid().ToString("N").Substring(0, 8) + ".txt");
+            // 只清理本功能生成、超过一天且没有有效邀请引用的副本，不触及用户附件。
+            lock (gate)
+            {
+                foreach (string old in Directory.GetFiles(folder, "消息-*.txt"))
+                    if (File.GetLastWriteTimeUtc(old) < DateTime.UtcNow.AddDays(-1) && !offers.Values.Any(o => o.Path == old && o.Expires > DateTime.UtcNow)) File.Delete(old);
+                byte[] bytes = new System.Text.UTF8Encoding(false, true).GetBytes(text);
+                if (Directory.GetFiles(folder).Sum(p => new FileInfo(p).Length) + bytes.Length > 64L * 1024 * 1024) throw new IOException("长文本缓存已达 64 MiB，请稍后重试或直接选择 TXT 文件发送。");
+                try
+                {
+                    using (FileStream output = new FileStream(generated, FileMode.CreateNew, FileAccess.Write)) output.Write(bytes, 0, bytes.Length);
+                    List<string> files = paths == null ? new List<string>() : new List<string>(paths); files.Add(generated);
+                    return SendMessage(peer, "长文本已转为 TXT，打开附件查看完整内容。", files);
+                }
+                catch { if (File.Exists(generated)) File.Delete(generated); throw; }
+            }
+        }
         public ChatRecord SendMessage(Peer peer, string text, IList<string> paths)
         {
             if (String.IsNullOrWhiteSpace(text) && (paths == null || paths.Count == 0)) throw new ArgumentException("请先输入消息或选择文件。");

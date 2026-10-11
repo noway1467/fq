@@ -242,7 +242,7 @@ public final class ChatService extends Service {
     void send(LanNode.Peer peer,String text,Consumer<Boolean> done) {
         DraftStore drafts=new DraftStore(this); DraftStore.Snapshot sent=drafts.snapshot(peer.id());
         if(stopped){main.post(()->done.accept(false));return;}
-        try {io.execute(()->{ try { requireNode().sendMessage(peer,text,Collections.emptyList()); main.post(()->{
+        try {io.execute(()->{ try { sendContent(peer,text,Collections.emptyList()); main.post(()->{
                 if(sent.text.equals(text)) drafts.clearIfUnchanged(peer.id(),sent);
                 changed(); done.accept(true);
             }); }
@@ -255,7 +255,7 @@ public final class ChatService extends Service {
                 LanNode.Message record=store.history(peer.id()).stream().filter(m->m.number==original.number&&m.outgoing).findFirst().orElseThrow(()->new IOException("原消息已不存在"));
                 if(!(record.state.contains("未确认")||record.state.equals("发送失败"))) throw new IOException("此消息已经重发或已送达");
                 if(!record.files.isEmpty()) throw new IOException("请重新选择原文件发送");
-                requireNode().sendMessage(peer,record.text,Collections.emptyList());
+                sendContent(peer,record.text,Collections.emptyList());
                 record.state="已重新发送（新消息）";store.message(peer,record,true,peer.id().equals(activePeer));publish();main.post(()->done.accept(true));
             }catch(Exception e){fail(e);main.post(()->done.accept(false));}
         });
@@ -263,7 +263,7 @@ public final class ChatService extends Service {
     void forward(LanNode.Peer source,LanNode.Message message,LanNode.Peer target,Consumer<Boolean> done) {
         if(stopped||!online()){main.post(()->done.accept(false));showError("请先连接局域网");return;}
         if(message.files.isEmpty()) {
-            queue(()->{try {requireNode().sendMessage(target,message.text,Collections.emptyList());main.post(()->done.accept(true));}
+            queue(()->{try {sendContent(target,message.text,Collections.emptyList());main.post(()->done.accept(true));}
                 catch(Exception e){fail(e);main.post(()->done.accept(false));}});
             return;
         }
@@ -291,7 +291,7 @@ public final class ChatService extends Service {
                     if(copy.length()!=attachment.size)throw new IOException("附件大小已改变，请重新选择文件发送");
                 }
                 checkTransfer(task);
-                requireNode().sendMessage(target,message.text,files);
+                sendContent(target,message.text,files);
                 success.set(true);
             }finally {
                 if(!success.get()) {
@@ -302,6 +302,27 @@ public final class ChatService extends Service {
                 }
             }
         },()->main.post(()->done.accept(success.get())));
+    }
+    private synchronized void sendContent(LanNode.Peer peer,String text,List<File> files) throws IOException {
+        LanNode current=requireNode();
+        if(!MessageText.asFile(text)){current.sendMessage(peer,text,files);return;}
+        if(text.length()>MessageText.INPUT_LIMIT||text.indexOf(0)>=0)throw new IOException("正文超过 1,048,576 个字符或含有空字符，请直接选择文件发送");
+        if(files.size()>=20)throw new IOException("超长正文需要一个 TXT 附件位置，请最多选择 19 个其他文件");
+        java.nio.ByteBuffer encoded=StandardCharsets.UTF_8.newEncoder().encode(java.nio.CharBuffer.wrap(text));
+        byte[] bytes=new byte[encoded.remaining()];encoded.get(bytes);
+        cleanStaging();File offers=directory("offers");
+        long used=0;File[] folders=offers.listFiles();
+        if(folders==null)throw new IOException("无法读取发送缓存");
+        for(File folder:folders){File[] entries=folder.listFiles();if(entries!=null)for(File entry:entries)if(entry.getName().startsWith("消息-")&&entry.getName().endsWith(".txt"))used+=entry.length();}
+        if(used+bytes.length>64L*1024*1024)throw new IOException("长文本缓存已达 64 MiB，请在设置中清理发送缓存后重试");
+        quota(offers,bytes.length);File folder=new File(offers,UUID.randomUUID().toString());
+        if(!folder.mkdir())throw new IOException("无法暂存长文本");
+        File file=new File(folder,"消息-"+System.currentTimeMillis()+".txt");boolean sent=false;
+        try {
+            try(OutputStream output=new FileOutputStream(file)){output.write(bytes);}
+            List<File> all=new ArrayList<>(files);all.add(file);
+            current.sendMessage(peer,"长文本已转为 TXT，打开附件查看完整内容。",all);sent=true;
+        } finally {if(!sent){Files.deleteIfExists(file.toPath());Files.deleteIfExists(folder.toPath());}}
     }
     void disconnect() {
         diagnostics.record(Diagnostics.Event.Disconnected);

@@ -22,6 +22,14 @@ public static class AndroidInteropHost
                 try
                 {
                     if (message.Record.Text == "0") { node.SendMessage(message.Peer, "IDLE_ECHO:0", null); return; }
+                    if (message.Record.Text == "REQUEST_TEXT_FILE") { node.SendContent(message.Peer, "Windows 自动 TXT："+UnicodeText, null, args[1]); return; }
+                    if (message.Record.Text == "ANDROID_TXT") {
+                        if(message.Files.Count!=1)throw new Exception("缺少 Android TXT 附件");
+                        string target=Path.Combine(args[1],"windows-long-text.txt");
+                        await node.ReceiveFileAsync(message.Peer,message.Record.Packet,message.Files[0],target,null,CancellationToken.None);
+                        if(File.ReadAllText(target,Encoding.UTF8)!="Android 自动 TXT："+UnicodeText)throw new Exception("Android TXT 原文不一致");
+                        node.SendMessage(message.Peer,"ANDROID_TXT_OK",null);return;
+                    }
                     if (message.Record.Text == "ANDROID_COMPLETE")
                     {
                         if (!received) throw new Exception("尚未收到安卓文件");

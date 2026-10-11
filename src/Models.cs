@@ -297,13 +297,13 @@ namespace FeiqLight
             {
                 string path = Path.ChangeExtension(HistoryPath(peerId), ".draft.txt");
                 if (!File.Exists(path)) return "";
-                if (new FileInfo(path).Length > 144000) throw new IOException("草稿文件超过大小限制。");
-                string text = File.ReadAllText(path, Encoding.UTF8); return text.Substring(0, Math.Min(text.Length, 18000));
+                if (new FileInfo(path).Length > 4L * MessageText.InputLimit) throw new IOException("草稿文件超过大小限制。");
+                string text = File.ReadAllText(path, Encoding.UTF8); return text.Substring(0, Math.Min(text.Length, MessageText.InputLimit));
             }
         }
         public void SaveDraft(string peerId, string text)
         {
-            if ((text ?? "").Length > 18000) throw new ArgumentException("草稿超过长度限制。");
+            if ((text ?? "").Length > MessageText.InputLimit) throw new ArgumentException("草稿超过长度限制。");
             lock (gate)
             {
                 string path = Path.ChangeExtension(HistoryPath(peerId), ".draft.txt");

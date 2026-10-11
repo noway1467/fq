@@ -23,6 +23,26 @@ import static org.robolectric.Shadows.shadowOf;
 @Config(sdk=35, qualifiers="w393dp-h852dp-xhdpi")
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 public final class UiTest {
+    @Test public void forwardingUsesAvatarRowsAndExplicitSelectionAndFullTextIsSelectable() throws Exception {
+        ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();
+        shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));
+        ActivityController<MainActivity> ac=Robolectric.buildActivity(MainActivity.class).create().start().resume().visible();MainActivity activity=ac.get();android.app.Dialog dialog=null;
+        LanNode.Listener quiet=new LanNode.Listener(){public void peersChanged(){}public void error(String t){}public void message(LanNode.Peer p,LanNode.Message m,boolean update){}};
+        try(LanNode node=new LanNode(32429,true,"ui-forward","host","测试","",quiet)) {
+            settle(service);Field nf=ChatService.class.getDeclaredField("node");nf.setAccessible(true);nf.set(service,node);
+            for(int i=0;i<3;i++){LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:"+(32425+i)),"peer"+i,"host",i==0?"upstair win10":"phone","");LanNode.Message m=new LanNode.Message();m.number=i+1;m.time=i+1;m.text="历史";service.incoming(peer,m,false);}
+            settle(service);for(ChatStore.Conversation c:service.conversations())c.peer.online=true;
+            LanNode.Message message=new LanNode.Message();message.text="正文 中文 👩🏽‍💻\n第二行\n".repeat(3000);
+            assertTrue(MessageText.preview(message.text).length()<640);
+            Method forward=MainActivity.class.getDeclaredMethod("forward",LanNode.Message.class,LanNode.Peer.class);forward.setAccessible(true);forward.invoke(activity,message,service.conversations().get(0).peer);
+            dialog=org.robolectric.shadows.ShadowDialog.getLatestDialog();List<View> views=descendants(dialog.getWindow().getDecorView());Button confirm=(Button)views.stream().filter(v->v instanceof Button&&((Button)v).getText().toString().equals("确认转发")).findFirst().get();assertFalse(confirm.isEnabled());
+            List<View> rows=new ArrayList<>();for(View v:views)if(v.getContentDescription()!=null&&v.getContentDescription().toString().startsWith("转发给 "))rows.add(v);assertEquals(3,rows.size());
+            rows.get(0).performClick();assertTrue(confirm.isEnabled());assertTrue(rows.get(0).isSelected());rows.get(1).performClick();assertFalse(rows.get(0).isSelected());assertTrue(rows.get(1).isSelected());
+            assertFalse(views.stream().anyMatch(v->v instanceof TextView&&((TextView)v).getText().toString().contains("/peer")));dialogScreenshot(dialog,"android-forward-contact-picker");
+            measure(dialog.getWindow().getDecorView(),640,520,true);assertTrue(confirm.getHeight()>0);dialog.dismiss();
+            invoke(activity,"showFullText",String.class,message.text);dialog=org.robolectric.shadows.ShadowDialog.getLatestDialog();TextView full=(TextView)descendants(dialog.getWindow().getDecorView()).stream().filter(v->v instanceof TextView&&message.text.contentEquals(((TextView)v).getText())).findFirst().get();assertTrue(full.isTextSelectable());assertEquals(message.text,full.getText().toString());dialogScreenshot(dialog,"android-full-text-selectable");
+        } finally {if(dialog!=null)dialog.dismiss();ac.pause().stop().destroy();sc.destroy();}
+    }
     @Test public void duplicateConversationNamesStayDistinctAcrossSearchAndOpen() throws Exception {
         shadowOf(RuntimeEnvironment.getApplication()).grantPermissions(android.Manifest.permission.POST_NOTIFICATIONS);
         ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));
