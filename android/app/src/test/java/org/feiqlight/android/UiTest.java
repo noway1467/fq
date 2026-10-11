@@ -23,6 +23,30 @@ import static org.robolectric.Shadows.shadowOf;
 @Config(sdk=35, qualifiers="w393dp-h852dp-xhdpi")
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 public final class UiTest {
+    @Test public void settingsTabsShowOnlySelectedPageAndKeepUnsavedChanges() throws Exception {
+        ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));
+        ActivityController<MainActivity> ac=Robolectric.buildActivity(MainActivity.class).create().start().resume().visible();MainActivity activity=ac.get();android.app.Dialog dialog=null;
+        try {
+            Method settings=MainActivity.class.getDeclaredMethod("settings");settings.setAccessible(true);settings.invoke(activity);dialog=org.robolectric.shadows.ShadowDialog.getLatestDialog();View decor=dialog.getWindow().getDecorView();
+            EditText name=(EditText)descendants(decor).stream().filter(v->"昵称".contentEquals(v.getContentDescription()==null?"":v.getContentDescription())).findFirst().get();name.setText("Tab 未保存昵称");
+            String[] names={"通用","外观","文件","诊断"};
+            for(int i=0;i<names.length;i++) {
+                clickDialogButton(names[i]);for(int j=0;j<4;j++){View page=decor.findViewWithTag("settings-page:"+j);assertEquals(j==i?View.VISIBLE:View.GONE,page.getVisibility());assertEquals(i==j,decor.findViewWithTag("settings-tab:"+j).isSelected());}
+                assertEquals("Tab 未保存昵称",name.getText().toString());dialogScreenshot(dialog,"android-settings-tab-"+i);
+            }
+            clickDialogButton("外观");Switch dark=(Switch)descendants(decor).stream().filter(v->v instanceof Switch&&"夜间模式".contentEquals(((Switch)v).getText())).findFirst().get();dark.setChecked(true);
+            name.setText("");clickDialogButton("诊断");clickDialogButton("保存");assertTrue(dialog.isShowing());assertEquals(View.VISIBLE,decor.findViewWithTag("settings-page:0").getVisibility());assertNotNull(name.getError());
+            name.setText("已保存昵称");clickDialogButton("文件");clickDialogButton("保存");assertFalse(dialog.isShowing());assertEquals("已保存昵称",activity.getSharedPreferences("settings",0).getString("name",""));assertTrue(activity.getSharedPreferences("settings",0).getBoolean("dark_mode",false));
+            settings.invoke(activity);dialog=org.robolectric.shadows.ShadowDialog.getLatestDialog();decor=dialog.getWindow().getDecorView();for(int i=0;i<names.length;i++){clickDialogButton(names[i]);dialogScreenshot(dialog,"android-settings-tab-"+i+"-dark");}
+            measure(decor,640,600,true);View navigation=decor.findViewWithTag("settings-navigation");assertEquals(View.VISIBLE,navigation.getVisibility());
+            Button save=(Button)descendants(decor).stream().filter(v->v instanceof Button&&"保存".contentEquals(((Button)v).getText())).findFirst().get();
+            int[] position=new int[2];save.getLocationInWindow(position);assertTrue("窄屏保存按钮超出窗口",position[1]>=0&&position[1]+save.getHeight()<=decor.getHeight());
+            clickDialogButton("外观");SeekBar size=(SeekBar)descendants(decor).stream().filter(v->v instanceof SeekBar).findFirst().get();assertEquals((int)(Integer)field(activity,"BLUE"),size.getThumbTintList().getDefaultColor());
+            measure(decor,640,600,true);snapshotView(decor,"android-settings-tabs-compact");
+            EditText cancelled=(EditText)descendants(decor).stream().filter(v->v instanceof EditText&&"昵称".contentEquals(v.getContentDescription()==null?"":v.getContentDescription())).findFirst().get();cancelled.setText("取消不保存");
+            dialog.dismiss();assertEquals("已保存昵称",activity.getSharedPreferences("settings",0).getString("name",""));
+        } finally {if(dialog!=null)dialog.dismiss();ac.pause().stop().destroy();sc.destroy();}
+    }
     @Test public void forwardingUsesAvatarRowsAndExplicitSelectionAndFullTextIsSelectable() throws Exception {
         ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();
         shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));
@@ -425,7 +449,7 @@ public final class UiTest {
             invoke(activity,"open",String.class,a.id()); settle(service); assertEquals("这份草稿只属于设计讨论",((EditText)field(activity,"editor")).getText().toString());
             assertEquals(0,service.conversations().stream().filter(c->c.peer.id().equals(a.id())).findFirst().get().unread);
             Method settings=MainActivity.class.getDeclaredMethod("settings"); settings.setAccessible(true); settings.invoke(activity);
-            android.app.Dialog dialog=org.robolectric.shadows.ShadowDialog.getLatestDialog(); assertNotNull(dialog); assertTrue(dialog.isShowing()); dialogScreenshot(dialog,"android-settings"); ScrollView settingsScroll=findScroller(dialog.getWindow().getDecorView()); assertNotNull(settingsScroll); settingsScroll.scrollTo(0,settingsScroll.getChildAt(0).getHeight()); assertTrue(settingsScroll.getScrollY()>0); dialogScreenshot(dialog,"android-settings-files"); dialog.dismiss();
+            android.app.Dialog dialog=org.robolectric.shadows.ShadowDialog.getLatestDialog(); assertNotNull(dialog); assertTrue(dialog.isShowing()); dialogScreenshot(dialog,"android-settings"); ScrollView settingsScroll=findScroller(dialog.getWindow().getDecorView()); assertNotNull(settingsScroll); clickDialogButton("外观");measure(settingsScroll,786,800,false);settingsScroll.scrollTo(0,settingsScroll.getChildAt(0).getHeight()); assertTrue(settingsScroll.getScrollY()>0); clickDialogButton("文件");dialogScreenshot(dialog,"android-settings-files"); dialog.dismiss();
             android.os.Bundle saved=new android.os.Bundle(); activityController.saveInstanceState(saved).pause().stop().destroy(); settle(service);
             activityController=Robolectric.buildActivity(MainActivity.class).create(saved).start().resume().visible(); activity=activityController.get(); settle(service);
             assertEquals("这份草稿只属于设计讨论",((EditText)field(activity,"editor")).getText().toString());
@@ -470,7 +494,7 @@ public final class UiTest {
         shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));
         ActivityController<MainActivity> controller=Robolectric.buildActivity(MainActivity.class).create().start().resume().visible();MainActivity activity=controller.get();
         try {
-            Method settings=MainActivity.class.getDeclaredMethod("settings");settings.setAccessible(true);settings.invoke(activity);android.app.Dialog dialog=org.robolectric.shadows.ShadowDialog.getLatestDialog();ScrollView scroller=findScroller(dialog.getWindow().getDecorView());measure(scroller,786,1500,false);
+            Method settings=MainActivity.class.getDeclaredMethod("settings");settings.setAccessible(true);settings.invoke(activity);android.app.Dialog dialog=org.robolectric.shadows.ShadowDialog.getLatestDialog();ScrollView scroller=findScroller(dialog.getWindow().getDecorView());clickDialogButton("外观");measure(scroller,786,1500,false);
             java.util.List<View> controls=descendants(scroller);Button mint=(Button)controls.stream().filter(v->v instanceof Button&&((Button)v).getText().toString().startsWith("薄荷")).findFirst().get();mint.performClick();
             SeekBar size=(SeekBar)controls.stream().filter(v->v instanceof SeekBar).findFirst().get();size.setProgress(8);
             TextView sample=(TextView)controls.stream().filter(v->v instanceof TextView&&((TextView)v).getText().toString().equals("消息与输入字号预览")).findFirst().get();assertEquals(22*activity.getResources().getDisplayMetrics().scaledDensity,sample.getTextSize(),.1f);
@@ -485,10 +509,11 @@ public final class UiTest {
         ActivityController<MainActivity> ac=Robolectric.buildActivity(MainActivity.class).create().start().resume().visible();MainActivity activity=ac.get();
         try {
             Method settings=MainActivity.class.getDeclaredMethod("settings");settings.setAccessible(true);settings.invoke(activity);android.app.Dialog dialog=org.robolectric.shadows.ShadowDialog.getLatestDialog();ScrollView scroll=findScroller(dialog.getWindow().getDecorView());
-            for(int width:new int[]{786,640}){
+            for(String tab:new String[]{"外观","文件","诊断"})for(int width:new int[]{786,640}){
+                clickDialogButton(tab);
                 measure(scroll,width,1400,false);
-                for(View view:descendants(scroll))if(view instanceof RadioGroup){RadioGroup group=(RadioGroup)view;for(int i=1;i<group.getChildCount();i++){View previous=group.getChildAt(i-1),next=group.getChildAt(i);int gap=group.getOrientation()==LinearLayout.HORIZONTAL?next.getLeft()-previous.getRight():next.getTop()-previous.getBottom();assertTrue("选项按钮贴在一起",gap>=16);}}
-                java.util.List<View> views=descendants(scroll);for(View view:views)if(view instanceof Button){ViewGroup parent=(ViewGroup)view.getParent();int index=parent.indexOfChild(view);if(index>0&&parent instanceof LinearLayout&&((LinearLayout)parent).getOrientation()==LinearLayout.VERTICAL&&parent.getChildAt(index-1) instanceof Button)assertTrue("纵向按钮没有间距",view.getTop()-parent.getChildAt(index-1).getBottom()>=16);}
+                for(View view:descendants(scroll))if(view.isShown()&&view instanceof RadioGroup){RadioGroup group=(RadioGroup)view;for(int i=1;i<group.getChildCount();i++){View previous=group.getChildAt(i-1),next=group.getChildAt(i);int gap=group.getOrientation()==LinearLayout.HORIZONTAL?next.getLeft()-previous.getRight():next.getTop()-previous.getBottom();assertTrue("选项按钮贴在一起",gap>=16);}}
+                java.util.List<View> views=descendants(scroll);for(View view:views)if(view.isShown()&&view instanceof Button){ViewGroup parent=(ViewGroup)view.getParent();int index=parent.indexOfChild(view);if(index>0&&parent instanceof LinearLayout&&((LinearLayout)parent).getOrientation()==LinearLayout.VERTICAL&&parent.getChildAt(index-1) instanceof Button)assertTrue("纵向按钮没有间距",view.getTop()-parent.getChildAt(index-1).getBottom()>=16);}
             }
             measure(scroll,640,1000,false);clickDialogButton("外观");snapshotView(scroll,"android-settings-spacing-narrow");
             measure(scroll,786,1400,false);clickDialogButton("外观");snapshotView(scroll,"android-settings-spacing-appearance");dialogScreenshot(dialog,"android-settings-spacing-fixed");clickDialogButton("诊断");snapshotView(scroll,"android-settings-spacing-diagnostics");dialogScreenshot(dialog,"android-settings-spacing-diagnostics-full");dialog.dismiss();

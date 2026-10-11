@@ -539,7 +539,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         dark.setOnCheckedChangeListener((buttonView,checked)->updatePreview.run());
         for(int i=0;i<accent.getChildCount();i++)accent.getChildAt(i).setOnClickListener(v->updatePreview.run());updatePreview.run();
         TextView sizeCaption=text("聊天字号 · "+messageSize()+" sp",14,INK);sizeCaption.setPadding(0,dp(14),0,0);box.addView(sizeCaption);
-        SeekBar fontSize=new SeekBar(this);fontSize.setContentDescription("聊天字号");fontSize.setMax(10);fontSize.setProgress(messageSize()-14);box.addView(fontSize,new LinearLayout.LayoutParams(-1,dp(48)));
+        SeekBar fontSize=new SeekBar(this);fontSize.setContentDescription("聊天字号");fontSize.setThumbTintList(android.content.res.ColorStateList.valueOf(BLUE));fontSize.setProgressTintList(android.content.res.ColorStateList.valueOf(BLUE));fontSize.setProgressBackgroundTintList(android.content.res.ColorStateList.valueOf(blend(INK,SURFACE,.18f)));fontSize.setMax(10);fontSize.setProgress(messageSize()-14);box.addView(fontSize,new LinearLayout.LayoutParams(-1,dp(48)));
         fontSize.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener(){public void onStartTrackingTouch(SeekBar bar){}public void onStopTrackingTouch(SeekBar bar){}public void onProgressChanged(SeekBar bar,int value,boolean user){sizeCaption.setText("聊天字号 · "+(value+14)+" sp");sampleIn.setTextSize(value+14);sampleOut.setTextSize(value+14);}});
         TextView wallpaperHeading=text("聊天背景",14,INK);wallpaperHeading.setPadding(0,dp(12),0,dp(8));box.addView(wallpaperHeading);
         RadioGroup backgrounds=settingChoices(4);wallpaperChoices=backgrounds;String[] backgroundKeys={"none","orbits","lines","image"},backgroundNames={"纯色","星环","流线","我的图片"};
@@ -565,11 +565,11 @@ public final class MainActivity extends Activity implements ChatService.Observer
         Button clearLog=button("清除诊断记录",false);box.addView(clearLog,settingSpacing(0,4));clearLog.setOnClickListener(v->{try{journal.clear();error("诊断记录已清除");}catch(Exception e){error("诊断清除失败："+e.getMessage());}});
         sheet("设置",box,"保存",dialog->{
             String n=name.getText().toString().trim(), g=group.getText().toString().trim(); int p;
-            if(n.isEmpty()||n.length()>64) { name.setError("昵称须为 1–64 个字符"); return; } if(g.length()>64) { group.setError("分组最多 64 个字符"); return; }
-            try { p=Integer.parseInt(port.getText().toString()); if(p<1024||p>65535) throw new NumberFormatException(); } catch(NumberFormatException e) { port.setError("端口须为 1024–65535"); return; }
+            if(n.isEmpty()||n.length()>64) { settingsError(dialog,name,"昵称须为 1–64 个字符"); return; } if(g.length()>64) { settingsError(dialog,group,"分组最多 64 个字符"); return; }
+            try { p=Integer.parseInt(port.getText().toString()); if(p<1024||p>65535) throw new NumberFormatException(); } catch(NumberFormatException e) { settingsError(dialog,port,"端口须为 1024–65535"); return; }
             View color=accent.findViewById(accent.getCheckedRadioButtonId());
             View backdrop=backgrounds.findViewById(backgrounds.getCheckedRadioButtonId());String backdropKey=backdrop==null?"orbits":backdrop.getTag().toString();
-            if(backdropKey.equals("image")&&prefs.getString("background_image","").isEmpty()){error("请先选择背景图片");return;}
+            if(backdropKey.equals("image")&&prefs.getString("background_image","").isEmpty()){dialog.getWindow().getDecorView().findViewWithTag("settings-tab:1").performClick();error("请先选择背景图片");return;}
             prefs.edit().putString("name",n).putString("group",g).putInt("port",p).putBoolean("auto_connect",autoConnect.isChecked()).putBoolean("diagnostics",diagnosticSwitch.isChecked()).putBoolean(ReceivedStorage.AUTO,automatic.isChecked()).putBoolean("dark_mode",dark.isChecked()).putString("accent",color==null?"blue":color.getTag().toString()).putInt("chat_font_size",fontSize.getProgress()+14).putString("chat_background",backdropKey).apply(); if(service!=null) service.receiveSettingsChanged(); dialog.dismiss(); saveDraft(); renderPage(); error("已保存；主题和接收选项立即生效，昵称和端口下次连接生效");
         });
     }
@@ -600,7 +600,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         };
     }
     private void settingHeading(LinearLayout box,String title){
-        if(box.getChildCount()>0){View line=new View(this);line.setBackgroundColor(blend(INK,SURFACE,.09f));LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(-1,dp(1));p.topMargin=dp(20);p.bottomMargin=dp(16);box.addView(line,p);}
+        if(box.getChildCount()>0){View line=new View(this);line.setTag("settings-divider");line.setBackgroundColor(blend(INK,SURFACE,.09f));LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(-1,dp(1));p.topMargin=dp(20);p.bottomMargin=dp(16);box.addView(line,p);}
         TextView heading=text(title,14,INK);heading.setTag("section:"+title);heading.setTypeface(null,Typeface.BOLD);heading.setPadding(0,dp(6),0,dp(8));box.addView(heading,new LinearLayout.LayoutParams(-1,-2));
     }
     private Switch settingSwitch(String label,boolean checked){
@@ -637,19 +637,41 @@ public final class MainActivity extends Activity implements ChatService.Observer
         TextView title=text(label,12,MUTED); title.setPadding(dp(4),dp(10),0,dp(7)); parent.addView(title);
         EditText field=new EditText(this); configureInput(field); field.setSingleLine(); field.setTextSize(16); field.setTextColor(INK); field.setText(value); field.setPadding(dp(15),dp(10),dp(15),dp(10)); field.setBackground(shape(PALE,CONTROL_RADIUS)); field.setMinHeight(dp(48)); field.setContentDescription(label); parent.addView(field,new LinearLayout.LayoutParams(-1,-2)); return field;
     }
+    private void settingsError(Dialog dialog,EditText field,String message) {
+        View tab=dialog.getWindow().getDecorView().findViewWithTag("settings-tab:0");if(tab!=null)tab.performClick();field.setError(message);field.requestFocus();
+    }
     private Dialog settingsPanel(View content,java.util.function.Consumer<Dialog> handler) {
         finishSelection();Dialog dialog=new Dialog(this){@Override public boolean dispatchTouchEvent(MotionEvent event){dismissSelectionOutside(event);return super.dispatchTouchEvent(event);}};dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
         dialog.setOnDismissListener(d->{if(selectionOwner!=null&&selectionOwner.getRootView()==dialog.getWindow().getDecorView())finishSelection();wallpaperChoices=null;});
-        LinearLayout frame=new LinearLayout(this){@Override protected void onMeasure(int width,int height){int available=root!=null&&root.getHeight()>0?root.getHeight()-root.getPaddingTop()-root.getPaddingBottom():getResources().getDisplayMetrics().heightPixels;int cap=Math.max(1,(int)(available*.9f));if(View.MeasureSpec.getMode(height)!=View.MeasureSpec.UNSPECIFIED)cap=Math.min(cap,View.MeasureSpec.getSize(height));View navigation=findViewWithTag("settings-navigation");if(navigation!=null)navigation.setVisibility(cap<dp(280)?View.GONE:View.VISIBLE);super.onMeasure(width,View.MeasureSpec.makeMeasureSpec(cap,View.MeasureSpec.EXACTLY));}};
+        LinearLayout frame=new LinearLayout(this){@Override protected void onMeasure(int width,int height){int available=root!=null&&root.getHeight()>0?root.getHeight()-root.getPaddingTop()-root.getPaddingBottom():getResources().getDisplayMetrics().heightPixels;int cap=Math.max(1,(int)(available*.9f));if(View.MeasureSpec.getMode(height)!=View.MeasureSpec.UNSPECIFIED)cap=Math.min(cap,View.MeasureSpec.getSize(height));super.onMeasure(width,View.MeasureSpec.makeMeasureSpec(cap,View.MeasureSpec.EXACTLY));}};
         frame.setOrientation(LinearLayout.VERTICAL);frame.setBackground(shape(SURFACE,18));
         LinearLayout heading=row();heading.setPadding(dp(22),dp(8),dp(10),0);TextView caption=text("设置",20,INK);caption.setContentDescription("设置");caption.setTypeface(null,Typeface.BOLD);heading.addView(caption,weight());IconButton close=new IconButton("close","关闭设置",MUTED);heading.addView(close,new LinearLayout.LayoutParams(dp(48),dp(48)));close.setOnClickListener(v->dialog.dismiss());frame.addView(heading);
-        ScrollView scroller=new ScrollView(this);scroller.setFillViewport(false);LinearLayout inset=column();inset.setPadding(dp(18),dp(4),dp(18),dp(18));inset.addView(content,new LinearLayout.LayoutParams(-1,-2));scroller.addView(inset);
-        LinearLayout navigation=row();navigation.setTag("settings-navigation");navigation.setPadding(dp(14),dp(4),dp(14),dp(8));String[] names={"资料","外观","文件","诊断"},sections={"个人资料与连接","外观","文件接收","故障诊断"};
-        for(int i=0;i<names.length;i++){final String section=sections[i];Button jump=button(names[i],false);jump.setTextSize(14);jump.setPadding(dp(4),dp(8),dp(4),dp(8));LinearLayout.LayoutParams p=weight();p.setMargins(i==0?0:dp(4),0,i==names.length-1?0:dp(4),0);navigation.addView(jump,p);jump.setOnClickListener(v->{View target=content.findViewWithTag("section:"+section);if(target!=null){int y=target.getTop();View parent=(View)target.getParent();while(parent!=scroller){y+=parent.getTop();parent=(View)parent.getParent();}scroller.scrollTo(0,y);}});}frame.addView(navigation);
-        frame.addView(scroller,new LinearLayout.LayoutParams(-1,0,1));
-        LinearLayout footer=column();footer.setPadding(dp(18),dp(10),dp(18),dp(14));Button done=button("保存",true);footer.addView(done,new LinearLayout.LayoutParams(-1,-2));done.setOnClickListener(v->handler.accept(dialog));frame.addView(footer);
+        String[] names={"通用","外观","文件","诊断"};LinearLayout[] pages=new LinearLayout[4];Button[] tabs=new Button[4];
+        LinearLayout original=(LinearLayout)content;List<View> fields=new ArrayList<>();for(int i=0;i<original.getChildCount();i++)fields.add(original.getChildAt(i));original.removeAllViews();
+        for(int i=0;i<pages.length;i++){pages[i]=column();pages[i].setTag("settings-page:"+i);pages[i].setVisibility(i==0?View.VISIBLE:View.GONE);original.addView(pages[i],new LinearLayout.LayoutParams(-1,-2));}
+        int page=0;
+        for(View field:fields){
+            Object tag=field.getTag();if("settings-divider".equals(tag))continue;
+            if("section:外观".equals(tag))page=1;else if("section:文件接收".equals(tag)||"section:存储管理".equals(tag))page=2;else if("section:故障诊断".equals(tag))page=3;
+            if(tag instanceof String&&((String)tag).startsWith("section:")&&pages[page].getChildCount()>0)((LinearLayout.LayoutParams)field.getLayoutParams()).topMargin=dp(24);
+            pages[page].addView(field);
+        }
+        ScrollView scroller=new ScrollView(this);scroller.setFillViewport(false);LinearLayout inset=column();inset.setPadding(dp(22),dp(16),dp(22),dp(24));inset.addView(content,new LinearLayout.LayoutParams(-1,-2));scroller.addView(inset);
+        LinearLayout navigation=row();navigation.setTag("settings-navigation");navigation.setPadding(dp(14),0,dp(14),0);
+        java.util.function.IntConsumer select=index->{
+            finishSelection();for(int i=0;i<pages.length;i++){pages[i].setVisibility(i==index?View.VISIBLE:View.GONE);tabs[i].setSelected(i==index);tabs[i].setTextColor(i==index?BLUE:MUTED);tabs[i].setContentDescription("设置标签："+names[i]+(i==index?"，已选择":""));}
+            scroller.scrollTo(0,0);scroller.requestLayout();
+            android.view.inputmethod.InputMethodManager keyboard=getSystemService(android.view.inputmethod.InputMethodManager.class);if(keyboard!=null)keyboard.hideSoftInputFromWindow(frame.getWindowToken(),0);
+            View focused=dialog.getCurrentFocus();if(focused instanceof EditText)focused.clearFocus();
+        };
+        for(int i=0;i<names.length;i++){
+            final int index=i;Button tab=new Button(this){private final Paint ink=new Paint(Paint.ANTI_ALIAS_FLAG);@Override protected void onDraw(Canvas canvas){super.onDraw(canvas);ink.setColor(blend(INK,SURFACE,.09f));canvas.drawRect(0,getHeight()-dp(1),getWidth(),getHeight(),ink);if(isSelected()){ink.setColor(BLUE);canvas.drawRoundRect(getWidth()/2f-dp(16),getHeight()-dp(3),getWidth()/2f+dp(16),getHeight(),dp(1),dp(1),ink);}}};
+            tab.setText(names[i]);tab.setTextSize(15);tab.setAllCaps(false);tab.setGravity(Gravity.CENTER);tab.setMinHeight(dp(48));tab.setMinimumWidth(0);tab.setPadding(dp(2),dp(10),dp(2),dp(10));tab.setStateListAnimator(null);tab.setBackground(new android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(BUBBLE),shape(SURFACE,0),null));tab.setTag("settings-tab:"+i);tabs[i]=tab;navigation.addView(tab,new LinearLayout.LayoutParams(0,-2,1));tab.setOnClickListener(v->select.accept(index));
+        }
+        frame.addView(navigation);frame.addView(scroller,new LinearLayout.LayoutParams(-1,0,1));
+        LinearLayout footer=row();footer.setPadding(dp(22),dp(10),dp(22),dp(14));TextView note=text("切换分类会保留未保存的修改",12,MUTED);footer.addView(note,weight());Button done=button("保存",true);footer.addView(done,new LinearLayout.LayoutParams(-2,-2));done.setOnClickListener(v->handler.accept(dialog));frame.addView(footer);
         dialog.setContentView(frame);Window window=dialog.getWindow();if(window!=null){window.setBackgroundDrawableResource(android.R.color.transparent);window.setGravity(Gravity.BOTTOM);window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);window.setDimAmount(.32f);window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);}
-        dialog.show();if(window!=null)window.setLayout(-1,-2);return dialog;
+        select.accept(0);dialog.show();if(window!=null)window.setLayout(-1,-2);return dialog;
     }
     private Dialog sheet(String name,View content,String action,java.util.function.Consumer<Dialog> handler) {
         if(name.equals("设置"))return settingsPanel(content,handler);

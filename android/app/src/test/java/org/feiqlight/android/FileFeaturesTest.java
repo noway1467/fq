@@ -31,6 +31,27 @@ import static org.robolectric.Shadows.shadowOf;
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk=35,qualifiers="w393dp-h852dp-xhdpi")
 public final class FileFeaturesTest {
+    @Test public void onlineConversationsMoveAboveRecentOfflineAndPinsSurviveOffline() throws Exception {
+        ServiceController<ChatService> controller=Robolectric.buildService(ChatService.class).create();ChatService service=controller.get();
+        Method publish=ChatService.class.getDeclaredMethod("requestPublish");publish.setAccessible(true);
+        LanNode.Listener listener=new LanNode.Listener(){public void peersChanged(){try{publish.invoke(service);}catch(Exception e){throw new RuntimeException(e);}}public void error(String t){}public void message(LanNode.Peer p,LanNode.Message m,boolean update){}};
+        LanNode.Listener quiet=new LanNode.Listener(){public void peersChanged(){}public void error(String t){}public void message(LanNode.Peer p,LanNode.Message m,boolean update){}};
+        int a=port(),b=port();while(a==b)b=port();
+        try(LanNode sender=new LanNode(a,true,"sort-local","host","本机","test",listener);LanNode remote=new LanNode(b,true,"sort-online","host","较早在线","test",quiet)) {
+            settle(service);set(service,"node",sender);sender.start();
+            LanNode.Peer pinned=new LanNode.Peer(LanNode.endpoint("127.0.0.1:33421"),"sort-pin","host","置顶离线",""),recent=new LanNode.Peer(LanNode.endpoint("127.0.0.1:33422"),"sort-recent","host","最近离线",""),old=new LanNode.Peer(LanNode.endpoint("127.0.0.1:"+b),"sort-online","host","较早在线","");
+            LanNode.Peer[] peers={pinned,recent,old};long[] times={100,500,200};
+            for(int i=0;i<peers.length;i++){LanNode.Message m=new LanNode.Message();m.number=i+1;m.time=times[i];m.text="排序历史";m.state="已送达";m.outgoing=true;service.incoming(peers[i],m,false);}
+            service.editConversation(pinned.id(),"",true);settle(service);new DraftStore(service).save(recent.id(),"保留草稿");service.active(recent.id());
+            remote.start();sender.probe(old.endpoint);waitFor(service,()->service.conversations().size()==3&&service.conversations().get(1).peer.online);
+            assertEquals(Arrays.asList(pinned.id(),old.id(),recent.id()),service.conversations().stream().map(c->c.peer.id()).collect(java.util.stream.Collectors.toList()));
+            service.editConversation(pinned.id(),"",false);waitFor(service,()->!service.conversations().get(0).pinned);assertEquals(old.id(),service.conversations().get(0).peer.id());
+            service.editConversation(old.id(),"",true);waitFor(service,()->service.conversations().get(0).pinned);remote.close();waitFor(service,()->!service.conversations().get(0).peer.online);
+            assertEquals(old.id(),service.conversations().get(0).peer.id());assertTrue(service.conversations().get(0).pinned);assertEquals(200,service.conversations().get(0).time);
+            assertEquals(recent.id(),field(service,"activePeer"));assertEquals("保留草稿",new DraftStore(service).read(recent.id()));
+            ChatStore store=(ChatStore)field(service,"store");assertTrue(store.conversations().stream().anyMatch(c->c.peer.id().equals(old.id())&&c.pinned));
+        } finally {controller.destroy();}
+    }
     @Test public void longTextUsesLosslessTxtAndKeepsDraftOnFailure() throws Exception {
         ServiceController<ChatService> controller=Robolectric.buildService(ChatService.class).create();ChatService service=controller.get();
         List<LanNode.Message> received=new CopyOnWriteArrayList<>();

@@ -203,7 +203,8 @@ namespace FeiqLight
             if (next == fingerprint) return; fingerprint = next;
             var rows = all.Where(p => filter != 2 || p.Online).Where(p => filter != 1 || (unread.ContainsKey(p.Id) && unread[p.Id] > 0))
                 .Where(p => (p.DisplayName + " " + p.Nickname + " " + p.Group + " " + p.Host + " " + p.Endpoint + " " + (previews.ContainsKey(p.Id) ? previews[p.Id] : "")).IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0)
-                .OrderByDescending(p=>p.Pinned).ThenBy(p => recent.Contains(p.Id) ? recent.IndexOf(p.Id) : Int32.MaxValue).ThenByDescending(p => p.Online).ThenBy(p => p.Nickname)
+                // 手动置顶优先，其余在线优先；同组保留最近消息顺序，不把上线当成新消息。
+                .OrderBy(p=>p.Pinned?0:p.Online?1:2).ThenBy(p => recent.Contains(p.Id) ? recent.IndexOf(p.Id) : Int32.MaxValue).ThenBy(p => p.DisplayName,StringComparer.OrdinalIgnoreCase).ThenBy(p=>p.Id,StringComparer.Ordinal)
                 .Select(p => new ConversationList.Item { Peer = p, Preview = previews.ContainsKey(p.Id) ? previews[p.Id] : (p.Online ? "在线" : "离线"), Unread = unread.ContainsKey(p.Id) ? unread[p.Id] : 0, Time = times.ContainsKey(p.Id) ? times[p.Id] : default(DateTime) });
             contacts.SetItems(rows); foreach(ChatForm chat in chats.Values)if(!chat.IsDisposed)chat.RefreshPeer();
             if (started&&persisted) status.Text = all.Count(p => p.Online) + " 人在线";

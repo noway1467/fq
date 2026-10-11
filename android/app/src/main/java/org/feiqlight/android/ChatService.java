@@ -226,6 +226,10 @@ public final class ChatService extends Service {
         if (current!=null) {List<LanNode.Peer> peers=current.peers();store.peers(peers);for(LanNode.Peer p:peers)live.put(p.id(),p);}
         List<ChatStore.Conversation> list=store.conversations();
         for (ChatStore.Conversation item:list) if (live.containsKey(item.peer.id())) item.peer=live.get(item.peer.id());
+        // 在线状态只参与展示排序，不改写消息时间；置顶即使离线也留在普通会话之前。
+        list.sort(Comparator.comparingInt((ChatStore.Conversation c)->c.pinned?0:c.peer.online?1:2)
+            .thenComparing(Comparator.comparingLong((ChatStore.Conversation c)->c.time).reversed())
+            .thenComparing(ChatStore.Conversation::displayName,String.CASE_INSENSITIVE_ORDER).thenComparing(c->c.peer.id()));
         main.post(()->{ if (!stopped) { conversations=list; changed(); } });
     }
     void refresh() {

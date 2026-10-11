@@ -95,6 +95,30 @@ namespace FeiqLight
     }
     public sealed class SettingsDialog : ModernWindow
     {
+        private readonly string[] tabNames={"通用","外观","文件","诊断"};
+        private readonly FlowLayoutPanel[] pages=new FlowLayoutPanel[4];
+        private readonly SettingsTabButton[] tabs=new SettingsTabButton[4];
+        private int selectedTab;
+        private void SelectTab(int index) {
+            selectedTab=index;body.SuspendLayout();body.AutoScrollPosition=Point.Empty;
+            for(int i=0;i<pages.Length;i++){pages[i].Visible=i==index;tabs[i].Active=i==index;tabs[i].AccessibleDescription=i==index?"当前标签":"切换标签";tabs[i].Invalidate();}
+            body.ResumeLayout(true);
+        }
+        protected override bool ProcessCmdKey(ref Message msg,Keys keyData) {
+            if(keyData==(Keys.Control|Keys.Tab)||keyData==(Keys.Control|Keys.Shift|Keys.Tab)){int next=(selectedTab+((keyData&Keys.Shift)!=0?3:1))%4;SelectTab(next);tabs[next].Focus();return true;}
+            return base.ProcessCmdKey(ref msg,keyData);
+        }
+        private sealed class SettingsTabButton : Button {
+            public bool Active;
+            public SettingsTabButton(){FlatStyle=FlatStyle.Flat;FlatAppearance.BorderSize=0;BackColor=Theme.Surface;Font=Theme.Body;AccessibleRole=AccessibleRole.PageTab;SetStyle(ControlStyles.UserPaint|ControlStyles.OptimizedDoubleBuffer|ControlStyles.AllPaintingInWmPaint,true);}
+            protected override bool IsInputKey(Keys keyData){Keys key=keyData&Keys.KeyCode;return key==Keys.Left||key==Keys.Right||base.IsInputKey(keyData);}
+            protected override void OnPaint(PaintEventArgs e){
+                e.Graphics.Clear(Theme.Surface);TextRenderer.DrawText(e.Graphics,Text,Font,ClientRectangle,Active?Theme.Blue:Theme.Muted,TextFormatFlags.HorizontalCenter|TextFormatFlags.VerticalCenter);
+                using(Pen line=new Pen(Theme.Line))e.Graphics.DrawLine(line,0,Height-1,Width,Height-1);
+                if(Active)using(SolidBrush fill=new SolidBrush(Theme.Blue))e.Graphics.FillRectangle(fill,Width/2-16,Height-3,32,3);
+                if(Focused&&ShowFocusCues)ControlPaint.DrawFocusRectangle(e.Graphics,Rectangle.Inflate(ClientRectangle,-5,-5),Theme.Blue,Theme.Surface);
+            }
+        }
         private readonly Panel body = new Panel { Dock = DockStyle.Fill, AutoScroll = true };
         public AppSettings Value { get; private set; }
         public SettingsDialog(AppSettings current, string dataPath, int port, bool startupAvailable = false, bool startupEnabled = false)
@@ -172,23 +196,29 @@ namespace FeiqLight
             Button cancel = Theme.Button("取消", delegate { DialogResult = DialogResult.Cancel; }, false); cancel.SetBounds(290, 44, 86, 38); footer.Controls.Add(cancel); CancelButton = cancel;
             Button save = Theme.Button("保存", delegate
             {
-                if (String.IsNullOrWhiteSpace(name.Text)) { error.Text = "昵称不能为空"; name.Focus(); return; }
+                if (String.IsNullOrWhiteSpace(name.Text)) { error.Text = "昵称不能为空"; SelectTab(0); name.Focus(); return; }
                 try
                 {
                     string path = ReceiveStorage.Folder(folder.Text); ReceiveStorage.ValidateWritable(path);
                     Value = new AppSettings { Nickname = Protocol.Field(name.Text.Trim()), Group = String.IsNullOrWhiteSpace(group.Text) ? "我的局域网" : Protocol.Field(group.Text.Trim()), Signature = signature.Text.Trim(), CloseToTray = close.Checked, StartWithWindows = startup.Checked, Notifications = notifications.Checked,DiagnosticsEnabled = diagnostics.Checked,  AutoReceiveFiles = auto.Checked, ReceiveFolder = path, ChatFontSize=messageSize,ChatBackground=backgroundMode,BackgroundImage=backgroundPath,DarkMode=dark.Checked, Accent=accentIndex==1?"green":accentIndex==2?"purple":"blue" };
                     DialogResult = DialogResult.OK;
                 }
-                catch (Exception e) { error.Text = "保存目录不可用：" + e.Message; folder.Focus(); }
+                catch (Exception e) { error.Text = "保存目录不可用：" + e.Message; SelectTab(2); folder.Focus(); }
             }, true); save.SetBounds(390, 44, 92, 38); footer.Controls.Add(save); AcceptButton = save;
-            // 单列自然流替代绝对坐标堆叠，滚动只作用于内容，保存按钮始终可见。
-            // 外观与日常开关相邻，技术资料置底；不让路径信息打断设置操作。
+            Action fitFooter=delegate{save.Left=footer.ClientSize.Width-24-save.Width;cancel.Left=save.Left-14-cancel.Width;error.Width=Math.Max(80,footer.ClientSize.Width-48);};footer.SizeChanged+=delegate{fitFooter();};fitFooter();
+            // 页面只创建一次，切换仅改变可见性，尚未保存的控件状态不会丢失。
             dark.Top = 290; accent.Top = 291; info.Top = 900;
             Control[] fields = body.Controls.Cast<Control>().OrderBy(c => c.Top).ToArray();
-            FlowLayoutPanel layout = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(24, 8, 24, 20) };
-            body.Controls.Clear(); body.Controls.Add(layout);
+            body.Controls.Clear();
+            for(int i=0;i<pages.Length;i++) {
+                pages[i]=new FlowLayoutPanel {FlowDirection=FlowDirection.TopDown,WrapContents=false,AutoSize=true,AutoSizeMode=AutoSizeMode.GrowAndShrink,Padding=new Padding(24,20,24,24),Visible=false,AccessibleName="设置内容："+tabNames[i]};
+                body.Controls.Add(pages[i]);
+            }
+            int page=0;
             foreach (Control field in fields)
             {
+                if(field==dark)page=1;else if(field==auto)page=2;else if(field==diagnostics||field==info)page=3;
+                FlowLayoutPanel layout=pages[page];
                 if (field == reset) continue;
                 if (field == browse)
                 {
@@ -197,7 +227,7 @@ namespace FeiqLight
                     browse.Text = "选择文件夹"; browse.Dock = reset.Dock = DockStyle.Fill; browse.BackColor = reset.BackColor = Theme.Ice;
                     browse.Margin = new Padding(0, 0, 6, 0); reset.Margin = new Padding(6, 0, 0, 0); actions.Controls.Add(browse, 0, 0); actions.Controls.Add(reset, 1, 0); layout.Controls.Add(actions); continue;
                 }
-                string section = field == fields[0] ? "个人资料" : field == close ? "消息与窗口" : field == auto ? "文件接收" : field == dark ? "外观" : field == diagnostics ? "故障诊断" : field == info ? "本机信息" : null;
+                string section = field == fields[0] ? "个人资料" : field == close ? "消息与窗口" : field == auto ? "文件接收" : field == dark ? "聊天外观" : field == diagnostics ? "故障诊断" : field == info ? "本机信息" : null;
                 if (section != null) {
                     if(layout.Controls.Count>0) { Panel divider=new Panel { Height=1, BackColor=Theme.Line, Margin=new Padding(0,16,0,16) };layout.Controls.Add(divider); }
                     Label heading = Theme.Label(section, Theme.Section, Theme.Ink); heading.Height = 28; heading.Margin = new Padding(0, 0, 0, 8); layout.Controls.Add(heading);
@@ -205,8 +235,18 @@ namespace FeiqLight
                 if(field is Label && field != hint && field != info && field != startupHint && field != privacy) field.Height=22;
                 field.Margin = new Padding(0, 0, 0, field is Label ? 6 : 12); layout.Controls.Add(field);
             }
-            Action fit = delegate { int width = Math.Max(260, body.ClientSize.Width - 48 - SystemInformation.VerticalScrollBarWidth); foreach (Control field in layout.Controls) field.Width = width; };
-            body.SizeChanged += delegate { fit(); }; fit();
+            TableLayoutPanel navigation=new TableLayoutPanel {Dock=DockStyle.Top,Height=56,ColumnCount=4,RowCount=1,Padding=new Padding(16,0,16,0),AccessibleName="设置标签页"};
+            navigation.RowStyles.Add(new RowStyle(SizeType.Percent,100));
+            for(int i=0;i<tabs.Length;i++) {
+                int index=i;navigation.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,25));
+                tabs[i]=new SettingsTabButton {Text=tabNames[i],AccessibleName="设置标签："+tabNames[i],Dock=DockStyle.Fill,Margin=Padding.Empty};
+                tabs[i].Click+=delegate {SelectTab(index);};
+                tabs[i].KeyDown+=delegate(object sender,KeyEventArgs e){if(e.KeyCode==Keys.Left||e.KeyCode==Keys.Right){int next=(selectedTab+(e.KeyCode==Keys.Right?1:3))%4;SelectTab(next);tabs[next].Focus();e.Handled=true;}};
+                navigation.Controls.Add(tabs[i],i,0);
+            }
+            Surface.Controls.Add(navigation);navigation.BringToFront();body.BringToFront();
+            Action fit = delegate { int width = Math.Max(260, body.ClientSize.Width - 48 - SystemInformation.VerticalScrollBarWidth); foreach(FlowLayoutPanel layout in pages)foreach (Control field in layout.Controls) field.Width = width; };
+            body.SizeChanged += delegate { fit(); }; fit();SelectTab(0);
         }
         protected override void OnLoad(EventArgs e) { base.OnLoad(e); Height = Math.Min(Height, Screen.FromControl(this).WorkingArea.Height - 24); }
         private TextBox Input(string title, string value, int y, int max)

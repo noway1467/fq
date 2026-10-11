@@ -23,6 +23,7 @@ namespace FeiqLight.Tests
         }
         private static T Find<T>(Control root, string accessible) where T : Control { return All(root).OfType<T>().Single(c => c.AccessibleName == accessible); }
         private static Button Button(Control root, string text) { return All(root).OfType<Button>().Single(c => c.Text.StartsWith(text)); }
+        private static void SettingsTab(SettingsDialog dialog,string name) { Find<Button>(dialog,"设置标签："+name).PerformClick();Application.DoEvents(); }
         private static void Check(bool value, string error) { if (!value) throw new Exception(error); }
         private static void Pump(Func<bool> done, string message)
         {
@@ -273,6 +274,46 @@ namespace FeiqLight.Tests
         }
         public static void Run(string directory, Action<string, Action> test)
         {
+            test("会话排序：置顶优先、在线自动靠前、上下线不串会话或草稿",()=>{
+                string folder=Path.Combine(directory,"online-order");LocalStore store=new LocalStore(folder);long now=DateTime.UtcNow.Ticks;
+                AppSettings settings=new AppSettings {CloseToTray=false,ReceiveFolder=Path.Combine(folder,"received"),Conversations=Enumerable.Range(0,4).Select(i=>new SavedConversation {Endpoint="127.0.0.1:"+(33425+i),Login="sort-"+i,Nickname="联系人 "+i,Pinned=i==0,MessageUtcTicks=now-TimeSpan.FromMinutes(i==1?0:i==2?20:i==3?10:30).Ticks}).ToArray()};
+                using(LanService node=new LanService(settings,Port(),true,"sort-ui"))using(MainForm main=new MainForm(node,store)) {
+                    Peer[] peers=node.Peers.OrderBy(p=>p.Login).ToArray();peers[2].Online=true;peers[3].Online=true;
+                    main.Show();main.NetworkStarted();Application.DoEvents();ConversationList list=Find<ConversationList>(main,"会话列表");
+                    Check(list.Items.Select(i=>i.Peer.Login).SequenceEqual(new[]{"sort-0","sort-3","sort-2","sort-1"}),"置顶/在线/最近消息顺序错误");
+                    main.OpenChat(peers[1]);ChatForm active=main.ActiveChat;RichTextBox editor=Find<RichTextBox>(active,"消息输入框");editor.Text="排序不能丢的草稿";
+                    peers[3].Online=false;main.NetworkStarted();Application.DoEvents();Check(list.Items.Select(i=>i.Peer.Login).SequenceEqual(new[]{"sort-0","sort-2","sort-1","sort-3"}),"离线未回到普通离线组");
+                    Check(main.ActiveChat==active&&list.SelectedId==peers[1].Id&&editor.Text=="排序不能丢的草稿","重排切换了会话或丢了草稿");
+                    typeof(MainForm).GetMethod("ShowConversationMenu",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(main,new object[]{peers[1]});ContextMenuStrip menu=(ContextMenuStrip)typeof(MainForm).GetField("conversationMenu",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(main);menu.Items.Cast<ToolStripItem>().Single(i=>i.Text=="置顶会话").PerformClick();menu.Close();Application.DoEvents();
+                    Check(list.Items[0].Peer==peers[1]&&store.LoadSettings().Conversations.Single(c=>c.Login=="sort-1").Pinned,"置顶入口未即时排序或持久化");
+                    TextBox query=All(main).OfType<TextBox>().Single();query.Text="联系人";Check(list.Items[0].Peer==peers[1],"搜索打乱置顶顺序");query.Clear();
+                    Render(main,"preview-online-pinned-order");main.ExitApplication();
+                }
+                using(LanService restored=new LanService(store.LoadSettings(),Port(),true,"sort-restored"))Check(restored.Peers.Single(p=>p.Login=="sort-1").Pinned,"重启丢失置顶");
+            });
+            test("设置标签页：独立内容、跨页保留、错误定位及保存取消",()=>{
+                string folder=Path.Combine(directory,"settings-tabs");AppSettings original=new AppSettings {Nickname="原昵称",ReceiveFolder=Path.Combine(folder,"received")};
+                foreach(bool night in new[]{false,true}) {
+                    Theme.Change(night,"blue");using(SettingsDialog dialog=new SettingsDialog(original,folder,2425)) {
+                        dialog.Show();Application.DoEvents();Find<TextBox>(dialog,"昵称").Text="标签页修改";
+                        string[] names={"通用","外观","文件","诊断"};
+                        for(int i=0;i<names.Length;i++) {
+                            SettingsTab(dialog,names[i]);Control[] pages=All(dialog).Where(c=>(c.AccessibleName??"").StartsWith("设置内容：")).ToArray();
+                            Check(pages.Count(c=>c.Visible)==1&&pages.Single(c=>c.Visible).AccessibleName=="设置内容："+names[i],"设置分类混在一起");
+                            Check(Find<TextBox>(dialog,"昵称").Text=="标签页修改","切换丢失修改");
+                            Render(dialog,"preview-settings-tab-"+i+(night?"-dark":""));
+                        }
+                        object[] keyArgs={Message.Create(dialog.Handle,0,IntPtr.Zero,IntPtr.Zero),Keys.Control|Keys.Tab};typeof(SettingsDialog).GetMethod("ProcessCmdKey",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(dialog,keyArgs);Check(Find<TextBox>(dialog,"昵称").Visible,"Ctrl+Tab 未循环切换");
+                        Button general=Find<Button>(dialog,"设置标签：通用");Check((bool)general.GetType().GetMethod("IsInputKey",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(general,new object[]{Keys.Right}),"标签吞掉方向键");
+                        typeof(Control).GetMethod("OnKeyDown",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(general,new object[]{new KeyEventArgs(Keys.Right)});Check(Find<TableLayoutPanel>(dialog,"主题颜色").Visible,"右方向键未切换标签");
+                        SettingsTab(dialog,"外观");Find<Button>(dialog,"紫罗兰").PerformClick();Find<TextBox>(dialog,"昵称").Text="";Button(dialog,"保存").PerformClick();
+                        Check(Find<TextBox>(dialog,"昵称").Visible&&dialog.DialogResult!=DialogResult.OK,"隐藏页校验没有跳回通用");
+                        Find<TextBox>(dialog,"昵称").Text="最终昵称";SettingsTab(dialog,"诊断");Button(dialog,"保存").PerformClick();
+                        Check(dialog.Value!=null&&dialog.Value.Nickname=="最终昵称"&&dialog.Value.Accent=="purple","跨标签保存漏掉值");dialog.Close();
+                    }
+                }
+                Theme.Change(false,"blue");using(SettingsDialog dialog=new SettingsDialog(original,folder,2425)){dialog.Show();SettingsTab(dialog,"外观");Find<ToggleSwitch>(dialog,"夜间模式").Checked=true;Button(dialog,"取消").PerformClick();Check(dialog.Value==null&&!original.DarkMode,"取消修改了设置");}
+            });
             test("全文窗口：只读选段复制、尾部可达、气泡有界折叠",()=>{
                 string text=String.Concat(Enumerable.Repeat("首行 中文 👩🏽‍💻\n第二行  保留空格\n",2000));
                 using(Form host=new Form{ClientSize=new Size(560,450)})using(BubbleHistory history=new BubbleHistory{Dock=DockStyle.Fill}) {
@@ -368,7 +409,7 @@ namespace FeiqLight.Tests
             test("外观设置：预设、字号、背景保存与预览排版",()=>{
                 string folder=Path.Combine(directory,"appearance-ui");LocalStore store=new LocalStore(folder);AppSettings settings=new AppSettings {ReceiveFolder=Path.Combine(folder,"received")};
                 using(SettingsDialog dialog=new SettingsDialog(settings,folder,2425)){
-                    dialog.Show();Application.DoEvents();Panel scroll=(Panel)typeof(SettingsDialog).GetField("body",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(dialog);
+                    dialog.Show();Application.DoEvents();SettingsTab(dialog,"外观");Panel scroll=(Panel)typeof(SettingsDialog).GetField("body",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(dialog);
                     Control appearance=All(dialog).Single(c=>c.AccessibleName=="聊天外观");scroll.ScrollControlIntoView(appearance);Application.DoEvents();Button(dialog,"薄荷").PerformClick();Find<TrackBar>(dialog,"聊天字号").Value=16;All(dialog).OfType<Button>().Single(b=>b.Text.EndsWith("流线")).PerformClick();foreach(TableLayoutPanel grid in All(appearance).OfType<TableLayoutPanel>()){Button[] buttons=grid.Controls.OfType<Button>().ToArray();for(int i=0;i<buttons.Length;i++)for(int j=i+1;j<buttons.Length;j++){if(buttons[i].Top==buttons[j].Top)Check(Math.Max(buttons[i].Left,buttons[j].Left)-Math.Min(buttons[i].Right,buttons[j].Right)>=10,"外观按钮横向间距不足");if(buttons[i].Left==buttons[j].Left)Check(Math.Max(buttons[i].Top,buttons[j].Top)-Math.Min(buttons[i].Bottom,buttons[j].Bottom)>=10,"外观按钮纵向间距不足");}}Render(dialog,"preview-appearance-settings");
                     Button(dialog,"保存").PerformClick();Check(dialog.Value!=null&&dialog.Value.ChatFontSize==16&&dialog.Value.ChatBackground=="lines"&&dialog.Value.Accent=="green"&&!dialog.Value.DarkMode,"外观设置未保存");store.SaveSettings(dialog.Value);Check(store.LoadSettings().ChatFontSize==16,"字号重启不保留");dialog.Close();
                 }
@@ -384,7 +425,7 @@ namespace FeiqLight.Tests
                 log.Clear();Check(Directory.GetFiles(Path.Combine(folder,"diagnostics")).Length==0&&File.Exists(Path.Combine(folder,"settings.json")),"清除误删设置");
                 settings.ReceiveFolder=Path.Combine(folder,"received");
                 using(SettingsDialog dialog=new SettingsDialog(settings,folder,2425)) {
-                    dialog.Show();Application.DoEvents();ToggleSwitch toggle=Find<ToggleSwitch>(dialog,"记录故障诊断");Check(!toggle.Checked,"诊断开关默认不符");toggle.Checked=true;
+                    dialog.Show();Application.DoEvents();SettingsTab(dialog,"诊断");ToggleSwitch toggle=Find<ToggleSwitch>(dialog,"记录故障诊断");Check(!toggle.Checked,"诊断开关默认不符");toggle.Checked=true;
                     Panel scroll=(Panel)typeof(SettingsDialog).GetField("body",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(dialog);scroll.ScrollControlIntoView(Button(dialog,"清除诊断记录"));Application.DoEvents();Render(dialog,"preview-diagnostics-settings");
                     Button(dialog,"保存").PerformClick();Check(dialog.Value!=null&&dialog.Value.DiagnosticsEnabled,"设置页面未保存诊断开关");dialog.Close();
                 }
@@ -863,6 +904,8 @@ namespace FeiqLight.Tests
                         MethodInfo insert=typeof(ChatForm).GetMethod("InsertEmoji",BindingFlags.Instance|BindingFlags.NonPublic);
                         Check((bool)insert.Invoke(chatA,new object[]{"👨‍👩‍👧‍👦"}),"插入失败");Check(input.Text=="前👨‍👩‍👧‍👦后","光标插入错误");
                         input.Text=new string('x',(input.MaxLength-1));input.Select(input.TextLength,0);Check(!(bool)insert.Invoke(chatA,new object[]{"😀"}),"边界插入截断了 emoji");Check(input.TextLength==(input.MaxLength-1),"拒绝后内容被修改");input.Clear();
+                        // 大输入产生的布局消息先完成，再让被测窗口获得焦点；菜单测试不能依赖桌面当前前台窗口。
+                        mainA.Activate();input.Focus();Application.DoEvents();
                         Find<Button>(chatA,"表情").PerformClick();Application.DoEvents();
                         ToolStripDropDown menu=OpenMenu();Control panel=((ToolStripControlHost)menu.Items[0]).Control;
                         ComboBox category=Find<ComboBox>(panel,"表情分类");FlowLayoutPanel grid=Find<FlowLayoutPanel>(panel,"表情网格");
@@ -944,11 +987,11 @@ namespace FeiqLight.Tests
                     });
                     test("夜间主题：保存立即生效、聊天与设置渲染、恢复浅色", () => {
                         MenuDialog<SettingsDialog>(()=>Find<Button>(mainA,"菜单").PerformClick(),"设置",dialog=>{
-                            Control accent=Find<TableLayoutPanel>(dialog,"主题颜色");((ScrollableControl)accent.Parent.Parent).ScrollControlIntoView(accent);Application.DoEvents();Render(dialog,"preview-settings-appearance");
+                            SettingsTab(dialog,"外观");Control accent=Find<TableLayoutPanel>(dialog,"主题颜色");((ScrollableControl)accent.Parent.Parent).ScrollControlIntoView(accent);Application.DoEvents();Render(dialog,"preview-settings-appearance");
                             Check(!All(dialog).OfType<ComboBox>().Any(),"设置仍使用默认下拉框");
                             Find<ToggleSwitch>(dialog,"夜间模式").Checked=true;Find<Button>(dialog,"紫罗兰").PerformClick();Button(dialog,"保存").PerformClick();
                         });Check(storeA.LoadSettings().DarkMode&&storeA.LoadSettings().Accent=="purple","主题保存失败");Check(mainA.BackColor==Theme.Surface&&Theme.Surface.GetBrightness()<.3,"夜间背景未生效");Render(mainA,"preview-night");
-                        MenuDialog<SettingsDialog>(()=>Find<Button>(mainA,"菜单").PerformClick(),"设置",dialog=>{Render(dialog,"preview-night-settings");Find<ToggleSwitch>(dialog,"夜间模式").Checked=false;Find<Button>(dialog,"经典蓝").PerformClick();Button(dialog,"保存").PerformClick();});
+                        MenuDialog<SettingsDialog>(()=>Find<Button>(mainA,"菜单").PerformClick(),"设置",dialog=>{SettingsTab(dialog,"外观");Render(dialog,"preview-night-settings");Find<ToggleSwitch>(dialog,"夜间模式").Checked=false;Find<Button>(dialog,"经典蓝").PerformClick();Button(dialog,"保存").PerformClick();});
                         Check(!storeA.LoadSettings().DarkMode&&Theme.Ink.GetBrightness()<.3,"浅色恢复失败");
                     });
                     test("统一视觉：三色明暗选中态、按钮与设置小窗口", () => {
@@ -963,7 +1006,7 @@ namespace FeiqLight.Tests
                             }
                             Theme.Change(false,"blue");
                             using(SettingsDialog dialog=new SettingsDialog(new AppSettings { AutoReceiveFiles = false },storeA.Root,a.Port)) {
-                                dialog.Show(mainA);dialog.Height=500;Application.DoEvents();Control accent=Find<TableLayoutPanel>(dialog,"主题颜色");((ScrollableControl)accent.Parent.Parent).ScrollControlIntoView(accent);Application.DoEvents();
+                                dialog.Show(mainA);dialog.Size=new Size(470,500);Application.DoEvents();SettingsTab(dialog,"外观");Control accent=Find<TableLayoutPanel>(dialog,"主题颜色");((ScrollableControl)accent.Parent.Parent).ScrollControlIntoView(accent);Application.DoEvents();
                                 Check(Button(dialog,"保存").Parent.ClientRectangle.Contains(Button(dialog,"保存").Bounds),"小窗口保存按钮不可见");Render(dialog,"preview-unified-small-settings");dialog.Close();
                             }
                         }finally {Theme.Change(false,"blue");}
