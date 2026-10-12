@@ -1,0 +1,14 @@
+飞Q 内置 emoji 默认头像
+
+Twemoji v16.0.1
+Copyright Twitter, Inc. and other contributors.
+来源：https://github.com/jdecked/twemoji/tree/v16.0.1
+图像许可：Creative Commons Attribution 4.0 International (CC BY 4.0)
+许可链接：https://creativecommons.org/licenses/by/4.0/
+完整许可见同目录 LICENSE.txt。
+
+飞Q 选取 24 张原始 72×72 PNG，按 catalog.txt 顺序合并为 atlas.png，未修改原图。
+图集为六列，每个 80×80 格子四周留 4 px 透明边，避免缩放采样串色。
+程序在显示时缩放并另绘圆形底色及在线光晕；运行时不访问外部图片服务。
+维护时可运行 tools/build-avatar-atlas.ps1 重新生成图集，需要网络。
+catalog.txt 的顺序决定默认头像映射，升级时不要重排或改变条目数量。

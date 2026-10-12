@@ -27,6 +27,26 @@ import static org.robolectric.Shadows.shadowOf;
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk=35,qualifiers="w393dp-h852dp-xhdpi")
 public final class ReliabilityTest {
+    @Test public void stableIdentityStorePreservesOldHistoryDraftAndMetadata() throws Exception {
+        Context context=RuntimeEnvironment.getApplication();String device="0123456789abcdef0123456789abcdef";
+        LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:32425"),"old","host","设备","组");String key=peer.id();
+        ChatStore store=new ChatStore(context);
+        new DraftStore(context).save(key,"未发送草稿");
+        try {
+            LanNode.Message message=new LanNode.Message();message.number=99;message.time=123;message.text="旧历史";message.state="已收到";
+            store.message(peer,message,false,false);store.edit(key,"备注",true);long number=store.conversations().get(0).number;
+            peer.conversationId=key;peer.deviceId=device;peer.endpoint=LanNode.endpoint("127.0.0.1:32426");peer.login="new";store.peer(peer);
+            assertEquals(1,store.conversations().size());assertEquals(number,store.conversations().get(0).number);
+            assertEquals("备注",store.conversations().get(0).note);assertTrue(store.conversations().get(0).pinned);assertEquals(1,store.conversations().get(0).unread);
+            assertEquals("旧历史",store.history(key).get(0).text);
+            assertEquals("未发送草稿",new DraftStore(context).read(peer.id()));
+        } finally {store.close();}
+        try(ChatStore restored=new ChatStore(context)) {LanNode.Peer saved=restored.conversations().get(0).peer;assertEquals(key,saved.id());assertEquals(device,saved.deviceId);assertEquals(32426,saved.endpoint.getPort());}
+        try(android.database.sqlite.SQLiteDatabase db=android.database.sqlite.SQLiteDatabase.create(null);ChatStore helper=new ChatStore(context)) {
+            db.execSQL("CREATE TABLE peers (id TEXT PRIMARY KEY, conversation_number INTEGER)");db.execSQL("INSERT INTO peers VALUES ('old-key',12)");helper.onUpgrade(db,5,6);
+            try(Cursor cursor=db.rawQuery("SELECT id,conversation_number,device_id FROM peers",null)) {assertTrue(cursor.moveToFirst());assertEquals("old-key",cursor.getString(0));assertEquals(12,cursor.getInt(1));assertTrue(cursor.isNull(2));}
+        }
+    }
     @Test public void delayedDiscoveryQueueDoesNotDelayRealTextSend() throws Exception {
         ServiceController<ChatService> controller=Robolectric.buildService(ChatService.class).create();ChatService service=controller.get();CountDownLatch release=new CountDownLatch(1),entered=new CountDownLatch(1);
         try(DatagramSocket target=new DatagramSocket(0,InetAddress.getLoopbackAddress());LanNode node=node()) {

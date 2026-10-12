@@ -7,14 +7,15 @@ android {
         applicationId 'org.feiqlight.android'
         minSdk 26
         targetSdk 36
-        versionCode 26
-        versionName '0.2.23'
+        versionCode 28
+        versionName '0.3.24'
     }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
     buildFeatures { buildConfig true }
+    sourceSets.main.assets.srcDirs += ['../../assets/avatars']
     buildTypes {
         release {
             minifyEnabled true

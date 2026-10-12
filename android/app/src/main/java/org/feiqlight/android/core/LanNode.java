@@ -13,15 +13,15 @@ public final class LanNode implements AutoCloseable {
     // 不设产品级单文件上限，长度仍受协议和文件系统能力约束。
     public static final long MAX_FILE=Long.MAX_VALUE;
     public static final class Peer {
-        public final InetSocketAddress endpoint;
-        public final String login, host;
+        public volatile InetSocketAddress endpoint;
+        public volatile String login, host, deviceId, conversationId;
         public volatile String name, group;
         public volatile boolean utf8, online;
         public volatile long lastSeen;
         public Peer(InetSocketAddress endpoint,String login,String host,String name,String group) {
             this.endpoint=endpoint; this.login=login; this.host=host; this.name=name; this.group=group;
         }
-        public String id() { return endpoint.getAddress().getHostAddress()+":"+endpoint.getPort()+"/"+login; }
+        public String id() { return conversationId!=null ? conversationId : deviceId!=null ? "device:"+deviceId : endpoint.getAddress().getHostAddress()+":"+endpoint.getPort()+"/"+login; }
     }
     public static final class Message {
         public long number, time;
@@ -82,6 +82,14 @@ public final class LanNode implements AutoCloseable {
     private final boolean loopback;
     private final int port;
     private final String login, host;
+    private String deviceId;
+    public void setDeviceId(String value) {
+        if(udp!=null)throw new IllegalStateException("需在启动前设置身份");
+        deviceId=Protocol.normalizeDeviceId(value);
+    }
+    public void rememberPeers(Collection<Peer> saved) {
+        synchronized(gate) { for(Peer peer:saved) if(peers.size()<1000 && (!loopback || peer.endpoint.getAddress().isLoopbackAddress())) { peer.conversationId=peer.id();peers.put(peer.id(),peer); } }
+    }
     public volatile String nickname, group;
     private DatagramSocket udp;
     private ServerSocket tcp;
@@ -118,7 +126,8 @@ public final class LanNode implements AutoCloseable {
             return new InetSocketAddress(address,p);
         } catch (IllegalArgumentException e) { throw new IOException("IPv4 地址或端口无效"); }
     }
-    private byte[] encode(int command,String body,String extra) { return Protocol.encode(sequence.incrementAndGet(),login,host,command|Protocol.UTF8,body,extra); }
+    // TCP 请求仍以首个 NUL 结束，身份扩展只用于 UDP，兼容旧端文件服务。
+    private byte[] encode(int command,String body,String extra) { return Protocol.encode(sequence.incrementAndGet(),login,host,command|Protocol.UTF8,body,extra,(command&255)==Protocol.GET_FILE?null:deviceId); }
     private void send(byte[] bytes,InetSocketAddress to) throws IOException {
         if (closed || udp==null) throw new IOException("尚未连接局域网");
         if (!(to.getAddress() instanceof Inet4Address) || (loopback && !to.getAddress().isLoopbackAddress())) throw new IOException("无效的目标地址");
@@ -175,7 +184,7 @@ public final class LanNode implements AutoCloseable {
             if (p.mode()==Protocol.ACK) {
                 try {
                     Pending item=pending.get(Long.parseLong(p.body));
-                    if (item!=null && item.peer.endpoint.equals(from) && item.peer.login.equals(p.login)) {
+                    if (item!=null && item.peer.endpoint.equals(from) && item.peer.login.equals(p.login) && (p.deviceId==null || item.peer.deviceId==null || item.peer.deviceId.equals(p.deviceId))) {
                         pending.remove(item.message.number); item.message.state="已送达"; listener.message(item.peer,item.message.copy(),true);
                     }
                 } catch (NumberFormatException ignored) { } return;
@@ -186,9 +195,16 @@ public final class LanNode implements AutoCloseable {
             }
             if (p.mode()!=Protocol.ENTRY && p.mode()!=Protocol.ANSWER && p.mode()!=Protocol.ABSENCE && p.mode()!=Protocol.EXIT && p.mode()!=Protocol.MESSAGE) return;
             Peer peer=new Peer(from,p.login,p.host,p.login,"我的局域网");
-            Peer existing=peers.get(peer.id());
+            Peer existing=null;
+            if(p.deviceId!=null) for(Peer candidate:peers.values()) if(p.deviceId.equals(candidate.deviceId)) { existing=candidate;break; }
+            if(existing==null) for(Peer candidate:peers.values())
+                if(candidate.endpoint.equals(from) && candidate.login.equals(p.login) && (p.deviceId==null || candidate.deviceId==null || candidate.deviceId.equals(p.deviceId))) { existing=candidate;break; }
+            peer.deviceId=p.deviceId;
             if (existing!=null) peer=existing;
             else { if (peers.size()>=1000) return; peers.put(peer.id(),peer); }
+            // 旧会话保留本地主键，历史、草稿和已下载文件路径无需破坏性迁移。
+            peer.conversationId=peer.id(); if(p.deviceId!=null)peer.deviceId=p.deviceId;
+            peer.endpoint=from;peer.login=p.login;peer.host=p.host;
             if (p.mode()==Protocol.ENTRY || p.mode()==Protocol.ANSWER || p.mode()==Protocol.ABSENCE) {
                 peer.name=p.body.trim().isEmpty()?p.login:Protocol.prefix(p.body,128);
                 peer.group=Protocol.prefix(p.extra,128);
@@ -208,10 +224,21 @@ public final class LanNode implements AutoCloseable {
         }
     }
     public Message sendMessage(Peer peer,String text,List<File> paths) throws IOException {
+        return sendMessage(peer,text,paths,null);
+    }
+    public Message retryMessage(Peer peer,Message original) throws IOException {
+        synchronized(gate) {
+            if(!original.outgoing || !(original.state.contains("未确认") || original.state.equals("发送失败")) || pending.containsKey(original.number))throw new IOException("此消息正在发送或已送达");
+            if(!original.files.isEmpty())throw new IOException("请重新选择原文件发送");
+            return sendMessage(peer,original.text,Collections.emptyList(),original);
+        }
+    }
+    private Message sendMessage(Peer peer,String text,List<File> paths,Message original) throws IOException {
         if (text==null) text="";
         if (text.indexOf('\0')>=0 || (text.trim().isEmpty() && paths.isEmpty())) throw new IOException("请输入消息或选择文件");
         if (paths.size()>20) throw new IOException("每次最多发送 20 个文件");
         Message m=new Message(); m.number=sequence.incrementAndGet(); m.time=System.currentTimeMillis(); m.text=text; m.state="等待确认"; m.outgoing=true;
+        if(original!=null) { m.number=original.number;m.time=original.time; }
         Map<String,Offer> additions=new HashMap<>();
         for (File file:paths) {
             if (!file.isFile() || !Protocol.safeName(file.getName())) throw new IOException("文件不可读、名称不安全或过长");
@@ -220,13 +247,13 @@ public final class LanNode implements AutoCloseable {
             Offer o=new Offer(); o.file=file; o.size=file.length(); o.modified=file.lastModified(); o.address=peer.endpoint.getAddress(); o.expires=System.nanoTime()+TimeUnit.MINUTES.toNanos(30); additions.put(m.number+":"+id,o);
             o.peer=peer; o.packet=m.number; o.id=id;
         }
-        byte[] bytes=Protocol.encode(m.number,login,host,Protocol.MESSAGE|Protocol.CHECK|(peer.utf8?Protocol.UTF8:0)|(paths.isEmpty()?0:Protocol.FILE),text,paths.isEmpty()?null:Protocol.files(m.files));
+        byte[] bytes=Protocol.encode(m.number,login,host,Protocol.MESSAGE|Protocol.CHECK|(peer.utf8?Protocol.UTF8:0)|(paths.isEmpty()?0:Protocol.FILE),text,paths.isEmpty()?null:Protocol.files(m.files),deviceId);
         synchronized (gate) {
             if (closed || udp==null) throw new IOException("尚未连接局域网");
             if (pending.size()>=256 || offers.size()+additions.size()>1000) throw new IOException("待处理任务过多，请稍后再试");
             Pending item=new Pending(); item.peer=peer; item.message=m; item.bytes=bytes; item.last=System.nanoTime(); pending.put(m.number,item); offers.putAll(additions);
             // 先发布记录再发送，避免本机 ACK 先到而被初始“等待确认”覆盖。
-            listener.message(peer,m.copy(),false);
+            listener.message(peer,m.copy(),original!=null);
             try { send(bytes,peer.endpoint); }
             catch (IOException e) { pending.remove(m.number); offers.keySet().removeAll(additions.keySet()); m.state="发送失败"; listener.message(peer,m.copy(),true); throw e; }
         }

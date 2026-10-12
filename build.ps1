@@ -11,11 +11,12 @@ $testOut = Join-Path $root 'build'
 New-Item -ItemType Directory -Force -Path $testOut | Out-Null
 $sources = @(Get-ChildItem -LiteralPath (Join-Path $root 'src') -Filter '*.cs' | ForEach-Object FullName)
 $common = @('/nologo','/utf8output','/optimize+','/warn:4','/warnaserror+','/platform:anycpu','/r:System.dll','/r:System.Core.dll','/r:System.Drawing.dll','/r:System.Windows.Forms.dll','/r:System.Web.Extensions.dll')
-& $compiler @common '/target:exe' "/out:$testOut\MakeIcon.exe" "$root\src\Theme.cs" "$root\tools\MakeIcon.cs"
+& $compiler @common '/target:exe' "/out:$testOut\MakeIcon.exe" "$root\src\Theme.cs" "$root\src\EmojiAvatars.cs" "$root\tools\MakeIcon.cs"
 if ($LASTEXITCODE -ne 0) { throw '图标生成工具编译失败' }
 & "$testOut\MakeIcon.exe" "$testOut\app.ico"
 if ($LASTEXITCODE -ne 0) { throw '图标生成失败' }
 $common += @("/resource:$root\src\emoji-atlas.png,FeiqLight.EmojiAtlas.png","/resource:$root\src\emoji-atlas.txt,FeiqLight.EmojiAtlas.txt","/resource:$root\docs\Twemoji-LICENSE-GRAPHICS.txt,FeiqLight.Twemoji-LICENSE-GRAPHICS.txt")
+$common += @("/resource:$root\assets\avatars\atlas.png,FeiqLight.Avatars.png","/resource:$root\assets\avatars\catalog.txt,FeiqLight.Avatars.txt")
 & $compiler @common '/target:winexe' "/win32icon:$testOut\app.ico" "/win32manifest:$root\src\app.manifest" "/out:$out\飞Q.exe" @sources
 if ($LASTEXITCODE -ne 0) { throw '应用编译失败' }
 if ($Test) {

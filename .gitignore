@@ -5,6 +5,9 @@
 !/src/
 !/tests/
 !/tools/
+!/assets/
+/assets/*
+!/assets/avatars/
 !/android/
 !/docs/
 !/build.ps1

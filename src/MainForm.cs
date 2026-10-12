@@ -90,6 +90,7 @@ namespace FeiqLight
             SavedConversation[] old=SavedConversation.Normalize(network.Settings.Conversations);
             SavedConversation[] current=SavedConversation.Normalize(peers.Select(p=>new SavedConversation {
                 Endpoint=p.Endpoint.ToString(),Login=p.Login,Host=p.Host,Nickname=p.Nickname,Group=p.Group,Note=p.Note,Pinned=p.Pinned,Hidden=p.Hidden,ConversationNumber=p.ConversationNumber,
+                DeviceId=p.DeviceId,ConversationId=p.Id,
                 Preview=previews.ContainsKey(p.Id)?previews[p.Id]:"",Unread=unread.ContainsKey(p.Id)?unread[p.Id]:0,
                 MessageUtcTicks=times.ContainsKey(p.Id)&&times[p.Id]!=default(DateTime)?times[p.Id].ToUniversalTime().Ticks:0 }));
             if (new HashSet<string>(previous).SetEquals(next)&&old.Length==current.Length&&old.Zip(current,(a,b)=>a.SameAs(b)).All(equal=>equal)) return true;
@@ -199,7 +200,7 @@ namespace FeiqLight
         {
             bool persisted=RememberPeerAddresses();
             List<Peer> all = network.Peers.Where(p=>!p.Hidden).ToList(); string query = search.Text.Trim();
-            string next = filter + "|" + query + "|" + started + "|" + String.Join("|", all.Select(p => p.Id + p.DisplayName + p.Pinned + p.Online + p.Group)) + "|" + String.Join("|", recent) + "|" + String.Join("|", unread.Select(p => p.Key + p.Value)) + "|" + String.Join("|", previews.Values);
+            string next = filter + "|" + query + "|" + started + "|" + String.Join("|", all.Select(p => p.Id + p.DisplayName + p.Pinned + p.Online + p.Group + p.Endpoint + p.Host)) + "|" + String.Join("|", recent) + "|" + String.Join("|", unread.Select(p => p.Key + p.Value)) + "|" + String.Join("|", previews.Values);
             if (next == fingerprint) return; fingerprint = next;
             var rows = all.Where(p => filter != 2 || p.Online).Where(p => filter != 1 || (unread.ContainsKey(p.Id) && unread[p.Id] > 0))
                 .Where(p => (p.DisplayName + " " + p.Nickname + " " + p.Group + " " + p.Host + " " + p.Endpoint + " " + (previews.ContainsKey(p.Id) ? previews[p.Id] : "")).IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0)
@@ -265,6 +266,7 @@ namespace FeiqLight
                 dialog.Value.Window = network.Settings.Window;
                 dialog.Value.KnownPeers = network.Settings.KnownPeers;
                 dialog.Value.Conversations = network.Settings.Conversations;
+                dialog.Value.DeviceId = network.Settings.DeviceId;
                 try { if (startupAvailable) startup.SaveSettings(store, network.Settings, dialog.Value); else store.SaveSettings(dialog.Value); network.Settings = dialog.Value; Theme.Change(dialog.Value.DarkMode,dialog.Value.Accent); foreach(ChatForm chat in chats.Values)chat.ApplyAppearance(); RefreshFilters(); RefreshNetwork(); ReceiveAutomatically(); } catch (Exception e) { status.Text = "设置保存失败：" + e.Message; }
             }
         }

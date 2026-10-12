@@ -18,7 +18,7 @@ public final class Protocol {
     public static final class Packet {
         public long number;
         public int command;
-        public String login, host, body, extra;
+        public String login, host, body, extra, deviceId;
         public int mode() { return command & 255; }
     }
     public static final class Attachment {
@@ -38,12 +38,19 @@ public final class Protocol {
         return value.substring(0,end);
     }
     public static byte[] encode(long number, String login, String host, int command, String body, String extra) {
+        return encode(number,login,host,command,body,extra,null);
+    }
+    public static String normalizeDeviceId(String value) {
+        return value!=null && value.matches("[0-9a-fA-F]{32}") && !value.equals("00000000000000000000000000000000") ? value.toLowerCase(Locale.ROOT) : null;
+    }
+    public static byte[] encode(long number, String login, String host, int command, String body, String extra, String deviceId) {
         if (number < 0 || field(login).length() > 128 || field(host).length() > 128)
             throw new IllegalArgumentException("无效的报文头");
         if ((body!=null && body.indexOf('\0')>=0) || (extra!=null && extra.indexOf('\0')>=0))
             throw new IllegalArgumentException("消息不能包含空字符");
         String wire="1:"+number+":"+field(login)+":"+field(host)+":"+Integer.toUnsignedString(command)+":"+(body==null?"":body)+"\0";
-        if (extra != null) wire+=extra+"\0";
+        if (extra != null || deviceId != null) wire+=(extra==null?"":extra)+"\0";
+        if (normalizeDeviceId(deviceId)!=null) wire+="FQID="+normalizeDeviceId(deviceId)+"\0";
         byte[] bytes;
         try {
             ByteBuffer encoded=((command & UTF8)!=0 ? StandardCharsets.UTF_8 : GBK).newEncoder().encode(CharBuffer.wrap(wire));
@@ -68,7 +75,8 @@ public final class Protocol {
             if (parts[2].length()>128 || parts[3].length()>128) return null;
             String[] content=parts[5].split("\u0000",-1);
             Packet p=new Packet(); p.number=number; p.command=(int)cmd; p.login=parts[2]; p.host=parts[3];
-            p.body=content[0]; p.extra=content.length>1 ? content[1] : ""; return p;
+            p.body=content[0]; p.extra=content.length>1 ? content[1] : "";
+            p.deviceId=content.length>2 && content[2].startsWith("FQID=") ? normalizeDeviceId(content[2].substring(5)) : null; return p;
         } catch (IllegalArgumentException | IndexOutOfBoundsException | CharacterCodingException e) { return null; }
     }
     public static boolean safeName(String name) {

@@ -87,6 +87,34 @@ namespace FeiqLight.Tests
             root = Path.Combine(Path.GetFullPath(dataRoot), "FeiqLight-tests-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(root);
             try
             {
+                Run("稳定设备身份：协议兼容、地址与登录变化、旧会话升级及重启", () => {
+                    string id="0123456789abcdef0123456789abcdef"; Packet packet;
+                    Assert(Protocol.TryParse(Protocol.Encode(1,"a","host",Protocol.Entry|Protocol.Utf8,"设备","组",id),out packet)&&packet.DeviceId==id&&packet.Extra=="组","身份扩展破坏基础字段");
+                    Assert(Protocol.NormalizeDeviceId("../invalid")==null,"接受非法身份");
+                    LocalStore store=new LocalStore(Path.Combine(root,"identity"));AppSettings settings=store.LoadSettings();store.SaveSettings(settings);
+                    Assert(store.LoadSettings().DeviceId==settings.DeviceId,"本机身份未持久化");
+                    using(UdpClient first=new UdpClient(Endpoint(FreePort())))
+                    using(UdpClient moved=new UdpClient(Endpoint(FreePort()))) {
+                        string oldId=first.Client.LocalEndPoint+"/old";
+                        settings.Conversations=new[]{new SavedConversation{Endpoint=first.Client.LocalEndPoint.ToString(),Login="old",Nickname="同名",Note="备注",Pinned=true,ConversationNumber=12}};
+                        using(LanService node=new LanService(settings,FreePort(),true,"local")) {
+                            node.Start();byte[] bytes=Protocol.Encode(2,"old","host",Protocol.AnswerEntry|Protocol.Utf8,"同名","组",id);first.Send(bytes,bytes.Length,Endpoint(node.Port));
+                            Wait(()=>node.Peers.Any(p=>p.DeviceId==id),"旧会话未升级",3000);Peer peer=node.Peers.Single();
+                            Assert(peer.Id==oldId&&peer.Note=="备注"&&peer.Pinned&&peer.ConversationNumber==12,"升级改变旧历史主键或元数据");
+                            bytes=Protocol.Encode(3,"new","host2",Protocol.AnswerEntry|Protocol.Utf8,"同名","组",id);moved.Send(bytes,bytes.Length,Endpoint(node.Port));
+                            Wait(()=>peer.Login=="new","地址变化未更新",3000);Assert(node.Peers.Count==1&&peer.Id==oldId&&peer.Endpoint.Equals(moved.Client.LocalEndPoint),"地址变化分裂会话");
+                            settings.Conversations=new[]{new SavedConversation{Endpoint=peer.Endpoint.ToString(),Login=peer.Login,DeviceId=peer.DeviceId,ConversationId=peer.Id,Nickname=peer.Nickname,Note=peer.Note}};store.SaveSettings(settings);
+                        }
+                        using(LanService restored=new LanService(store.LoadSettings(),FreePort(),true,"local"))Assert(restored.Peers.Single().Id==oldId&&restored.Peers.Single().DeviceId==id,"重启丢失身份映射");
+                    }
+                });
+                Run("应用图标：七尺寸真彩色 ICO 和运行时颜色一致", () => {
+                    byte[] bytes=Theme.AppIconBytes();Assert(BitConverter.ToUInt16(bytes,4)==7,"缺少多尺寸图标");
+                    using(var stream=new MemoryStream(bytes))using(var icon=new System.Drawing.Icon(stream,32,32))using(var bitmap=icon.ToBitmap()) {
+                        var color=bitmap.GetPixel(16,5);Assert(color.B>color.R+50&&color.G>color.R+10,"应用图标变灰");
+                    }
+                    using(var bitmap=Theme.AppIcon.ToBitmap())Assert(bitmap.GetPixel(16,5).B>bitmap.GetPixel(16,5).R+50,"运行时图标变灰");
+                });
                 Run("同名会话：固定编号、旧配置迁移、隐藏备注及新增身份不重排", () => {
                     LocalStore store=new LocalStore(Path.Combine(root,"conversation-numbers"));
                     Peer[] peers=Enumerable.Range(1,5).Select(i=>new Peer {Endpoint=Endpoint(32425),Login="phone-"+i,Nickname="phone"}).ToArray();

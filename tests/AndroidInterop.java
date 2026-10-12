@@ -15,9 +15,11 @@ public final class AndroidInterop {
             public void message(LanNode.Peer peer,LanNode.Message message,boolean update) { if(!message.outgoing) incoming.add(message); if(update) updates.add(message); }
         };
         try(LanNode node=new LanNode(port,true,"android-test","JVM-Android-Core","安卓测试😀","互通验证",listener)) {
+            node.setDeviceId("0123456789abcdef0123456789abcdef");
             node.start(); node.probe(LanNode.endpoint("127.0.0.1:"+windows)); LanNode.Peer peer=null;
             for(int i=0;i<500&&peer==null;i++) { for(LanNode.Peer p:node.peers()) if(p.login.equals("windows-test")) peer=p; Thread.sleep(10); }
             if(peer==null) throw new AssertionError("Windows 发现失败");
+            if(peer.deviceId==null || !peer.id().startsWith("device:"))throw new AssertionError("Windows 稳定身份未互通");
             if(!peer.name.equals("Windows 测试👩🏽‍💻")) throw new AssertionError("Windows 昵称乱码");
             for(int i=0;i<5;i++) {
                 Thread.sleep(150);long started=System.nanoTime();node.sendMessage(peer,"0",Collections.emptyList());

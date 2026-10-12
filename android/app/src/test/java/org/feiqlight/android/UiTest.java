@@ -108,7 +108,7 @@ public final class UiTest {
         }
         Map<String,String> names=new HashMap<>();
         try(ChatStore store=new ChatStore(context)) {
-            List<ChatStore.Conversation> all=store.conversations();assertEquals(5,store.getReadableDatabase().getVersion());assertEquals(2,all.stream().map(ChatStore.Conversation::displayName).distinct().count());
+            List<ChatStore.Conversation> all=store.conversations();assertEquals(6,store.getReadableDatabase().getVersion());assertEquals(2,all.stream().map(ChatStore.Conversation::displayName).distinct().count());
             for(ChatStore.Conversation c:all) {assertTrue(c.number>0);names.put(c.peer.id(),c.displayName());assertEquals("历史 #"+c.number,store.history(c.peer.id()).get(0).text);store.peer(c.peer);}
             assertTrue(all.get(0).hidden);assertTrue(all.get(0).pinned);
             LanNode.Peer fresh=new LanNode.Peer(LanNode.endpoint("127.0.0.1:32424"),"fresh","host","phone","");store.peer(fresh);assertEquals(3,store.conversations().stream().filter(c->c.peer.id().equals(fresh.id())).findFirst().get().number);
@@ -201,12 +201,38 @@ public final class UiTest {
             input.setText("旧草稿");button.performClick();shadowOf(Looper.getMainLooper()).idle();dialog=org.robolectric.shadows.ShadowDialog.getLatestDialog();Button old=(Button)descendants(dialog.getWindow().getDecorView()).stream().filter(v->v instanceof Button&&((Button)v).getText().toString().equals("😀")).findFirst().get();invoke(activity,"open",String.class,"other-emoji");old.performClick();assertEquals("",((EditText)field(activity,"editor")).getText().toString());
         }finally{ac.pause().stop().destroy();sc.destroy();}
     }
+    @Test public void emojiAvatarsShareWindowsMappingAndRenderAllBuiltIns() throws Exception {
+        Context context=RuntimeEnvironment.getApplication();EmojiAvatars avatars=EmojiAvatars.get(context);
+        assertEquals(24,avatars.count());assertSame(avatars,EmojiAvatars.get(context));assertEquals(0,avatars.index(null));
+        assertEquals(480,avatars.atlas.getWidth());assertEquals(320,avatars.atlas.getHeight());
+        for(int y=0;y<320;y++)for(int x=0;x<480;x++)if(x%80<4||x%80>=76||y%80<4||y%80>=76)assertEquals("头像透明隔离边丢失",0,Color.alpha(avatars.atlas.getPixel(x,y)));
+        String[] identities={"","127.0.0.1:2425/ghost","127.0.0.1:2425/alien","192.168.1.8:2425/测试😀"};int[] expected={0,18,2,17};
+        for(int i=0;i<identities.length;i++)assertEquals("双端映射不一致",expected[i],avatars.index(identities[i]));
+        for(boolean dark:new boolean[]{false,true}) {
+            Bitmap gallery=Bitmap.createBitmap(720,480,Bitmap.Config.ARGB_8888);
+            try {
+                Canvas canvas=new Canvas(gallery);canvas.drawColor(dark?0xff17212b:Color.WHITE);Paint label=new Paint(Paint.ANTI_ALIAS_FLAG);label.setColor(dark?Color.WHITE:0xff17212b);label.setTextSize(14);label.setTextAlign(Paint.Align.CENTER);
+                for(int i=0;i<24;i++) {
+                    String identity=Character.toString((char)('0'+i));assertEquals(i,avatars.index(identity));
+                    Bitmap image=Bitmap.createBitmap(88,88,Bitmap.Config.ARGB_8888);
+                    try {
+                        AvatarDrawable drawable=new AvatarDrawable(context,identity,i%2==0,8);drawable.setBounds(0,0,88,88);drawable.draw(new Canvas(image));
+                        Set<Integer> colors=new HashSet<>();for(int y=24;y<64;y++)for(int x=24;x<64;x++)colors.add(image.getPixel(x,y));assertTrue("头像空白或单色："+i,colors.size()>12);assertEquals(0,Color.alpha(image.getPixel(0,0)));
+                        canvas.drawBitmap(image,i%6*120+16,i/6*120+5,null);
+                    } finally {image.recycle();}
+                    canvas.drawText(avatars.description(i),i%6*120+60,i/6*120+110,label);
+                }
+                File dir=new File(System.getProperty("feiq.previewDir"));dir.mkdirs();
+                try(OutputStream output=new FileOutputStream(new File(dir,"android-emoji-avatars-"+(dark?"dark":"light")+".png"))){gallery.compress(Bitmap.CompressFormat.PNG,100,output);}
+            } finally {gallery.recycle();}
+        }
+    }
     @Test public void onlineAvatarGlowRendersAndClearsWithoutChangingTheFace() throws Exception {
         for(int faceSize:new int[]{42,56,84,112}) {
             int halo=(int)Math.ceil(faceSize*.1f),size=faceSize+halo*2;
             Bitmap offline=Bitmap.createBitmap(size,size,Bitmap.Config.ARGB_8888),online=Bitmap.createBitmap(size,size,Bitmap.Config.ARGB_8888),restored=Bitmap.createBitmap(size,size,Bitmap.Config.ARGB_8888);
             try {
-                AvatarDrawable avatar=new AvatarDrawable(0xff65bca5,false,halo);avatar.setBounds(0,0,size,size);avatar.draw(new Canvas(offline));
+                AvatarDrawable avatar=new AvatarDrawable(RuntimeEnvironment.getApplication(),"127.0.0.1:2425/ghost",false,halo);avatar.setBounds(0,0,size,size);avatar.draw(new Canvas(offline));
                 avatar.setOnline(true);avatar.draw(new Canvas(online));assertTrue(avatar.isOnline());
                 assertEquals(offline.getPixel(size/2,size/2),online.getPixel(size/2,size/2));
                 assertEquals(0,Color.alpha(offline.getPixel(size/2,halo/2)));assertTrue("头像外没有光晕",Color.alpha(online.getPixel(size/2,halo/2))>0);
@@ -232,6 +258,11 @@ public final class UiTest {
                 for(int i=0;i<2;i++) { View row=list.getAdapter().getView(i,null,list);TextView portrait=(TextView)descendants(row).stream().filter(v->v.getBackground() instanceof AvatarDrawable).findFirst().get();assertEquals(i==0,((AvatarDrawable)portrait.getBackground()).isOnline()); }
                 invoke(activity,"open",String.class,rows.get(0).peer.id());settle(service);conversations.set(service,rows);activity.changed();
                 TextView portrait=(TextView)field(activity,"chatAvatar");assertTrue(((AvatarDrawable)portrait.getBackground()).isOnline());screenshot(activity,"android-presence-chat-"+(dark?"dark":"light"));
+                assertEquals("",portrait.getText().toString());AvatarDrawable original=(AvatarDrawable)portrait.getBackground();assertEquals(EmojiAvatars.get(activity).index(rows.get(0).peer.id()),original.avatarIndex());
+                rows.get(0).note="刚改的备注";activity.changed();assertSame("改备注不应重新分配头像",original,portrait.getBackground());assertTrue(portrait.getContentDescription().toString().startsWith("刚改的备注"));
+                Method bind=MainActivity.class.getDeclaredMethod("bindAvatar",TextView.class,String.class,String.class,boolean.class);bind.setAccessible(true);
+                bind.invoke(activity,portrait,"0","同名联系人",false);assertEquals(0,((AvatarDrawable)portrait.getBackground()).avatarIndex());
+                bind.invoke(activity,portrait,"1","同名联系人",true);assertEquals(1,((AvatarDrawable)portrait.getBackground()).avatarIndex());activity.changed();
                 rows.get(0).peer.online=false;activity.changed();assertFalse(((AvatarDrawable)portrait.getBackground()).isOnline());assertTrue(portrait.getContentDescription().toString().endsWith("离线"));
                 rows.get(0).peer.online=true;activity.changed();assertTrue(((AvatarDrawable)portrait.getBackground()).isOnline());
             }
@@ -453,7 +484,9 @@ public final class UiTest {
             android.os.Bundle saved=new android.os.Bundle(); activityController.saveInstanceState(saved).pause().stop().destroy(); settle(service);
             activityController=Robolectric.buildActivity(MainActivity.class).create(saved).start().resume().visible(); activity=activityController.get(); settle(service);
             assertEquals("这份草稿只属于设计讨论",((EditText)field(activity,"editor")).getText().toString());
-            assertEquals("设",((TextView)field(activity,"chatAvatar")).getText().toString());
+            TextView restoredAvatar=(TextView)field(activity,"chatAvatar");assertEquals("",restoredAvatar.getText().toString());
+            assertEquals(EmojiAvatars.get(activity).index(a.id()),((AvatarDrawable)restoredAvatar.getBackground()).avatarIndex());
+            assertTrue(restoredAvatar.getContentDescription().toString().startsWith("设计讨论"));
         } finally { activityController.pause().stop().destroy(); serviceController.destroy(); }
     }
     @Test public void nightThemeAndOutgoingScroll() throws Exception {
@@ -537,7 +570,7 @@ public final class UiTest {
             db.execSQL("CREATE TABLE messages (id INTEGER PRIMARY KEY,peer TEXT,packet INTEGER,outgoing INTEGER,time INTEGER,text TEXT,state TEXT,files TEXT,local_files TEXT DEFAULT '[]',UNIQUE(peer,packet,outgoing))");
             db.execSQL("INSERT INTO peers(id,endpoint,login,host,name,grp) VALUES('127.0.0.1:32425/old','127.0.0.1:32425','old','host','旧联系人','')");db.execSQL("INSERT INTO messages(peer,packet,outgoing,time,text,state,files) VALUES('127.0.0.1:32425/old',1,0,1,'升级前消息','已收到','')");db.setVersion(3);
         }
-        try(ChatStore store=new ChatStore(context)){ChatStore.Conversation c=store.conversations().get(0);assertEquals("旧联系人",c.displayName());assertEquals("升级前消息",store.history(c.peer.id()).get(0).text);assertFalse(c.pinned);assertFalse(c.hidden);assertEquals(5,store.getReadableDatabase().getVersion());store.edit(c.peer.id(),"升级后备注",true);assertEquals("升级后备注",store.conversations().get(0).displayName());}
+        try(ChatStore store=new ChatStore(context)){ChatStore.Conversation c=store.conversations().get(0);assertEquals("旧联系人",c.displayName());assertEquals("升级前消息",store.history(c.peer.id()).get(0).text);assertFalse(c.pinned);assertFalse(c.hidden);assertEquals(6,store.getReadableDatabase().getVersion());store.edit(c.peer.id(),"升级后备注",true);assertEquals("升级后备注",store.conversations().get(0).displayName());}
     }
     @Test public void conversationMetadataSurvivesDiscoveryAndClearDoesNotResurrectAck() throws Exception {
         Context context=RuntimeEnvironment.getApplication();

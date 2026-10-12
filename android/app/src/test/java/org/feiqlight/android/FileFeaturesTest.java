@@ -224,7 +224,8 @@ public final class FileFeaturesTest {
             ((ExecutorService)field(service,"io")).submit(()->((ChatStore)uncheckedField(service,"store")).message(remote,failed,false,true)).get(5,TimeUnit.SECONDS);
             java.util.List<Boolean> outcomes=new ArrayList<>();service.retryMessage(remote,failed,outcomes::add);waitFor(service,()->outcomes.size()==1);assertTrue(outcomes.get(0));
             service.retryMessage(remote,failed,outcomes::add);waitFor(service,()->outcomes.size()==2);assertFalse(outcomes.get(1));
-            assertEquals("已重新发送（新消息）",((ChatStore)field(service,"store")).history(remote.id()).stream().filter(m->m.number==98765).findFirst().get().state);
+            waitFor(service,()->((ChatStore)uncheckedField(service,"store")).history(remote.id()).stream().anyMatch(m->m.number==98765&&m.state.equals("已送达")));
+            assertEquals(1,((ChatStore)field(service,"store")).history(remote.id()).stream().filter(m->m.text.equals(failed.text)).count());
         } finally { controller.destroy(); }
     }
     private static Object uncheckedField(Object o,String name) { try { return field(o,name); } catch(Exception e) { throw new AssertionError(e); } }

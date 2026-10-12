@@ -39,6 +39,8 @@ namespace FeiqLight
                     {
                         if (!profileCreated) { if (!autoStart) Notice("数据目录已占用", "多实例请使用不同的 --profile 目录。"); return; }
                         LocalStore store = new LocalStore(root); AppSettings settings = store.LoadSettings();
+                        // 身份先落盘再广播，异常退出也不会在下次启动变成新设备。
+                        store.SaveSettings(settings);
                         Theme.Configure(settings.DarkMode,settings.Accent);
                         if (!String.IsNullOrWhiteSpace(name)) settings.Nickname = name;
                         string startupFolder = Environment.GetFolderPath(Environment.SpecialFolder.Startup);

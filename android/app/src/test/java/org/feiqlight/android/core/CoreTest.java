@@ -10,6 +10,58 @@ import java.util.*;
 import java.util.concurrent.*;
 
 public final class CoreTest {
+    @Test public void legacyDatagramsDoNotReplaceUpgradedIdentityAndAckStillWorks() throws Exception {
+        int port=port();Inbox inbox=new Inbox();
+        try(DatagramSocket raw=new DatagramSocket(0,InetAddress.getLoopbackAddress());LanNode local=new LanNode(port,true,"local","host","local","组",inbox)) {
+            LanNode.Peer peer=new LanNode.Peer(new InetSocketAddress(InetAddress.getLoopbackAddress(),raw.getLocalPort()),"old","host","设备","组");
+            String key=peer.id();local.rememberPeers(Collections.singletonList(peer));local.start();String id="0123456789abcdef0123456789abcdef";
+            java.lang.reflect.Method handle=LanNode.class.getDeclaredMethod("handle",Protocol.Packet.class,InetSocketAddress.class);handle.setAccessible(true);
+            handle.invoke(local,Protocol.parse(Protocol.encode(1,"old","host",Protocol.ANSWER|Protocol.UTF8,"设备","组",id)),peer.endpoint);
+            handle.invoke(local,Protocol.parse(Protocol.encode(2,"old","host",Protocol.ANSWER|Protocol.UTF8,"设备","组")),peer.endpoint);
+            assertEquals(1,local.peers().size());assertSame(peer,local.peers().get(0));assertEquals(key,peer.id());assertEquals(id,peer.deviceId);
+            LanNode.Message sent=local.sendMessage(peer,"旧 ACK",Collections.emptyList());byte[] ack=Protocol.encode(3,"old","host",Protocol.ACK|Protocol.UTF8,Long.toString(sent.number),null);
+            raw.send(new DatagramPacket(ack,ack.length,InetAddress.getLoopbackAddress(),port));assertEquals("已送达",inbox.updates.poll(3,TimeUnit.SECONDS).state);
+        }
+    }
+    @Test public void tcpRequestWithStableIdentityStopsAtFirstNul() throws Exception {
+        int port=port();
+        try(LanNode node=new LanNode(port,true,"id","host","name","group",new Inbox())) {
+            node.setDeviceId("0123456789abcdef0123456789abcdef");
+            java.lang.reflect.Method encode=LanNode.class.getDeclaredMethod("encode",int.class,String.class,String.class);encode.setAccessible(true);
+            byte[] tcp=(byte[])encode.invoke(node,Protocol.GET_FILE,"1:0:0:",null);
+            for(int i=0;i<tcp.length-1;i++)assertNotEquals("TCP 请求尾随身份扩展",0,tcp[i]);assertEquals(0,tcp[tcp.length-1]);
+            assertNotNull(Protocol.parse((byte[])encode.invoke(node,Protocol.ACK,"1",null)).deviceId);
+        }
+    }
+    @Test public void stableIdentitySurvivesEndpointAndLoginChangesWithoutMergingNames() throws Exception {
+        String id="0123456789abcdef0123456789abcdef";
+        Protocol.Packet decoded=Protocol.parse(Protocol.encode(1,"a","h",Protocol.ENTRY|Protocol.UTF8,"同名","组",id));
+        assertEquals(id,decoded.deviceId);assertEquals("组",decoded.extra);assertNull(Protocol.normalizeDeviceId("../invalid"));
+        try(DatagramSocket first=new DatagramSocket(0,InetAddress.getLoopbackAddress());DatagramSocket moved=new DatagramSocket(0,InetAddress.getLoopbackAddress());LanNode local=new LanNode(port(),true,"local","host","local","组",new Inbox())) {
+            LanNode.Peer old=new LanNode.Peer(new InetSocketAddress(InetAddress.getLoopbackAddress(),first.getLocalPort()),"old","host","同名","组");String key=old.id();
+            local.rememberPeers(Collections.singletonList(old));local.start();
+            java.lang.reflect.Field field=LanNode.class.getDeclaredField("port");field.setAccessible(true);int port=field.getInt(local);
+            byte[] bytes=Protocol.encode(2,"old","host",Protocol.ANSWER|Protocol.UTF8,"同名","组",id);first.send(new DatagramPacket(bytes,bytes.length,InetAddress.getLoopbackAddress(),port));
+            long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(3);while(old.deviceId==null&&System.nanoTime()<end)Thread.sleep(10);
+            assertEquals(id,old.deviceId);assertEquals(key,old.id());
+            bytes=Protocol.encode(3,"new","host2",Protocol.ANSWER|Protocol.UTF8,"同名","组",id);moved.send(new DatagramPacket(bytes,bytes.length,InetAddress.getLoopbackAddress(),port));
+            assertSame(old,waitPeer(local,"new"));assertEquals(key,old.id());assertEquals(moved.getLocalPort(),old.endpoint.getPort());assertEquals(1,local.peers().size());
+            bytes=Protocol.encode(4,"another","host",Protocol.ANSWER|Protocol.UTF8,"同名","组","1123456789abcdef0123456789abcdef");first.send(new DatagramPacket(bytes,bytes.length,InetAddress.getLoopbackAddress(),port));
+            assertNotEquals(old.id(),waitPeer(local,"another").id());assertEquals(2,local.peers().size());
+        }
+    }
+    @Test public void retryKeepsPacketAndTimeAndReceiverDeduplicates() throws Exception {
+        Inbox ia=new Inbox(),ib=new Inbox();int pa=port(),pb=port();
+        try(LanNode a=node(ia,pa,"a");LanNode b=node(ib,pb,"b")) {
+            a.probe(new InetSocketAddress("127.0.0.1",pb));LanNode.Peer peer=waitPeer(a,"b");
+            LanNode.Message sent=a.sendMessage(peer,"重发仍是一条",Collections.emptyList());
+            assertNotNull(ia.updates.poll(4,TimeUnit.SECONDS));assertNotNull(ib.messages.poll(4,TimeUnit.SECONDS));
+            sent.state="未确认送达";LanNode.Message retry=a.retryMessage(peer,sent);
+            assertEquals(sent.number,retry.number);assertEquals(sent.time,retry.time);
+            assertNull(ib.messages.poll(400,TimeUnit.MILLISECONDS));
+            assertEquals("等待确认",ia.updates.poll(2,TimeUnit.SECONDS).state);assertEquals("已送达",ia.updates.poll(2,TimeUnit.SECONDS).state);
+        }
+    }
     @Test public void outgoingZeroDoesNotWaitForAndroidStyleReceiveMonitor() throws Exception {
         ExecutorService workers=Executors.newFixedThreadPool(2);CountDownLatch entered=new CountDownLatch(1),release=new CountDownLatch(1);
         try(LanNode sender=node(new Inbox(),port(),"idle-sender");DatagramSocket remote=new DatagramSocket(0,InetAddress.getLoopbackAddress())) {

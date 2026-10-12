@@ -216,7 +216,7 @@ namespace FeiqLight
             return image;
         }
         public static int AvatarHalo(int size) { return (int)Math.Ceiling(size * .1F); }
-        public static Bitmap ContactAvatar(int size, string name, bool online)
+        public static Bitmap ContactAvatar(int size, string identity, bool online)
         {
             int halo=AvatarHalo(size), extent=size+halo*2;
             Bitmap image=new Bitmap(extent,extent);
@@ -234,7 +234,7 @@ namespace FeiqLight
                         g.FillPath(glow,path);
                     }
                 }
-                using(Bitmap face=Avatar(size,name)) g.DrawImageUnscaled(face,halo,halo);
+                EmojiAvatars.Draw(g,new Rectangle(halo,halo,size,size),identity);
             }
             return image;
         }
@@ -252,15 +252,34 @@ namespace FeiqLight
         }
         private static Icon MakeIcon()
         {
-            // 图标由几何绘制生成，不依赖原版素材。
-            using (Bitmap bitmap = Avatar(32))
+            using (System.IO.MemoryStream stream = new System.IO.MemoryStream(AppIconBytes()))
+            using (Icon icon = new Icon(stream, new Size(32,32))) return (Icon)icon.Clone();
+        }
+        public static byte[] AppIconBytes()
+        {
+            // 不序列化 GetHicon 的设备相关位图：该路径可能丢失颜色/透明度。
+            // EXE 与运行时图标共用显式 32-bit BGRA、多尺寸 ICO，完全不依赖主题和显示设备。
+            int[] sizes={16,24,32,48,64,128,256};
+            using(System.IO.MemoryStream stream=new System.IO.MemoryStream())
+            using(System.IO.BinaryWriter writer=new System.IO.BinaryWriter(stream))
             {
-                IntPtr handle = bitmap.GetHicon();
-                try { return (Icon)Icon.FromHandle(handle).Clone(); }
-                finally { DestroyIcon(handle); }
+                writer.Write((ushort)0);writer.Write((ushort)1);writer.Write((ushort)sizes.Length);
+                int offset=6+16*sizes.Length;
+                foreach(int size in sizes) {
+                    int length=40+size*size*4+((size+31)/32)*4*size;
+                    writer.Write((byte)(size==256?0:size));writer.Write((byte)(size==256?0:size));writer.Write((ushort)0);
+                    writer.Write((ushort)1);writer.Write((ushort)32);writer.Write(length);writer.Write(offset);offset+=length;
+                }
+                foreach(int size in sizes) using(Bitmap bitmap=Avatar(size,"Q")) {
+                    int stride=((size+31)/32)*4;
+                    writer.Write(40);writer.Write(size);writer.Write(size*2);writer.Write((ushort)1);writer.Write((ushort)32);
+                    writer.Write(0);writer.Write(size*size*4);writer.Write(0);writer.Write(0);writer.Write(0);writer.Write(0);
+                    for(int y=size-1;y>=0;y--)for(int x=0;x<size;x++) {Color c=bitmap.GetPixel(x,y);writer.Write(c.B);writer.Write(c.G);writer.Write(c.R);writer.Write(c.A);}
+                    for(int y=size-1;y>=0;y--) {byte[] mask=new byte[stride];for(int x=0;x<size;x++)if(bitmap.GetPixel(x,y).A==0)mask[x/8]|=(byte)(128>>(x%8));writer.Write(mask);}
+                }
+                return stream.ToArray();
             }
         }
-        [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern bool DestroyIcon(IntPtr handle);
     }
     public sealed class RoundedButton : Button
     {

@@ -97,7 +97,8 @@ namespace FeiqLight
             catch { Dispose(); throw; }
         }
         private long Next() { return Interlocked.Increment(ref sequence); }
-        private byte[] Encode(uint command, string body, string extra) { return Protocol.Encode(Next(), Login, Host, command | Protocol.Utf8, body, extra); }
+        // TCP 文件请求以第一个 NUL 结束；尾随 UDP 身份扩展会让旧服务因未读字节关闭时发 RST。
+        private byte[] Encode(uint command, string body, string extra) { return Protocol.Encode(Next(), Login, Host, command | Protocol.Utf8, body, extra, (command & 255) == Protocol.GetFile ? null : Settings.DeviceId); }
         private void Send(byte[] bytes, IPEndPoint endpoint)
         {
             if (disposed) throw new ObjectDisposedException("LanService");
@@ -141,16 +142,21 @@ namespace FeiqLight
         }
         private Peer Upsert(Packet packet, IPEndPoint endpoint)
         {
-            string id = endpoint + "/" + packet.Login; Peer peer;
+            string legacyId = endpoint + "/" + packet.Login; Peer peer;
             bool entry = packet.Mode == Protocol.Entry || packet.Mode == Protocol.AnswerEntry || packet.Mode == Protocol.Absence;
             lock (gate)
             {
-                if (!peers.TryGetValue(id, out peer))
+                peer = packet.DeviceId == null ? null : peers.Values.FirstOrDefault(p => p.DeviceId == packet.DeviceId);
+                // 仅升级端点和登录名均匹配、且尚无稳定身份的旧会话，不按昵称猜测设备。
+                if (peer == null) peer = peers.Values.FirstOrDefault(p => p.Endpoint.Equals(endpoint) && p.Login == packet.Login && (packet.DeviceId == null || p.DeviceId == null || p.DeviceId == packet.DeviceId));
+                if (peer == null)
                 {
                     if (peers.Count >= 2000) return null;
-                    peer = new Peer { Endpoint = endpoint, Login = packet.Login, Host = packet.Host, Nickname = packet.Login, Group = "我的局域网" };
-                    peers[id] = peer;
+                    peer = new Peer { ConversationId = packet.DeviceId == null ? legacyId : "device:" + packet.DeviceId, DeviceId = packet.DeviceId, Endpoint = endpoint, Login = packet.Login, Host = packet.Host, Nickname = packet.Login, Group = "我的局域网" };
+                    peers[peer.Id] = peer;
                 }
+                peer.ConversationId = peer.Id; peer.DeviceId = packet.DeviceId ?? peer.DeviceId;
+                peer.Endpoint = endpoint; peer.Login = packet.Login; peer.Host = packet.Host;
                 if (entry)
                 {
                     peer.Nickname = String.IsNullOrWhiteSpace(packet.Body) ? packet.Login : Protocol.Prefix(packet.Body, 128);
@@ -187,7 +193,7 @@ namespace FeiqLight
                 lock (gate)
                 {
                     Pending candidate;
-                    if (pending.TryGetValue(number, out candidate) && candidate.Peer.Endpoint.Equals(remote) && candidate.Peer.Login == packet.Login)
+                    if (pending.TryGetValue(number, out candidate) && candidate.Peer.Endpoint.Equals(remote) && candidate.Peer.Login == packet.Login && (packet.DeviceId == null || candidate.Peer.DeviceId == null || candidate.Peer.DeviceId == packet.DeviceId))
                     { item = candidate; pending.Remove(number); }
                 }
                 if (item != null) Complete(item.Record, "已送达");
@@ -251,10 +257,23 @@ namespace FeiqLight
         }
         public ChatRecord SendMessage(Peer peer, string text, IList<string> paths)
         {
+            return SendMessage(peer, text, paths, null);
+        }
+        public ChatRecord RetryMessage(Peer peer, ChatRecord original)
+        {
+            lock (gate)
+            {
+                if (!original.Outgoing || original.PeerId != peer.Id || !(original.State ?? "").Contains("未确认") || pending.ContainsKey(original.Packet))
+                    throw new InvalidOperationException("此消息正在发送或已送达。");
+                return SendMessage(peer, original.ForwardText(), original.GetLocalFiles(), original);
+            }
+        }
+        private ChatRecord SendMessage(Peer peer, string text, IList<string> paths, ChatRecord original)
+        {
             if (String.IsNullOrWhiteSpace(text) && (paths == null || paths.Count == 0)) throw new ArgumentException("请先输入消息或选择文件。");
             if ((text ?? "").IndexOf('\0') >= 0) throw new ArgumentException("消息不能包含空字符。");
             if (paths != null && paths.Count > 20) throw new ArgumentException("一次最多发送 20 个文件。");
-            long number = Next(); List<Attachment> files = new List<Attachment>(); Dictionary<string, Offer> additions = new Dictionary<string, Offer>();
+            long number = original == null ? Next() : original.Packet; List<Attachment> files = new List<Attachment>(); Dictionary<string, Offer> additions = new Dictionary<string, Offer>();
             if (paths != null)
             {
                 int id = 0;
@@ -268,16 +287,23 @@ namespace FeiqLight
                 }
             }
             uint command = Protocol.SendMessage | Protocol.SendCheck | (peer.Utf8 ? Protocol.Utf8 : 0) | (files.Count > 0 ? Protocol.FileAttach : 0);
-            byte[] bytes = Protocol.Encode(number, Login, Host, command, text, files.Count > 0 ? Protocol.FileList(files) : null);
+            byte[] bytes = Protocol.Encode(number, Login, Host, command, text, files.Count > 0 ? Protocol.FileList(files) : null, Settings.DeviceId);
             string display = text ?? "";
             if (files.Count > 0) display += (display.Length > 0 ? "\n" : "") + "[文件] " + String.Join("、", files.Select(f => f.Name));
             ChatRecord record = new ChatRecord { Packet = number, PeerId = peer.Id, Sender = Settings.Nickname, Text = display, Time = DateTime.Now, Outgoing = true, State = "等待确认", LocalFiles = paths == null ? null : paths.Select(Path.GetFullPath).ToArray() };
             record.HasAttachments = files.Count > 0; record.AttachmentNames = files.Select(f => f.Name).ToArray();
             record.Transfers = files.Select(f => new FileTransferState { Id = f.Id, Name = f.Name, Size = f.Size, Status = "等待对方接收", LocalPath = record.LocalFiles[f.Id] }).ToArray();
+            if (original != null)
+            {
+                if (original.Transfers != null && original.Transfers.Any(old => !files.Any(f => f.Id == old.Id && f.Name == old.Name && f.Size == old.Size)))
+                    throw new IOException("原附件已改变，请作为新附件发送。");
+                original.Transfers = record.Transfers; record = original;
+            }
             foreach (Attachment file in files) { Offer offer = additions[number + ":" + file.Id]; offer.Record = record; offer.FileId = file.Id; }
             lock (gate)
             {
                 if (pending.Count >= 256 || offers.Count + additions.Count > 1000) throw new InvalidOperationException("待处理消息或文件过多，请稍后再试。");
+                record.State = "等待确认";
                 foreach (var item in additions) offers[item.Key] = item.Value;
                 pending[number] = new Pending { Peer = peer, Bytes = bytes, Record = record, Last = DateTime.UtcNow, Attempts = 1 };
             }
@@ -285,6 +311,7 @@ namespace FeiqLight
             catch
             {
                 lock (gate) { pending.Remove(number); foreach (string key in additions.Keys) offers.Remove(key); }
+                if (original != null) Complete(original, "发送失败，未确认送达");
                 throw;
             }
             return record;

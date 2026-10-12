@@ -444,7 +444,8 @@ namespace FeiqLight.Tests
             test("离线会话：重启仍显示联系人、预览和未读，历史与草稿可打开", () =>
             {
                 LocalStore store=new LocalStore(Path.Combine(directory,"offline-roster"));int aPort=Port(),bPort=Port();string peerId;
-                using(LanService remote=new LanService(new AppSettings { Nickname="离线测试联系人" },bPort,true,"offline-peer"))
+                AppSettings remoteSettings=new AppSettings { Nickname="离线测试联系人" };
+                using(LanService remote=new LanService(remoteSettings,bPort,true,"offline-peer"))
                 using(LanService local=new LanService(new AppSettings { Nickname="本机",Notifications=false },aPort,true,"offline-local"))
                 using(MainForm window=new MainForm(local,store))
                 {
@@ -467,7 +468,8 @@ namespace FeiqLight.Tests
                     Check(Find<RichTextBox>(window.ActiveChat,"消息输入框").Text=="尚未发送的草稿","离线草稿无法恢复");
                     Check(store.LoadSettings().Conversations.Single(c=>c.Id==peerId).Unread==0,"打开会话后的已读状态未保存");
                     Peer original=list.Items[0].Peer;
-                    using(LanService remote=new LanService(new AppSettings { Nickname="重新上线并改名" },bPort,true,"offline-peer"))
+                    remoteSettings.Nickname="重新上线并改名";
+                    using(LanService remote=new LanService(remoteSettings,bPort,true,"offline-peer"))
                     {
                         remote.Start();restarted.Refresh();Pump(()=>original.Online&&original.Nickname=="重新上线并改名","历史联系人重连后没有原位更新");
                         Pump(()=>Find<Label>(window.ActiveChat,"聊天联系人昵称").Text=="重新上线并改名"&&Find<Label>(window.ActiveChat,"聊天联系人状态").Text=="在线","重连后的聊天抬头未刷新");
@@ -576,6 +578,47 @@ namespace FeiqLight.Tests
                     });
                     if (chatA != null && chatB != null)
                     {
+                        test("Emoji 默认头像：双端映射向量、24 枚彩色资源及改名稳定", () =>
+                        {
+                            Check(EmojiAvatars.Count==24,"内置头像数量错误");
+                            using(Stream stream=typeof(EmojiAvatars).Assembly.GetManifestResourceStream("FeiqLight.Avatars.png")) using(Bitmap atlas=new Bitmap(stream)) {
+                                Check(atlas.Width==480&&atlas.Height==320,"图集尺寸错误");
+                                for(int y=0;y<atlas.Height;y++)for(int x=0;x<atlas.Width;x++)if(x%80<4||x%80>=76||y%80<4||y%80>=76)Check(atlas.GetPixel(x,y).A==0,"头像透明隔离边丢失，缩放会串色");
+                            }
+                            string[] identities={"","127.0.0.1:2425/ghost","127.0.0.1:2425/alien","192.168.1.8:2425/测试😀"};
+                            int[] expected={0,18,2,17};
+                            for(int i=0;i<identities.Length;i++)Check(EmojiAvatars.Index(identities[i])==expected[i],"双端头像映射不一致："+i);
+                            Check(EmojiAvatars.Index(null)==0,"空身份没有固定默认头像");
+                            foreach(bool dark in new[]{false,true}) {
+                                Theme.Change(dark,"blue");
+                                using(Bitmap gallery=new Bitmap(720,480)) using(Graphics g=Graphics.FromImage(gallery)) {
+                                    g.Clear(Theme.Surface);
+                                    for(int i=0;i<24;i++) {
+                                        string identity=((char)('0'+i)).ToString();Check(EmojiAvatars.Index(identity)==i,"图集顺序错误");
+                                        using(Bitmap image=Theme.ContactAvatar(72,identity,i%2==0)) {
+                                            var colors=new HashSet<int>();
+                                            for(int y=24;y<64;y++)for(int x=24;x<64;x++)colors.Add(image.GetPixel(x,y).ToArgb());
+                                            Check(colors.Count>12,"头像是空白或单色："+i);
+                                            Check(image.GetPixel(0,0).A==0,"头像透明边距丢失");
+                                            g.DrawImageUnscaled(image,i%6*120+16,i/6*120+5);
+                                        }
+                                        TextRenderer.DrawText(g,EmojiAvatars.Description(identity),Theme.Small,new Rectangle(i%6*120,i/6*120+94,120,22),Theme.Ink,TextFormatFlags.HorizontalCenter|TextFormatFlags.NoPrefix);
+                                    }
+                                    gallery.Save(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"preview-emoji-avatars-"+(dark?"dark":"light")+".png"),ImageFormat.Png);
+                                }
+                            }
+                            Theme.Change(false,"blue");
+                            Peer contact=a.Peers.Single(p=>p.Login=="ui-b");PictureBox portrait=Find<PictureBox>(chatA,"聊天联系人头像");
+                            string note=contact.Note,nickname=contact.Nickname;Image original=portrait.Image;
+                            try {
+                                contact.Note="刚改的备注";contact.Nickname="另一个昵称";chatA.RefreshPeer();
+                                Check(Object.ReferenceEquals(original,portrait.Image),"改昵称/备注重新分配了头像");
+                                using(Bitmap expectedImage=Theme.ContactAvatar(46,contact.Id,contact.Online)) {
+                                    Bitmap actual=(Bitmap)portrait.Image;
+                                    for(int y=0;y<actual.Height;y++)for(int x=0;x<actual.Width;x++)Check(actual.GetPixel(x,y)==expectedImage.GetPixel(x,y),"聊天标题未按身份渲染");
+                                }
+                            } finally {contact.Note=note;contact.Nickname=nickname;chatA.RefreshPeer();}
+                        });
                         test("在线头像：光边渲染、离线还原与聊天标题即时更新", () =>
                         {
                             foreach(int size in new[]{46,52,78,104}) using(Bitmap offline=Theme.ContactAvatar(size,"头像",false)) using(Bitmap online=Theme.ContactAvatar(size,"头像",true))
@@ -895,7 +938,8 @@ namespace FeiqLight.Tests
                         Peer remote=a.Peers.Single(p=>p.Login=="ui-b");
                         ChatRecord failed=new ChatRecord {PeerId=remote.Id,Packet=800000,Text="手动重发 [文件] 只是文字 👩🏽‍💻 (๑•̀ㅂ•́)و✧\n末尾换行\n",Outgoing=true,State="未确认送达，请检查网络后重发",Time=DateTime.Now};chatA.Append(failed);
                         MethodInfo retry=typeof(ChatForm).GetMethod("RetryMessage",BindingFlags.Instance|BindingFlags.NonPublic);retry.Invoke(chatA,new object[]{failed});
-                        Pump(()=>Find<BubbleHistory>(chatB,"聊天记录").Text.Contains(failed.Text),"重发没有到达对端");Check(failed.State=="已重新发送（新消息）","原记录未标记");
+                        Pump(()=>Find<BubbleHistory>(chatB,"聊天记录").Text.Contains(failed.Text)&&failed.State=="已送达","重发没有到达对端或 ACK 未更新原记录");
+                        Check(storeA.History(remote.Id,150).Count(r=>r.Text==failed.Text)==1,"重发产生第二条气泡");
                         int count=storeA.History(remote.Id,150).Count(r=>r.Text==failed.Text);retry.Invoke(chatA,new object[]{failed});Check(storeA.History(remote.Id,150).Count(r=>r.Text==failed.Text)==count,"同一记录被重复发送");
                     });
                     test("表情分类与组合 emoji 不截断",()=>{

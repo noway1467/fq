@@ -11,6 +11,7 @@ namespace FeiqLight
     {
         public long Number;
         public string Login;
+        public string DeviceId;
         public string Host;
         public uint Command;
         public string Body;
@@ -35,13 +36,18 @@ namespace FeiqLight
             if (end > 0 && end < value.Length && Char.IsHighSurrogate(value[end - 1]) && Char.IsLowSurrogate(value[end])) end--;
             return value.Substring(0, end);
         }
-        public static byte[] Encode(long number, string login, string host, uint command, string body, string extra)
+        public static string NormalizeDeviceId(string value)
+        {
+            Guid id; return value != null && Guid.TryParseExact(value, "N", out id) && id != Guid.Empty ? id.ToString("N") : null;
+        }
+        public static byte[] Encode(long number, string login, string host, uint command, string body, string extra, string deviceId = null)
         {
             if (number < 0 || Field(login).Length > 128 || Field(host).Length > 128) throw new ArgumentException("无效的报文头。");
             if ((body ?? "").IndexOf('\0') >= 0 || (extra ?? "").IndexOf('\0') >= 0) throw new ArgumentException("消息不能包含空字符。");
             Encoding encoding = (command & Utf8) != 0 ? StrictUtf8 : StrictLegacy;
             string wire = "1:" + number.ToString(CultureInfo.InvariantCulture) + ":" + Field(login) + ":" + Field(host) + ":" + command.ToString(CultureInfo.InvariantCulture) + ":" + (body ?? "") + "\0";
-            if (extra != null) wire += extra + "\0";
+            if (extra != null || deviceId != null) wire += (extra ?? "") + "\0";
+            if (NormalizeDeviceId(deviceId) != null) wire += "FQID=" + NormalizeDeviceId(deviceId) + "\0";
             byte[] result;
             try { result = encoding.GetBytes(wire); }
             catch (EncoderFallbackException) { throw new ArgumentException((command & Utf8) != 0 ? "文本包含不完整的 Unicode 字符，请重新输入。" : "对方未声明 UTF-8 支持，当前文字或文件名无法无损发送，请刷新联系人或更换内容。"); }
@@ -64,6 +70,7 @@ namespace FeiqLight
             string[] parts = decoded.Split(new[] { ':' }, 6);
             string[] body = parts[5].Split('\0');
             packet = new Packet { Number = number, Login = parts[2], Host = parts[3], Command = command, Body = body[0], Extra = body.Length > 1 ? body[1] : "" };
+            packet.DeviceId = body.Length > 2 && body[2].StartsWith("FQID=", StringComparison.Ordinal) ? NormalizeDeviceId(body[2].Substring(5)) : null;
             return packet.Login.Length <= 128 && packet.Host.Length <= 128;
         }
         public static bool SafeFileName(string name)

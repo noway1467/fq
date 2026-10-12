@@ -2,12 +2,16 @@
 
 轻量的 Windows / Android 局域网聊天与文件传输工具。功能方向参考飞秋，界面布局参考 Telegram；独立实现，非官方产品。
 
-当前版本：**Windows 0.3.22 / Android 0.2.23 预览版**。
+当前版本：**Windows / Android 0.3.24**。
 
 下载独立安装/运行包：[GitHub Releases](https://github.com/noway1467/fq/releases)。选择 Windows EXE 或 Android APK，无需下载源码。
 
 ## 功能
 
+- 失败文本重发复用原消息号，只更新原气泡及送达状态，重复点击不会追加消息；ACK 仍不代表已读。Windows 可重发原文件邀请，Android 文件邀请仍需重新选择原文件。
+- 双端以首次启动生成并持久保存的随机设备 ID 识别新版设备，地址、端口、登录名改变只更新连接位置。升级时可明确匹配的旧会话沿用原主键，保留历史、草稿、备注和编号；无法证明属于同一设备的旧分裂会话不按昵称自动合并。旧客户端未提供 ID 时仍按旧身份区分，重新安装或重置资料会生成新 ID。
+- Windows EXE、窗口与托盘统一使用多尺寸 32 位彩色 Q 图标，不依赖设备相关位图转换。
+- 双端默认联系人头像内置 24 枚彩色 emoji：幽灵、外星人、机器人、蘑菇、恐龙、树懒、飞碟等，保留在线蓝色光晕。按联系人身份固定分配，不因改昵称、备注或重启而变化，无需联网；不同联系人可能分到同款。本次不含手动选择或向对方同步自选头像。
 - 双端设置采用「通用 / 外观 / 文件 / 诊断」独立标签页，一次只显示当前分类。切换保留未保存内容，底部统一保存；Windows 支持 Ctrl+Tab 和标签上的方向键切换。目录授权等立即生效操作仍保留说明。
 - 双端会话按「置顶 → 未置顶在线 → 未置顶离线」自动排列，同组按最近消息排序；置顶持久保存，上下线不修改消息时间。Windows 右键会话、Android 长按会话可置顶/取消置顶。
 
@@ -68,4 +72,4 @@ Windows 使用系统 C# 编译器；Android 使用 JDK 17+、SDK platform 36 / b
 
 ## 素材许可
 
-Windows 的 144 枚彩色表情来自 [Twemoji v16.0.1](https://github.com/jdecked/twemoji/tree/v16.0.1)，版权归 Twitter, Inc. 及贡献者，按 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) 使用。原图仅合并为本地图集；完整许可见 [Twemoji-LICENSE-GRAPHICS.txt](docs/Twemoji-LICENSE-GRAPHICS.txt)，并嵌入 EXE。运行时不联网下载表情。
+Windows 的 144 枚彩色聊天表情及双端的 24 枚默认头像来自 [Twemoji v16.0.1](https://github.com/jdecked/twemoji/tree/v16.0.1)，版权归 Twitter, Inc. 及贡献者，按 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) 使用。原图仅合并为本地图集；完整许可见 [Twemoji-LICENSE-GRAPHICS.txt](docs/Twemoji-LICENSE-GRAPHICS.txt)，并嵌入 EXE / APK。运行时不联网下载表情。双端头像共用 assets/avatars 的目录、图集和许可；tools/build-avatar-atlas.ps1 可从固定版本重新生成素材。

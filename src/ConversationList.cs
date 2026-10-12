@@ -44,7 +44,7 @@ namespace FeiqLight
                 bool selected = item.Peer.Id == SelectedId;
                 Rectangle highlight = new Rectangle(row.Left + (int)(8*s), row.Top + (int)(3*s), Math.Max(1,row.Width - (int)(16*s)), row.Height - (int)(6*s));
                 using (GraphicsPath path = Theme.Rounded(highlight,(int)(Theme.ControlRadius*s))) using (SolidBrush b = new SolidBrush(selected ? Theme.Sky : i == hover ? Theme.Ice : Theme.Surface)) e.Graphics.FillPath(b, path);
-                using (Bitmap image = Theme.ContactAvatar(avatar, item.Peer.BaseDisplayName, item.Peer.Online)) e.Graphics.DrawImageUnscaled(image, pad - Theme.AvatarHalo(avatar), row.Top + (RowHeight - avatar) / 2 - Theme.AvatarHalo(avatar));
+                using (Bitmap image = Theme.ContactAvatar(avatar, item.Peer.Id, item.Peer.Online)) e.Graphics.DrawImageUnscaled(image, pad - Theme.AvatarHalo(avatar), row.Top + (RowHeight - avatar) / 2 - Theme.AvatarHalo(avatar));
                 int right = (int)(60 * s); Rectangle name = new Rectangle(pad * 2 + avatar, row.Top + (int)(17 * s), Math.Max(20, row.Width - pad * 3 - avatar - right), (int)(25 * s));
                 using (Font font = new Font(Theme.Body.FontFamily, 10F, FontStyle.Bold))
                 {

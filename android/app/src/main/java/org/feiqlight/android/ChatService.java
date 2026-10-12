@@ -122,6 +122,8 @@ public final class ChatService extends Service {
                 SharedPreferences prefs=getSharedPreferences("settings",MODE_PRIVATE);
                 if(!prefs.contains("connection_enabled")) prefs.edit().putBoolean("connection_enabled",prefs.contains("login")).apply();
                 String login=prefs.getString("login",null); if(login==null) { login="android-"+UUID.randomUUID().toString().substring(0,8); prefs.edit().putString("login",login).apply(); }
+                String deviceId=Protocol.normalizeDeviceId(prefs.getString("device_id",null));
+                if(deviceId==null) { deviceId=UUID.randomUUID().toString().replace("-","");if(!prefs.edit().putString("device_id",deviceId).commit())throw new IOException("无法保存本机身份"); }
                 next=connectionFactory.apply(prefs,new LanNode.Listener() {
                     @Override public void peersChanged() { if(currentConnection(epoch)) requestPublish(); }
                     @Override public void error(String text) { if(currentConnection(epoch)) showError(text); }
@@ -130,6 +132,8 @@ public final class ChatService extends Service {
                         main.post(()->{if(currentConnection(epoch))ChatService.this.fileProgress(peer.id(),packet,file,true,percent,state,null);});
                     }
                 });
+                next.setDeviceId(deviceId);
+                next.rememberPeers(store.conversations().stream().map(c->c.peer).collect(java.util.stream.Collectors.toList()));
                 next.rememberEndpoints(store.conversations().stream().map(c->c.peer.endpoint).collect(java.util.stream.Collectors.toList()));
                 next.setSocketBinding(new LanNetwork(getSystemService(ConnectivityManager.class)));
                 if(!currentConnection(epoch)) { next.close(); return; }
@@ -259,8 +263,9 @@ public final class ChatService extends Service {
                 LanNode.Message record=store.history(peer.id()).stream().filter(m->m.number==original.number&&m.outgoing).findFirst().orElseThrow(()->new IOException("原消息已不存在"));
                 if(!(record.state.contains("未确认")||record.state.equals("发送失败"))) throw new IOException("此消息已经重发或已送达");
                 if(!record.files.isEmpty()) throw new IOException("请重新选择原文件发送");
-                sendContent(peer,record.text,Collections.emptyList());
-                record.state="已重新发送（新消息）";store.message(peer,record,true,peer.id().equals(activePeer));publish();main.post(()->done.accept(true));
+                LanNode.Message retried=requireNode().retryMessage(peer,record);
+                // 同队列立即回写，第二次点击不能抢在网络状态回调之前再重发。
+                store.message(peer,retried,true,peer.id().equals(activePeer));publish();main.post(()->done.accept(true));
             }catch(Exception e){fail(e);main.post(()->done.accept(false));}
         });
     }

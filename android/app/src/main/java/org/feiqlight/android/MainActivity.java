@@ -32,7 +32,6 @@ public final class MainActivity extends Activity implements ChatService.Observer
         BUBBLE=blend(BLUE,SURFACE,dark?.30f:.17f);
         getWindow().setStatusBarColor(SURFACE);getWindow().setNavigationBarColor(SURFACE);
     }
-    private static final int[] AVATARS={0xff66a9e0,0xff7e9bdb,0xff65bca5,0xffdca169,0xffa38cc9};
     private ChatService service;
     private DraftStore drafts;
     private ReceivedStorage receivedStorage;
@@ -146,7 +145,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         toolbar.addView(menu,new LinearLayout.LayoutParams(dp(48),dp(48))); menu.setOnClickListener(v->{ if(selected.isEmpty()) showMenu(v); else open(""); });
         if(!selected.isEmpty()) {
             ChatStore.Conversation current=conversation(selected); String name=current==null?"?":current.displayName();
-            TextView avatar=text(name.isEmpty()?"?":name.substring(0,name.offsetByCodePoints(0,1)),18,Color.WHITE); avatar.setGravity(Gravity.CENTER); bindAvatar(avatar,selected,name,current!=null&&current.peer.online);
+            TextView avatar=text("",18,Color.WHITE); avatar.setGravity(Gravity.CENTER); bindAvatar(avatar,selected,name,current!=null&&current.peer.online);
             chatAvatar=avatar;
             LinearLayout.LayoutParams ap=new LinearLayout.LayoutParams(dp(54),dp(54)); ap.leftMargin=-dp(6); ap.rightMargin=dp(4); toolbar.addView(avatar,ap);
         }
@@ -337,9 +336,10 @@ public final class MainActivity extends Activity implements ChatService.Observer
                 TextView retry=text("发送未确认 · 点击重试",13,BLUE);retry.setPadding(0,dp(8),0,dp(8));bubble.addView(retry);
                 retry.setOnClickListener(v->{
                     if(!m.files.isEmpty()){error("文件邀请重发请重新选择原文件，避免发送已过期的缓存");return;}
-                    confirm("重新发送","对方可能已收到但确认丢失，重发可能产生重复消息。","重新发送",()->{
-                        if(service==null||conversation==null)return;retry.setEnabled(false);
-                        service.retryMessage(conversation.peer,m,success->{if(isDestroyed())return;retry.setEnabled(!success);if(success&&selected.equals(conversation.peer.id())){forceLatest=true;changed();}});
+                    final LanNode.Peer retryPeer=conversation.peer; final int retryGeneration=editorGeneration;
+                    confirm("重新发送","将更新原消息，不新增气泡；对方旧版客户端可能无法长期去重。","重新发送",()->{
+                        if(service==null||retryGeneration!=editorGeneration||!selected.equals(retryPeer.id()))return;retry.setEnabled(false);
+                        service.retryMessage(retryPeer,m,success->{if(isDestroyed())return;retry.setEnabled(!success);if(success&&retryGeneration==editorGeneration&&selected.equals(retryPeer.id())){forceLatest=true;changed();}});
                     });
                 });
             }
@@ -478,7 +478,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         LinearLayout options=column(); Dialog dialog=sheet("飞Q",options,null,null);
         String[] labels={"刷新","添加联系人","已移除的联系人","设置","关于",service!=null&&service.canDisconnect()?"断开":"连接"};
         for(String label:labels) {
-            fileAction(options,dialog,label,()->{ if(label.equals("已移除的联系人")) hiddenConversations(); else if(label.equals("设置")) settings(); else if(label.equals("添加联系人")) addPeer(); else if(label.equals("刷新")) { if(service!=null) service.refresh(); } else if(label.equals("断开")) { if(service!=null) service.disconnect(); } else if(label.equals("关于")) sheet("飞Q "+BuildConfig.VERSION_NAME,text("独立局域网客户端\n非飞秋或 Telegram 官方产品\n\n基础协议为明文，请仅用于可信局域网。",15,MUTED),"确定",Dialog::dismiss); else connect(); });
+            fileAction(options,dialog,label,()->{ if(label.equals("已移除的联系人")) hiddenConversations(); else if(label.equals("设置")) settings(); else if(label.equals("添加联系人")) addPeer(); else if(label.equals("刷新")) { if(service!=null) service.refresh(); } else if(label.equals("断开")) { if(service!=null) service.disconnect(); } else if(label.equals("关于")) sheet("飞Q "+BuildConfig.VERSION_NAME,text("独立局域网客户端\n非飞秋或 Telegram 官方产品\n\n基础协议为明文，请仅用于可信局域网。\n\n内置头像：Twemoji v16.0.1\n© Twitter, Inc. 及贡献者 · CC BY 4.0\n原图合并为本地图集；许可随 APK 内置。",15,MUTED),"确定",Dialog::dismiss); else connect(); });
         }
     }
     private void hiddenConversations() {
@@ -851,10 +851,11 @@ public final class MainActivity extends Activity implements ChatService.Observer
     @Override public void error(String text) { if(!isFinishing()) Toast.makeText(this,text,Toast.LENGTH_LONG).show(); }
     private static String size(long value) { if(value>=1048576) return String.format(Locale.CHINA,"%.1f MB",value/1048576.0); if(value>=1024) return String.format(Locale.CHINA,"%.1f KB",value/1024.0); return value+" B"; }
     private void bindAvatar(TextView avatar,String id,String name,boolean online) {
-        avatar.setText(name.isEmpty()?"?":name.substring(0,name.offsetByCodePoints(0,1)));
-        avatar.setContentDescription(name+"，"+(online?"在线":"离线"));
-        if(avatar.getBackground() instanceof AvatarDrawable) ((AvatarDrawable)avatar.getBackground()).setOnline(online);
-        else avatar.setBackground(new AvatarDrawable(AVATARS[Math.floorMod(id.hashCode(),AVATARS.length)],online,dp(6)));
+        EmojiAvatars avatars=EmojiAvatars.get(this);int index=avatars.index(id);
+        avatar.setText("");
+        avatar.setContentDescription(name+"，"+avatars.description(index)+"，"+(online?"在线":"离线"));
+        if(avatar.getBackground() instanceof AvatarDrawable && ((AvatarDrawable)avatar.getBackground()).avatarIndex()==index) ((AvatarDrawable)avatar.getBackground()).setOnline(online);
+        else avatar.setBackground(new AvatarDrawable(this,id,online,dp(6)));
     }
     private final class ConversationAdapter extends BaseAdapter {
         private final List<ChatStore.Conversation> items=new ArrayList<>();
@@ -864,7 +865,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         @Override public long getItemId(int p) { return p; }
         @Override public View getView(int position,View convert,ViewGroup parent) {
             ChatStore.Conversation c=items.get(position); LinearLayout row=row(); row.setPadding(dp(10),dp(5),dp(16),dp(5)); row.setMinimumHeight(dp(82));
-            TextView avatar=text(c.displayName().isEmpty()?"?":c.displayName().substring(0,c.displayName().offsetByCodePoints(0,1)),21,Color.WHITE); avatar.setGravity(Gravity.CENTER); avatar.setTypeface(null,Typeface.BOLD);
+            TextView avatar=text("",21,Color.WHITE); avatar.setGravity(Gravity.CENTER);
             bindAvatar(avatar,c.peer.id(),c.displayName(),c.peer.online); row.addView(avatar,new LinearLayout.LayoutParams(dp(68),dp(68)));
             LinearLayout center=column(); LinearLayout.LayoutParams cp=weight(); cp.leftMargin=dp(8); row.addView(center,cp);
             TextView name=text((c.pinned?"↑ ":"")+c.displayName(),16,INK); name.setTypeface(null,Typeface.BOLD); name.setSingleLine();

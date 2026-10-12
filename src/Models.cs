@@ -11,6 +11,7 @@ namespace FeiqLight
 {
     public sealed class AppSettings
     {
+        public string DeviceId { get; set; }
         public string Nickname { get; set; }
         public string Group { get; set; }
         public string Signature { get; set; }
@@ -31,6 +32,7 @@ namespace FeiqLight
         public static string DefaultReceiveFolder { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "飞Q接收文件"); } }
         public AppSettings()
         {
+            DeviceId = Guid.NewGuid().ToString("N");
             Nickname = Environment.UserName; Group = "我的局域网";
             Signature = "在同一个局域网，简单聊一聊。";
             CloseToTray = true; Notifications = true; AutoReceiveFiles = true; ReceiveFolder = DefaultReceiveFolder;
@@ -51,6 +53,8 @@ namespace FeiqLight
     }
     public sealed class SavedConversation
     {
+        public string DeviceId { get; set; }
+        public string ConversationId { get; set; }
         public string Endpoint { get; set; }
         public string Login { get; set; }
         public string Host { get; set; }
@@ -63,15 +67,15 @@ namespace FeiqLight
         public bool Pinned { get; set; }
         public bool Hidden { get; set; }
         public int ConversationNumber { get; set; }
-        [ScriptIgnore] public string Id { get { return Endpoint + "/" + Login; } }
+        [ScriptIgnore] public string Id { get { return ConversationId ?? (DeviceId == null ? Endpoint + "/" + Login : "device:" + DeviceId); } }
         public Peer OfflinePeer()
         {
             // 历史资料不是当前在线或编码能力的证据；真正收到报文后再更新同一个 Peer。
-            return new Peer { Endpoint=AppSettings.ParseKnownPeer(Endpoint),Login=Login,Host=Host,Nickname=Nickname,Group=Group,Online=false,Utf8=false,Note=Note,Pinned=Pinned,Hidden=Hidden,ConversationNumber=ConversationNumber };
+            return new Peer { ConversationId=Id,DeviceId=DeviceId,Endpoint=AppSettings.ParseKnownPeer(Endpoint),Login=Login,Host=Host,Nickname=Nickname,Group=Group,Online=false,Utf8=false,Note=Note,Pinned=Pinned,Hidden=Hidden,ConversationNumber=ConversationNumber };
         }
         public bool SameAs(SavedConversation other)
         {
-            return Endpoint==other.Endpoint&&Login==other.Login&&Host==other.Host&&Nickname==other.Nickname&&Group==other.Group&&Preview==other.Preview&&MessageUtcTicks==other.MessageUtcTicks&&Unread==other.Unread&&Note==other.Note&&Pinned==other.Pinned&&Hidden==other.Hidden&&ConversationNumber==other.ConversationNumber;
+            return DeviceId==other.DeviceId&&Id==other.Id&&Endpoint==other.Endpoint&&Login==other.Login&&Host==other.Host&&Nickname==other.Nickname&&Group==other.Group&&Preview==other.Preview&&MessageUtcTicks==other.MessageUtcTicks&&Unread==other.Unread&&Note==other.Note&&Pinned==other.Pinned&&Hidden==other.Hidden&&ConversationNumber==other.ConversationNumber;
         }
         public static SavedConversation[] Normalize(IEnumerable<SavedConversation> values)
         {
@@ -81,6 +85,7 @@ namespace FeiqLight
                 if(item==null||item.Login==null||item.Login.Length>128||Protocol.Field(item.Login)!=item.Login)continue;
                 IPEndPoint endpoint=AppSettings.ParseKnownPeer(item.Endpoint);if(endpoint==null)continue;
                 SavedConversation clean=new SavedConversation { Endpoint=endpoint.ToString(),Login=item.Login,
+                    DeviceId=Protocol.NormalizeDeviceId(item.DeviceId),ConversationId=String.IsNullOrEmpty(item.ConversationId)?null:Protocol.Prefix(item.ConversationId,256),
                     Note=Protocol.Prefix((item.Note??"").Trim(),64),Pinned=item.Pinned,Hidden=item.Hidden,ConversationNumber=item.ConversationNumber>0&&item.ConversationNumber<=1000000?item.ConversationNumber:0,
                     Host=Protocol.Prefix(item.Host??"",128),Nickname=Protocol.Prefix(String.IsNullOrWhiteSpace(item.Nickname)?item.Login:item.Nickname,128),
                     Group=Protocol.Prefix(item.Group??"我的局域网",128),Preview=Protocol.Prefix((item.Preview??"").Replace('\0',' ').Replace('\r',' ').Replace('\n',' '),160),
@@ -124,7 +129,8 @@ namespace FeiqLight
     }
     public sealed class Peer
     {
-        public string Id { get { return Endpoint + "/" + Login; } }
+        public string DeviceId, ConversationId;
+        public string Id { get { return ConversationId ?? (DeviceId == null ? Endpoint + "/" + Login : "device:" + DeviceId); } }
         public IPEndPoint Endpoint;
         public string Login;
         public string Host;
@@ -255,6 +261,7 @@ namespace FeiqLight
                 if(new FileInfo(path).Length>16*1024*1024)throw new IOException("配置文件超过大小限制。");
                 AppSettings s = json.Deserialize<AppSettings>(File.ReadAllText(path, Encoding.UTF8));
                 if (s == null || String.IsNullOrWhiteSpace(s.Nickname)) throw new FormatException();
+                s.DeviceId = Protocol.NormalizeDeviceId(s.DeviceId) ?? Guid.NewGuid().ToString("N");
                 if (String.IsNullOrWhiteSpace(s.ReceiveFolder)) s.ReceiveFolder = AppSettings.DefaultReceiveFolder;
                 s.KnownPeers = AppSettings.NormalizeKnownPeers(s.KnownPeers);
                 s.Conversations = SavedConversation.Normalize(s.Conversations);
