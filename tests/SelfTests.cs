@@ -643,6 +643,21 @@ namespace FeiqLight.Tests
                 {
                     using (LanService duplicate = new LanService(new AppSettings(), portA, true, "duplicate")) ExpectFailure(duplicate.Start, "两个服务共享了端口");
                 });
+                // 只改本次测试的心跳参数：静默节点必须判离线，同一时间里能应答的节点必须保持在线。
+                Run("心跳复核：静默节点判离线而可回应节点保持在线", () =>
+                {
+                    TimeSpan idle = a.HeartbeatIdle, retry = a.HeartbeatRetry; int misses = a.IdleMisses;
+                    using (UdpClient silent = new UdpClient(Endpoint(0)))
+                    {
+                        byte[] entry = Protocol.Encode(1, "silent", "test", Protocol.Entry | Protocol.Utf8, Protocol.Field("静默节点"), null, null);
+                        silent.Send(entry, entry.Length, Endpoint(portA));
+                        Wait(() => a.Peers.Any(p => p.Login == "silent" && p.Online), "静默节点未出现在线列表", 3000);
+                        a.HeartbeatIdle = TimeSpan.FromMilliseconds(100); a.HeartbeatRetry = TimeSpan.FromMilliseconds(50); a.IdleMisses = 1;
+                        Wait(() => !a.Peers.Single(p => p.Login == "silent").Online, "静默节点长期假在线", 8000);
+                        Assert(a.Peers.Single(p => p.Login == "bob").Online, "能应答的节点被心跳误判离线");
+                    }
+                    a.HeartbeatIdle = idle; a.HeartbeatRetry = retry; a.IdleMisses = misses;
+                });
                 Run("退出广播更新离线状态", () =>
                 {
                     b.Dispose(); Wait(() => !bob.Online, "未收到退出通知", 4000);

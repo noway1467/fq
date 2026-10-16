@@ -18,6 +18,9 @@ public final class LanNode implements AutoCloseable {
         public volatile String name, group;
         public volatile boolean utf8, online;
         public volatile long lastSeen;
+        // 仅供在线复核：最近一次单播探测及之后连续未回应次数；初值取创建时刻，nanoTime 原点为负也不会误判。
+        volatile long probed=System.nanoTime();
+        volatile int misses;
         public Peer(InetSocketAddress endpoint,String login,String host,String name,String group) {
             this.endpoint=endpoint; this.login=login; this.host=host; this.name=name; this.group=group;
         }
@@ -48,7 +51,13 @@ public final class LanNode implements AutoCloseable {
     }
     private volatile SocketBinding socketBinding;
     public void setSocketBinding(SocketBinding binding) { if(udp!=null) throw new IllegalStateException("需在启动前设置网络"); socketBinding=binding; }
-    public void networkChanged() {SocketBinding binding=socketBinding;if(binding!=null)binding.changed();}
+    public void networkChanged() {SocketBinding binding=socketBinding;if(binding!=null)binding.changed();revalidate();}
+    // 静默 6 秒后逐个单播 ENTRY，连续 3 次无回应判离线；网络切换或手动刷新后 2 次无回应即离线。
+    long heartbeatIdle=TimeUnit.SECONDS.toNanos(6), heartbeatRetry=TimeUnit.SECONDS.toNanos(3);
+    int idleMisses=3, verifyMisses=2;
+    private volatile long verifyFrom=System.nanoTime();
+    /** 网络切换、用户刷新或回到前台时立即复核：仍能回应的联系人保持在线，失联者约 6 秒内离线。 */
+    public void revalidate() { verifyFrom=System.nanoTime(); }
     public interface Progress { void update(int percent); }
     public static final class Transfer implements AutoCloseable {
         private volatile boolean cancelled;
@@ -164,8 +173,12 @@ public final class LanNode implements AutoCloseable {
             }
         }
         for (InetAddress address:addresses) try { probe(new InetSocketAddress(address,port)); } catch (IOException e) { listener.error("广播不可用，可尝试手动添加 IP"); }
-        Set<InetSocketAddress> targets; synchronized(gate) { targets=new LinkedHashSet<>(remembered); }
-        for(Peer peer:peers()) targets.add(peer.endpoint);
+        Set<InetSocketAddress> targets; long now=System.nanoTime();
+        synchronized(gate) {
+            targets=new LinkedHashSet<>(remembered);
+            // 每次单播都计为一次待回应探测，对方任何报文都会清零。
+            for(Peer peer:peers.values()) { targets.add(peer.endpoint); peer.probed=now; peer.misses++; }
+        }
         for(InetSocketAddress target:targets) try { probe(target); } catch(IOException ignored) { }
     }
     private void receiveLoop() {
@@ -209,7 +222,7 @@ public final class LanNode implements AutoCloseable {
                 peer.name=p.body.trim().isEmpty()?p.login:Protocol.prefix(p.body,128);
                 peer.group=Protocol.prefix(p.extra,128);
             }
-            peer.utf8|=(p.command&(Protocol.UTF8|Protocol.CAP_UTF8))!=0; peer.online=p.mode()!=Protocol.EXIT; peer.lastSeen=System.nanoTime();
+            peer.utf8|=(p.command&(Protocol.UTF8|Protocol.CAP_UTF8))!=0; peer.online=p.mode()!=Protocol.EXIT; peer.lastSeen=System.nanoTime(); peer.misses=0;
             listener.peersChanged();
             if (p.mode()==Protocol.ENTRY) send(encode(Protocol.ANSWER|Protocol.FILE|Protocol.CAP_UTF8|(peer.utf8?Protocol.UTF8:0),Protocol.field(nickname),Protocol.field(group)),from);
             if (p.mode()!=Protocol.MESSAGE) return;
@@ -262,7 +275,7 @@ public final class LanNode implements AutoCloseable {
     private void tick() {
         if (closed) return;
         try {
-            long now=System.nanoTime(); boolean changed=false;
+            long now=System.nanoTime(); boolean changed=false; List<InetSocketAddress> probes=new ArrayList<>();
             synchronized (gate) {
                 Iterator<Pending> it=pending.values().iterator();
                 while (it.hasNext()) {
@@ -272,8 +285,17 @@ public final class LanNode implements AutoCloseable {
                 }
                 seen.entrySet().removeIf(e->now-e.getValue()>TimeUnit.MINUTES.toNanos(10));
                 offers.entrySet().removeIf(e->{if(e.getValue().expires>=now)return false;endOffer(e.getValue(),"邀请已过期，请重新发送");return true;});
-                for (Peer p:peers.values()) if (p.online && now-p.lastSeen>TimeUnit.SECONDS.toNanos(120)) { p.online=false; changed=true; }
+                // 切网不会发送退出通知；只按实际发出且未获回应的探测判离线，休眠或计时器延后不会误判。
+                long verify=verifyFrom;
+                for (Peer p:peers.values()) {
+                    if (!p.online) continue;
+                    boolean verifying=p.lastSeen-verify<0;
+                    if ((!verifying && now-p.lastSeen<heartbeatIdle) || now-p.probed<heartbeatRetry) continue;
+                    if (p.misses>=(verifying?verifyMisses:idleMisses)) { p.online=false; changed=true; }
+                    else { p.probed=now; p.misses++; probes.add(p.endpoint); }
+                }
             }
+            for (InetSocketAddress target:probes) try { probe(target); } catch (IOException ignored) { }
             if (changed) listener.peersChanged();
             if (now-refreshAt>TimeUnit.SECONDS.toNanos(30)) refresh();
         } catch (IOException | RuntimeException e) { if (!closed) listener.error("网络维护失败："+e.getMessage()); }

@@ -239,9 +239,12 @@ public final class ChatService extends Service {
     void refresh() {
         if(stopped||!refreshQueued.compareAndSet(false,true))return;
         LanNode current=node;long epoch=connectionEpoch;
-        try {discovery.execute(()->{try {if(current!=null&&node==current&&currentConnection(epoch))current.refresh();}catch(IOException e){if(currentConnection(epoch))fail(e);}finally{refreshQueued.set(false);}});}
+        // 用户刷新与网络回调都要立即复核在线状态，不再等两分钟超时。
+        try {discovery.execute(()->{try {if(current!=null&&node==current&&currentConnection(epoch)){current.revalidate();current.refresh();}}catch(IOException e){if(currentConnection(epoch))fail(e);}finally{refreshQueued.set(false);}});}
         catch(RejectedExecutionException ignored){refreshQueued.set(false);}
     }
+    // 回到前台只让维护线程单播复核在线联系人，不额外广播或访问系统网络接口。
+    void verifyPresence() { LanNode current=node; if(current!=null&&!connecting&&!stopped) current.revalidate(); }
     void probe(String address) {
         if(stopped)return;long epoch=connectionEpoch;
         try {discovery.execute(()->{try {if(currentConnection(epoch))requireNode().probe(LanNode.endpoint(address));}catch(IOException e){if(currentConnection(epoch))fail(e);}});}catch(RejectedExecutionException ignored){}

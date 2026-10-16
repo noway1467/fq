@@ -244,7 +244,7 @@ namespace FeiqLight
                 }catch(Exception e){using(NoticeDialog notice=new NoticeDialog("操作未完成",e.Message))notice.ShowDialog(this);}
             }
         }
-        private void RefreshNetwork() { if (started) try { network.Refresh(); } catch (Exception e) { status.Text = e.Message; } }
+        private void RefreshNetwork() { if (started) try { network.Revalidate(); } catch (Exception e) { status.Text = e.Message; } }
         private void AddPeer()
         {
             if (!started) return; using (AddressDialog dialog = new AddressDialog(network.Port)) if (dialog.ShowDialog(this) == DialogResult.OK) try { network.Probe(dialog.Endpoint); status.Text = "正在查找"; } catch (Exception e) { status.Text = e.Message; }
