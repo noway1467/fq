@@ -202,6 +202,23 @@ public final class CoreTest {
             b.close(); long until=System.nanoTime()+TimeUnit.SECONDS.toNanos(3); while(peer.online&&System.nanoTime()<until) Thread.sleep(10); assertFalse(peer.online);
         }
     }
+    @Test public void silentPeerGoesOfflineWhileRespondingPeerStaysOnline() throws Exception {
+        Inbox inbox=new Inbox(); int pa=port(),pb=port();
+        try(LanNode a=node(inbox,pa,"watcher"); LanNode b=node(new Inbox(),pb,"alive"); DatagramSocket silent=new DatagramSocket(0,InetAddress.getLoopbackAddress())) {
+            a.probe(LanNode.endpoint("127.0.0.1:"+pb)); LanNode.Peer alive=waitPeer(a,"alive"); assertTrue(alive.online);
+            byte[] entry=Protocol.encode(70,"silent","host",Protocol.ENTRY|Protocol.UTF8,"静默节点",null);
+            silent.send(new DatagramPacket(entry,entry.length,InetAddress.getLoopbackAddress(),pa));
+            LanNode.Peer ghost=waitPeer(a,"silent"); long idle=a.heartbeatIdle,retry=a.heartbeatRetry; int misses=a.idleMisses;
+            try {
+                // 只改本次测试的心跳参数：静默节点必须判离线，同一时间里能应答的节点必须保持在线。
+                a.heartbeatIdle=TimeUnit.MILLISECONDS.toNanos(100); a.heartbeatRetry=TimeUnit.MILLISECONDS.toNanos(50); a.idleMisses=1;
+                long until=System.nanoTime()+TimeUnit.SECONDS.toNanos(8);
+                while(ghost.online&&System.nanoTime()<until) Thread.sleep(20);
+                assertFalse("静默节点长期假在线",ghost.online);
+                assertTrue("能应答的节点被心跳误判离线",alive.online);
+            } finally { a.heartbeatIdle=idle; a.heartbeatRetry=retry; a.idleMisses=misses; }
+        }
+    }
     @Test public void duplicateMessageIsAckedButDeliveredOnce() throws Exception {
         Inbox inbox=new Inbox(); int p=port();
         try(LanNode n=node(inbox,p,"receiver"); DatagramSocket raw=new DatagramSocket(0,InetAddress.getLoopbackAddress())) {

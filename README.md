@@ -2,7 +2,7 @@
 
 轻量的 Windows / Android 局域网聊天与文件传输工具。功能方向参考飞秋，界面布局参考 Telegram；独立实现，非官方产品。
 
-当前版本：**Windows / Android 0.3.24**。
+当前版本：**Windows / Android 0.3.25**。
 
 下载独立安装/运行包：[GitHub Releases](https://github.com/noway1467/fq/releases)。选择 Windows EXE 或 Android APK，无需下载源码。
 

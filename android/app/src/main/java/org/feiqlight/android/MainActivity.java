@@ -86,7 +86,8 @@ public final class MainActivity extends Activity implements ChatService.Observer
         if(Build.VERSION.SDK_INT>=33) { backCallback=()->{ if(!selected.isEmpty()) open(""); else finish(); }; getOnBackInvokedDispatcher().registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT,backCallback); }
         renderPage(); bound=bindService(new Intent(this,ChatService.class),connection,BIND_AUTO_CREATE);
     }
-    @Override protected void onStart() { super.onStart(); visible=true; if(service!=null) { service.observe(this); service.active(selected); } restoreConnection(); }
+    // 熄屏期间对端可能已切网离开，亮屏回到页面时立即复核头像在线光晕。
+    @Override protected void onStart() { super.onStart(); visible=true; if(service!=null) { service.observe(this); service.active(selected); service.verifyPresence(); } restoreConnection(); }
     @Override protected void onStop() { historyAppliedVersion=++historyRequestVersion; finishSelection(); saveDraft(); visible=false; if(service!=null) { service.remove(this); service.active(""); } super.onStop(); }
     @Override protected void onDestroy() { if(media!=null) media.close(); if(backgroundBitmap!=null){backgroundBitmap.recycle();backgroundBitmap=null;} if(service!=null) service.remove(this); if(bound) unbindService(connection); if(Build.VERSION.SDK_INT>=33&&backCallback!=null) getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(backCallback); super.onDestroy(); }
     @Override protected void onSaveInstanceState(Bundle state) { saveDraft(); state.putString("peer",selected); state.putString("picker",pickerPeer); state.putString("export",exportPath); super.onSaveInstanceState(state); }

@@ -32,7 +32,13 @@ namespace FeiqLight
         private readonly Dictionary<string, Offer> offers = new Dictionary<string, Offer>();
         private readonly HashSet<TcpClient> connections = new HashSet<TcpClient>();
         private static readonly SemaphoreSlim[] receiveLocks = Enumerable.Range(0, 32).Select(i => new SemaphoreSlim(1, 1)).ToArray();
-        private readonly HashSet<IPAddress> localAddresses;
+        private static readonly System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();
+        // 静默 6 秒后逐个单播 ENTRY，连续 3 次无回应判离线；网络切换或手动刷新后 2 次无回应即离线。
+        internal TimeSpan HeartbeatIdle = TimeSpan.FromSeconds(6), HeartbeatRetry = TimeSpan.FromSeconds(3);
+        internal int IdleMisses = 3, VerifyMisses = 2;
+        private TimeSpan verifyFrom;
+        private int networkDirty;
+        private volatile HashSet<IPAddress> localAddresses;
         private UdpClient udp;
         private TcpListener tcp;
         private Timer timer;
@@ -56,7 +62,7 @@ namespace FeiqLight
             if (port < 1024 || port > 65535) throw new ArgumentOutOfRangeException("port", "端口必须在 1024–65535 之间。");
             Settings = settings; Port = port; LoopbackOnly = loopbackOnly;
             Login = Protocol.Field(login ?? Environment.UserName); Host = Protocol.Field(Environment.MachineName);
-            localAddresses = new HashSet<IPAddress>(LocalIPv4()); localAddresses.Add(IPAddress.Loopback);
+            localAddresses = CurrentAddresses();
             foreach(SavedConversation conversation in SavedConversation.Normalize(settings.Conversations))
             {
                 Peer peer=conversation.OfflinePeer();
@@ -75,6 +81,7 @@ namespace FeiqLight
                         if (address.Address.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(address.Address)) result.Add(address.Address);
             return result;
         }
+        private static HashSet<IPAddress> CurrentAddresses() { HashSet<IPAddress> result = new HashSet<IPAddress>(LocalIPv4()); result.Add(IPAddress.Loopback); return result; }
         public List<Peer> Peers { get { lock (gate) return peers.Values.OrderByDescending(p => p.Online).ThenBy(p => p.Nickname).ToList(); } }
         public ChatRecord OutgoingRecord(string peer, long packet) { lock(gate) { Offer offer=offers.Values.FirstOrDefault(o=>o.Record.PeerId==peer&&o.Record.Packet==packet&&o.Expires>DateTime.UtcNow);return offer==null?null:offer.Record; } }
         public void Start()
@@ -91,6 +98,8 @@ namespace FeiqLight
                 tcp = new TcpListener(bind, Port); tcp.ExclusiveAddressUse = true; tcp.Start(8);
                 Task.Factory.StartNew(ReceiveLoop, TaskCreationOptions.LongRunning);
                 Task.Factory.StartNew(AcceptLoop, TaskCreationOptions.LongRunning);
+                // 回环测试不受宿主网络变化影响；真实网络切换由维护线程合并后复核。
+                if (!LoopbackOnly) { NetworkChange.NetworkAddressChanged += OnNetworkChanged; NetworkChange.NetworkAvailabilityChanged += OnNetworkChanged; }
                 timer = new Timer(Tick, null, 1000, 1000);
                 Refresh();
             }
@@ -114,7 +123,8 @@ namespace FeiqLight
         }
         public void Refresh()
         {
-            lastRefresh = DateTime.UtcNow;
+            // 切换网络后本机地址会变，先更新自身过滤再广播，避免把自己的新地址当成联系人。
+            lastRefresh = DateTime.UtcNow; localAddresses = CurrentAddresses();
             if (!LoopbackOnly)
             {
                 HashSet<IPAddress> broadcast = new HashSet<IPAddress>(); broadcast.Add(IPAddress.Broadcast);
@@ -133,13 +143,24 @@ namespace FeiqLight
                     try { Probe(new IPEndPoint(address, Port)); } catch (SocketException e) { Report("广播失败：" + e.Message); }
             }
             // 单播补充广播；只有收到真实报文才置为在线，不把历史地址伪装成在线联系人。
-            IEnumerable<IPEndPoint> targets = Peers.Select(p => p.Endpoint).Concat(AppSettings.NormalizeKnownPeers(Settings.KnownPeers).Select(AppSettings.ParseKnownPeer)).Distinct();
+            List<Peer> known = Peers; TimeSpan now = clock.Elapsed;
+            // 每次单播都计为一次待回应探测，对方任何报文都会清零。
+            lock (gate) foreach (Peer peer in known) { peer.Probed = now; peer.Misses++; }
+            IEnumerable<IPEndPoint> targets = known.Select(p => p.Endpoint).Concat(AppSettings.NormalizeKnownPeers(Settings.KnownPeers).Select(AppSettings.ParseKnownPeer)).Distinct();
             foreach (IPEndPoint target in targets)
             {
                 if (LoopbackOnly && !IPAddress.IsLoopback(target.Address)) continue;
                 try { Probe(target); } catch (SocketException e) { Report("刷新联系人失败：" + e.Message); }
             }
         }
+        // 网络切换或用户刷新时立即复核：仍能回应的联系人保持在线，失联者约 6 秒内离线。
+        public void Revalidate()
+        {
+            lock (gate) verifyFrom = clock.Elapsed;
+            Refresh();
+        }
+        // 系统地址通知常成批到达，只记标记，由每秒维护合并处理。
+        private void OnNetworkChanged(object sender, EventArgs e) { Interlocked.Exchange(ref networkDirty, 1); }
         private Peer Upsert(Packet packet, IPEndPoint endpoint)
         {
             string legacyId = endpoint + "/" + packet.Login; Peer peer;
@@ -163,7 +184,7 @@ namespace FeiqLight
                     peer.Group = String.IsNullOrWhiteSpace(packet.Extra) ? "我的局域网" : Protocol.Prefix(packet.Extra, 128);
                 }
                 peer.Utf8 = peer.Utf8 || (packet.Command & (Protocol.Utf8 | Protocol.CapUtf8)) != 0;
-                peer.Online = packet.Mode != Protocol.Exit; peer.LastSeen = DateTime.UtcNow;
+                peer.Online = packet.Mode != Protocol.Exit; peer.LastSeen = DateTime.UtcNow; peer.Seen = clock.Elapsed; peer.Misses = 0;
             }
             Changed(); return peer;
         }
@@ -321,10 +342,10 @@ namespace FeiqLight
             if (disposed) return;
             try
             {
-                List<Pending> retry = new List<Pending>(), failed = new List<Pending>(); bool changed = false;
+                List<Pending> retry = new List<Pending>(), failed = new List<Pending>(); List<IPEndPoint> probes = new List<IPEndPoint>(); bool changed = false;
                 lock (gate)
                 {
-                    DateTime now = DateTime.UtcNow;
+                    DateTime now = DateTime.UtcNow; TimeSpan elapsed = clock.Elapsed;
                     foreach (Pending item in pending.Values.ToList())
                     {
                         if ((now - item.Last).TotalSeconds < 2) continue;
@@ -333,12 +354,22 @@ namespace FeiqLight
                     }
                     foreach (string key in seen.Where(p => (now - p.Value).TotalMinutes > 10).Select(p => p.Key).ToList()) seen.Remove(key);
                     foreach (string key in offers.Where(p => p.Value.Expires < now).Select(p => p.Key).ToList()) { EndOffer(offers[key], "邀请已过期，请重新发送"); offers.Remove(key); }
-                    foreach (Peer peer in peers.Values) if (peer.Online && (now - peer.LastSeen).TotalSeconds > 120) { peer.Online = false; changed = true; }
+                    // 切网不会发送退出通知；只按实际发出且未获回应的探测判离线，计时器延后不会误判。
+                    foreach (Peer peer in peers.Values)
+                    {
+                        if (!peer.Online) continue;
+                        bool verify = peer.Seen < verifyFrom;
+                        if ((!verify && elapsed - peer.Seen < HeartbeatIdle) || elapsed - peer.Probed < HeartbeatRetry) continue;
+                        if (peer.Misses >= (verify ? VerifyMisses : IdleMisses)) { peer.Online = false; changed = true; }
+                        else { peer.Probed = elapsed; peer.Misses++; probes.Add(peer.Endpoint); }
+                    }
                 }
                 foreach (Pending item in retry) try { Send(item.Bytes, item.Peer.Endpoint); } catch (SocketException) { }
+                foreach (IPEndPoint target in probes) try { Probe(target); } catch (SocketException) { }
                 foreach (Pending item in failed) Complete(item.Record, "未确认送达，请检查网络后重发");
                 if (changed) Changed();
-                if ((DateTime.UtcNow - lastRefresh).TotalSeconds >= 30) Refresh();
+                if (Interlocked.Exchange(ref networkDirty, 0) != 0) Revalidate();
+                else if ((DateTime.UtcNow - lastRefresh).TotalSeconds >= 30) Refresh();
             }
             catch (ObjectDisposedException) { }
             catch (Exception e) { Report("网络维护失败：" + e.Message); }
@@ -510,6 +541,7 @@ namespace FeiqLight
                     try { Send(Encode(Protocol.Exit, Settings.Nickname, null), peer.Endpoint); } catch (Exception) { }
             }
             disposed = true;
+            NetworkChange.NetworkAddressChanged -= OnNetworkChanged; NetworkChange.NetworkAvailabilityChanged -= OnNetworkChanged;
             if (timer != null) timer.Dispose();
             if (udp != null) udp.Close();
             if (tcp != null) tcp.Stop();

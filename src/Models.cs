@@ -165,6 +165,8 @@ namespace FeiqLight
         public bool Utf8;
         public bool Online;
         public DateTime LastSeen;
+        // 在线复核只用单调时钟和连续未回应的单播探测数；改系统时间或休眠恢复不会造成长期假在线或集体掉线。
+        internal TimeSpan Seen, Probed; internal int Misses;
         public override string ToString() { return Nickname; }
     }
     public sealed class FileTransferState
