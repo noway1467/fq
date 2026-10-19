@@ -98,7 +98,8 @@ namespace FeiqLight
             editor.Resize += delegate { ResizeComposer(); };
             Button file = Theme.IconButton("clip", "发送文件", SelectFiles, false); file.Dock = DockStyle.Fill; file.Margin = Padding.Empty; compose.Controls.Add(file, 2, 0);
             Button send = Theme.IconButton("send", "发送消息", delegate { SendMessage(); }, true); send.Dock = DockStyle.Fill; send.Margin = new Padding(3); compose.Controls.Add(send, 3, 0); root.Controls.Add(compose, 0, 3);
-            AllowDrop = true; DragEnter += delegate(object sender, DragEventArgs e) { if (e.Data.GetDataPresent(DataFormats.FileDrop)) e.Effect = DragDropEffects.Copy; }; DragDrop += delegate(object sender, DragEventArgs e) { string[] paths = e.Data.GetData(DataFormats.FileDrop) as string[]; if (paths != null) QueueFiles(paths); };
+            editor.EnableAutoDragDrop = false;
+            RegisterFileDrop(this);
             ApplyAppearance();
             try { foreach (ChatRecord record in store.History(peer.Id, 150)) Append(record.Outgoing ? network.OutgoingRecord(peer.Id, record.Packet) ?? record : record); editor.Text = store.LoadDraft(peer.Id); } catch (Exception e) { Error("本地记录", e.Message); }
         }
@@ -178,6 +179,27 @@ namespace FeiqLight
                 if (attachments.Count >= 20) { Error("附件数量", "一次最多 20 个文件。"); break; }
                 if (File.Exists(path) && !attachments.Contains(path)) attachments.Add(path);
             } UpdateQueued();
+        }
+        private void RegisterFileDrop(Control target)
+        {
+            target.AllowDrop=true;target.DragEnter+=FileDragEnter;target.DragOver+=FileDragEnter;target.DragDrop+=FileDropped;
+            foreach(Control child in target.Controls)RegisterFileDrop(child);
+        }
+        private void FileDragEnter(object sender,DragEventArgs e)
+        {
+            e.Effect=e.Data!=null&&e.Data.GetDataPresent(DataFormats.FileDrop)&&(e.AllowedEffect&DragDropEffects.Copy)!=0?DragDropEffects.Copy:DragDropEffects.None;
+        }
+        private void FileDropped(object sender,DragEventArgs e)
+        {
+            // RichEdit 若收到 Copy 会继续插入 OLE 占位空格；文件已由本程序处理，拒绝它的默认插入。
+            e.Effect=DragDropEffects.None;
+            if(e.Data==null||(e.AllowedEffect&DragDropEffects.Copy)==0)return;
+            string[] paths=e.Data.GetData(DataFormats.FileDrop) as string[];
+            if(paths==null||paths.Length==0)return;
+            if(!network.Settings.AutoSendDroppedFiles){QueueFiles(paths);if(!(sender is RichTextBox))e.Effect=DragDropEffects.Copy;return;}
+            // 自动发送只使用这次拖入的附件，不把未完成的文字和已排队附件一起发出去。
+            try {ForwardContent("",paths.Distinct(StringComparer.OrdinalIgnoreCase).ToArray());if(!(sender is RichTextBox))e.Effect=DragDropEffects.Copy;}
+            catch(Exception error){Error("拖入文件发送失败",error.Message);}
         }
         private void UpdateQueued() { bool longText=MessageText.AsFile(editor.Text);bool show=attachments.Count > 0 || longText;queue.Visible = show; root.RowStyles[2].Height = show ? 42 * DeviceDpi / 96F : 0; queued.Text = (longText?"长文本将作为 TXT 附件发送  ":"")+String.Join("、", attachments.Select(Path.GetFileName)); }
         private void SelectFiles(object sender, EventArgs e) { using (OpenFileDialog dialog = new OpenFileDialog { Title = "发送文件", Multiselect = true, CheckFileExists = true }) if (dialog.ShowDialog(this) == DialogResult.OK) QueueFiles(dialog.FileNames); }

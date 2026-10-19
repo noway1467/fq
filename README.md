@@ -1,13 +1,19 @@
 # 飞Q
 
-轻量的 Windows / Android 局域网聊天与文件传输工具。功能方向参考飞秋，界面布局参考 Telegram；独立实现，非官方产品。
+[![release](https://img.shields.io/github/v/release/noway1467/fq?display_name=tag&label=release&style=flat-square)](https://github.com/noway1467/fq/releases/latest)
+[![GitHub Repository](https://img.shields.io/badge/GitHub-Repository-181717?style=flat-square&logo=github&logoColor=white)](https://github.com/noway1467/fq)
 
-当前版本：**Windows / Android 0.3.25**。
+轻量的 Windows / Android 局域网聊天与文件传输工具。功能方向参考飞秋，界面布局参考 Telegram。
+
+当前版本：**Windows / Android 0.3.26**。
 
 下载独立安装/运行包：[GitHub Releases](https://github.com/noway1467/fq/releases)。选择 Windows EXE 或 Android APK，无需下载源码。
 
 ## 功能
 
+- 双端关于页使用应用图标、版本信息与独立 GitHub 仓库入口，支持明暗主题。
+- Windows 支持从聊天区域、输入框和输入区按钮上拖入文件；在「设置 → 文件」开启「拖入文件自动发送」后，仅发送本次拖入的文件，不夹带输入草稿或已排队附件。默认关闭，旧配置保持手动发送。Android 保留系统文件选择器与输入法图片发送，本轮不新增跨应用拖放。
+- Windows 无边框主窗口保留系统最小化能力，支持任务栏再次点击收起；关闭窗口收起到托盘的设置保持不变。
 - 失败文本重发复用原消息号，只更新原气泡及送达状态，重复点击不会追加消息；ACK 仍不代表已读。Windows 可重发原文件邀请，Android 文件邀请仍需重新选择原文件。
 - 双端以首次启动生成并持久保存的随机设备 ID 识别新版设备，地址、端口、登录名改变只更新连接位置。升级时可明确匹配的旧会话沿用原主键，保留历史、草稿、备注和编号；无法证明属于同一设备的旧分裂会话不按昵称自动合并。旧客户端未提供 ID 时仍按旧身份区分，重新安装或重置资料会生成新 ID。
 - Windows EXE、窗口与托盘统一使用多尺寸 32 位彩色 Q 图标，不依赖设备相关位图转换。
@@ -58,7 +64,7 @@ Windows 使用系统 C# 编译器；Android 使用 JDK 17+、SDK platform 36 / b
 .\tests\package-smoke.ps1
 ```
 
-构建输出位于 `dist/`，便携 ZIP、测试日志和渲染预览位于 `build/`；临时文件与新依赖缓存也留在项目内。已有 Gradle 可用 `-GradleHome` 复用，缓存齐全后可加 `-Offline`。
+构建输出位于 `dist/`，便携 ZIP、测试日志和渲染预览位于 `build/`；临时文件与新依赖缓存也留在项目内。只维护根目录这份 README，便携包直接包含它，不再维护 `dist/README.md` 旧副本。已有 Gradle 可用 `-GradleHome` 复用，缓存齐全后可加 `-Offline`。
 
 仓库只包含源码、测试、构建入口、这份说明和必要素材许可，不提交代理指令、个人记录、本机配置、密钥或安装包。新环境生成的 Android 调试签名与其他机器不一定相同；覆盖安装必须使用兼容签名，不要为升级而随意卸载清空数据。
 

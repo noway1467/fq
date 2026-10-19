@@ -17,6 +17,24 @@ namespace FeiqLight.Tests
 {
     internal static class UiSmokeTests
     {
+        [StructLayout(LayoutKind.Sequential)] private struct DropPoint {public int X,Y;}
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)] private delegate int DropData(IntPtr self,[MarshalAs(UnmanagedType.Interface)]System.Runtime.InteropServices.ComTypes.IDataObject data,uint keys,DropPoint point,ref uint effect);
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)] private delegate int DropOver(IntPtr self,uint keys,DropPoint point,ref uint effect);
+        [DllImport("user32.dll",CharSet=CharSet.Unicode)] private static extern IntPtr GetProp(IntPtr window,string name);
+        private static void NativeFileDrop(Control target,string[] paths)
+        {
+            // 走已注册的原生 OLE 目标，而不是只反射 OnDragDrop；覆盖 RichEdit 自带插入流程。
+            IntPtr pointer=GetProp(target.Handle,"OleDropTargetInterface");Check(pointer!=IntPtr.Zero,"控件没有注册原生文件拖放目标");
+            Marshal.AddRef(pointer);IntPtr table=Marshal.ReadIntPtr(pointer);
+            DropData enter=(DropData)Marshal.GetDelegateForFunctionPointer(Marshal.ReadIntPtr(table,3*IntPtr.Size),typeof(DropData)),drop=(DropData)Marshal.GetDelegateForFunctionPointer(Marshal.ReadIntPtr(table,6*IntPtr.Size),typeof(DropData));
+            DropOver over=(DropOver)Marshal.GetDelegateForFunctionPointer(Marshal.ReadIntPtr(table,4*IntPtr.Size),typeof(DropOver));
+            try {
+                var data=(System.Runtime.InteropServices.ComTypes.IDataObject)new DataObject(DataFormats.FileDrop,paths);Point p=target.PointToScreen(new Point(4,4));DropPoint point=new DropPoint {X=p.X,Y=p.Y};uint effect=1;
+                Check(enter(pointer,data,1,point,ref effect)==0&&effect==1,"原生 DragEnter 未接受 Copy");effect=1;Check(over(pointer,1,point,ref effect)==0&&effect==1,"原生 DragOver 未接受 Copy");effect=1;int result=drop(pointer,data,0,point,ref effect);
+                // RichEdit 的默认 OLE 插入必须返回 E_FAIL；应用侧附件队列和草稿另行断言。
+                Check(result==(target is RichTextBox?unchecked((int)0x80004005):0),"原生 Drop 的默认插入处理错误");
+            } finally {Marshal.Release(pointer);}
+        }
         private static IEnumerable<Control> All(Control root)
         {
             foreach (Control child in root.Controls) { yield return child; foreach (Control descendant in All(child)) yield return descendant; }
@@ -274,6 +292,33 @@ namespace FeiqLight.Tests
         }
         public static void Run(string directory, Action<string, Action> test)
         {
+            test("拖入设置：旧配置默认关闭、保存持久化与取消",()=>{
+                string folder=Path.Combine(directory,"drop-settings");LocalStore store=new LocalStore(folder);Directory.CreateDirectory(folder);File.WriteAllText(Path.Combine(folder,"settings.json"),"{\"Nickname\":\"旧配置\"}");
+                AppSettings settings=store.LoadSettings();Check(!settings.AutoSendDroppedFiles,"旧配置意外启用自动发送");settings.ReceiveFolder=Path.Combine(folder,"received");
+                using(SettingsDialog dialog=new SettingsDialog(settings,folder,2425)) {dialog.Show();Application.DoEvents();SettingsTab(dialog,"文件");ToggleSwitch drop=Find<ToggleSwitch>(dialog,"拖入文件自动发送");Check(drop.Visible&&!drop.Checked,"文件页开关不可见或默认开启");drop.Checked=true;SettingsTab(dialog,"通用");SettingsTab(dialog,"文件");Check(drop.Checked,"切页丢失开关状态");Render(dialog,"preview-drop-settings");Button(dialog,"保存").PerformClick();Check(dialog.Value.AutoSendDroppedFiles,"未保存开关");store.SaveSettings(dialog.Value);}
+                Check(store.LoadSettings().AutoSendDroppedFiles,"重新读取丢失设置");
+                using(SettingsDialog dialog=new SettingsDialog(store.LoadSettings(),folder,2425)){dialog.Show();Application.DoEvents();SettingsTab(dialog,"文件");Find<ToggleSwitch>(dialog,"拖入文件自动发送").Checked=false;Button(dialog,"取消").PerformClick();}Check(store.LoadSettings().AutoSendDroppedFiles,"取消修改了配置");
+            });
+            test("无边框窗口：Shell 最小化样式、系统命令恢复及关于页明暗渲染",()=>{
+                using(ModernWindow window=new ModernWindow()) {window.Show();Application.DoEvents();Check((GetWindowLong(window.Handle,-16)&0x000A0000)==0x000A0000,"缺少任务栏最小化样式");SendMessage(window.Handle,0x112,new IntPtr(0xF020),IntPtr.Zero);Application.DoEvents();Check(window.WindowState==FormWindowState.Minimized,"系统最小化命令无效");SendMessage(window.Handle,0x112,new IntPtr(0xF120),IntPtr.Zero);Application.DoEvents();Check(window.WindowState==FormWindowState.Normal,"系统恢复命令无效");}
+                foreach(bool dark in new[]{false,true}) {Theme.Change(dark,"blue");using(AboutDialog dialog=new AboutDialog()){dialog.Show();Application.DoEvents();LinkLabel link=Find<LinkLabel>(dialog,"GitHub 仓库：github.com/noway1467/fq");Check(link.Width>220&&link.Height>=44,"仓库地址空间不足");Check((GetWindowLong(dialog.Handle,-16)&0x00020000)==0,"关于页意外带最小化样式");Render(dialog,"preview-about-"+(dark?"dark":"light"));dialog.Close();}}Theme.Change(false,"blue");
+            });
+            test("文件拖放：输入区接收、默认排队、自动只发本批及真实传输",()=>{
+                string folder=Path.Combine(directory,"drop-transfer");Directory.CreateDirectory(folder);string first=Path.Combine(folder,"queued.txt"),second=Path.Combine(folder,"automatic.txt");File.WriteAllText(first,"等待手动发送");File.WriteAllText(second,"拖放真实回环内容");
+                LocalStore store=new LocalStore(Path.Combine(folder,"profile"));
+                using(LanService a=new LanService(new AppSettings {Notifications=false,CloseToTray=false,AutoReceiveFiles=false},Port(),true,"drop-a"))using(LanService b=new LanService(new AppSettings {Notifications=false,AutoReceiveFiles=false},Port(),true,"drop-b"))using(MainForm main=new MainForm(a,store)) {
+                    a.Start();b.Start();main.Show();main.NetworkStarted();a.Probe(new IPEndPoint(IPAddress.Loopback,b.Port));Pump(()=>a.Peers.Any(p=>p.Login=="drop-b"),"拖放测试未发现节点");Peer peer=a.Peers.Single(p=>p.Login=="drop-b");main.OpenChat(peer);ChatForm chat=main.ActiveChat;RichTextBox editor=Find<RichTextBox>(chat,"消息输入框");editor.Text="不应自动发出的草稿";
+                    Check(All(chat).All(c=>c.AllowDrop)&&chat.AllowDrop&&!editor.EnableAutoDragDrop,"输入或子控件未接入文件拖放");
+                    Action<Control,string[]> drop=NativeFileDrop;
+                    drop(editor,new[]{first});Check(store.History(peer.Id,20).Count==0,"默认拖入竟然发送");
+                    List<string> queued=(List<string>)typeof(ChatForm).GetField("attachments",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(chat);Check(queued.SequenceEqual(new[]{first}),"输入区没有排队");
+                    drop(editor.Parent,new[]{first});drop(Find<Button>(chat,"发送消息"),new[]{first});drop(All(chat).OfType<BubbleHistory>().Single(),new[]{first});Check(queued.Count==1&&editor.Text=="不应自动发出的草稿","原生拖放重复入队或改动草稿");
+                    IncomingMessage incoming=null;b.MessageReceived+=message=>incoming=message;a.Settings.AutoSendDroppedFiles=true;drop(editor,new[]{second,second});Pump(()=>incoming!=null,"自动拖入未发送");
+                    Check(incoming.Files.Count==1&&incoming.Files[0].Name=="automatic.txt"&&!incoming.Record.Text.Contains("草稿"),"自动发送夹带草稿或已有附件");Check(editor.Text=="不应自动发出的草稿"&&queued.SequenceEqual(new[]{first}),"自动发送清空草稿或已有附件");
+                    string received=Path.Combine(folder,"received.txt");Task<string> transfer=b.ReceiveFileAsync(incoming.Peer,incoming.Record.Packet,incoming.Files[0],received,null,CancellationToken.None);Pump(()=>transfer.IsCompleted,"拖入文件下载未完成");Check(File.ReadAllText(transfer.Result)==File.ReadAllText(second),"拖入附件实际内容错误");
+                    a.Settings.AutoSendDroppedFiles=false;drop(chat,new[]{second});Check(queued.Count==2,"关闭开关后未恢复排队");Find<Button>(chat,"发送消息").PerformClick();Pump(()=>store.History(peer.Id,20).Count==2,"手动发送未成功");Check(editor.TextLength==0&&queued.Count==0,"手动发送后未清空");main.ExitApplication();
+                }
+            });
             test("会话排序：置顶优先、在线自动靠前、上下线不串会话或草稿",()=>{
                 string folder=Path.Combine(directory,"online-order");LocalStore store=new LocalStore(folder);long now=DateTime.UtcNow.Ticks;
                 AppSettings settings=new AppSettings {CloseToTray=false,ReceiveFolder=Path.Combine(folder,"received"),Conversations=Enumerable.Range(0,4).Select(i=>new SavedConversation {Endpoint="127.0.0.1:"+(33425+i),Login="sort-"+i,Nickname="联系人 "+i,Pinned=i==0,MessageUtcTicks=now-TimeSpan.FromMinutes(i==1?0:i==2?20:i==3?10:30).Ticks}).ToArray()};
@@ -877,7 +922,12 @@ namespace FeiqLight.Tests
                         ownedMenus.Add(tray.ContextMenuStrip);
                         MenuDialog<SettingsDialog>(() => tray.ContextMenuStrip.Show(mainA, new Point(20, 60)), "设置", dialog => Button(dialog, "取消").PerformClick());
                         MenuDialog<AddressDialog>(() => Find<Button>(mainA, "菜单").PerformClick(), "添加联系人", dialog => { Check(dialog.Visible, "添加联系人未显示"); });
-                        MenuDialog<NoticeDialog>(() => Find<Button>(mainA, "菜单").PerformClick(), "关于", dialog => Button(dialog, "确定").PerformClick());
+                        MenuDialog<AboutDialog>(() => Find<Button>(mainA, "菜单").PerformClick(), "关于", dialog =>
+                        {
+                            LinkLabel repository = All(dialog).OfType<LinkLabel>().Single(link => link.AccessibleName == "GitHub 仓库：github.com/noway1467/fq");
+                            Check(repository.Links.Count == 1 && (string)repository.Links[0].LinkData == "https://github.com/noway1467/fq", "关于窗口的 GitHub 链接地址错误");
+                            Button(dialog, "确定").PerformClick();
+                        });
                     });
                     if (chatA != null)
                     {

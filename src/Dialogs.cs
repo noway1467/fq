@@ -7,15 +7,49 @@ using System.Windows.Forms;
 
 namespace FeiqLight
 {
+    public sealed class AboutDialog : ModernWindow
+    {
+        public const string RepositoryUrl="https://github.com/noway1467/fq";
+        private readonly Bitmap logo=Theme.Avatar(128,"Q");
+        public AboutDialog()
+        {
+            Text="关于飞Q";ResizeWindow=false;ClientSize=new Size(460,414);MinimumSize=new Size(400,380);StartPosition=FormStartPosition.CenterParent;
+            Panel footer=new Panel {Dock=DockStyle.Bottom,Height=62,Padding=new Padding(24,8,24,16)};
+            Button done=Theme.Button("确定",delegate {DialogResult=DialogResult.OK;},true);done.Dock=DockStyle.Right;footer.Controls.Add(done);AcceptButton=done;CancelButton=done;
+            TableLayoutPanel body=new TableLayoutPanel {Dock=DockStyle.Fill,ColumnCount=1,RowCount=4,Padding=new Padding(24,4,24,8)};
+            body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));foreach(int height in new[]{82,48,78,76})body.RowStyles.Add(new RowStyle(SizeType.Absolute,height));
+            TableLayoutPanel brand=new TableLayoutPanel {Dock=DockStyle.Fill,ColumnCount=2,RowCount=2,Margin=Padding.Empty};brand.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute,70));brand.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));brand.RowStyles.Add(new RowStyle(SizeType.Percent,55));brand.RowStyles.Add(new RowStyle(SizeType.Percent,45));
+            Panel icon=new Panel {Dock=DockStyle.Fill,Margin=new Padding(0,8,12,12),AccessibleName="飞Q图标"};icon.Paint+=delegate(object sender,PaintEventArgs e){e.Graphics.InterpolationMode=System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;e.Graphics.DrawImage(logo,new Rectangle(0,0,Math.Min(icon.Width,icon.Height),Math.Min(icon.Width,icon.Height)));};brand.Controls.Add(icon,0,0);brand.SetRowSpan(icon,2);
+            Label title=Theme.Label("飞Q",Theme.Title,Theme.Ink);title.Dock=DockStyle.Fill;brand.Controls.Add(title,1,0);
+            Label version=Theme.Label("Windows  "+typeof(AboutDialog).Assembly.GetName().Version.ToString(3),Theme.Small,Theme.Muted);version.Dock=DockStyle.Fill;brand.Controls.Add(version,1,1);body.Controls.Add(brand,0,0);
+            Label intro=Theme.Label("局域网聊天与文件传输",Theme.Body,Theme.Ink);intro.Dock=DockStyle.Fill;intro.Margin=Padding.Empty;body.Controls.Add(intro,0,1);
+            RoundedPanel card=new RoundedPanel {Dock=DockStyle.Fill,Fill=Theme.Ice,Radius=Theme.ControlRadius,Padding=new Padding(14,8,14,8),Margin=new Padding(0,0,0,8)};
+            Panel sourceIcon=new Panel {Dock=DockStyle.Left,Width=38,BackColor=Theme.Ice};sourceIcon.Paint+=delegate(object sender,PaintEventArgs e){Theme.Glyph(e.Graphics,"code",new Rectangle(0,(sourceIcon.Height-26)/2,26,26),Theme.Blue);};
+            LinkLabel repository=new LinkLabel {Dock=DockStyle.Fill,Text="GitHub 仓库\ngithub.com/noway1467/fq",Font=Theme.Body,BackColor=Theme.Ice,LinkColor=Theme.Blue,ActiveLinkColor=Theme.Blue,VisitedLinkColor=Theme.Blue,TextAlign=ContentAlignment.MiddleLeft,LinkBehavior=LinkBehavior.HoverUnderline,AccessibleName="GitHub 仓库：github.com/noway1467/fq"};repository.Links.Add(0,repository.Text.Length,RepositoryUrl);repository.LinkClicked+=delegate {MessageLinks.Open(repository,RepositoryUrl);};card.Controls.Add(repository);card.Controls.Add(sourceIcon);body.Controls.Add(card,0,2);
+            Label note=Theme.Label("仅用于可信局域网 · 基础协议明文\n内置表情与头像：Twemoji · CC BY 4.0\n© Twitter, Inc. 及贡献者；许可随程序内置。",Theme.Small,Theme.Muted);note.Dock=DockStyle.Fill;note.Margin=Padding.Empty;body.Controls.Add(note,0,3);
+            Surface.Controls.Add(body);Surface.Controls.Add(footer);
+        }
+        protected override void Dispose(bool disposing) {if(disposing)logo.Dispose();base.Dispose(disposing);}
+    }
     public sealed class NoticeDialog : ModernWindow
     {
-        public NoticeDialog(string title, string text)
+        public NoticeDialog(string title, string text) : this(title, text, null, null) { }
+        public NoticeDialog(string title, string text, string linkText, string linkUrl)
         {
-            Text = title; ClientSize = new Size(420, 245); MinimumSize = new Size(380, 200); ResizeWindow = false; StartPosition = FormStartPosition.CenterParent;
+            bool hasLink = !String.IsNullOrWhiteSpace(linkText) && !String.IsNullOrWhiteSpace(linkUrl);
+            Text = title; ClientSize = new Size(420, hasLink ? 285 : 245); MinimumSize = new Size(380, hasLink ? 240 : 200); ResizeWindow = false; StartPosition = FormStartPosition.CenterParent;
             Panel body = new Panel { Dock = DockStyle.Fill, Padding = new Padding(24, 8, 24, 10) };
             RichTextBox details = new RichTextBox { Dock = DockStyle.Fill, ReadOnly = true, BorderStyle = BorderStyle.None, Text = text,
                 Font = Theme.Body, BackColor = Theme.Surface, ForeColor = Theme.Ink, DetectUrls = false, ScrollBars = RichTextBoxScrollBars.Vertical, AccessibleName = "提示详情" };
             Theme.AttachEditMenu(details); body.Controls.Add(details);
+            if (hasLink)
+            {
+                Panel linkPanel = new Panel { Dock = DockStyle.Bottom, Height = 32, Padding = new Padding(0, 4, 0, 0) };
+                LinkLabel link = new LinkLabel { Dock = DockStyle.Fill, Text = linkText, Font = Theme.Body, BackColor = Color.Transparent, LinkColor = Theme.Blue, ActiveLinkColor = Theme.Blue, VisitedLinkColor = Theme.Blue, TextAlign = ContentAlignment.MiddleLeft, AccessibleName = linkText };
+                link.Links.Add(0, link.Text.Length, linkUrl);
+                link.LinkClicked += delegate(object sender, LinkLabelLinkClickedEventArgs e) { MessageLinks.Open(link, e.Link.LinkData as string); };
+                linkPanel.Controls.Add(link); body.Controls.Add(linkPanel);
+            }
             Panel footer = new Panel { Dock = DockStyle.Bottom, Height = 58, Padding = new Padding(18, 8, 18, 10) }; Button done = Theme.Button("确定", delegate { DialogResult = DialogResult.OK; }, true); done.Dock = DockStyle.Right; footer.Controls.Add(done); Surface.Controls.Add(body); Surface.Controls.Add(footer); AcceptButton = done;
         }
     }
@@ -134,6 +168,8 @@ namespace FeiqLight
             Label startupHint = Theme.Label(startupAvailable ? "登录 Windows 后自动连接并收起到托盘，无需管理员权限。\n移动程序后请重新开启；系统禁用的启动项需在任务管理器恢复。" : "当前运行环境无法配置系统启动项（如回环测试或系统限制）。\n其他设置仍可正常保存。", Theme.Small, Theme.Muted); startupHint.SetBounds(24, 276, 458, 56); body.Controls.Add(startupHint);
             ToggleSwitch auto = new ToggleSwitch { Text = "自动接收文件（无需逐次确认）", AccessibleName = "自动接收文件", Checked = current.AutoReceiveFiles, BackColor = Theme.Surface }; auto.SetBounds(24, 316, 458, 40); body.Controls.Add(auto);
             Label hint = Theme.Label("仅用于可信局域网；不会自动运行文件。\n关闭后，收到文件需手动点击接收。", Theme.Small, Theme.Muted); hint.SetBounds(24, 360, 458, 40); body.Controls.Add(hint);
+            ToggleSwitch autoDrop=new ToggleSwitch {Text="拖入文件自动发送",AccessibleName="拖入文件自动发送",Checked=current.AutoSendDroppedFiles,BackColor=Theme.Surface};autoDrop.SetBounds(24,520,458,40);body.Controls.Add(autoDrop);
+            Label dropHint=Theme.Label("默认关闭，拖入后先加入待发送列表。开启后仅发送本次拖入文件，不发送输入草稿或已排队附件。",Theme.Small,Theme.Muted);dropHint.SetBounds(24,521,458,48);body.Controls.Add(dropHint);
             TextBox folder = Input("文件保存文件夹", current.ReceiveFolder ?? AppSettings.DefaultReceiveFolder, 404, 240); folder.Parent.Width = 350;
             Button browse = Theme.Button("浏览…", delegate
             {
@@ -200,7 +236,7 @@ namespace FeiqLight
                 try
                 {
                     string path = ReceiveStorage.Folder(folder.Text); ReceiveStorage.ValidateWritable(path);
-                    Value = new AppSettings { Nickname = Protocol.Field(name.Text.Trim()), Group = String.IsNullOrWhiteSpace(group.Text) ? "我的局域网" : Protocol.Field(group.Text.Trim()), Signature = signature.Text.Trim(), CloseToTray = close.Checked, StartWithWindows = startup.Checked, Notifications = notifications.Checked,DiagnosticsEnabled = diagnostics.Checked,  AutoReceiveFiles = auto.Checked, ReceiveFolder = path, ChatFontSize=messageSize,ChatBackground=backgroundMode,BackgroundImage=backgroundPath,DarkMode=dark.Checked, Accent=accentIndex==1?"green":accentIndex==2?"purple":"blue" };
+                    Value = new AppSettings { Nickname = Protocol.Field(name.Text.Trim()), Group = String.IsNullOrWhiteSpace(group.Text) ? "我的局域网" : Protocol.Field(group.Text.Trim()), Signature = signature.Text.Trim(), CloseToTray = close.Checked, StartWithWindows = startup.Checked, Notifications = notifications.Checked,DiagnosticsEnabled = diagnostics.Checked, AutoSendDroppedFiles=autoDrop.Checked, AutoReceiveFiles = auto.Checked, ReceiveFolder = path, ChatFontSize=messageSize,ChatBackground=backgroundMode,BackgroundImage=backgroundPath,DarkMode=dark.Checked, Accent=accentIndex==1?"green":accentIndex==2?"purple":"blue" };
                     DialogResult = DialogResult.OK;
                 }
                 catch (Exception e) { error.Text = "保存目录不可用：" + e.Message; SelectTab(2); folder.Focus(); }
@@ -227,12 +263,12 @@ namespace FeiqLight
                     browse.Text = "选择文件夹"; browse.Dock = reset.Dock = DockStyle.Fill; browse.BackColor = reset.BackColor = Theme.Ice;
                     browse.Margin = new Padding(0, 0, 6, 0); reset.Margin = new Padding(6, 0, 0, 0); actions.Controls.Add(browse, 0, 0); actions.Controls.Add(reset, 1, 0); layout.Controls.Add(actions); continue;
                 }
-                string section = field == fields[0] ? "个人资料" : field == close ? "消息与窗口" : field == auto ? "文件接收" : field == dark ? "聊天外观" : field == diagnostics ? "故障诊断" : field == info ? "本机信息" : null;
+                string section = field == fields[0] ? "个人资料" : field == close ? "消息与窗口" : field == auto ? "文件接收" : field == autoDrop ? "文件发送" : field == dark ? "聊天外观" : field == diagnostics ? "故障诊断" : field == info ? "本机信息" : null;
                 if (section != null) {
                     if(layout.Controls.Count>0) { Panel divider=new Panel { Height=1, BackColor=Theme.Line, Margin=new Padding(0,16,0,16) };layout.Controls.Add(divider); }
                     Label heading = Theme.Label(section, Theme.Section, Theme.Ink); heading.Height = 28; heading.Margin = new Padding(0, 0, 0, 8); layout.Controls.Add(heading);
                 }
-                if(field is Label && field != hint && field != info && field != startupHint && field != privacy) field.Height=22;
+                if(field is Label && field != hint && field != info && field != startupHint && field != privacy && field != dropHint) field.Height=22;
                 field.Margin = new Padding(0, 0, 0, field is Label ? 6 : 12); layout.Controls.Add(field);
             }
             TableLayoutPanel navigation=new TableLayoutPanel {Dock=DockStyle.Top,Height=56,ColumnCount=4,RowCount=1,Padding=new Padding(16,0,16,0),AccessibleName="设置标签页"};

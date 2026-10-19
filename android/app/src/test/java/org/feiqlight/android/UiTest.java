@@ -591,6 +591,18 @@ public final class UiTest {
         spans[0].onClick(view);Intent intent=shadowOf(context).getNextStartedActivity();assertNotNull(intent);assertEquals(Intent.ACTION_VIEW,intent.getAction());assertTrue(intent.hasCategory(Intent.CATEGORY_BROWSABLE));assertEquals("https://example.com/a?q=1&x=2",intent.getDataString());
         assertNull(MessageLinks.normalize("javascript:alert(1)"));assertNull(MessageLinks.normalize("file:///data/private"));assertNull(MessageLinks.normalize("https://user:pass@example.com"));controller.pause().stop().destroy();
     }
+    @Test public void aboutDialogLinksToGithubRepository() throws Exception {
+        ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();
+        shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));
+        ActivityController<MainActivity> ac=Robolectric.buildActivity(MainActivity.class).setup();MainActivity activity=ac.get();android.app.Dialog dialog=null;
+        try {
+            Method showAbout=MainActivity.class.getDeclaredMethod("showAbout");showAbout.setAccessible(true);showAbout.invoke(activity);dialog=org.robolectric.shadows.ShadowDialog.getLatestDialog();
+            View about=descendants(dialog.getWindow().getDecorView()).stream().filter(v->"GitHub 仓库：github.com/noway1467/fq".contentEquals(v.getContentDescription()==null?"":v.getContentDescription())).findFirst().get();
+            assertTrue(about.isFocusable());dialogScreenshot(dialog,"android-about-light");
+            about.performClick();Intent intent=shadowOf(activity).getNextStartedActivity();assertNotNull(intent);assertEquals(Intent.ACTION_VIEW,intent.getAction());assertTrue(intent.hasCategory(Intent.CATEGORY_BROWSABLE));assertEquals("https://github.com/noway1467/fq",intent.getDataString());
+            dialog.dismiss();activity.getSharedPreferences("settings",0).edit().putBoolean("dark_mode",true).commit();Method theme=MainActivity.class.getDeclaredMethod("applyTheme");theme.setAccessible(true);theme.invoke(activity);showAbout.invoke(activity);dialog=org.robolectric.shadows.ShadowDialog.getLatestDialog();dialogScreenshot(dialog,"android-about-dark");measure(dialog.getWindow().getDecorView(),640,600,true);snapshotView(dialog.getWindow().getDecorView(),"android-about-compact");
+        } finally {if(dialog!=null)dialog.dismiss();ac.pause().stop().destroy();sc.destroy();}
+    }
     @Test public void firstChatFrameAlreadyAtBottomAndHistoryRefreshKeepsViewport() throws Exception {
         ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();
         shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));

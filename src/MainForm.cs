@@ -7,7 +7,7 @@ using System.Windows.Forms;
 
 namespace FeiqLight
 {
-    public sealed class MainForm : ModernWindow
+public sealed class MainForm : ModernWindow
     {
         private readonly LanService network;
         private readonly LocalStore store;
@@ -278,7 +278,7 @@ namespace FeiqLight
             {
                 mainMenu = Theme.Menu(); mainMenu.Items.Add("添加联系人", null, delegate { AddPeer(); }); mainMenu.Items.Add("刷新", null, delegate { RefreshNetwork(); }); mainMenu.Items.Add("设置", null, delegate { OpenSettings(); });
                 mainMenu.Items.Add("已移除的联系人…", null,delegate {using(ForwardDialog dialog=new ForwardDialog(network.Peers.Where(p=>p.Hidden).ToArray(),-1))if(dialog.ShowDialog(this)==DialogResult.OK)OpenChat(dialog.Target);});
-                mainMenu.Items.Add("关于", null, delegate { using (NoticeDialog dialog = new NoticeDialog("飞Q " + typeof(MainForm).Assembly.GetName().Version.ToString(3), "独立局域网客户端\n非飞秋或 Telegram 官方产品\n\n基础协议为明文，请仅用于可信局域网。")) dialog.ShowDialog(this); });
+                mainMenu.Items.Add("关于", null, delegate { using (AboutDialog dialog = new AboutDialog()) dialog.ShowDialog(this); });
                 // 退出会销毁窗口与菜单，先让当前菜单事件返回再执行。
                 mainMenu.Items.Add("退出", null, delegate { Ui(ExitApplication); });
             }

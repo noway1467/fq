@@ -25,6 +25,7 @@ namespace FeiqLight
         public string ChatBackground { get; set; }
         public string BackgroundImage { get; set; }
         public bool AutoReceiveFiles { get; set; }
+        public bool AutoSendDroppedFiles { get; set; }
         public string ReceiveFolder { get; set; }
         public WindowPlacement Window { get; set; }
         public string[] KnownPeers { get; set; }
@@ -36,7 +37,7 @@ namespace FeiqLight
             Nickname = Environment.UserName; Group = "我的局域网";
             Signature = "在同一个局域网，简单聊一聊。";
             CloseToTray = true; Notifications = true; AutoReceiveFiles = true; ReceiveFolder = DefaultReceiveFolder;
-            StartWithWindows = false; ChatFontSize=10; ChatBackground="orbits"; BackgroundImage="";
+            StartWithWindows = false; AutoSendDroppedFiles = false; ChatFontSize=10; ChatBackground="orbits"; BackgroundImage="";
             KnownPeers = new string[0];
             Conversations = new SavedConversation[0];
         }

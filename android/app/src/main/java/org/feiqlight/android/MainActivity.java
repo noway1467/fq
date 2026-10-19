@@ -21,6 +21,7 @@ import java.util.*;
 
 /** 原生 View 界面：借鉴 Telegram 的信息层级，不加载 WebView 或第三方 UI 运行时。 */
 public final class MainActivity extends Activity implements ChatService.Observer {
+    private static final String GITHUB_REPOSITORY="https://github.com/noway1467/fq";
     private int BLUE=0xff3390ec, INK=0xff17212b, MUTED=0xff738392, PALE=0xfff1f4f7, WALL=0xffe3edf5, SURFACE=Color.WHITE, BUBBLE=0xffd9edff;
     private void applyTheme() {
         SharedPreferences prefs=getSharedPreferences("settings",MODE_PRIVATE); boolean dark=prefs.getBoolean("dark_mode",false);
@@ -479,8 +480,19 @@ public final class MainActivity extends Activity implements ChatService.Observer
         LinearLayout options=column(); Dialog dialog=sheet("飞Q",options,null,null);
         String[] labels={"刷新","添加联系人","已移除的联系人","设置","关于",service!=null&&service.canDisconnect()?"断开":"连接"};
         for(String label:labels) {
-            fileAction(options,dialog,label,()->{ if(label.equals("已移除的联系人")) hiddenConversations(); else if(label.equals("设置")) settings(); else if(label.equals("添加联系人")) addPeer(); else if(label.equals("刷新")) { if(service!=null) service.refresh(); } else if(label.equals("断开")) { if(service!=null) service.disconnect(); } else if(label.equals("关于")) sheet("飞Q "+BuildConfig.VERSION_NAME,text("独立局域网客户端\n非飞秋或 Telegram 官方产品\n\n基础协议为明文，请仅用于可信局域网。\n\n内置头像：Twemoji v16.0.1\n© Twitter, Inc. 及贡献者 · CC BY 4.0\n原图合并为本地图集；许可随 APK 内置。",15,MUTED),"确定",Dialog::dismiss); else connect(); });
+            fileAction(options,dialog,label,()->{ if(label.equals("已移除的联系人")) hiddenConversations(); else if(label.equals("设置")) settings(); else if(label.equals("添加联系人")) addPeer(); else if(label.equals("刷新")) { if(service!=null) service.refresh(); } else if(label.equals("断开")) { if(service!=null) service.disconnect(); } else if(label.equals("关于")) showAbout(); else connect(); });
         }
+    }
+    private void showAbout() {
+        LinearLayout content=column(),brand=row();brand.setPadding(0,dp(12),0,dp(12));
+        ImageView logo=new ImageView(this);logo.setImageDrawable(getApplicationInfo().loadIcon(getPackageManager()));logo.setContentDescription("飞Q图标");brand.addView(logo,new LinearLayout.LayoutParams(dp(52),dp(52)));
+        LinearLayout identity=column();identity.setPadding(dp(16),0,0,0);TextView name=text("飞Q",22,INK);name.setTypeface(null,Typeface.BOLD);identity.addView(name);identity.addView(text("Android  "+BuildConfig.VERSION_NAME,13,MUTED));brand.addView(identity,weight());content.addView(brand);
+        TextView intro=text("局域网聊天与文件传输",15,INK);intro.setPadding(0,dp(8),0,dp(18));content.addView(intro);
+        LinearLayout repository=row();repository.setPadding(dp(12),dp(10),dp(12),dp(10));repository.setBackground(new android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(BUBBLE),shape(PALE,CONTROL_RADIUS),null));repository.setFocusable(true);repository.setContentDescription("GitHub 仓库：github.com/noway1467/fq");
+        IconButton source=new IconButton("code","源码",BLUE);source.setClickable(false);source.setFocusable(false);source.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);repository.addView(source,new LinearLayout.LayoutParams(dp(40),dp(44)));
+        LinearLayout labels=column();labels.setPadding(dp(8),0,0,0);labels.addView(text("GitHub 仓库",15,BLUE));labels.addView(text("github.com/noway1467/fq",13,MUTED));repository.addView(labels,weight());repository.setOnClickListener(v->{try{startActivity(new Intent(Intent.ACTION_VIEW,Uri.parse(GITHUB_REPOSITORY)).addCategory(Intent.CATEGORY_BROWSABLE));}catch(ActivityNotFoundException e){error("没有可用的浏览器");}});content.addView(repository,new LinearLayout.LayoutParams(-1,-2));
+        TextView note=text("仅用于可信局域网 · 基础协议明文\n内置头像：Twemoji · CC BY 4.0\n© Twitter, Inc. 及贡献者；许可随 APK 内置。",12,MUTED);note.setPadding(0,dp(18),0,dp(4));note.setLineSpacing(dp(4),1);content.addView(note);
+        sheet("关于飞Q",content,"确定",Dialog::dismiss);
     }
     private void hiddenConversations() {
         LinearLayout box=column();Dialog dialog=sheet("已移除的联系人",box,null,null);
@@ -894,6 +906,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
             else if(kind.equals("back")) { path.moveTo(12,4); path.lineTo(4,12); path.lineTo(12,20); canvas.drawPath(path,p); canvas.drawLine(4,12,21,12,p); }
             else if(kind.equals("send")) { path.moveTo(3,3); path.lineTo(22,12); path.lineTo(3,21); path.lineTo(6,12); path.close(); canvas.drawPath(path,p); canvas.drawLine(6,12,21,12,p); }
             else if(kind.equals("smile")) {canvas.drawCircle(12,12,9,p);canvas.drawPoint(9,9,p);canvas.drawPoint(15,9,p);canvas.drawArc(7,9,17,17,15,150,false,p);}
+            else if(kind.equals("code")) {path.moveTo(7,6);path.lineTo(2,12);path.lineTo(7,18);path.moveTo(17,6);path.lineTo(22,12);path.lineTo(17,18);canvas.drawPath(path,p);canvas.drawLine(14,4,10,20,p);}
             else { path.moveTo(17,8); path.lineTo(8,17); path.cubicTo(4,21,0,16,4,12); path.lineTo(13,3); path.cubicTo(19,-3,27,5,21,11); path.lineTo(11,21); canvas.drawPath(path,p); }
             canvas.restore();
         }

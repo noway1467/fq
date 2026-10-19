@@ -164,6 +164,7 @@ namespace FeiqLight
                 else if (name == "close") { g.DrawLine(p, 6, 6, 18, 18); g.DrawLine(p, 18, 6, 6, 18); }
                 else if (name == "min") g.DrawLine(p, 5, 15, 19, 15);
                 else if (name == "max") g.DrawRectangle(p, 5, 5, 14, 14);
+                else if (name == "code") { g.DrawLines(p,new[]{new PointF(7,6),new PointF(2,12),new PointF(7,18)});g.DrawLines(p,new[]{new PointF(17,6),new PointF(22,12),new PointF(17,18)});g.DrawLine(p,14,4,10,20); }
                 else if (name == "search") { g.DrawEllipse(p, 4, 3, 12, 12); g.DrawLine(p, 15, 15, 21, 21); }
                 else if (name == "send") { g.DrawPolygon(p, new[] { new PointF(3, 3), new PointF(22, 12), new PointF(3, 21), new PointF(6, 12) }); g.DrawLine(p, 6, 12, 20, 12); }
                 else if (name == "smile") { g.DrawEllipse(p, 3, 3, 18, 18); g.DrawArc(p, 7, 8, 10, 9, 0, 180); g.DrawLine(p, 8, 8, 8, 9); g.DrawLine(p, 16, 8, 16, 9); }
@@ -378,7 +379,16 @@ namespace FeiqLight
         public bool ResizeWindow
         {
             get { return resizeWindow; }
-            set { resizeWindow = value; if (minimize != null) { minimize.Visible = maximize.Visible = value; chrome.ColumnStyles[1].Width = value ? 126 : 42; chrome.Height = value ? 36 : 52; caption.Font = value ? Theme.Small : Theme.Title; caption.ForeColor = value ? Theme.Muted : Theme.Ink; } }
+            set { resizeWindow = value; if (minimize != null) { minimize.Visible = maximize.Visible = value; chrome.ColumnStyles[1].Width = value ? 126 : 42; chrome.Height = value ? 36 : 52; caption.Font = value ? Theme.Small : Theme.Title; caption.ForeColor = value ? Theme.Muted : Theme.Ink; } if(IsHandleCreated)UpdateStyles(); }
+        }
+        protected override CreateParams CreateParams
+        {
+            get {
+                CreateParams value=base.CreateParams;
+                // 无边框只负责外观；保留 Shell 所需的系统菜单与最小化能力，任务栏再次点击才能收起。
+                if(ResizeWindow)value.Style|=0x00080000|0x00020000|0x00010000;
+                return value;
+            }
         }
         public ModernWindow()
         {
