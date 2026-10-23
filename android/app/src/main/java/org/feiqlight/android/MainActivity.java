@@ -71,6 +71,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
     private ScrollView scroll;
     private Button connect;
     private IconButton sendButton;
+    private Dialog historyDialog;
     private android.window.OnBackInvokedCallback backCallback;
     private ConversationAdapter adapter;
     private final ServiceConnection connection=new ServiceConnection() {
@@ -89,7 +90,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
     }
     // 熄屏期间对端可能已切网离开，亮屏回到页面时立即复核头像在线光晕。
     @Override protected void onStart() { super.onStart(); visible=true; if(service!=null) { service.observe(this); service.active(selected); service.verifyPresence(); } restoreConnection(); }
-    @Override protected void onStop() { historyAppliedVersion=++historyRequestVersion; finishSelection(); saveDraft(); visible=false; if(service!=null) { service.remove(this); service.active(""); } super.onStop(); }
+    @Override protected void onStop() { historyAppliedVersion=++historyRequestVersion; closeHistory(); finishSelection(); saveDraft(); visible=false; if(service!=null) { service.remove(this); service.active(""); } super.onStop(); }
     @Override protected void onDestroy() { if(media!=null) media.close(); if(backgroundBitmap!=null){backgroundBitmap.recycle();backgroundBitmap=null;} if(service!=null) service.remove(this); if(bound) unbindService(connection); if(Build.VERSION.SDK_INT>=33&&backCallback!=null) getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(backCallback); super.onDestroy(); }
     @Override protected void onSaveInstanceState(Bundle state) { saveDraft(); state.putString("peer",selected); state.putString("picker",pickerPeer); state.putString("export",exportPath); super.onSaveInstanceState(state); }
     private int dp(float n) { return Math.round(n*getResources().getDisplayMetrics().density); }
@@ -133,6 +134,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         });
     }
     private void renderPage() {
+        closeHistory();
         historyAppliedVersion=++historyRequestVersion;
         finishSelection();
         applyTheme(); historySignature=""; displayedOutgoing.clear(); forceLatest=false; editor=null; search=null; messages=null; list=null; chatAvatar=null;sendStatus=null;sendButton=null;
@@ -502,6 +504,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
     }
     private void conversationMenu(ChatStore.Conversation c) {
         LinearLayout options=column();Dialog menu=sheet(c.displayName(),options,null,null);
+        fileAction(options,menu,"聊天记录",()->showHistory(c));
         fileAction(options,menu,"设置备注",()->{
             LinearLayout box=column();EditText note=formField(box,"仅本机显示，留空恢复昵称",c.note==null?"":c.note);note.setFilters(new InputFilter[]{new InputFilter.LengthFilter(64)});
             sheet("联系人备注",box,"保存",dialog->{if(service!=null)service.editConversation(c.peer.id(),note.getText().toString(),c.pinned);dialog.dismiss();});
@@ -509,6 +512,73 @@ public final class MainActivity extends Activity implements ChatService.Observer
         fileAction(options,menu,c.pinned?"取消置顶":"置顶会话",()->{if(service!=null)service.editConversation(c.peer.id(),c.note,!c.pinned);});
         fileAction(options,menu,"清空聊天记录",()->deleteConversation(c,true));
         fileAction(options,menu,"删除联系人",()->deleteConversation(c,false));
+    }
+    private void closeHistory() { if(historyDialog!=null){historyDialog.dismiss();historyDialog=null;} }
+    private CharSequence searchHighlight(String value,String query) {
+        SpannableString spans=new SpannableString(value);
+        if(query.isEmpty())return spans;
+        for(int i=0;i+query.length()<=value.length();) {
+            if(value.regionMatches(true,i,query,0,query.length())) {
+                spans.setSpan(new android.text.style.BackgroundColorSpan(blend(0xfff4b92a,SURFACE,.48f)),i,i+query.length(),Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                i+=query.length();
+            } else i++;
+        }
+        return spans;
+    }
+    private static boolean searchContains(String value,String query) {
+        for(int i=0;i+query.length()<=value.length();i++)if(value.regionMatches(true,i,query,0,query.length()))return true;
+        return false;
+    }
+    private static String searchPreview(String value,String query) {
+        String preview=MessageText.preview(value);
+        if(query.isEmpty()||searchContains(preview,query))return preview;
+        for(int i=0;i+query.length()<=value.length();i++)if(value.regionMatches(true,i,query,0,query.length())) {
+            int start=Math.max(0,i-60),end=Math.min(value.length(),i+Math.max(query.length(),180));
+            if(start>0&&Character.isLowSurrogate(value.charAt(start)))start--;
+            if(end<value.length()&&Character.isHighSurrogate(value.charAt(end-1)))end--;
+            return (start>0?"… ":"")+value.substring(start,end)+(end<value.length()?" …":"");
+        }
+        return preview;
+    }
+    private void showHistory(ChatStore.Conversation conversation) {
+        if(service==null)return;
+        closeHistory();finishSelection();
+        ChatService source=service;String page=selected;int generation=editorGeneration;
+        Dialog dialog=new Dialog(this) {
+            @Override public boolean dispatchTouchEvent(MotionEvent event){dismissSelectionOutside(event);return super.dispatchTouchEvent(event);}
+        };dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);historyDialog=dialog;
+        LinearLayout frame=column();frame.setBackground(shape(SURFACE,18));frame.setPadding(dp(16),dp(12),dp(16),dp(12));
+        LinearLayout heading=row();TextView caption=text("聊天记录 · "+conversation.displayName(),18,INK);caption.setTypeface(null,Typeface.BOLD);caption.setMaxLines(2);caption.setEllipsize(TextUtils.TruncateAt.END);heading.addView(caption,weight());
+        IconButton close=new IconButton("close","关闭聊天记录",MUTED);heading.addView(close,new LinearLayout.LayoutParams(dp(44),dp(44)));close.setOnClickListener(v->dialog.dismiss());frame.addView(heading);
+        EditText input=new EditText(this);configureInput(input);input.setSingleLine();input.setTextSize(15);input.setTextColor(INK);input.setHintTextColor(MUTED);input.setHint("搜索消息或文件名");input.setContentDescription("搜索聊天记录");input.setBackground(shape(PALE,CONTROL_RADIUS));input.setPadding(dp(14),dp(10),dp(14),dp(10));input.setFilters(new InputFilter[]{new InputFilter.LengthFilter(200)});frame.addView(input,new LinearLayout.LayoutParams(-1,-2));
+        TextView count=text("正在读取聊天记录…",12,MUTED);count.setContentDescription("聊天记录搜索结果");count.setPadding(0,dp(10),0,dp(10));frame.addView(count);
+        ListView results=new ListView(this);results.setContentDescription("聊天记录搜索列表");results.setDivider(null);results.setBackgroundColor(WALL);frame.addView(results,new LinearLayout.LayoutParams(-1,0,1));
+        List<LanNode.Message> rows=new ArrayList<>(),matches=new ArrayList<>();
+        BaseAdapter adapter=new BaseAdapter() {
+            public int getCount(){return matches.size();} public Object getItem(int position){return matches.get(position);} public long getItemId(int position){return position;}
+            public View getView(int position,View recycled,ViewGroup parent) {
+                LanNode.Message message=matches.get(position);String query=input.getText().toString();
+                LinearLayout item=column();item.setPadding(dp(10),dp(8),dp(10),dp(8));LinearLayout bubble=column();bubble.setPadding(dp(14),dp(10),dp(14),dp(10));bubble.setBackground(shape(message.outgoing?BUBBLE:SURFACE,CONTROL_RADIUS));item.addView(bubble);
+                TextView stamp=text(new SimpleDateFormat("M月d日 HH:mm",Locale.CHINA).format(new Date(message.time))+" · "+(message.outgoing?"我":conversation.displayName()),12,MUTED);bubble.addView(stamp);
+                if(!message.text.isEmpty()) {
+                    TextView content=text("",messageSize(),INK);content.setText(searchHighlight(searchPreview(message.text,query),query));selectable(content);MessageLinks.apply(content,BLUE);content.setLineSpacing(dp(3),1);content.setPadding(0,dp(6),0,dp(4));bubble.addView(content);
+                    TextView full=text("查看全文 / 选段复制",13,BLUE);full.setMinHeight(dp(44));full.setGravity(Gravity.CENTER_VERTICAL);full.setOnClickListener(v->showFullText(message.text));bubble.addView(full);
+                }
+                for(Protocol.Attachment file:message.files){TextView name=text("",14,INK);name.setText(searchHighlight(file.name,query));selectable(name);name.setPadding(0,dp(6),0,dp(4));bubble.addView(name);}
+                return item;
+            }
+        };results.setAdapter(adapter);
+        Runnable filter=()->{
+            finishSelection();String query=input.getText().toString();matches.clear();
+            for(LanNode.Message message:rows)if(searchContains(message.text,query)||message.files.stream().anyMatch(f->searchContains(f.name,query)))matches.add(message);
+            count.setText(query.isEmpty()?"最近 "+rows.size()+" 条记录（最多 200 条）":"找到 "+matches.size()+" 条匹配记录 · 关键词已高亮");adapter.notifyDataSetChanged();results.setSelection(0);
+        };
+        input.addTextChangedListener(new TextWatcher(){public void beforeTextChanged(CharSequence s,int start,int count,int after){}public void onTextChanged(CharSequence s,int start,int before,int count){filter.run();}public void afterTextChanged(Editable value){}});
+        dialog.setOnDismissListener(d->{finishSelection();if(historyDialog==dialog)historyDialog=null;});
+        dialog.setContentView(frame);Window window=dialog.getWindow();if(window!=null){window.setBackgroundDrawableResource(android.R.color.transparent);window.setGravity(Gravity.BOTTOM);window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);}
+        dialog.show();if(window!=null)window.setLayout(-1,Math.max(dp(240),(int)(getResources().getDisplayMetrics().heightPixels*.85f)));
+        // 固定联系人快照；离开页面或关闭窗口后，旧查询不能写入后来打开的搜索窗口。
+        source.history(conversation.peer.id(),loaded->{if(historyDialog!=dialog||!dialog.isShowing()||!visible||isDestroyed()||isFinishing()||service!=source||generation!=editorGeneration||!page.equals(selected))return;rows.addAll(loaded);filter.run();});
     }
     private void deleteConversation(ChatStore.Conversation c,boolean clearOnly) {
         LinearLayout box=column();TextView hint=text("仅影响本机，不删除已接收的文件。删除列表不是屏蔽，新消息会恢复会话入口。",14,MUTED);box.addView(hint);

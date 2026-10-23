@@ -40,6 +40,7 @@ namespace FeiqLight
         }
         private readonly TableLayoutPanel middle, root, side, queue;
         private readonly List<string> attachments = new List<string>();
+        private readonly HashSet<string> pastedImages = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private CancellationTokenSource receiving;
         private ReceivedFile activeFile;
         private readonly System.Windows.Forms.Timer draftTimer = new System.Windows.Forms.Timer { Interval = 500 };
@@ -81,16 +82,16 @@ namespace FeiqLight
             files.SelectedIndexChanged += delegate { if (receiving == null) receive.Enabled = reject.Enabled = files.SelectedItem != null; };
             fileStatus.Dock = DockStyle.Fill; fileStatus.AutoEllipsis = true; side.Controls.Add(fileStatus, 0, 3); middle.Controls.Add(side, 1, 0); root.Controls.Add(middle, 0, 1); UpdateFilesPanel();
             queue = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Padding = new Padding(18, 1, 8, 1), Margin = Padding.Empty, Visible = false }; queue.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); queue.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 40)); queue.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            queued.Dock = DockStyle.Fill; queued.AutoEllipsis = true; queue.Controls.Add(queued, 0, 0); Button remove = Theme.IconButton("close", "移除附件", delegate { attachments.Clear(); UpdateQueued(); }, false); remove.Dock = DockStyle.Fill; remove.Margin = Padding.Empty; queue.Controls.Add(remove, 1, 0); root.Controls.Add(queue, 0, 2);
+            queued.Dock = DockStyle.Fill; queued.AutoEllipsis = true; queue.Controls.Add(queued, 0, 0); Button remove = Theme.IconButton("close", "移除附件", delegate { ClearPastedImages(); attachments.Clear(); UpdateQueued(); }, false); remove.Dock = DockStyle.Fill; remove.Margin = Padding.Empty; queue.Controls.Add(remove, 1, 0); root.Controls.Add(queue, 0, 2);
             TableLayoutPanel compose = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, RowCount = 1, Padding = new Padding(10, 11, 14, 11), Margin = Padding.Empty, BackColor = Theme.Surface };
             compose.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 44)); compose.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); compose.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 44)); compose.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 52)); compose.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             Button emoji = Theme.IconButton("smile", "表情", ShowEmoji, false); emoji.Dock = DockStyle.Fill; emoji.Margin = Padding.Empty; compose.Controls.Add(emoji, 0, 0);
             RoundedPanel input = new RoundedPanel { Dock = DockStyle.Fill, Fill = Theme.Ice, Radius = Theme.ControlRadius, Padding = new Padding(15, 13, 12, 6), Margin = new Padding(4, 1, 6, 1) };
             editor.BorderStyle = BorderStyle.None; editor.Dock = DockStyle.Fill; editor.BackColor = Theme.Ice; editor.Font = new Font(Theme.Body.FontFamily, 10F); editor.MaxLength = MessageText.InputLimit; editor.AccessibleName = "消息输入框"; editor.DetectUrls = false; editor.ScrollBars = RichTextBoxScrollBars.None;
-            Theme.AttachEditMenu(editor);
+            Theme.AttachEditMenu(editor, PasteClipboard);
             editor.KeyDown += delegate(object sender, KeyEventArgs e)
             {
-                if ((e.Control && e.KeyCode == Keys.V) || (e.Shift && e.KeyCode == Keys.Insert)) { e.SuppressKeyPress = true; Theme.PasteText(editor); }
+                if ((e.Control && e.KeyCode == Keys.V) || (e.Shift && e.KeyCode == Keys.Insert)) { e.SuppressKeyPress = true; PasteClipboard(); }
                 else if (e.KeyCode == Keys.Enter && !e.Shift) { e.SuppressKeyPress = true; SendMessage(); }
             }; input.Controls.Add(editor); compose.Controls.Add(input, 1, 0);
             draftTimer.Tick += delegate { draftTimer.Stop(); SaveDraft(); };
@@ -152,7 +153,7 @@ namespace FeiqLight
         private void SendMessage()
         {
             if (String.IsNullOrWhiteSpace(editor.Text) && attachments.Count == 0) return;
-            try { ChatRecord record = network.SendContent(peer, editor.Text, attachments, store.Root); main.Sent(peer, record); Append(record); Delivery(record); editor.Clear(); SaveDraft(); attachments.Clear(); UpdateQueued(); editor.Focus(); history.ScrollToLatest(); }
+            try { ChatRecord record = network.SendContent(peer, editor.Text, attachments, store.Root); pastedImages.Clear(); main.Sent(peer, record); Append(record); Delivery(record); editor.Clear(); SaveDraft(); attachments.Clear(); UpdateQueued(); editor.Focus(); history.ScrollToLatest(); }
             catch (Exception e) { Error("发送失败", e.Message); }
         }
         internal void ForwardContent(string text, string[] paths)
@@ -180,6 +181,41 @@ namespace FeiqLight
                 if (File.Exists(path) && !attachments.Contains(path)) attachments.Add(path);
             } UpdateQueued();
         }
+        private void PasteClipboard()
+        {
+            if (editor.ReadOnly) return;
+            try
+            {
+                if (Clipboard.ContainsImage())
+                {
+                    if(attachments.Count>=20)throw new InvalidOperationException("一次最多 20 个文件，请先发送或移除附件。");
+                    string folder = Path.Combine(store.Root, "pasted-images");
+                    Directory.CreateDirectory(folder);
+                    long used=Directory.GetFiles(folder).Sum(p=>new FileInfo(p).Length);
+                    const long limit=128L*1024*1024;
+                    using(Image image=Clipboard.GetImage()) {
+                        if(image==null)return;
+                        if((long)image.Width*image.Height>40000000)throw new IOException("图片超过 4000 万像素，请保存为文件后发送。");
+                        using(MemoryStream encoded=new MemoryStream()) {
+                            image.Save(encoded,System.Drawing.Imaging.ImageFormat.Png);
+                            if(used+encoded.Length>limit)throw new IOException("粘贴图片缓存已达 128 MiB，请将图片保存为文件后发送。已有图片保留于：\n"+folder);
+                            string path=Path.Combine(folder,"粘贴图片-"+DateTime.Now.ToString("yyyyMMdd-HHmmss")+"-"+Guid.NewGuid().ToString("N").Substring(0,8)+".png");
+                            try {using(FileStream output=new FileStream(path,FileMode.CreateNew,FileAccess.Write)){encoded.Position=0;encoded.CopyTo(output);}pastedImages.Add(path);attachments.Add(path);}
+                            catch {if(File.Exists(path))File.Delete(path);throw;}
+                        }
+                    }
+                    UpdateQueued();
+                    return;
+                }
+                Theme.PasteText(editor);
+            }
+            catch (Exception error) { Error("粘贴失败", error.Message); }
+        }
+        private void ClearPastedImages()
+        {
+            // 只清理本会话尚未发送的副本；已发图片保留给文件服务、历史打开和向外拖动。
+            foreach(string path in pastedImages.ToArray())try {File.Delete(path);pastedImages.Remove(path);}catch(IOException){}catch(UnauthorizedAccessException){}
+        }
         private void RegisterFileDrop(Control target)
         {
             target.AllowDrop=true;target.DragEnter+=FileDragEnter;target.DragOver+=FileDragEnter;target.DragDrop+=FileDropped;
@@ -187,13 +223,13 @@ namespace FeiqLight
         }
         private void FileDragEnter(object sender,DragEventArgs e)
         {
-            e.Effect=e.Data!=null&&e.Data.GetDataPresent(DataFormats.FileDrop)&&(e.AllowedEffect&DragDropEffects.Copy)!=0?DragDropEffects.Copy:DragDropEffects.None;
+            e.Effect=!history.IsDraggingFile&&e.Data!=null&&e.Data.GetDataPresent(DataFormats.FileDrop)&&(e.AllowedEffect&DragDropEffects.Copy)!=0?DragDropEffects.Copy:DragDropEffects.None;
         }
         private void FileDropped(object sender,DragEventArgs e)
         {
             // RichEdit 若收到 Copy 会继续插入 OLE 占位空格；文件已由本程序处理，拒绝它的默认插入。
             e.Effect=DragDropEffects.None;
-            if(e.Data==null||(e.AllowedEffect&DragDropEffects.Copy)==0)return;
+            if(history.IsDraggingFile||e.Data==null||(e.AllowedEffect&DragDropEffects.Copy)==0)return;
             string[] paths=e.Data.GetData(DataFormats.FileDrop) as string[];
             if(paths==null||paths.Length==0)return;
             if(!network.Settings.AutoSendDroppedFiles){QueueFiles(paths);if(!(sender is RichTextBox))e.Effect=DragDropEffects.Copy;return;}
@@ -217,7 +253,7 @@ namespace FeiqLight
         {
             if (chatMenu == null)
             {
-                chatMenu = Theme.Menu(); chatMenu.MinimumSize = new Size((int)(220 * DeviceDpi / 96F), 0);
+                chatMenu = Theme.Menu(); chatMenu.MinimumSize = new Size((int)(248 * DeviceDpi / 96F), 0);
                 chatMenu.Items.Add("发送文件", null, SelectFiles); chatMenu.Items.Add("聊天记录", null, ShowHistory);
                 chatMenu.Items.Add(new ToolStripSeparator());
                 chatMenu.Items.Add("管理会话…",null,delegate { main.ShowConversationMenu(peer); });
@@ -321,6 +357,6 @@ namespace FeiqLight
             if (percent.HasValue) state.Percent = percent.Value; state.Status = status; if (path != null) state.LocalPath = path;
             history.Delivery(item.Record);
         }
-        protected override void Dispose(bool disposing) { if (disposing && !IsDisposed) { SaveDraft(); draftTimer.Dispose(); if (emojiPicker != null) emojiPicker.Dispose(); if (chatMenu != null) chatMenu.Dispose(); if (fileMenu != null) fileMenu.Dispose(); if (receiving != null) receiving.Cancel(); if (avatar != null && avatar.Image != null) avatar.Image.Dispose(); } base.Dispose(disposing); if(disposing&&chatFont!=null){chatFont.Dispose();chatFont=null;} }
+        protected override void Dispose(bool disposing) { if (disposing && !IsDisposed) { ClearPastedImages(); SaveDraft(); draftTimer.Dispose(); if (emojiPicker != null) emojiPicker.Dispose(); if (chatMenu != null) chatMenu.Dispose(); if (fileMenu != null) fileMenu.Dispose(); if (receiving != null) receiving.Cancel(); if (avatar != null && avatar.Image != null) avatar.Image.Dispose(); } base.Dispose(disposing); if(disposing&&chatFont!=null){chatFont.Dispose();chatFont=null;} }
     }
 }

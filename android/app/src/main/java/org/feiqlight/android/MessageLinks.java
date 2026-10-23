@@ -20,7 +20,7 @@ final class MessageLinks {
         return ("http".equalsIgnoreCase(scheme)||"https".equalsIgnoreCase(scheme))&&uri.getHost()!=null&&!uri.getHost().isEmpty()&&uri.getUserInfo()==null?value:null;
     }
     static void apply(TextView view,int color) {
-        String text=view.getText().toString();SpannableString spans=new SpannableString(text);Matcher matcher=URL.matcher(text);boolean found=false;
+        String text=view.getText().toString();SpannableString spans=new SpannableString(view.getText());Matcher matcher=URL.matcher(text);boolean found=false;
         while(matcher.find()) {
             String value=matcher.group().replaceAll("[.,!?;:'\"]+$","");
             while(value.endsWith(")")&&value.chars().filter(c->c==')').count()>value.chars().filter(c->c=='(').count())value=value.substring(0,value.length()-1);

@@ -53,6 +53,7 @@ namespace FeiqLight
             foreach(Control child in control.Controls)Recolor(child,old,next);control.Invalidate();
         }
         public static readonly Color Green = Color.FromArgb(73, 167, 107);
+        public static Color SearchHighlight { get { return Blend(Color.FromArgb(244,185,42),Surface,.48F); } }
         public static readonly Font Body = new Font("Microsoft YaHei UI", 9F);
         public static readonly Font Title = new Font("Microsoft YaHei UI", 13F, FontStyle.Bold);
         public static readonly Font Section = new Font("Microsoft YaHei UI", 9F, FontStyle.Bold);
@@ -79,7 +80,7 @@ namespace FeiqLight
         }
         public static ContextMenuStrip Menu()
         {
-            ContextMenuStrip menu=new ContextMenuStrip { Renderer = new ModernMenuRenderer(), ForeColor=Ink, Font = Body, ShowImageMargin = true, Padding = new Padding(6), BackColor = Theme.Surface };
+            ContextMenuStrip menu=new ContextMenuStrip { Renderer = new ModernMenuRenderer(), ForeColor=Ink, Font = Body, ShowImageMargin = true, Padding = new Padding(8), BackColor = Theme.Surface, DropShadowEnabled=true };
             menu.Opening+=delegate { StyleMenu(menu); }; return menu;
         }
         private static void StyleMenu(ToolStripDropDown menu)
@@ -88,12 +89,17 @@ namespace FeiqLight
             float scale=menu.DeviceDpi/96F; menu.Padding=new Padding((int)(8*scale));
             foreach(ToolStripItem item in menu.Items)
             {
-                item.Padding=item is ToolStripSeparator?new Padding(0,(int)(4*scale),0,(int)(4*scale)):new Padding((int)(12*scale),(int)(8*scale),(int)(18*scale),(int)(8*scale));
+                item.Padding=item is ToolStripSeparator?new Padding(0,(int)(5*scale),0,(int)(5*scale)):new Padding((int)(8*scale),(int)(9*scale),(int)(16*scale),(int)(9*scale));
+                item.Margin=Padding.Empty;
                 ToolStripMenuItem child=item as ToolStripMenuItem;
                 if(child!=null && child.HasDropDownItems) { child.DropDown.Renderer=menu.Renderer; StyleMenu(child.DropDown); }
             }
+            int width=Math.Max(menu.MinimumSize.Width,menu.GetPreferredSize(Size.Empty).Width);
+            foreach(ToolStripItem item in menu.Items) {
+                item.AutoSize=false;item.Size=new Size(Math.Max((int)(96*scale),width-menu.Padding.Horizontal),item is ToolStripSeparator?(int)(12*scale):(int)(40*scale));
+            }
         }
-        public static bool DestructiveMenu(string text) { return text=="退出" || text=="断开" || text.StartsWith("删除") || text.StartsWith("清空") || text.StartsWith("拒绝"); }
+        public static bool DestructiveMenu(string text) { return text=="退出" || text=="断开" || text=="关闭会话" || text.StartsWith("删除") || text.StartsWith("清空") || text.StartsWith("拒绝"); }
         public static string MenuGlyph(string text)
         {
             if(text.StartsWith("复制")) return "copy";
@@ -118,13 +124,13 @@ namespace FeiqLight
             // 数值和未知菜单项不使用省略号冒充语义图标。
             return "";
         }
-        public static void AttachEditMenu(TextBoxBase input)
+        public static void AttachEditMenu(TextBoxBase input, Action pasteOverride = null)
         {
             ContextMenuStrip menu = Menu();
             ToolStripMenuItem undo = new ToolStripMenuItem("撤销", null, delegate { input.Undo(); }) { ShortcutKeyDisplayString = "Ctrl+Z" };
             ToolStripMenuItem cut = new ToolStripMenuItem("剪切", null, delegate { ClipboardAction(input.Cut); }) { ShortcutKeyDisplayString = "Ctrl+X" };
             ToolStripMenuItem copy = new ToolStripMenuItem("复制", null, delegate { ClipboardAction(input.Copy); }) { ShortcutKeyDisplayString = "Ctrl+C" };
-            ToolStripMenuItem paste = new ToolStripMenuItem("粘贴", null, delegate { PasteText(input); }) { ShortcutKeyDisplayString = "Ctrl+V" };
+            ToolStripMenuItem paste = new ToolStripMenuItem("粘贴", null, delegate { if (pasteOverride != null) pasteOverride(); else PasteText(input); }) { ShortcutKeyDisplayString = "Ctrl+V" };
             ToolStripMenuItem delete = new ToolStripMenuItem("删除", null, delegate { input.SelectedText = ""; });
             ToolStripMenuItem all = new ToolStripMenuItem("全选", null, delegate { input.SelectAll(); }) { ShortcutKeyDisplayString = "Ctrl+A" };
             menu.Items.Add(undo); menu.Items.Add(new ToolStripSeparator()); menu.Items.AddRange(new ToolStripItem[] { cut, copy, paste, delete }); menu.Items.Add(new ToolStripSeparator()); menu.Items.Add(all);
@@ -132,7 +138,7 @@ namespace FeiqLight
             {
                 undo.Enabled = !input.ReadOnly && input.CanUndo; cut.Enabled = delete.Enabled = !input.ReadOnly && input.SelectionLength > 0;
                 copy.Enabled = input.SelectionLength > 0; all.Enabled = input.TextLength > 0; paste.Enabled = false;
-                ClipboardAction(delegate { paste.Enabled = !input.ReadOnly && Clipboard.ContainsText(); });
+                ClipboardAction(delegate { paste.Enabled = !input.ReadOnly && (Clipboard.ContainsText() || (pasteOverride != null && Clipboard.ContainsImage())); });
             };
             input.ContextMenuStrip = menu; input.Disposed += delegate { menu.Dispose(); };
         }
@@ -350,17 +356,25 @@ namespace FeiqLight
     public sealed class ModernMenuRenderer : ToolStripProfessionalRenderer
     {
         private static Color ItemColor(ToolStripItem item) { return !item.Enabled?Theme.Blend(Theme.Muted,Theme.Surface,.65F):Theme.DestructiveMenu(item.Text)?Color.FromArgb(210,78,84):Theme.Ink; }
-        protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e) { e.TextColor=ItemColor(e.Item); e.TextRectangle=new Rectangle(e.TextRectangle.X,0,e.TextRectangle.Width,e.Item.Height); e.TextFormat|=TextFormatFlags.VerticalCenter; base.OnRenderItemText(e); }
+        protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e) {
+            e.TextColor=ItemColor(e.Item);
+            ToolStripDropDownMenu owner=e.ToolStrip as ToolStripDropDownMenu;
+            int left=(int)((owner!=null&&!owner.ShowImageMargin?30:42)*e.Graphics.DpiX/96F);
+            // 图标与正文各有固定栏，避免原生 image margin 太窄时两者挤在一起。
+            int delta=Math.Max(0,left-e.TextRectangle.Left);
+            e.TextRectangle=new Rectangle(e.TextRectangle.X+delta,0,Math.Max(1,e.TextRectangle.Width-delta),e.Item.Height);
+            e.TextFormat|=TextFormatFlags.VerticalCenter;base.OnRenderItemText(e);
+        }
         protected override void OnRenderImageMargin(ToolStripRenderEventArgs e) { }
         protected override void OnRenderItemCheck(ToolStripItemImageRenderEventArgs e) { int size=(int)(18*e.Graphics.DpiX/96F); Theme.Glyph(e.Graphics,"check",new Rectangle((int)(10*e.Graphics.DpiX/96F),(e.Item.Height-size)/2,size,size),Theme.Blue); }
         protected override void OnRenderArrow(ToolStripArrowRenderEventArgs e) { e.ArrowColor=ItemColor(e.Item); base.OnRenderArrow(e); }
-        protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e) { using(Pen p=new Pen(Theme.Line)) e.Graphics.DrawLine(p,32,e.Item.Height/2,e.Item.Width-10,e.Item.Height/2); }
+        protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e) { using(Pen p=new Pen(Theme.Line)) e.Graphics.DrawLine(p,(int)(42*e.Graphics.DpiX/96F),e.Item.Height/2,e.Item.Width-12,e.Item.Height/2); }
         protected override void OnRenderToolStripBackground(ToolStripRenderEventArgs e) {e.Graphics.Clear(Theme.Surface);}
         protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e) { e.Graphics.SmoothingMode=SmoothingMode.AntiAlias; using(Pen pen=new Pen(Theme.Line)) using(GraphicsPath path=Theme.Rounded(new Rectangle(0,0,e.ToolStrip.Width-1,e.ToolStrip.Height-1),Theme.ControlRadius)) e.Graphics.DrawPath(pen,path); }
         protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e)
         {
             if(e.Item.Selected && e.Item.Enabled) {
-                Rectangle r = new Rectangle(2,1,e.Item.Width-4,e.Item.Height-2);
+                Rectangle r = new Rectangle(1,1,e.Item.Width-2,e.Item.Height-2);
                 using(GraphicsPath path=Theme.Rounded(r,7)) using(SolidBrush b=new SolidBrush(Theme.Sky)) e.Graphics.FillPath(b,path);
             }
             ToolStripMenuItem item=e.Item as ToolStripMenuItem;
@@ -375,6 +389,14 @@ namespace FeiqLight
         private readonly TableLayoutPanel chrome = new BufferedTable { Dock = DockStyle.Top, Height = 36, BackColor = Theme.Surface, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty };
         private readonly Label caption = Theme.Label("", Theme.Small, Theme.Muted);
         private readonly Button minimize, maximize;
+        private bool secondaryWindow;
+        protected void UseSecondaryChrome()
+        {
+            secondaryWindow=true;Padding=new Padding(3);chrome.Height=60;caption.Font=Theme.Section;caption.ForeColor=Theme.Ink;
+            Control actions=chrome.GetControlFromPosition(1,0);if(actions!=null)actions.Padding=new Padding(0,12,0,0);
+            chrome.Paint+=delegate(object sender,PaintEventArgs e){using(Pen line=new Pen(Theme.Line))e.Graphics.DrawLine(line,0,chrome.Height-1,chrome.Width,chrome.Height-1);};
+            Invalidate();
+        }
         private bool resizeWindow = true;
         public bool ResizeWindow
         {
@@ -424,7 +446,11 @@ namespace FeiqLight
             int edge = 6; bool l = p.X < edge, r = p.X >= Width - edge, t = p.Y < edge, b = p.Y >= Height - edge;
             if (l || r || t || b) m.Result = new IntPtr(t ? (l ? 13 : r ? 14 : 12) : b ? (l ? 16 : r ? 17 : 15) : l ? 10 : 11);
         }
-        protected override void OnPaint(PaintEventArgs e) { base.OnPaint(e); using (Pen p = new Pen(Theme.Line)) e.Graphics.DrawRectangle(p, 0, 0, Width - 1, Height - 1); }
+        protected override void OnPaint(PaintEventArgs e) {
+            base.OnPaint(e);
+            using(Pen p=new Pen(secondaryWindow?Theme.Blend(Theme.Blue,Theme.Line,.55F):Theme.Line,secondaryWindow?2:1))e.Graphics.DrawRectangle(p,1,1,Width-3,Height-3);
+            if(secondaryWindow)using(SolidBrush accent=new SolidBrush(Theme.Blue))e.Graphics.FillRectangle(accent,0,0,Width,3);
+        }
         [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern bool ReleaseCapture();
         [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr w, IntPtr l);
     }

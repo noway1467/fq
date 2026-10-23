@@ -17,6 +17,15 @@ namespace FeiqLight
         private readonly List<MessageLayout> textLayouts=new List<MessageLayout>();
         private readonly List<Tuple<Rectangle,string>> linkHits=new List<Tuple<Rectangle,string>>();
         private readonly List<Tuple<Rectangle,ChatRecord,int>> fileHits=new List<Tuple<Rectangle,ChatRecord,int>>();
+        private string dragFilePath;
+        private Point dragStart;
+        private bool fileDragStarted;
+        internal bool IsDraggingFile { get; private set; }
+        private Action pressedAction;
+        private string highlightText = "";
+        internal int RecordLimit = 200;
+        internal int CharacterLimit = 200000;
+        public string HighlightText { get { return highlightText; } set { highlightText = value ?? ""; Arrange(); Invalidate(); } }
         private int selected = -1;
         private string wallpaperPattern="none";
         private ChatWallpaper.Asset wallpaperImage;
@@ -94,14 +103,14 @@ namespace FeiqLight
             catch (Exception e) { using (NoticeDialog dialog = new NoticeDialog("无法定位文件", e.Message)) dialog.ShowDialog(owner.FindForm()); }
         }
         private int D(int value) { return (int)Math.Round(value * scale); }
-        public void Clear() { records.Clear(); bounds.Clear(); textLayouts.Clear(); linkHits.Clear(); mediaHits.Clear(); Text = ""; AutoScrollMinSize = Size.Empty; selected = -1; Invalidate(); }
+        public void Clear() { records.Clear(); bounds.Clear(); textLayouts.Clear(); linkHits.Clear(); mediaHits.Clear(); fileHits.Clear(); pressedAction=null; dragFilePath=null; Text = ""; AutoScrollMinSize = Size.Empty; selected = -1; Invalidate(); }
         public bool HasDelivery(string state) { return records.Any(r => r.State == state); }
         public void ScrollToLatest() { AutoScrollPosition = new Point(0, AutoScrollMinSize.Height); Invalidate(); }
         public void Append(ChatRecord record)
         {
             bool bottom = records.Count == 0 || -AutoScrollPosition.Y + ClientSize.Height >= AutoScrollMinSize.Height - D(70);
             records.Add(record);
-            while (records.Count > 200 || records.Sum(r => r.Text.Length) > 200000) { records.RemoveAt(0); selected--; }
+            while (records.Count > RecordLimit || (records.Count>1&&records.Sum(r => r.Text.Length) > CharacterLimit)) { records.RemoveAt(0); selected--; }
             Text = String.Join("\n", records.Select(r => r.Sender + "  " + r.Text));
             Arrange(); if (bottom) AutoScrollPosition = new Point(0, AutoScrollMinSize.Height); Invalidate();
         }
@@ -125,8 +134,8 @@ namespace FeiqLight
             bounds.Clear(); textLayouts.Clear(); int y = D(22), max = Math.Max(D(100), (int)((ClientSize.Width - SystemInformation.VerticalScrollBarWidth) * .77));
             foreach (ChatRecord r in records)
             {
-                string display = MessageText.Preview(r.DisplayText());
-                MessageLayout layout=MessageLinks.Find(display).Count>0||ColorEmoji.Contains(display)?new MessageLayout(display,Font,max-D(28)):null;
+                string display = DisplayText(r);
+                MessageLayout layout=HighlightText.Length>0||MessageLinks.Find(display).Count>0||ColorEmoji.Contains(display)?new MessageLayout(display,Font,max-D(28),HighlightText):null;
                 textLayouts.Add(layout);
                 Size text = display.Length == 0 ? Size.Empty : layout==null?TextRenderer.MeasureText(display, Font, new Size(max - D(28), Int32.MaxValue), MessageFormat):new Size(layout.Width,layout.Height);
                 Size state = TextRenderer.MeasureText(Stamp(r), Theme.Small, new Size(max - D(28), Int32.MaxValue), MessageFormat);
@@ -186,13 +195,19 @@ namespace FeiqLight
                     if(MediaPreview.Video(media[n])) TextRenderer.DrawText(e.Graphics,"▶ 点击播放",Theme.Body,preview,Theme.Blue,TextFormatFlags.Bottom|TextFormatFlags.HorizontalCenter);
                     mediaHits.Add(Tuple.Create(preview,media[n]));
                 }
+                string displayText = DisplayText(record);
                 if(i<textLayouts.Count&&textLayouts[i]!=null)textLayouts[i].Draw(e.Graphics,content.Location,Font,linkHits);
-                else TextRenderer.DrawText(e.Graphics, MessageText.Preview(record.DisplayText()), Font, content, Theme.Ink, MessageFormat);
+                else TextRenderer.DrawText(e.Graphics, displayText, Font, content, Theme.Ink, MessageFormat);
                 if(cards) {
                     int y=content.Bottom;
                     foreach(FileTransferState file in record.Transfers) {
                         int top=y;
-                        TextRenderer.DrawText(e.Graphics,file.Name,Font,new Rectangle(content.X,y,content.Width,D(24)),Theme.Ink,TextFormatFlags.EndEllipsis|TextFormatFlags.NoPrefix); y+=D(25);
+                        Rectangle nameArea=new Rectangle(content.X,y,content.Width,D(24));
+                        if(HighlightText.Length>0) {
+                            var clip=e.Graphics.Save();e.Graphics.SetClip(nameArea,System.Drawing.Drawing2D.CombineMode.Intersect);
+                            new MessageLayout(file.Name,Font,Int32.MaxValue/2,HighlightText).Draw(e.Graphics,nameArea.Location,Font,new List<Tuple<Rectangle,string>>());e.Graphics.Restore(clip);
+                        } else TextRenderer.DrawText(e.Graphics,file.Name,Font,nameArea,Theme.Ink,TextFormatFlags.EndEllipsis|TextFormatFlags.NoPrefix);
+                        y+=D(25);
                         if(CardMedia(file)) { DrawCardPreview(e.Graphics,new Rectangle(content.X,y,content.Width,D(140)),file.LocalPath); y+=D(150); }
                         string label=Theme.SizeText(file.Size)+" · "+file.Percent+"% · "+file.DisplayStatus();
                         TextRenderer.DrawText(e.Graphics,label,Theme.Small,new Rectangle(content.X,y,content.Width,D(23)),Theme.Muted,TextFormatFlags.EndEllipsis|TextFormatFlags.NoPrefix); y+=D(25);
@@ -206,6 +221,16 @@ namespace FeiqLight
                 TextRenderer.DrawText(e.Graphics, Stamp(record), Theme.Small, new Rectangle(content.X, r.Bottom - stamp.Height - D(9), content.Width, stamp.Height), Theme.Muted, TextFormatFlags.Right | MessageFormat);
             }
         }
+        private string DisplayText(ChatRecord record)
+        {
+            string text=record.DisplayText(), preview=MessageText.Preview(text);
+            if(HighlightText.Length==0||preview.IndexOf(HighlightText,StringComparison.OrdinalIgnoreCase)>=0)return preview;
+            int index=text.IndexOf(HighlightText,StringComparison.OrdinalIgnoreCase);if(index<0)return preview;
+            // 命中摘要之外时展示上下文，搜索结果不应只剩一条看不见关键词的气泡。
+            int start=Math.Max(0,index-60);if(start>0&&Char.IsLowSurrogate(text[start]))start--;
+            int end=Math.Min(text.Length,index+Math.Max(HighlightText.Length,180));if(end<text.Length&&Char.IsHighSurrogate(text[end-1]))end--;
+            return (start>0?"… ":"")+text.Substring(start,end-start)+(end<text.Length?" …":"");
+        }
         protected override void OnMouseDown(MouseEventArgs e)
         {
             base.OnMouseDown(e); Focus(); Point point = new Point(e.X - AutoScrollPosition.X, e.Y - AutoScrollPosition.Y);
@@ -213,15 +238,39 @@ namespace FeiqLight
             for(int i=0;i<bounds.Count;i++) using(GraphicsPath path=BubblePath(bounds[i],D(Theme.BubbleRadius),D(7),records[i].Outgoing))
                 if(path.IsVisible(point)) { selected=i;break; }
             Invalidate();
-            if(e.Button==MouseButtons.Left) {var link=linkHits.FirstOrDefault(item=>item.Item1.Contains(e.Location));if(link!=null){MessageLinks.Open(this,link.Item2);return;}var hit=mediaHits.FirstOrDefault(item=>item.Item1.Contains(e.Location));if(hit!=null)MediaPreview.Open(this,hit.Item2);}
-            if(e.Button==MouseButtons.Left) {
-                var hit=fileHits.FirstOrDefault(item=>item.Item1.Contains(e.Location));
-                if(hit!=null && !mediaHits.Any(item=>item.Item1.Contains(e.Location))) {
-                    FileTransferState file=hit.Item2.Transfers.First(f=>f.Id==hit.Item3);
-                    if(!String.IsNullOrEmpty(file.LocalPath)) MediaPreview.OpenFile(this,file.LocalPath,false);
-                    else if(!hit.Item2.Outgoing && FileRequested!=null) FileRequested(hit.Item2,hit.Item3);
-                }
+            pressedAction=null;dragFilePath=null;fileDragStarted=false;
+            if(e.Button!=MouseButtons.Left)return;
+            dragStart=e.Location;
+            var link=linkHits.FirstOrDefault(item=>item.Item1.Contains(e.Location));
+            if(link!=null){pressedAction=delegate{MessageLinks.Open(this,link.Item2);};return;}
+            var fileHit=fileHits.FirstOrDefault(item=>item.Item1.Contains(e.Location));
+            if(fileHit!=null) {
+                FileTransferState file=fileHit.Item2.Transfers.FirstOrDefault(f=>f.Id==fileHit.Item3);if(file==null)return;
+                dragFilePath=ValidDragPath(file.LocalPath);
+                pressedAction=delegate {
+                    if(!String.IsNullOrEmpty(file.LocalPath))MediaPreview.OpenFile(this,file.LocalPath,false);
+                    else if(!fileHit.Item2.Outgoing&&FileRequested!=null)FileRequested(fileHit.Item2,fileHit.Item3);
+                };
+            } else {
+                var media=mediaHits.FirstOrDefault(item=>item.Item1.Contains(e.Location));
+                if(media!=null){dragFilePath=ValidDragPath(media.Item2);pressedAction=delegate{MediaPreview.Open(this,media.Item2);};}
+                else if(SelectedRecord!=null&&SelectedRecord.GetLocalFiles().Length==1)dragFilePath=ValidDragPath(SelectedRecord.GetLocalFiles()[0]);
             }
+            if(pressedAction!=null||dragFilePath!=null)Capture=true;
+        }
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            base.OnMouseUp(e);
+            if (e.Button != MouseButtons.Left) return;
+            Action action=pressedAction;
+            bool click=!fileDragStarted&&!MovedPastDragThreshold(e.Location);
+            pressedAction=null;dragFilePath=null;fileDragStarted=false;Capture=false;
+            if(click&&action!=null)action();
+        }
+        private static string ValidDragPath(string path) { return !String.IsNullOrEmpty(path)&&Path.IsPathRooted(path)&&File.Exists(path)?Path.GetFullPath(path):null; }
+        private bool MovedPastDragThreshold(Point point) { Size size=SystemInformation.DragSize;return !new Rectangle(dragStart.X-size.Width/2,dragStart.Y-size.Height/2,size.Width,size.Height).Contains(point); }
+        internal static DataObject FileDragData(string path) {
+            string valid=ValidDragPath(path);return valid==null?null:new DataObject(DataFormats.FileDrop,new[]{valid});
         }
         private void ShowFullText()
         {
@@ -244,7 +293,14 @@ namespace FeiqLight
             } else {LoadPreview(path);TextRenderer.DrawText(g,"预览不可用 / 加载中",Theme.Small,preview,Theme.Muted,TextFormatFlags.HorizontalCenter|TextFormatFlags.VerticalCenter);}
             mediaHits.Add(Tuple.Create(preview,path));
         }
-        protected override void OnMouseMove(MouseEventArgs e) { base.OnMouseMove(e); Cursor=linkHits.Any(h=>h.Item1.Contains(e.Location))?Cursors.Hand:Cursors.Default; }
+        protected override void OnMouseMove(MouseEventArgs e) {
+            base.OnMouseMove(e); Cursor=linkHits.Any(h=>h.Item1.Contains(e.Location))||fileHits.Any(h=>h.Item1.Contains(e.Location))||mediaHits.Any(h=>h.Item1.Contains(e.Location))?Cursors.Hand:Cursors.Default;
+            if(e.Button==MouseButtons.Left&&dragFilePath!=null&&!fileDragStarted&&MovedPastDragThreshold(e.Location)) {
+                DataObject data=FileDragData(dragFilePath);fileDragStarted=true;pressedAction=null;Capture=false;
+                try { IsDraggingFile=true;if(data!=null)DoDragDrop(data,DragDropEffects.Copy); }
+                finally { IsDraggingFile=false;dragFilePath=null; }
+            }
+        }
         protected override void OnFontChanged(EventArgs e) { base.OnFontChanged(e);if(records!=null&&bounds!=null&&textLayouts!=null){Arrange();Invalidate();} }
         protected override void OnKeyDown(KeyEventArgs e)
         {

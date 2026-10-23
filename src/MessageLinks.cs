@@ -33,17 +33,24 @@ namespace FeiqLight
     }
     internal sealed class MessageLayout
     {
-        internal sealed class Run { public string Text, Url; public Rectangle Bounds; public bool Emoji; }
+        internal sealed class Run { public string Text, Url; public Rectangle Bounds; public bool Emoji, Highlight; }
         internal readonly List<Run> Runs=new List<Run>();
         internal int Height, Width;
         private const TextFormatFlags Flags=TextFormatFlags.NoPadding|TextFormatFlags.NoPrefix|TextFormatFlags.SingleLine;
-        internal MessageLayout(string text,Font font,int maxWidth)
+        internal MessageLayout(string text,Font font,int maxWidth,string query = null)
         {
+            text=text??"";
+            bool[] highlighted=new bool[text.Length];
+            if(!String.IsNullOrEmpty(query))
+                for(int from=0;from<text.Length;) {
+                    int match=text.IndexOf(query,from,StringComparison.OrdinalIgnoreCase);if(match<0)break;
+                    for(int n=match;n<match+query.Length;n++)highlighted[n]=true;
+                    from=match+query.Length;
+                }
             int line=TextRenderer.MeasureText("国Ag",font,Size.Empty,Flags).Height+2,x=0,y=0;
             List<MessageLinks.Link> links=MessageLinks.Find(text);int linkIndex=0;
             // 测量整段而不是逐字累加，保留字距；超长链接按文本元素安全换行。
             Run run=null;
-            text=text??"";
             for(int offset=0;offset<text.Length;) {
                 int start=offset;string part;bool emoji=ColorEmoji.Match(text,offset,out part);
                 if(!emoji) {part=StringInfo.GetNextTextElement(text,offset);int next=offset+part.Length;while(next<text.Length&&text[next]=='\u200d'&&next+1<text.Length){string joined=StringInfo.GetNextTextElement(text,next+1);part+="\u200d"+joined;next+=1+joined.Length;}}
@@ -53,11 +60,12 @@ namespace FeiqLight
                 if(part=="\t")part="    ";
                 while(linkIndex<links.Count&&start>=links[linkIndex].Start+links[linkIndex].Length)linkIndex++;
                 string url=linkIndex<links.Count&&start>=links[linkIndex].Start?links[linkIndex].Url:null;
-                if(emoji&&url==null){if(x+line>maxWidth&&x>0){x=0;y+=line;}Runs.Add(new Run {Text=part,Emoji=true,Bounds=new Rectangle(x,y,line,line)});x+=line;Width=Math.Max(Width,x);run=null;continue;}
-                if(run==null||run.Url!=url){run=new Run {Text="",Url=url,Bounds=new Rectangle(x,y,0,line)};Runs.Add(run);}
+                bool highlight=highlighted[start];
+                if(emoji&&url==null){if(x+line>maxWidth&&x>0){x=0;y+=line;}Runs.Add(new Run {Text=part,Emoji=true,Highlight=highlight,Bounds=new Rectangle(x,y,line,line)});x+=line;Width=Math.Max(Width,x);run=null;continue;}
+                if(run==null||run.Url!=url||run.Highlight!=highlight){run=new Run {Text="",Url=url,Highlight=highlight,Bounds=new Rectangle(x,y,0,line)};Runs.Add(run);}
                 int w=TextRenderer.MeasureText(run.Text+part,font,Size.Empty,Flags).Width;
                 if(run.Bounds.X+w>maxWidth&&x>0){
-                    x=0;y+=line;run=new Run {Text="",Url=url,Bounds=new Rectangle(0,y,0,line)};Runs.Add(run);
+                    x=0;y+=line;run=new Run {Text="",Url=url,Highlight=highlight,Bounds=new Rectangle(0,y,0,line)};Runs.Add(run);
                     w=TextRenderer.MeasureText(part,font,Size.Empty,Flags).Width;
                 }
                 run.Text+=part;run.Bounds=new Rectangle(run.Bounds.X,y,w,line);x=run.Bounds.Right;Width=Math.Max(Width,x);
@@ -68,6 +76,7 @@ namespace FeiqLight
         {
             foreach(Run run in Runs) {
                 Rectangle r=run.Bounds;r.Offset(origin);
+                if(run.Highlight)using(SolidBrush fill=new SolidBrush(Theme.SearchHighlight))graphics.FillRectangle(fill,r);
                 if(run.Emoji){ColorEmoji.Draw(graphics,run.Text,r);continue;}
                 TextRenderer.DrawText(graphics,run.Text,font,r,run.Url==null?Theme.Ink:Theme.Blue,Flags);
                 if(run.Url!=null) {using(Pen pen=new Pen(Theme.Blue))graphics.DrawLine(pen,r.Left,r.Bottom-3,r.Right,r.Bottom-3);hits.Add(Tuple.Create(r,run.Url));}

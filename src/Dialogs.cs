@@ -295,10 +295,19 @@ namespace FeiqLight
     {
         public HistoryDialog(LocalStore store, Peer peer)
         {
-            Text = "聊天记录"; ClientSize = new Size(680, 660); MinimumSize = new Size(480, 420); StartPosition = FormStartPosition.CenterParent;
-            Panel top = new Panel { Dock = DockStyle.Top, Height = 66, Padding = new Padding(16, 8, 16, 10) }; RoundedInput input = new RoundedInput { Dock = DockStyle.Fill }; input.Input.AccessibleName = "搜索聊天记录"; input.Placeholder = "搜索"; top.Controls.Add(input);
-            BubbleHistory body = new BubbleHistory { Dock = DockStyle.Fill }; Surface.Controls.Add(body); Surface.Controls.Add(top);
-            try { var records = store.History(peer.Id, 500); Action render = () => { body.Clear(); foreach (var record in records.Where(r => r.Text.IndexOf(input.Input.Text, StringComparison.OrdinalIgnoreCase) >= 0)) body.Append(record); }; input.Input.TextChanged += delegate { render(); }; render(); }
+            Text = "聊天记录 · " + peer.DisplayName; UseSecondaryChrome();ShowInTaskbar=false; ClientSize = new Size(720, 700); MinimumSize = new Size(520, 460); StartPosition = FormStartPosition.CenterParent;
+            Surface.BackColor = Theme.Wallpaper;
+            Panel top = new Panel { Dock = DockStyle.Top, Height = 108, Padding = new Padding(20, 8, 20, 12), BackColor = Theme.Surface };
+            Label summary=Theme.Label("",Theme.Small,Theme.Muted);summary.Dock=DockStyle.Bottom;summary.Height=28;summary.AccessibleName="聊天记录搜索结果";top.Controls.Add(summary);
+            RoundedInput input = new RoundedInput { Dock = DockStyle.Fill }; input.Input.AccessibleName = "搜索聊天记录"; input.Input.MaxLength=200;input.Placeholder = "搜索消息或文件名"; top.Controls.Add(input);input.BringToFront();
+            BubbleHistory body = new BubbleHistory { Dock = DockStyle.Fill, Margin = new Padding(10), BackColor = Theme.Wallpaper, RecordLimit=500, CharacterLimit=Int32.MaxValue };
+            Panel frame = new Panel { Dock = DockStyle.Fill, Padding = new Padding(10, 0, 10, 10), BackColor = Theme.Wallpaper }; frame.Controls.Add(body); Surface.Controls.Add(frame); Surface.Controls.Add(top);
+            try { var records = store.History(peer.Id, 500); Action render = () => {
+                string query=input.Input.Text;body.Clear();body.HighlightText=query;
+                var matches=records.Where(r=>(r.Text??"").IndexOf(query,StringComparison.OrdinalIgnoreCase)>=0||(r.Transfers??new FileTransferState[0]).Any(f=>(f.Name??"").IndexOf(query,StringComparison.OrdinalIgnoreCase)>=0)).ToArray();
+                foreach(var record in matches)body.Append(record);
+                summary.Text=query.Length==0?"最近 "+records.Count+" 条记录":"找到 "+matches.Length+" 条匹配记录 · 关键词已高亮";
+            }; input.Input.TextChanged += delegate { render(); }; render(); }
             catch (Exception e) { using (NoticeDialog error = new NoticeDialog("读取失败", e.Message)) error.ShowDialog(this); }
         }
     }

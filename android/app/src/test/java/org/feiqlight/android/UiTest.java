@@ -23,6 +23,36 @@ import static org.robolectric.Shadows.shadowOf;
 @Config(sdk=35, qualifiers="w393dp-h852dp-xhdpi")
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 public final class UiTest {
+    @Test public void chatHistorySearchHighlightsTextFilesAndLinksWithoutChangingDraft() throws Exception {
+        ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();
+        shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));
+        ActivityController<MainActivity> ac=Robolectric.buildActivity(MainActivity.class).create().start().resume().visible();MainActivity activity=ac.get();android.app.Dialog dialog=null;
+        try {
+            settle(service);ExecutorService io=(ExecutorService)field(service,"io");ChatStore store=(ChatStore)field(service,"store");
+            LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:32425"),"history-search","host","搜索测试","");
+            io.submit(()->{
+                LanNode.Message first=new LanNode.Message();first.number=1;first.time=1;first.text="关键词重复 关键词\nhttps://example.com/关键词 😊";first.state="已收到";store.message(peer,first,false,false);
+                LanNode.Message file=new LanNode.Message();file.number=2;file.time=2;file.text="文件消息";file.outgoing=true;file.state="已送达";file.files=Collections.singletonList(new Protocol.Attachment(0,"关键词.PNG",40,0));store.message(peer,file,false,false);
+                LanNode.Message tail=new LanNode.Message();tail.number=3;tail.time=3;tail.text="长".repeat(650)+"摘要尾部😊";tail.state="已收到";store.message(peer,tail,false,false);
+            }).get();service.active(peer.id());settle(service);invoke(activity,"open",String.class,peer.id());settle(service);
+            EditText editor=(EditText)field(activity,"editor");editor.setText("搜索不能修改的草稿");
+            for(boolean dark:new boolean[]{false,true}) {
+                activity.getSharedPreferences("settings",0).edit().putBoolean("dark_mode",dark).apply();invoke(activity,"open",String.class,peer.id());settle(service);
+                invoke(activity,"conversationMenu",ChatStore.Conversation.class,service.conversations().get(0));clickDialogButton("聊天记录");dialog=org.robolectric.shadows.ShadowDialog.getLatestDialog();settle(service);
+                View decor=dialog.getWindow().getDecorView();EditText input=(EditText)descendants(decor).stream().filter(v->"搜索聊天记录".contentEquals(v.getContentDescription()==null?"":v.getContentDescription())).findFirst().get();
+                ListView results=(ListView)descendants(decor).stream().filter(v->v instanceof ListView).findFirst().get();TextView count=(TextView)descendants(decor).stream().filter(v->"聊天记录搜索结果".contentEquals(v.getContentDescription()==null?"":v.getContentDescription())).findFirst().get();
+                assertEquals(3,results.getCount());input.setText("关键词");assertEquals(2,results.getCount());assertTrue(count.getText().toString().contains("2 条"));
+                View first=results.getAdapter().getView(0,null,results);List<TextView> texts=new ArrayList<>();for(View v:descendants(first))if(v instanceof TextView)texts.add((TextView)v);
+                TextView content=texts.stream().filter(v->v.getText().toString().contains("https://")).findFirst().get();android.text.Spanned spans=(android.text.Spanned)content.getText();assertEquals(3,spans.getSpans(0,spans.length(),android.text.style.BackgroundColorSpan.class).length);assertEquals(1,spans.getSpans(0,spans.length(),android.text.style.ClickableSpan.class).length);assertTrue(content.isTextSelectable());
+                View second=results.getAdapter().getView(1,null,results);TextView name=(TextView)descendants(second).stream().filter(v->v instanceof TextView&&"关键词.PNG".contentEquals(((TextView)v).getText())).findFirst().get();assertEquals(1,((android.text.Spanned)name.getText()).getSpans(0,name.length(),android.text.style.BackgroundColorSpan.class).length);
+                dialogScreenshot(dialog,"android-history-search-"+(dark?"dark":"light"));
+                input.setText("png");assertEquals(1,results.getCount());input.setText("摘要尾部😊");assertEquals(1,results.getCount());View tail=results.getAdapter().getView(0,null,results);assertTrue(descendants(tail).stream().anyMatch(v->v instanceof TextView&&((TextView)v).getText().toString().contains("摘要尾部😊")));
+                input.setText("不存在");assertEquals(0,results.getCount());assertTrue(count.getText().toString().contains("0 条"));input.setText("");assertEquals(3,results.getCount());dialog.dismiss();
+                assertEquals("搜索不能修改的草稿",((EditText)field(activity,"editor")).getText().toString());
+            }
+            invoke(activity,"showHistory",ChatStore.Conversation.class,service.conversations().get(0));dialog=(android.app.Dialog)field(activity,"historyDialog");invoke(activity,"open",String.class,"");settle(service);assertFalse(dialog.isShowing());assertNull(field(activity,"historyDialog"));
+        } finally {if(dialog!=null)dialog.dismiss();ac.pause().stop().destroy();sc.destroy();}
+    }
     @Test public void settingsTabsShowOnlySelectedPageAndKeepUnsavedChanges() throws Exception {
         ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));
         ActivityController<MainActivity> ac=Robolectric.buildActivity(MainActivity.class).create().start().resume().visible();MainActivity activity=ac.get();android.app.Dialog dialog=null;

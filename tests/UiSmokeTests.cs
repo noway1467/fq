@@ -55,7 +55,7 @@ namespace FeiqLight.Tests
         }
         private static void Render(Form form, string name)
         {
-            File.WriteAllLines(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, name + "-layout.txt"), new[] { "FORM " + form.Size + " CLIENT " + form.ClientSize }.Concat(All(form).Select(c => c.GetType().Name + " " + c.AccessibleName + " " + c.Text.Replace("\n", " ").Substring(0, Math.Min(c.Text.Length, 28)) + " bounds=" + c.Bounds + " parent=" + c.Parent.GetType().Name + " client=" + c.Parent.ClientSize + (c is TableLayoutPanel ? " rows=" + String.Join(",", ((TableLayoutPanel)c).GetRowHeights()) : ""))));
+            File.WriteAllLines(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, name + "-layout.txt"), new[] { "FORM " + form.Size + " CLIENT " + form.ClientSize }.Concat(All(form).Select(c => c.GetType().Name + " " + c.AccessibleName + " " + Protocol.Prefix(c.Text.Replace("\n", " "),28) + " bounds=" + c.Bounds + " parent=" + c.Parent.GetType().Name + " client=" + c.Parent.ClientSize + (c is TableLayoutPanel ? " rows=" + String.Join(",", ((TableLayoutPanel)c).GetRowHeights()) : ""))));
             using (Bitmap bitmap = new Bitmap(form.Width, form.Height))
             {
                 form.DrawToBitmap(bitmap, new Rectangle(Point.Empty, form.Size));
@@ -292,6 +292,56 @@ namespace FeiqLight.Tests
         }
         public static void Run(string directory, Action<string, Action> test)
         {
+            test("图片粘贴：快捷键与右键、真实 PNG 传输、移除清理及已发保留",()=>{
+                string folder=Path.Combine(directory,"clipboard-image");LocalStore store=new LocalStore(Path.Combine(folder,"profile"));
+                IDataObject clipboard=Clipboard.GetDataObject();
+                try {
+                    using(LanService a=new LanService(new AppSettings {Notifications=false,CloseToTray=false,AutoReceiveFiles=false},Port(),true,"paste-a"))
+                    using(LanService b=new LanService(new AppSettings {Notifications=false,AutoReceiveFiles=false},Port(),true,"paste-b"))
+                    using(MainForm main=new MainForm(a,store)) {
+                        a.Start();b.Start();main.Show();main.NetworkStarted();a.Probe(new IPEndPoint(IPAddress.Loopback,b.Port));Pump(()=>a.Peers.Any(p=>p.Login=="paste-b"),"图片节点未发现");Peer peer=a.Peers.Single(p=>p.Login=="paste-b");main.OpenChat(peer);
+                        ChatForm chat=main.ActiveChat;RichTextBox editor=Find<RichTextBox>(chat,"消息输入框");editor.Text="保留图片草稿";
+                        using(Bitmap image=new Bitmap(40,30)){using(Graphics g=Graphics.FromImage(image))g.Clear(Color.Coral);Clipboard.SetImage(image);}
+                        typeof(Control).GetMethod("OnKeyDown",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(editor,new object[]{new KeyEventArgs(Keys.Control|Keys.V)});
+                        List<string> queued=(List<string>)typeof(ChatForm).GetField("attachments",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(chat);
+                        Check(queued.Count==1&&editor.Text=="保留图片草稿"&&store.History(peer.Id,20).Count==0,"粘贴图片夹带发送或损坏草稿");string removed=queued[0];Check(File.Exists(removed),"图片未落盘");
+                        Find<Button>(chat,"移除附件").PerformClick();Check(!File.Exists(removed)&&queued.Count==0,"移除未清理图片");
+                        editor.ContextMenuStrip.Show(editor,new Point(2,2));Check(editor.ContextMenuStrip.Items.Cast<ToolStripItem>().Single(i=>i.Text=="粘贴").Enabled,"图片右键粘贴被禁用");ClickMenu(editor.ContextMenuStrip,"粘贴");
+                        string sentPath=queued.Single();IncomingMessage incoming=null;b.MessageReceived+=m=>incoming=m;Find<Button>(chat,"发送消息").PerformClick();Pump(()=>incoming!=null,"图片邀请未送达");
+                        Task<string> transfer=b.ReceiveFileAsync(incoming.Peer,incoming.Record.Packet,incoming.Files.Single(),Path.Combine(folder,"received.png"),null,CancellationToken.None);Pump(()=>transfer.IsCompleted,"图片下载未完成");
+                        using(Bitmap decoded=new Bitmap(transfer.Result))Check(decoded.Size==new Size(40,30)&&decoded.GetPixel(4,4).ToArgb()==Color.Coral.ToArgb(),"PNG 内容不一致");
+                        Check(File.ReadAllBytes(sentPath).SequenceEqual(File.ReadAllBytes(transfer.Result)),"PNG 字节不一致");main.ExitApplication();Check(File.Exists(sentPath),"已发图片随会话退出被删除");
+                    }
+                } finally {if(clipboard!=null)Clipboard.SetDataObject(clipboard,true);else Clipboard.Clear();}
+            });
+            test("文件外拖：图片卡片与旧预览命中、FileDrop 数据及无效路径拒绝",()=>{
+                string folder=Path.Combine(directory,"drag-out");Directory.CreateDirectory(folder);string imagePath=Path.Combine(folder,"image.png");using(Bitmap bitmap=new Bitmap(20,20))bitmap.Save(imagePath,ImageFormat.Png);
+                Check(BubbleHistory.FileDragData("relative.png")==null&&BubbleHistory.FileDragData(Path.Combine(folder,"missing.png"))==null,"发布了不存在或相对路径");
+                using(Form form=new Form {Size=new Size(600,500)})using(BubbleHistory history=new BubbleHistory {Dock=DockStyle.Fill}) {
+                    form.Controls.Add(history);form.Show();Application.DoEvents();int requests=0;history.FileRequested+=(r,id)=>requests++;
+                    history.Append(new ChatRecord {Packet=1,Text="",Sender="对端",State="已保存",Time=DateTime.Now,Transfers=new[]{new FileTransferState {Id=0,Name="image.png",LocalPath=imagePath,Percent=100,Status="已保存"}}});history.Refresh();
+                    var cards=(List<Tuple<Rectangle,ChatRecord,int>>)typeof(BubbleHistory).GetField("fileHits",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(history);Point p=new Point(cards.Single().Item1.Left+10,cards.Single().Item1.Top+35);
+                    MethodInfo down=typeof(BubbleHistory).GetMethod("OnMouseDown",BindingFlags.Instance|BindingFlags.NonPublic),move=typeof(BubbleHistory).GetMethod("OnMouseMove",BindingFlags.Instance|BindingFlags.NonPublic);
+                    down.Invoke(history,new object[]{new MouseEventArgs(MouseButtons.Left,1,p.X,p.Y,0)});
+                    Check((string)typeof(BubbleHistory).GetField("dragFilePath",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(history)==imagePath,"图片预览按下未准备外拖");
+                    move.Invoke(history,new object[]{new MouseEventArgs(MouseButtons.Left,0,p.X,p.Y,0)});Check(!history.IsDraggingFile&&requests==0,"按下误启动拖动或接收");
+                    DataObject data=BubbleHistory.FileDragData(imagePath);Check(((string[])data.GetData(DataFormats.FileDrop)).SequenceEqual(new[]{imagePath}),"FileDrop 路径不一致");
+                    history.Clear();history.Append(new ChatRecord {Packet=2,Text="旧图片",Sender="文件",State="已保存",Time=DateTime.Now,LocalFiles=new[]{imagePath}});history.Refresh();
+                    var media=(List<Tuple<Rectangle,string>>)typeof(BubbleHistory).GetField("mediaHits",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(history);p=media.Single().Item1.Location;down.Invoke(history,new object[]{new MouseEventArgs(MouseButtons.Left,1,p.X+4,p.Y+4,0)});
+                    Check((string)typeof(BubbleHistory).GetField("dragFilePath",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(history)==imagePath,"旧历史预览不支持外拖");form.Close();
+                }
+            });
+            test("历史搜索：换行高亮、重复/表情/文件名、摘要外命中与独立边框",()=>{
+                string folder=Path.Combine(directory,"highlight-history");LocalStore store=new LocalStore(folder);Peer peer=new Peer {Nickname="测试联系人",Login="history",Endpoint=new IPEndPoint(IPAddress.Loopback,Port())};
+                foreach(var record in new[]{new ChatRecord {Packet=1,Text="搜索关键词重复 关键词\n换行后仍能高亮关键词 😊",Sender="对端",State="已收到",Time=DateTime.Now},new ChatRecord {Packet=2,Text="[文件] 关键词.png",Sender="我",Outgoing=true,State="已送达",Time=DateTime.Now,Transfers=new[]{new FileTransferState {Id=0,Name="关键词.png",Status="待接收"}}},new ChatRecord {Packet=3,Text=new string('长',650)+"摘要尾部",Sender="对端",State="已收到",Time=DateTime.Now}}){record.PeerId=peer.Id;store.Append(record);}
+                MessageLayout layout=new MessageLayout("xx ABCabc 😊\nabc",Theme.Body,45,"abc");Check(String.Join("",layout.Runs.Where(r=>r.Highlight).Select(r=>r.Text))=="ABCabcabc","换行或大小写高亮不完整");Check(new MessageLayout("😊😊",Theme.Body,100,"😊").Runs.All(r=>r.Highlight),"表情未高亮");
+                try {foreach(bool dark in new[]{false,true}) {Theme.Change(dark,"blue");using(HistoryDialog dialog=new HistoryDialog(store,peer)) {
+                    dialog.Show();Application.DoEvents();TextBox input=Find<TextBox>(dialog,"搜索聊天记录");BubbleHistory body=Find<BubbleHistory>(dialog,"聊天记录");input.Text="关键词";body.Refresh();
+                    Check(body.HighlightText=="关键词"&&Find<Label>(dialog,"聊天记录搜索结果").Text.Contains("2 条"),"搜索数量或高亮未绑定");Check(dialog.Padding.Left==3&&dialog.Text.Contains(peer.DisplayName),"记录窗口与主窗未区分");
+                    Render(dialog,"preview-history-highlight-"+(dark?"dark":"light"));input.Text="摘要尾部";body.Refresh();Check(body.Text.Contains("摘要尾部"),"摘要外结果消失");
+                    var layouts=(List<MessageLayout>)typeof(BubbleHistory).GetField("textLayouts",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(body);Check(layouts.Single().Runs.Any(r=>r.Highlight),"摘要外命中未展示高亮");input.Text="不存在";Check(Find<Label>(dialog,"聊天记录搜索结果").Text.Contains("0 条"),"空结果未提示");dialog.Close();
+                }}}finally {Theme.Change(false,"blue");}
+            });
             test("拖入设置：旧配置默认关闭、保存持久化与取消",()=>{
                 string folder=Path.Combine(directory,"drop-settings");LocalStore store=new LocalStore(folder);Directory.CreateDirectory(folder);File.WriteAllText(Path.Combine(folder,"settings.json"),"{\"Nickname\":\"旧配置\"}");
                 AppSettings settings=store.LoadSettings();Check(!settings.AutoSendDroppedFiles,"旧配置意外启用自动发送");settings.ReceiveFolder=Path.Combine(folder,"received");
