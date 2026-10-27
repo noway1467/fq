@@ -11,7 +11,7 @@ $testOut = Join-Path $root 'build'
 New-Item -ItemType Directory -Force -Path $testOut | Out-Null
 $sources = @(Get-ChildItem -LiteralPath (Join-Path $root 'src') -Filter '*.cs' | ForEach-Object FullName)
 $common = @('/nologo','/utf8output','/optimize+','/warn:4','/warnaserror+','/platform:anycpu','/r:System.dll','/r:System.Core.dll','/r:System.Drawing.dll','/r:System.Windows.Forms.dll','/r:System.Web.Extensions.dll')
-& $compiler @common '/target:exe' "/out:$testOut\MakeIcon.exe" "$root\src\Theme.cs" "$root\src\EmojiAvatars.cs" "$root\tools\MakeIcon.cs"
+& $compiler @common '/target:exe' "/out:$testOut\MakeIcon.exe" "$root\src\Theme.cs" "$root\src\Motion.cs" "$root\src\EmojiAvatars.cs" "$root\tools\MakeIcon.cs"
 if ($LASTEXITCODE -ne 0) { throw '图标生成工具编译失败' }
 & "$testOut\MakeIcon.exe" "$testOut\app.ico"
 if ($LASTEXITCODE -ne 0) { throw '图标生成失败' }

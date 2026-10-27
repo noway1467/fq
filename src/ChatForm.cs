@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -17,7 +18,7 @@ namespace FeiqLight
         private readonly LocalStore store;
         private readonly MainForm main;
         private readonly BubbleHistory history = new BubbleHistory();
-        private readonly RichTextBox editor = new RichTextBox();
+        private readonly ChatEditor editor = new ChatEditor();
         private readonly ListBox files = new ListBox();
         private readonly Label queued = Theme.Label("", Theme.Small, Theme.Muted);
         private readonly Label fileStatus = Theme.Label("", Theme.Small, Theme.Muted);
@@ -38,32 +39,37 @@ namespace FeiqLight
             ResizeComposer();
             history.SetWallpaper(network.Settings.ChatBackground,network.Settings.BackgroundImage);
         }
-        private readonly TableLayoutPanel middle, root, side, queue;
+        private readonly TableLayoutPanel root, head, compose, queue, drawer;
+        private readonly Panel middle;
+        private readonly DropOverlay dropOverlay = new DropOverlay();
         private readonly List<string> attachments = new List<string>();
         private readonly HashSet<string> pastedImages = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private CancellationTokenSource receiving;
         private ReceivedFile activeFile;
         private readonly System.Windows.Forms.Timer draftTimer = new System.Windows.Forms.Timer { Interval = 500 };
-        private bool drawer;
+        private bool drawerOpen;
         private ContextMenuStrip chatMenu, fileMenu;
         private EmojiPicker emojiPicker;
+        private readonly RoundedPanel inputShell = new RoundedPanel { Fill = Theme.Ice, Radius = 22, Padding = new Padding(16, 9, 14, 7) };
         public ChatForm(Peer peer, LanService network, LocalStore store, MainForm main)
         {
             this.peer = peer; this.network = network; this.store = store; this.main = main;
             Theme.Apply(this); DoubleBuffered = true; Text = peer.Nickname; FormBorderStyle = FormBorderStyle.None; ClientSize = new Size(760, 720); MinimumSize = Size.Empty;
-            root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, Margin = Padding.Empty };
-            root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); root.RowStyles.Add(new RowStyle(SizeType.Absolute, 72)); root.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); root.RowStyles.Add(new RowStyle(SizeType.Absolute, 0)); root.RowStyles.Add(new RowStyle(SizeType.Absolute, 76)); Controls.Add(root);
-            TableLayoutPanel head = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 5, RowCount = 1, Padding = new Padding(18, 8, 14, 8), Margin = Padding.Empty, BackColor = Theme.Surface };
-            head.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 58)); head.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); for (int i = 0; i < 3; i++) head.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 42)); head.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, Margin = Padding.Empty, BackColor = Theme.Surface };
+            root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); root.RowStyles.Add(new RowStyle(SizeType.Absolute, 74)); root.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); root.RowStyles.Add(new RowStyle(SizeType.Absolute, 0)); root.RowStyles.Add(new RowStyle(SizeType.Absolute, 82)); Controls.Add(root);
+            head = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 5, RowCount = 1, Padding = new Padding(16, 8, 12, 8), Margin = Padding.Empty, BackColor = Theme.Surface };
+            head.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 58)); head.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); for (int i = 0; i < 3; i++) head.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 44)); head.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             avatar = new PictureBox { Image = Theme.ContactAvatar(46, peer.Id, peer.Online), AccessibleName = "聊天联系人头像", Size = new Size(56, 56), Margin = Padding.Empty, SizeMode = PictureBoxSizeMode.Zoom, Anchor = AnchorStyles.Left }; head.Controls.Add(avatar, 0, 0);
-            TableLayoutPanel identity = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 2, ColumnCount = 1, Margin = Padding.Empty }; identity.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); identity.RowStyles.Add(new RowStyle(SizeType.Percent, 55)); identity.RowStyles.Add(new RowStyle(SizeType.Percent, 45));
+            TableLayoutPanel identity = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 2, ColumnCount = 1, Margin = Padding.Empty }; identity.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); identity.RowStyles.Add(new RowStyle(SizeType.Percent, 56)); identity.RowStyles.Add(new RowStyle(SizeType.Percent, 44));
             peerName.Dock = DockStyle.Fill; peerName.AutoEllipsis = true; peerName.AccessibleName = "聊天联系人昵称"; identity.Controls.Add(peerName, 0, 0);
             peerStatus.Dock = DockStyle.Fill; peerStatus.AccessibleName = "聊天联系人状态"; identity.Controls.Add(peerStatus, 0, 1); head.Controls.Add(identity, 1, 0);
             avatarIdentity = peer.Id; avatarOnline = peer.Online; RefreshPeer();
             Button search = Theme.IconButton("search", "聊天记录", ShowHistory, false); search.Dock = DockStyle.Fill; search.Margin = Padding.Empty; head.Controls.Add(search, 2, 0);
-            fileButton = Theme.IconButton("inbox", "收到的文件", delegate { drawer = !drawer; UpdateFilesPanel(); }, false); fileButton.Dock = DockStyle.Fill; fileButton.Margin = Padding.Empty; head.Controls.Add(fileButton, 3, 0);
-            Button menu = Theme.IconButton("more", "会话菜单", ShowMenu, false); menu.Dock = DockStyle.Fill; menu.Margin = Padding.Empty; head.Controls.Add(menu, 4, 0); root.Controls.Add(head, 0, 0);
-            middle = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty }; middle.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); middle.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 0)); middle.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            fileButton = Theme.IconButton("inbox", "收到的文件", delegate { SetDrawer(!drawerOpen); }, false); fileButton.Dock = DockStyle.Fill; fileButton.Margin = Padding.Empty; head.Controls.Add(fileButton, 3, 0);
+            Button menu = Theme.IconButton("more", "会话菜单", ShowMenu, false); menu.Dock = DockStyle.Fill; menu.Margin = Padding.Empty; head.Controls.Add(menu, 4, 0);
+            root.Controls.Add(head, 0, 0);
+            head.Paint += delegate(object sender, PaintEventArgs e) { using (Pen line = new Pen(Theme.Line)) e.Graphics.DrawLine(line, 0, head.Height - 1, head.Width, head.Height - 1); };
+            middle = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty, BackColor = Theme.Wallpaper };
             history.RetryRequested += RetryMessage;
             history.FileRequested += (record, id) => {
                 ReceivedFile item = files.Items.Cast<ReceivedFile>().FirstOrDefault(f => f.Packet == record.Packet && f.File.Id == id);
@@ -72,37 +78,45 @@ namespace FeiqLight
                 files.SelectedItem = item; ReceiveFile(this, EventArgs.Empty);
             };
             history.ForwardRequested += delegate(ChatRecord record) { main.Forward(record); };
-            history.Dock = DockStyle.Fill; history.Margin = Padding.Empty; middle.Controls.Add(history, 0, 0);
-            side = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, Padding = new Padding(12), Margin = Padding.Empty, BackColor = Theme.Surface }; side.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); side.RowStyles.Add(new RowStyle(SizeType.Absolute, 40)); side.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); side.RowStyles.Add(new RowStyle(SizeType.Absolute, 48)); side.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
-            Label fileTitle = Theme.Label("文件", Theme.Title, Theme.Ink); fileTitle.Dock = DockStyle.Fill; side.Controls.Add(fileTitle, 0, 0);
-            files.Dock = DockStyle.Fill; files.BorderStyle = BorderStyle.None; files.DrawMode = DrawMode.OwnerDrawFixed; files.ItemHeight = 60; files.IntegralHeight = false; files.AccessibleName = "收到的文件列表"; files.DrawItem += DrawFile; side.Controls.Add(files, 0, 1);
+            history.Dock = DockStyle.Fill; history.Margin = Padding.Empty; middle.Controls.Add(history);
+            dropOverlay.Dock = DockStyle.Fill; middle.Controls.Add(dropOverlay); dropOverlay.BringToFront();
+            drawer = new TableLayoutPanel { Dock = DockStyle.Right, Width = 292, ColumnCount = 1, RowCount = 4, Padding = new Padding(16, 14, 16, 12), Margin = Padding.Empty, BackColor = Theme.Surface, Visible = false };
+            drawer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); drawer.RowStyles.Add(new RowStyle(SizeType.Absolute, 34)); drawer.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); drawer.RowStyles.Add(new RowStyle(SizeType.Absolute, 46)); drawer.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+            Label fileTitle = Theme.Label("文件", Theme.Section, Theme.Ink); fileTitle.Dock = DockStyle.Fill; drawer.Controls.Add(fileTitle, 0, 0);
+            files.Dock = DockStyle.Fill; files.BorderStyle = BorderStyle.None; files.DrawMode = DrawMode.OwnerDrawFixed; files.ItemHeight = 62; files.IntegralHeight = false; files.AccessibleName = "收到的文件列表"; files.BackColor = Theme.Surface; files.ForeColor = Theme.Ink; files.DrawItem += DrawFile; drawer.Controls.Add(files, 0, 1);
             ConfigureFileMenu();
-            TableLayoutPanel actions = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty }; actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50)); actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50)); actions.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            receive = Theme.Button("接收", ReceiveFile, true); reject = Theme.Button("拒绝", RejectFile, false); receive.Dock = reject.Dock = DockStyle.Fill; receive.Enabled = reject.Enabled = false; actions.Controls.Add(receive, 0, 0); actions.Controls.Add(reject, 1, 0); side.Controls.Add(actions, 0, 2);
+            TableLayoutPanel actions = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = new Padding(0, 4, 0, 4) }; actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50)); actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50)); actions.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            receive = Theme.Button("接收", ReceiveFile, true); reject = Theme.Button("拒绝", RejectFile, false); receive.Dock = reject.Dock = DockStyle.Fill; receive.Enabled = reject.Enabled = false; actions.Controls.Add(receive, 0, 0); actions.Controls.Add(reject, 1, 0); drawer.Controls.Add(actions, 0, 2);
             files.SelectedIndexChanged += delegate { if (receiving == null) receive.Enabled = reject.Enabled = files.SelectedItem != null; };
-            fileStatus.Dock = DockStyle.Fill; fileStatus.AutoEllipsis = true; side.Controls.Add(fileStatus, 0, 3); middle.Controls.Add(side, 1, 0); root.Controls.Add(middle, 0, 1); UpdateFilesPanel();
-            queue = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Padding = new Padding(18, 1, 8, 1), Margin = Padding.Empty, Visible = false }; queue.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); queue.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 40)); queue.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            fileStatus.Dock = DockStyle.Fill; fileStatus.AutoEllipsis = true; drawer.Controls.Add(fileStatus, 0, 3);
+            drawer.Paint += delegate(object sender, PaintEventArgs e) { using (Pen line = new Pen(Theme.Line)) e.Graphics.DrawLine(line, 0, 0, 0, drawer.Height); };
+            middle.Controls.Add(drawer); drawer.BringToFront();
+            root.Controls.Add(middle, 0, 1);
+            queue = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Padding = new Padding(18, 1, 10, 1), Margin = Padding.Empty, Visible = false }; queue.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); queue.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 38)); queue.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             queued.Dock = DockStyle.Fill; queued.AutoEllipsis = true; queue.Controls.Add(queued, 0, 0); Button remove = Theme.IconButton("close", "移除附件", delegate { ClearPastedImages(); attachments.Clear(); UpdateQueued(); }, false); remove.Dock = DockStyle.Fill; remove.Margin = Padding.Empty; queue.Controls.Add(remove, 1, 0); root.Controls.Add(queue, 0, 2);
-            TableLayoutPanel compose = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, RowCount = 1, Padding = new Padding(10, 11, 14, 11), Margin = Padding.Empty, BackColor = Theme.Surface };
-            compose.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 44)); compose.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); compose.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 44)); compose.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 52)); compose.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            compose = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, RowCount = 1, Padding = new Padding(10, 9, 14, 9), Margin = Padding.Empty, BackColor = Theme.Surface };
+            compose.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 42)); compose.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); compose.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 42)); compose.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 58)); compose.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             Button emoji = Theme.IconButton("smile", "表情", ShowEmoji, false); emoji.Dock = DockStyle.Fill; emoji.Margin = Padding.Empty; compose.Controls.Add(emoji, 0, 0);
-            RoundedPanel input = new RoundedPanel { Dock = DockStyle.Fill, Fill = Theme.Ice, Radius = Theme.ControlRadius, Padding = new Padding(15, 13, 12, 6), Margin = new Padding(4, 1, 6, 1) };
-            editor.BorderStyle = BorderStyle.None; editor.Dock = DockStyle.Fill; editor.BackColor = Theme.Ice; editor.Font = new Font(Theme.Body.FontFamily, 10F); editor.MaxLength = MessageText.InputLimit; editor.AccessibleName = "消息输入框"; editor.DetectUrls = false; editor.ScrollBars = RichTextBoxScrollBars.None;
+            inputShell.Dock = DockStyle.Fill; inputShell.Margin = new Padding(2, 1, 4, 1);
+            editor.BorderStyle = BorderStyle.None; editor.Dock = DockStyle.Fill; editor.BackColor = Theme.Ice; editor.Font = new Font(Theme.Body.FontFamily, 10F); editor.MaxLength = MessageText.InputLimit; editor.AccessibleName = "消息输入框"; editor.DetectUrls = false; editor.ScrollBars = RichTextBoxScrollBars.None; editor.Placeholder = "输入消息…";
             Theme.AttachEditMenu(editor, PasteClipboard);
             editor.KeyDown += delegate(object sender, KeyEventArgs e)
             {
                 if ((e.Control && e.KeyCode == Keys.V) || (e.Shift && e.KeyCode == Keys.Insert)) { e.SuppressKeyPress = true; PasteClipboard(); }
                 else if (e.KeyCode == Keys.Enter && !e.Shift) { e.SuppressKeyPress = true; SendMessage(); }
-            }; input.Controls.Add(editor); compose.Controls.Add(input, 1, 0);
+            }; inputShell.Controls.Add(editor); compose.Controls.Add(inputShell, 1, 0);
             draftTimer.Tick += delegate { draftTimer.Stop(); SaveDraft(); };
             editor.TextChanged += delegate { draftTimer.Stop(); draftTimer.Start(); ResizeComposer(); UpdateQueued(); };
             editor.Resize += delegate { ResizeComposer(); };
             Button file = Theme.IconButton("clip", "发送文件", SelectFiles, false); file.Dock = DockStyle.Fill; file.Margin = Padding.Empty; compose.Controls.Add(file, 2, 0);
-            Button send = Theme.IconButton("send", "发送消息", delegate { SendMessage(); }, true); send.Dock = DockStyle.Fill; send.Margin = new Padding(3); compose.Controls.Add(send, 3, 0); root.Controls.Add(compose, 0, 3);
+            Button send = Theme.IconButton("send", "发送消息", delegate { SendMessage(); }, true); send.Dock = DockStyle.Fill; send.Margin = new Padding(4, 3, 0, 3); compose.Controls.Add(send, 3, 0); root.Controls.Add(compose, 0, 3);
+            compose.Paint += delegate(object sender, PaintEventArgs e) { using (Pen line = new Pen(Theme.Line)) e.Graphics.DrawLine(line, 0, 0, compose.Width, 0); };
             editor.EnableAutoDragDrop = false;
             RegisterFileDrop(this);
             ApplyAppearance();
-            try { foreach (ChatRecord record in store.History(peer.Id, 150)) Append(record.Outgoing ? network.OutgoingRecord(peer.Id, record.Packet) ?? record : record); editor.Text = store.LoadDraft(peer.Id); } catch (Exception e) { Error("本地记录", e.Message); }
+            try { var records = store.History(peer.Id, 150).Select(record => record.Outgoing ? network.OutgoingRecord(peer.Id, record.Packet) ?? record : record).ToList(); history.SetRecords(records); editor.Text = store.LoadDraft(peer.Id); } catch (Exception e) { Error("本地记录", e.Message); }
+            // 侧栏宽度随窗口缩放，窄窗口时保持消息区可读。
+            middle.SizeChanged += delegate { drawer.Width = Math.Min(drawer.Width, Math.Max(200, middle.ClientSize.Width / 2)); };
         }
         private bool resizingComposer;
         private void ResizeComposer()
@@ -112,14 +126,16 @@ namespace FeiqLight
             try {
                 float scale=DeviceDpi/96F; int lines=Math.Max(1,editor.GetLineFromCharIndex(editor.TextLength)+1);
                 // 短消息不显示原生滚动箭头；输入区随内容增长，长文本仍能用光标和滚轮滚动。
-                int height=Math.Max((int)(76*scale),Math.Min(5,lines)*editor.Font.Height+(int)(44*scale));
-                root.RowStyles[3].Height=Math.Min(height,Math.Max((int)(76*scale),ClientSize.Height/3));
+                int height=Math.Max((int)(82*scale),Math.Min(5,lines)*editor.Font.Height+(int)(40*scale));
+                root.RowStyles[3].Height=Math.Min(height,Math.Max((int)(82*scale),ClientSize.Height/3));
             } finally {resizingComposer=false;}
         }
         public void SaveDraft() { draftTimer.Stop(); main.SaveDraft(peer.Id, editor.Text); }
         public void RefreshPeer()
         {
-            Text = peer.DisplayName; peerName.Text = peer.DisplayName; peerStatus.Text = (peer.Online ? "在线" : "离线") + (peer.DuplicateName ? peer.NameSuffix+" · "+peer.Endpoint : "");
+            Text = peer.DisplayName; peerName.Text = peer.DisplayName;
+            peerStatus.Text = (peer.Online ? "在线" : "离线") + (peer.DuplicateName ? peer.NameSuffix+" · "+peer.Endpoint : "");
+            peerStatus.ForeColor = peer.Online ? Theme.Online : Theme.Muted;
             peerName.AccessibleDescription=peer.DisplayName+" · "+peer.Id;
             avatar.AccessibleDescription = peer.Online ? "在线" : "离线";
             if (avatarIdentity != peer.Id || avatarOnline != peer.Online)
@@ -136,19 +152,29 @@ namespace FeiqLight
         {
             foreach (Attachment file in message.Files) { if (files.Items.Count >= 100) { fileStatus.Text = "待接收文件已达上限"; break; } files.Items.Add(new ReceivedFile { Packet = message.Record.Packet, File = file, Record = message.Record }); }
             if (files.Items.Count > 0 && files.SelectedIndex < 0) files.SelectedIndex = 0;
-            drawer = files.Items.Count > 0; UpdateFilesPanel(); main.ReceiveAutomatically();
+            SetDrawer(files.Items.Count > 0); main.ReceiveAutomatically();
         }
-        private void UpdateFilesPanel() { bool visible = drawer && files.Items.Count > 0; side.Visible = visible; middle.ColumnStyles[1].Width = visible ? 220 * DeviceDpi / 96F : 0; fileButton.Enabled = files.Items.Count > 0; }
+        // 抽屉以覆盖方式从右侧滑入，消息区宽度不变，阅读位置不被挤动。
+        private void SetDrawer(bool open)
+        {
+            drawerOpen = open && files.Items.Count > 0;
+            fileButton.Enabled = files.Items.Count > 0;
+            if (!drawerOpen) { drawer.Visible = false; return; }
+            drawer.Visible = true; drawer.BringToFront(); Invalidate();
+        }
         private void DrawFile(object sender, DrawItemEventArgs e)
         {
             // 接收完成移除条目后，WinForms 仍可能派发已排队的旧绘制索引。
             if (e.Index < 0 || e.Index >= files.Items.Count) return; ReceivedFile item = (ReceivedFile)files.Items[e.Index]; bool selected = (e.State & DrawItemState.Selected) != 0;
-            using(SolidBrush background=new SolidBrush(Theme.Surface)) e.Graphics.FillRectangle(background,e.Bounds);
-            using (System.Drawing.Drawing2D.GraphicsPath path = Theme.Rounded(new Rectangle(e.Bounds.X + 1, e.Bounds.Y + 2, Math.Max(4, e.Bounds.Width - 2), Math.Max(4, e.Bounds.Height - 4)), 10))
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            using (SolidBrush background = new SolidBrush(Theme.Surface)) e.Graphics.FillRectangle(background, e.Bounds);
+            using (GraphicsPath path = Theme.Rounded(new Rectangle(e.Bounds.X + 1, e.Bounds.Y + 2, Math.Max(4, e.Bounds.Width - 2), Math.Max(4, e.Bounds.Height - 4)), 9))
             using (SolidBrush b = new SolidBrush(selected ? Theme.Sky : Theme.Surface)) e.Graphics.FillPath(b, path);
-            int pad = 8; Theme.Glyph(e.Graphics, "file", new Rectangle(e.Bounds.Left + pad, e.Bounds.Top + 12, 28, 28), Theme.Blue);
-            Rectangle name = new Rectangle(e.Bounds.Left + 44, e.Bounds.Top + 9, e.Bounds.Width - 48, 23); TextRenderer.DrawText(e.Graphics, item.File.Name, Theme.Body, name, Theme.Ink, TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
-            name.Y += 25; TextRenderer.DrawText(e.Graphics, Theme.SizeText(item.File.Size) + " · " + item.Status, Theme.Small, name, Theme.Muted);
+            int pad = 8, circle = 34;
+            using (SolidBrush b = new SolidBrush(selected ? Theme.Blue : Theme.Ice)) e.Graphics.FillEllipse(b, e.Bounds.Left + pad, e.Bounds.Top + (e.Bounds.Height - circle) / 2, circle, circle);
+            Theme.Glyph(e.Graphics, "file", new Rectangle(e.Bounds.Left + pad + 8, e.Bounds.Top + (e.Bounds.Height - circle) / 2 + 8, 18, 18), selected ? Color.White : Theme.Blue);
+            Rectangle name = new Rectangle(e.Bounds.Left + pad + circle + 8, e.Bounds.Top + 10, Math.Max(1, e.Bounds.Width - pad * 2 - circle - 12), 22); TextRenderer.DrawText(e.Graphics, item.File.Name, Theme.Section, name, Theme.Ink, TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+            name.Y += 24; TextRenderer.DrawText(e.Graphics, Theme.SizeText(item.File.Size) + " · " + item.Status, Theme.Small, name, Theme.Muted, TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
         }
         private void SendMessage()
         {
@@ -218,17 +244,24 @@ namespace FeiqLight
         }
         private void RegisterFileDrop(Control target)
         {
-            target.AllowDrop=true;target.DragEnter+=FileDragEnter;target.DragOver+=FileDragEnter;target.DragDrop+=FileDropped;
+            target.AllowDrop=true;target.DragEnter+=FileDragEnter;target.DragOver+=FileDragEnter;target.DragLeave+=FileDragLeave;target.DragDrop+=FileDropped;
             foreach(Control child in target.Controls)RegisterFileDrop(child);
         }
         private void FileDragEnter(object sender,DragEventArgs e)
         {
-            e.Effect=!history.IsDraggingFile&&e.Data!=null&&e.Data.GetDataPresent(DataFormats.FileDrop)&&(e.AllowedEffect&DragDropEffects.Copy)!=0?DragDropEffects.Copy:DragDropEffects.None;
+            bool copy=!history.IsDraggingFile&&e.Data!=null&&e.Data.GetDataPresent(DataFormats.FileDrop)&&(e.AllowedEffect&DragDropEffects.Copy)!=0;
+            e.Effect=copy?DragDropEffects.Copy:DragDropEffects.None;
+            if(copy&&sender!=dropOverlay&&IsHandleCreated)dropOverlay.Visible=true;
+        }
+        private void FileDragLeave(object sender,EventArgs e)
+        {
+            // 子控件之间移动也会触发 DragLeave；仅当指针真的离开窗口时才收起提示。
+            if(sender==dropOverlay||!ClientRectangle.Contains(PointToClient(Cursor.Position)))dropOverlay.Visible=false;
         }
         private void FileDropped(object sender,DragEventArgs e)
         {
             // RichEdit 若收到 Copy 会继续插入 OLE 占位空格；文件已由本程序处理，拒绝它的默认插入。
-            e.Effect=DragDropEffects.None;
+            e.Effect=DragDropEffects.None; dropOverlay.Visible=false;
             if(history.IsDraggingFile||e.Data==null||(e.AllowedEffect&DragDropEffects.Copy)==0)return;
             string[] paths=e.Data.GetData(DataFormats.FileDrop) as string[];
             if(paths==null||paths.Length==0)return;
@@ -237,7 +270,7 @@ namespace FeiqLight
             try {ForwardContent("",paths.Distinct(StringComparer.OrdinalIgnoreCase).ToArray());if(!(sender is RichTextBox))e.Effect=DragDropEffects.Copy;}
             catch(Exception error){Error("拖入文件发送失败",error.Message);}
         }
-        private void UpdateQueued() { bool longText=MessageText.AsFile(editor.Text);bool show=attachments.Count > 0 || longText;queue.Visible = show; root.RowStyles[2].Height = show ? 42 * DeviceDpi / 96F : 0; queued.Text = (longText?"长文本将作为 TXT 附件发送  ":"")+String.Join("、", attachments.Select(Path.GetFileName)); }
+        private void UpdateQueued() { bool longText=MessageText.AsFile(editor.Text);bool show=attachments.Count > 0 || longText;queue.Visible = show; root.RowStyles[2].Height = show ? 40 * DeviceDpi / 96F : 0; queued.Text = (longText?"长文本将作为 TXT 附件发送  ":"")+String.Join("、", attachments.Select(Path.GetFileName)); }
         private void SelectFiles(object sender, EventArgs e) { using (OpenFileDialog dialog = new OpenFileDialog { Title = "发送文件", Multiselect = true, CheckFileExists = true }) if (dialog.ShowDialog(this) == DialogResult.OK) QueueFiles(dialog.FileNames); }
         private void ShowEmoji(object sender, EventArgs e)
         {
@@ -253,7 +286,7 @@ namespace FeiqLight
         {
             if (chatMenu == null)
             {
-                chatMenu = Theme.Menu(); chatMenu.MinimumSize = new Size((int)(248 * DeviceDpi / 96F), 0);
+                chatMenu = Theme.Menu(); chatMenu.MinimumSize = new Size((int)(236 * DeviceDpi / 96F), 0);
                 chatMenu.Items.Add("发送文件", null, SelectFiles); chatMenu.Items.Add("聊天记录", null, ShowHistory);
                 chatMenu.Items.Add(new ToolStripSeparator());
                 chatMenu.Items.Add("管理会话…",null,delegate { main.ShowConversationMenu(peer); });
@@ -316,7 +349,7 @@ namespace FeiqLight
                 // 完成状态与本地附件回写原邀请，不另造一条聊天消息或重复媒体卡片。
                 main.TrySave(selected.Record); history.Delivery(selected.Record);
                 files.Items.Remove(selected); if (files.Items.Count > 0 && files.SelectedIndex < 0) files.SelectedIndex = 0;
-                UpdateFilesPanel(); fileStatus.Text = "已保存"; main.FileReceiveStatus("文件已保存：" + Path.GetFileName(saved));
+                SetDrawer(files.Items.Count > 0); fileStatus.Text = "已保存"; main.FileReceiveStatus("文件已保存：" + Path.GetFileName(saved));
             }
             catch (OperationCanceledException) { if (!IsDisposed) { selected.Status = "已取消，可重试"; fileStatus.Text = "已取消，可重新接收"; FileState(selected, 0, "已取消 · 点击重试"); main.TrySave(selected.Record); } }
             catch (Exception error)
@@ -345,7 +378,7 @@ namespace FeiqLight
                 foreach (ReceivedFile item in files.Items.Cast<ReceivedFile>().Where(f => f.Packet == selected.Packet).ToList())
                 { foreach (string part in item.PartialPaths) if (File.Exists(part)) File.Delete(part); FileState(item, 0, "已拒绝"); files.Items.Remove(item); }
                 main.TrySave(selected.Record);
-                UpdateFilesPanel(); fileStatus.Text = "已拒绝";
+                SetDrawer(files.Items.Count > 0); fileStatus.Text = "已拒绝";
             }
             catch (Exception error) { Error("拒绝失败", error.Message); }
         }

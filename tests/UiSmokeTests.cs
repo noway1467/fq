@@ -55,7 +55,11 @@ namespace FeiqLight.Tests
         }
         private static void Render(Form form, string name)
         {
-            File.WriteAllLines(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, name + "-layout.txt"), new[] { "FORM " + form.Size + " CLIENT " + form.ClientSize }.Concat(All(form).Select(c => c.GetType().Name + " " + c.AccessibleName + " " + Protocol.Prefix(c.Text.Replace("\n", " "),28) + " bounds=" + c.Bounds + " parent=" + c.Parent.GetType().Name + " client=" + c.Parent.ClientSize + (c is TableLayoutPanel ? " rows=" + String.Join(",", ((TableLayoutPanel)c).GetRowHeights()) : ""))));
+            // 平滑滚动是异步动画；预览截图前让它落位，避免把过渡中的半帧当作最终布局。
+            Stopwatch settle = Stopwatch.StartNew();
+            while (settle.ElapsedMilliseconds < 900 && All(form).OfType<SmoothScrollView>().Any(v => v.Busy)) { Application.DoEvents(); Thread.Sleep(8); }
+            string[] scroll = All(form).OfType<SmoothScrollView>().Select(v => "SCROLL " + v.GetType().Name + " client=" + v.ClientSize + " content=" + v.AutoScrollMinSize + " at=" + v.AutoScrollPosition + " busy=" + v.Busy).ToArray();
+            File.WriteAllLines(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, name + "-layout.txt"), new[] { "FORM " + form.Size + " CLIENT " + form.ClientSize }.Concat(scroll).Concat(All(form).Select(c => c.GetType().Name + " " + c.AccessibleName + " " + Protocol.Prefix(c.Text.Replace("\n", " "),28) + " bounds=" + c.Bounds + " parent=" + c.Parent.GetType().Name + " client=" + c.Parent.ClientSize + (c is TableLayoutPanel ? " rows=" + String.Join(",", ((TableLayoutPanel)c).GetRowHeights()) : ""))));
             using (Bitmap bitmap = new Bitmap(form.Width, form.Height))
             {
                 form.DrawToBitmap(bitmap, new Rectangle(Point.Empty, form.Size));
@@ -714,16 +718,18 @@ namespace FeiqLight.Tests
                                 }
                             } finally {contact.Note=note;contact.Nickname=nickname;chatA.RefreshPeer();}
                         });
-                        test("在线头像：光边渲染、离线还原与聊天标题即时更新", () =>
+                        test("在线头像：绿点标记、离线还原与聊天标题即时更新", () =>
                         {
                             foreach(int size in new[]{46,52,78,104}) using(Bitmap offline=Theme.ContactAvatar(size,"头像",false)) using(Bitmap online=Theme.ContactAvatar(size,"头像",true))
                             {
-                                Check(offline.GetPixel(size/2,size/2)==online.GetPixel(size/2,size/2),"光边改变了头像中心");
+                                Check(offline.GetPixel(size/2,size/2)==online.GetPixel(size/2,size/2),"在线标记改变了头像中心");
                                 int halo=Theme.AvatarHalo(size),center=online.Width/2;
-                                Check(offline.GetPixel(center,halo/2).A==0&&online.GetPixel(center,halo/2).A>0,"头像外没有光晕");
-                                Check(online.GetPixel(center,halo-1).A>online.GetPixel(center,1).A,"光晕没有向外渐隐");
-                                for(int y=0;y<offline.Height;y++)for(int x=0;x<offline.Width;x++)if(offline.GetPixel(x,y).A==255)Check(offline.GetPixel(x,y)==online.GetPixel(x,y),"外发光染色了头像内部");
-                                Check(online.GetPixel(0,0).A==0,"光边填满了透明角落");
+                                // 在线标记是头像右下角的绿色圆点；离线头像同一位置不能出现标记。
+                                int dot=(int)Math.Max(9F,size*.3F),markX=halo+size-(int)(dot*.36F),markY=halo+size-(int)(dot*.36F);
+                                Check(online.GetPixel(markX,markY).G>online.GetPixel(markX,markY).R+40,"在线头像没有绿点标记");
+                                Check(offline.GetPixel(markX,markY).G<=offline.GetPixel(markX,markY).R+40,"离线头像仍带在线标记");
+                                for(int y=0;y<offline.Height;y++)for(int x=0;x<offline.Width;x++)if(offline.GetPixel(x,y).A==255&&(x<halo+size-dot||y<halo+size-dot))Check(offline.GetPixel(x,y)==online.GetPixel(x,y),"在线标记染色了头像内部");
+                                Check(online.GetPixel(0,0).A==0&&offline.GetPixel(center,halo/2).A==0,"头像外留白被填满");
                             }
                             Peer contact=a.Peers.Single(p=>p.Login=="ui-b"); PictureBox portrait=Find<PictureBox>(chatA,"聊天联系人头像");
                             try {

@@ -1,6 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
 namespace FeiqLight
@@ -10,53 +12,83 @@ namespace FeiqLight
         public static Color Blue = Color.FromArgb(51, 144, 236);
         public static Color Sky = Color.FromArgb(230, 241, 252);
         public static Color Ice = Color.FromArgb(241, 244, 247);
-        public static Color Line = Color.FromArgb(233, 237, 241);
+        public static Color Line = Color.FromArgb(231, 236, 240);
         public static Color Ink = Color.FromArgb(23, 33, 43);
         public static Color Muted = Color.FromArgb(115, 131, 146);
-        public static Color Wallpaper = Color.FromArgb(239, 243, 247);
+        public static Color Wallpaper = Color.FromArgb(209, 223, 245);
         public static Color Surface = Color.White;
-        // 两端共用同一组视觉角色：操作色、轻选中、输入面、分隔线，不按页面另造颜色。
+        // 派生角色：发出气泡、悬停底色、危险操作与覆盖滚动条，均随主题统一换算，不在页面里另造颜色。
+        public static Color Outgoing = Color.FromArgb(224, 238, 252);
+        public static Color Hover = Color.FromArgb(243, 245, 246);
+        public static Color Danger = Color.FromArgb(225, 62, 62);
+        public static Color ScrollThumb = Color.FromArgb(23, 33, 43);
+        public static Color Online = Color.FromArgb(60, 179, 79);
+        public static Color[] WallpaperColors = { Color.FromArgb(214, 233, 250), Color.FromArgb(198, 214, 246), Color.FromArgb(203, 229, 238), Color.FromArgb(219, 214, 245) };
+        public static bool Dark { get; private set; }
+        public static string AccentKey { get; private set; }
+        // 主题版本号：缓存（壁纸、头像）比对它即可得知配色已变化。
+        public static int Version { get; private set; }
         public const int ControlRadius = 10;
-        public const int BubbleRadius = 14;
+        public const int BubbleRadius = 15;
+        // 字段初值只是占位；启动即按默认浅色经典蓝换算全部角色，避免与 Configure 的结果漂移。
+        static Theme() { Configure(false, "blue"); }
         public static void Configure(bool dark,string accent)
         {
-            Blue=accent=="green"?Color.FromArgb(34,153,116):accent=="purple"?Color.FromArgb(139,103,215):Color.FromArgb(51,144,236);
-            Surface=dark?Color.FromArgb(30,39,49):Color.White;
-            Ink=dark?Color.FromArgb(230,235,241):Color.FromArgb(23,33,43);
-            Muted=dark?Color.FromArgb(166,182,199):Color.FromArgb(115,131,146);
-            Ice=dark?Color.FromArgb(42,54,68):Color.FromArgb(241,244,247);
-            Line=dark?Color.FromArgb(59,73,88):Color.FromArgb(233,237,241);
-            Wallpaper=dark?Color.FromArgb(19,28,38):Color.FromArgb(239,243,247);
-            if(accent=="green") {
-                Surface=ColorTranslator.FromHtml(dark?"#172D29":"#F4FAF4");Ink=ColorTranslator.FromHtml(dark?"#E4F3E9":"#20382D");Muted=ColorTranslator.FromHtml(dark?"#A3C4B6":"#627D6A");Ice=ColorTranslator.FromHtml(dark?"#28433B":"#E4EFE2");Line=ColorTranslator.FromHtml(dark?"#36564B":"#D4E3CF");Wallpaper=ColorTranslator.FromHtml(dark?"#10221C":"#D5E5CC");
-            } else if(accent=="purple") {
-                Surface=ColorTranslator.FromHtml(dark?"#292338":"#FCF7FC");Ink=ColorTranslator.FromHtml(dark?"#F0E8F7":"#38283F");Muted=ColorTranslator.FromHtml(dark?"#BEB0D0":"#84708D");Ice=ColorTranslator.FromHtml(dark?"#3A304B":"#EFE5F1");Line=ColorTranslator.FromHtml(dark?"#50405F":"#E4D5E8");Wallpaper=ColorTranslator.FromHtml(dark?"#1A1227":"#E6D8ED");
-            }
+            Dark=dark; AccentKey=accent=="green"||accent=="purple"?accent:"blue"; Version++;
+            string[] palette;
+            if(AccentKey=="green") palette=dark?new[]{"#2CB385","#14221D","#E2F1E8","#8FAE9F","#1E3129","#29423A","#0F241C","#16382B","#0E2A21","#1B3A31"}:new[]{"#229974","#F7FBF8","#1D3328","#5E7368","#EAF2EC","#DCE8DF","#DAECCE","#BEDEBE","#E2EAC8","#C8E2CD"};
+            else if(AccentKey=="purple") palette=dark?new[]{"#9A78E6","#211B2E","#EEE7F6","#A897BA","#2D253D","#3A3050","#1C1330","#2D1E47","#25162F","#2A2045"}:new[]{"#8B67D7","#FCF9FD","#33263D","#6E6478","#F2EBF6","#E7DDEC","#ECDEF6","#D7CCF2","#F2E0EC","#DED6F4"};
+            else palette=dark?new[]{"#3390EC","#17212B","#E9EEF3","#8A9AAB","#22303D","#2B3A48","#0E1A28","#16294A","#0C1F2B","#1C2141"}:new[]{"#3390EC","#FFFFFF","#17212B","#64727F","#F1F4F7","#E7ECF0","#D6E9FA","#C6D6F6","#CBE5EE","#DBD6F5"};
+            Blue=Hex(palette[0]);Surface=Hex(palette[1]);Ink=Hex(palette[2]);Muted=Hex(palette[3]);Ice=Hex(palette[4]);Line=Hex(palette[5]);
+            WallpaperColors=new[]{Hex(palette[6]),Hex(palette[7]),Hex(palette[8]),Hex(palette[9])};
+            Wallpaper=Color.FromArgb((WallpaperColors[0].R+WallpaperColors[1].R+WallpaperColors[2].R+WallpaperColors[3].R)/4,(WallpaperColors[0].G+WallpaperColors[1].G+WallpaperColors[2].G+WallpaperColors[3].G)/4,(WallpaperColors[0].B+WallpaperColors[1].B+WallpaperColors[2].B+WallpaperColors[3].B)/4);
             Sky=Blend(Blue,Surface,dark?.30F:.17F);
+            Outgoing=Blend(Blue,Surface,dark?.42F:.15F);
+            Hover=Blend(Ink,Surface,dark?.08F:.05F);
+            Danger=dark?Color.FromArgb(255,110,110):Color.FromArgb(225,62,62);
+            ScrollThumb=dark?Color.FromArgb(200,210,220):Color.FromArgb(40,50,60);
+            Online=dark?Color.FromArgb(88,196,104):Color.FromArgb(60,179,79);
         }
+        private static Color Hex(string value) { return ColorTranslator.FromHtml(value); }
         public static Color Blend(Color foreground, Color background, float amount)
         {
             return Color.FromArgb((int)(foreground.R*amount+background.R*(1-amount)),(int)(foreground.G*amount+background.G*(1-amount)),(int)(foreground.B*amount+background.B*(1-amount)));
         }
+        // 发出气泡上的时间与状态：与强调色同色系，深浅主题都保持可读。
+        public static Color OutgoingMeta { get { return Dark?Blend(Blue,Ink,.38F):Blend(Blue,Ink,.62F); } }
+        public static Color Link { get { return Dark?Blend(Color.White,Blue,.28F):Blue; } }
+        // 日期胶囊等服务提示：取壁纸平均色压暗，浅底深底都能衬白字。
+        public static Color ServiceFill { get { return Color.FromArgb(Dark?150:165,Blend(Color.Black,Wallpaper,Dark?.45F:.42F)); } }
         public static void Change(bool dark,string accent)
         {
-            Color[] old={Blue,Surface,Ink,Muted,Ice,Line,Wallpaper,Sky}; Configure(dark,accent);
-            Color[] next={Blue,Surface,Ink,Muted,Ice,Line,Wallpaper,Sky};
+            Color[] old={Blue,Surface,Ink,Muted,Ice,Line,Wallpaper,Sky,Outgoing,Hover};Configure(dark,accent);
+            Color[] next={Blue,Surface,Ink,Muted,Ice,Line,Wallpaper,Sky,Outgoing,Hover};
             foreach(Form form in Application.OpenForms) Recolor(form,old,next);
+            Action handler=Changed;if(handler!=null)handler();
         }
+        public static event Action Changed;
         private static void Recolor(Control control,Color[] old,Color[] next)
         {
-            for(int i=0;i<old.Length;i++) if(control.BackColor.ToArgb()==old[i].ToArgb()){control.BackColor=next[i];break;}
-            for(int i=0;i<old.Length;i++) if(control.ForeColor.ToArgb()==old[i].ToArgb()&&!(control is Button&&control.ForeColor==Color.White)){control.ForeColor=next[i];break;}
+            // 背景与前景分表换算：深浅主题的 Surface 与 Ink 可能同值（如 #17212B），
+            // 若共用一张表，前景会被误当成背景角色，切换后出现白字白底。
+            Color back=control.BackColor,fore=control.ForeColor;
+            if(back.ToArgb()==old[0].ToArgb())control.BackColor=next[0];
+            else if(back.ToArgb()==old[1].ToArgb())control.BackColor=next[1];
+            else for(int i=4;i<old.Length;i++)if(back.ToArgb()==old[i].ToArgb()){control.BackColor=next[i];break;}
+            if(fore.ToArgb()==old[2].ToArgb())control.ForeColor=next[2];
+            else if(fore.ToArgb()==old[3].ToArgb())control.ForeColor=next[3];
+            else if(fore.ToArgb()==old[0].ToArgb())control.ForeColor=next[0];
             RoundedPanel panel=control as RoundedPanel;if(panel!=null)for(int i=0;i<old.Length;i++)if(panel.Fill==old[i]){panel.Fill=next[i];break;}
             if(control.ContextMenuStrip!=null){control.ContextMenuStrip.BackColor=Surface;control.ContextMenuStrip.ForeColor=Ink;}
+            if(control.IsHandleCreated&&(control is TextBoxBase||control is ListBox||(control is ScrollableControl&&((ScrollableControl)control).AutoScroll)))ApplyScrollTheme(control);
             foreach(Control child in control.Controls)Recolor(child,old,next);control.Invalidate();
         }
         public static readonly Color Green = Color.FromArgb(73, 167, 107);
-        public static Color SearchHighlight { get { return Blend(Color.FromArgb(244,185,42),Surface,.48F); } }
+        public static Color SearchHighlight { get { return Blend(Color.FromArgb(244,185,42),Surface,Dark?.42F:.48F); } }
         public static readonly Font Body = new Font("Microsoft YaHei UI", 9F);
-        public static readonly Font Title = new Font("Microsoft YaHei UI", 13F, FontStyle.Bold);
+        public static readonly Font Title = new Font("Microsoft YaHei UI", 12F, FontStyle.Bold);
         public static readonly Font Section = new Font("Microsoft YaHei UI", 9F, FontStyle.Bold);
+        public static readonly Font Strong = new Font("Microsoft YaHei UI", 10F, FontStyle.Bold);
         public static readonly Font Small = new Font("Microsoft YaHei UI", 8F);
         public static readonly Icon AppIcon = MakeIcon();
         public static void Apply(Form form)
@@ -70,7 +102,6 @@ namespace FeiqLight
             Button button = new RoundedButton { Text = text, Font = Body, AutoSize = false, Size = new Size(88, 36), MinimumSize = new Size(32, 30), FlatStyle = FlatStyle.Flat, BackColor = primary ? Blue : Ice, ForeColor = primary ? Color.White : Ink, Cursor = Cursors.Hand, Margin = new Padding(4) };
             button.FlatAppearance.BorderColor = primary ? Blue : Line;
             button.FlatAppearance.BorderSize = 0;
-            button.FlatAppearance.MouseOverBackColor = primary ? Color.FromArgb(39, 125, 214) : Ice;
             if (click != null) button.Click += click;
             return button;
         }
@@ -78,48 +109,77 @@ namespace FeiqLight
         {
             RoundedButton button = (RoundedButton)Button(label, click, primary); button.Glyph = icon; button.AccessibleName = label; button.Size = new Size(40, 40); button.BackColor = primary ? Blue : Surface; button.ForeColor = primary ? Color.White : Muted; button.Radius = primary ? 20 : ControlRadius; return button;
         }
+        private static readonly ModernMenuRenderer menuRenderer = new ModernMenuRenderer();
         public static ContextMenuStrip Menu()
         {
-            ContextMenuStrip menu=new ContextMenuStrip { Renderer = new ModernMenuRenderer(), ForeColor=Ink, Font = Body, ShowImageMargin = true, Padding = new Padding(8), BackColor = Theme.Surface, DropShadowEnabled=true };
-            menu.Opening+=delegate { StyleMenu(menu); }; return menu;
+            ContextMenuStrip menu=new ContextMenuStrip { Renderer = menuRenderer, ForeColor=Ink, Font = Body, ShowImageMargin = true, Padding = new Padding(6), BackColor = Theme.Surface, DropShadowEnabled=true };
+            menu.Opening+=delegate { StyleMenu(menu); }; PrepareDropDown(menu); return menu;
+        }
+        // 弹层淡入并请求 Windows 11 圆角；旧系统忽略圆角属性，仍保留阴影与描边。
+        internal static void PrepareDropDown(ToolStripDropDown menu)
+        {
+            if(menu.Tag as string=="feiq-prepared")return; if(menu.Tag==null)menu.Tag="feiq-prepared";
+            menu.HandleCreated+=delegate{RoundWindow(menu.Handle,3);};
+            double start=0;Func<bool> fade=delegate{
+                if(menu.IsDisposed)return false;double t=Motion.Progress(start,130);
+                if(!menu.Visible){menu.Opacity=1;return false;}
+                menu.Opacity=t>=1?1:.2+.8*Motion.EaseOut(t);return t<1;
+            };
+            menu.Opening+=delegate{if(Motion.Enabled)menu.Opacity=.2;};
+            menu.Opened+=delegate{start=Motion.Now;if(Motion.Enabled)Motion.Run(fade);else menu.Opacity=1;};
+            menu.Closed+=delegate{menu.Opacity=1;};
         }
         private static void StyleMenu(ToolStripDropDown menu)
         {
             menu.BackColor=Surface; menu.ForeColor=Ink; menu.Font=Body;
-            float scale=menu.DeviceDpi/96F; menu.Padding=new Padding((int)(8*scale));
+            float scale=menu.DeviceDpi/96F; menu.Padding=new Padding((int)(6*scale));
             foreach(ToolStripItem item in menu.Items)
             {
-                item.Padding=item is ToolStripSeparator?new Padding(0,(int)(5*scale),0,(int)(5*scale)):new Padding((int)(8*scale),(int)(9*scale),(int)(16*scale),(int)(9*scale));
+                item.Padding=item is ToolStripSeparator?new Padding(0,(int)(4*scale),0,(int)(4*scale)):new Padding((int)(10*scale),(int)(8*scale),(int)(18*scale),(int)(8*scale));
                 item.Margin=Padding.Empty;
                 ToolStripMenuItem child=item as ToolStripMenuItem;
-                if(child!=null && child.HasDropDownItems) { child.DropDown.Renderer=menu.Renderer; StyleMenu(child.DropDown); }
+                if(child!=null && child.HasDropDownItems) { child.DropDown.Renderer=menu.Renderer; PrepareDropDown(child.DropDown); StyleMenu(child.DropDown); }
             }
-            int width=Math.Max(menu.MinimumSize.Width,menu.GetPreferredSize(Size.Empty).Width);
+            int width=Math.Max(Math.Max(menu.MinimumSize.Width,(int)(200*scale)),menu.GetPreferredSize(Size.Empty).Width);
             foreach(ToolStripItem item in menu.Items) {
-                item.AutoSize=false;item.Size=new Size(Math.Max((int)(96*scale),width-menu.Padding.Horizontal),item is ToolStripSeparator?(int)(12*scale):(int)(40*scale));
+                item.AutoSize=false;item.Size=new Size(Math.Max((int)(96*scale),width-menu.Padding.Horizontal),item is ToolStripSeparator?(int)(9*scale):item.Tag as string=="profile"?(int)(62*scale):(int)(36*scale));
             }
         }
-        public static bool DestructiveMenu(string text) { return text=="退出" || text=="断开" || text=="关闭会话" || text.StartsWith("删除") || text.StartsWith("清空") || text.StartsWith("拒绝"); }
+        // 只有会丢弃数据或结束程序的操作标红；收起会话不是破坏性操作。
+        public static bool DestructiveMenu(string text) { return text=="退出" || text=="断开" || text.StartsWith("删除") || text.StartsWith("清空") || text.StartsWith("拒绝"); }
         public static string MenuGlyph(string text)
         {
+            if(text.StartsWith("复制文件路径")) return "link";
             if(text.StartsWith("复制")) return "copy";
             if(text=="剪切") return "cut";
             if(text=="粘贴") return "paste";
             if(text=="撤销") return "undo";
             if(text=="全选") return "select";
+            if(text=="删除") return "trash";
+            if(text.StartsWith("查看全文")) return "doc";
             if(text.Contains("目录") || text.Contains("位置")) return "folder";
-            if(text.Contains("转发")) return "send";
+            if(text.StartsWith("打开方式")) return "apps";
+            if(text=="打开文件") return "open";
+            if(text=="打开") return "chat";
+            if(text.Contains("转发")) return "forward";
             if(text.Contains("刷新") || text.Contains("重发") || text.Contains("重新发送")) return "refresh";
             if(text=="发送文件") return "clip";
-            if(text.Contains("管理会话") || text.Contains("联系人")) return text.Contains("添加")?"plus":"person";
+            if(text.StartsWith("接收")) return "download";
+            if(text.Contains("备注")) return "edit";
+            if(text.Contains("已移除")) return "people";
+            if(text.Contains("添加联系人")) return "user-plus";
+            if(text.Contains("管理会话") || text.Contains("联系人")) return text.StartsWith("删除")?"trash":"person";
+            if(text.StartsWith("清空")) return "eraser";
             if(text.Contains("外观设置")) return "palette";
             if(text.Contains("字号")) return "type";
             if(text.Contains("聊天记录")) return "history";
+            if(text.Contains("夜间")) return "moon";
             if(text.Contains("设置")) return "settings";
             if(text.Contains("置顶")) return "pin";
             if(text=="关于") return "info";
+            if(text=="退出") return "power";
             if(text.Contains("添加")) return "plus";
-            if(text.Contains("关闭") || DestructiveMenu(text)) return "close";
+            if(text.StartsWith("取消") || text.Contains("关闭") || DestructiveMenu(text)) return "close";
             if(text.Contains("记录")) return "history";
             // 数值和未知菜单项不使用省略号冒充语义图标。
             return "";
@@ -158,43 +218,106 @@ namespace FeiqLight
                 input.SelectedText = text.Substring(0, count);
             });
         }
-        public static void Glyph(Graphics g, string name, Rectangle bounds, Color color)
+        public static void Glyph(Graphics g, string name, Rectangle bounds, Color color) { Glyph(g, name, (RectangleF)bounds, color); }
+        // 24 单位网格的线性图标：统一 1.8 线宽、圆头圆角，缩放到任意尺寸仍保持同一视觉重量。
+        public static void Glyph(Graphics g, string name, RectangleF bounds, Color color)
         {
-            var old = g.Save(); g.SmoothingMode = SmoothingMode.AntiAlias;
-            float size = Math.Min(bounds.Width, bounds.Height); g.TranslateTransform(bounds.X, bounds.Y); g.ScaleTransform(size / 24F, size / 24F);
-            using (Pen p = new Pen(color, 1.7F) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round })
+            if (String.IsNullOrEmpty(name) || bounds.Width <= 0 || bounds.Height <= 0) return;
+            GraphicsState old = g.Save(); g.SmoothingMode = SmoothingMode.AntiAlias; g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+            float size = Math.Min(bounds.Width, bounds.Height); g.TranslateTransform(bounds.X + (bounds.Width - size) / 2, bounds.Y + (bounds.Height - size) / 2); g.ScaleTransform(size / 24F, size / 24F);
+            using (Pen p = new Pen(color, 1.8F) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round })
+            using (SolidBrush b = new SolidBrush(color))
             {
-                if (name == "menu") { for (int y = 6; y <= 18; y += 6) g.DrawLine(p, 4, y, 20, y); }
-                else if (name == "more") { using (SolidBrush b = new SolidBrush(color)) for (int y = 4; y <= 18; y += 7) g.FillEllipse(b, 10, y, 3, 3); }
-                else if (name == "plus") { g.DrawLine(p, 12, 4, 12, 20); g.DrawLine(p, 4, 12, 20, 12); }
-                else if (name == "close") { g.DrawLine(p, 6, 6, 18, 18); g.DrawLine(p, 18, 6, 6, 18); }
-                else if (name == "min") g.DrawLine(p, 5, 15, 19, 15);
-                else if (name == "max") g.DrawRectangle(p, 5, 5, 14, 14);
-                else if (name == "code") { g.DrawLines(p,new[]{new PointF(7,6),new PointF(2,12),new PointF(7,18)});g.DrawLines(p,new[]{new PointF(17,6),new PointF(22,12),new PointF(17,18)});g.DrawLine(p,14,4,10,20); }
-                else if (name == "search") { g.DrawEllipse(p, 4, 3, 12, 12); g.DrawLine(p, 15, 15, 21, 21); }
-                else if (name == "send") { g.DrawPolygon(p, new[] { new PointF(3, 3), new PointF(22, 12), new PointF(3, 21), new PointF(6, 12) }); g.DrawLine(p, 6, 12, 20, 12); }
-                else if (name == "smile") { g.DrawEllipse(p, 3, 3, 18, 18); g.DrawArc(p, 7, 8, 10, 9, 0, 180); g.DrawLine(p, 8, 8, 8, 9); g.DrawLine(p, 16, 8, 16, 9); }
-                else if (name == "refresh") { g.DrawArc(p, 4, 4, 16, 16, 35, 290); g.DrawLines(p, new[] { new PointF(16, 3), new PointF(20, 4), new PointF(19, 8) }); }
-                else if (name == "file") { g.DrawLines(p, new[] { new PointF(7, 2), new PointF(15, 2), new PointF(20, 7), new PointF(20, 22), new PointF(5, 22), new PointF(5, 2), new PointF(7, 2) }); g.DrawLine(p, 9, 12, 16, 12); g.DrawLine(p, 9, 16, 16, 16); }
-                else if (name == "clip") { g.DrawArc(p, 7, 2, 10, 10, 180, 180); g.DrawLine(p, 7, 7, 7, 16); g.DrawArc(p, 7, 11, 8, 10, 0, 180); g.DrawLine(p, 15, 16, 15, 7); g.DrawLine(p, 11, 7, 11, 15); }
-                else if (name == "copy") { g.DrawRectangle(p,8,8,12,13); g.DrawLines(p,new[]{new Point(5,16),new Point(3,16),new Point(3,3),new Point(15,3),new Point(15,5)}); }
-                else if (name == "cut") { g.DrawEllipse(p,3,14,6,6);g.DrawEllipse(p,15,14,6,6);g.DrawLine(p,7,15,19,3);g.DrawLine(p,17,15,5,3); }
-                else if (name == "paste") { g.DrawRectangle(p,5,5,14,16);g.DrawRectangle(p,9,2,6,5);g.DrawLine(p,9,12,15,12);g.DrawLine(p,9,16,15,16); }
-                else if (name == "undo") { g.DrawArc(p,5,7,15,13,200,290);g.DrawLines(p,new[]{new Point(3,3),new Point(3,10),new Point(10,10)}); }
-                else if (name == "select") { g.DrawRectangle(p,3,3,18,18);g.DrawLine(p,7,8,17,8);g.DrawLine(p,7,12,17,12);g.DrawLine(p,7,16,14,16); }
-                else if (name == "folder") { g.DrawPolygon(p,new[]{new Point(3,6),new Point(9,6),new Point(11,9),new Point(21,9),new Point(21,20),new Point(3,20)}); }
-                else if (name == "settings") { g.DrawEllipse(p,5,5,14,14);g.DrawEllipse(p,9,9,6,6);for(int angle=0;angle<360;angle+=45){double a=angle*Math.PI/180;g.DrawLine(p,12+(float)Math.Cos(a)*8,12+(float)Math.Sin(a)*8,12+(float)Math.Cos(a)*10,12+(float)Math.Sin(a)*10);} }
-                else if (name == "history") { g.DrawArc(p,4,4,16,16,210,310);g.DrawLines(p,new[]{new Point(2,4),new Point(2,10),new Point(8,10)});g.DrawLines(p,new[]{new Point(12,7),new Point(12,12),new Point(16,14)}); }
-                else if (name == "person") { g.DrawEllipse(p,8,3,8,8);g.DrawArc(p,4,14,16,12,180,180);g.DrawLine(p,4,20,20,20); }
-                else if (name == "type") { g.DrawLines(p,new[]{new Point(3,19),new Point(9,4),new Point(15,19)});g.DrawLine(p,5,14,13,14);g.DrawLine(p,17,10,23,10);g.DrawLine(p,20,10,20,19); }
-                else if (name == "palette") { g.DrawArc(p,3,3,18,18,90,290);g.DrawBezier(p,20,15,12,13,18,22,12,21);using(SolidBrush b=new SolidBrush(color)){g.FillEllipse(b,7,6,2,2);g.FillEllipse(b,13,5,2,2);g.FillEllipse(b,6,12,2,2);g.FillEllipse(b,17,9,2,2);} }
-                else if (name == "inbox") { g.DrawLines(p,new[]{new Point(3,13),new Point(3,20),new Point(21,20),new Point(21,13)});g.DrawLine(p,12,3,12,15);g.DrawLines(p,new[]{new Point(8,11),new Point(12,15),new Point(16,11)}); }
-                else if (name == "pin") { g.DrawLines(p,new[]{new Point(8,3),new Point(16,3),new Point(15,10),new Point(19,15),new Point(5,15),new Point(9,10),new Point(8,3)});g.DrawLine(p,12,15,12,22); }
-                else if (name == "info") { g.DrawEllipse(p,3,3,18,18);g.DrawLine(p,12,11,12,17);g.DrawLine(p,12,7,12,7.5F); }
-                else if (name == "check") g.DrawLines(p,new[]{new Point(5,12),new Point(10,17),new Point(19,7)});
+                switch (name)
+                {
+                    case "menu": g.DrawLine(p, 4.5F, 7, 19.5F, 7); g.DrawLine(p, 4.5F, 12, 19.5F, 12); g.DrawLine(p, 4.5F, 17, 19.5F, 17); break;
+                    case "more": foreach (float y in new[] { 5.5F, 12F, 18.5F }) g.FillEllipse(b, 10.2F, y - 1.8F, 3.6F, 3.6F); break;
+                    case "plus": g.DrawLine(p, 12, 5, 12, 19); g.DrawLine(p, 5, 12, 19, 12); break;
+                    case "close": g.DrawLine(p, 6.5F, 6.5F, 17.5F, 17.5F); g.DrawLine(p, 17.5F, 6.5F, 6.5F, 17.5F); break;
+                    case "min": using (Pen thin = new Pen(color, 1.2F)) g.DrawLine(thin, 6.5F, 12.5F, 17.5F, 12.5F); break;
+                    case "max": using (Pen thin = new Pen(color, 1.2F)) using (GraphicsPath path = RoundedF(new RectangleF(6.5F, 6.5F, 11, 11), 1.5F)) g.DrawPath(thin, path); break;
+                    case "code": g.DrawLines(p, new[] { new PointF(8, 7), new PointF(3, 12), new PointF(8, 17) }); g.DrawLines(p, new[] { new PointF(16, 7), new PointF(21, 12), new PointF(16, 17) }); g.DrawLine(p, 13.5F, 5, 10.5F, 19); break;
+                    case "search": g.DrawEllipse(p, 4, 4, 12.5F, 12.5F); g.DrawLine(p, 14.8F, 14.8F, 20, 20); break;
+                    case "send":
+                        using (GraphicsPath plane = new GraphicsPath())
+                        {
+                            plane.AddPolygon(new[] { new PointF(3.2F, 11.4F), new PointF(20.8F, 3.6F), new PointF(14F, 20.8F), new PointF(11.1F, 13.6F) });
+                            g.FillPath(b, plane); using (Pen join = new Pen(color, 1.4F) { LineJoin = LineJoin.Round }) g.DrawPath(join, plane);
+                        }
+                        break;
+                    case "smile": g.DrawEllipse(p, 3, 3, 18, 18); g.FillEllipse(b, 8.1F, 8.6F, 2.2F, 2.6F); g.FillEllipse(b, 13.7F, 8.6F, 2.2F, 2.6F); g.DrawArc(p, 7.6F, 8.4F, 8.8F, 8.2F, 25, 130); break;
+                    case "clip":
+                        g.TranslateTransform(12, 12); g.RotateTransform(45); g.TranslateTransform(-12, -12);
+                        using (GraphicsPath clip = new GraphicsPath())
+                        {
+                            clip.AddLine(15, 8, 15, 16.5F); clip.AddArc(9, 13.5F, 6, 6, 0, 180); clip.AddLine(9, 16.5F, 9, 6.5F); clip.AddArc(9, 4.5F, 4, 4, 180, 180); clip.AddLine(13, 6.5F, 13, 15.5F);
+                            g.DrawPath(p, clip);
+                        }
+                        break;
+                    case "refresh": g.DrawArc(p, 4.5F, 4.5F, 15, 15, 35, 285); g.DrawLines(p, new[] { new PointF(19.6F, 4.4F), new PointF(19.4F, 8.9F), new PointF(15F, 8.6F) }); break;
+                    case "file": g.DrawLines(p, new[] { new PointF(13.5F, 3), new PointF(7, 3), new PointF(5.5F, 4.5F), new PointF(5.5F, 19.5F), new PointF(7, 21), new PointF(17, 21), new PointF(18.5F, 19.5F), new PointF(18.5F, 8), new PointF(13.5F, 3), new PointF(13.5F, 8), new PointF(18.5F, 8) }); break;
+                    case "doc": g.DrawLine(p, 5, 6, 19, 6); g.DrawLine(p, 5, 10, 19, 10); g.DrawLine(p, 5, 14, 19, 14); g.DrawLine(p, 5, 18, 13, 18); break;
+                    case "copy": using (GraphicsPath front = RoundedF(new RectangleF(8.5F, 8.5F, 11.5F, 12.5F), 2.2F)) g.DrawPath(p, front); g.DrawLines(p, new[] { new PointF(15.5F, 5), new PointF(15.5F, 4.8F), new PointF(14, 3.3F), new PointF(5.5F, 3.3F), new PointF(4, 4.8F), new PointF(4, 14.5F), new PointF(5.5F, 16), new PointF(5.8F, 16) }); break;
+                    case "cut": g.DrawEllipse(p, 3.5F, 14, 6, 6); g.DrawEllipse(p, 14.5F, 14, 6, 6); g.DrawLine(p, 8.2F, 15.2F, 18.5F, 3.5F); g.DrawLine(p, 15.8F, 15.2F, 5.5F, 3.5F); break;
+                    case "paste": using (GraphicsPath board = RoundedF(new RectangleF(5, 5, 14, 16.5F), 2)) g.DrawPath(p, board); using (GraphicsPath clip = RoundedF(new RectangleF(9, 2.8F, 6, 4.2F), 1.2F)) g.DrawPath(p, clip); g.DrawLine(p, 9, 12, 15, 12); g.DrawLine(p, 9, 16, 15, 16); break;
+                    case "undo": g.DrawArc(p, 5.5F, 7.5F, 14, 12.5F, 205, 285); g.DrawLines(p, new[] { new PointF(4, 4.5F), new PointF(4.3F, 10), new PointF(9.6F, 9.6F) }); break;
+                    case "select": using (GraphicsPath frame = RoundedF(new RectangleF(3.5F, 3.5F, 17, 17), 3)) g.DrawPath(p, frame); g.DrawLine(p, 7.5F, 8.5F, 16.5F, 8.5F); g.DrawLine(p, 7.5F, 12, 16.5F, 12); g.DrawLine(p, 7.5F, 15.5F, 13, 15.5F); break;
+                    case "folder": using (GraphicsPath folder = new GraphicsPath()) { folder.AddLines(new[] { new PointF(3.5F, 18), new PointF(3.5F, 6.5F), new PointF(5, 5), new PointF(9.2F, 5), new PointF(11.2F, 7.5F), new PointF(19, 7.5F), new PointF(20.5F, 9), new PointF(20.5F, 18), new PointF(19, 19.5F), new PointF(5, 19.5F) }); folder.CloseFigure(); g.DrawPath(p, folder); } break;
+                    case "settings":
+                        using (GraphicsPath gear = new GraphicsPath())
+                        {
+                            List<PointF> points = new List<PointF>();
+                            for (int k = 0; k < 8; k++) { double a = k * 45; points.Add(Polar(9.2, a - 9.5)); points.Add(Polar(9.2, a + 9.5)); points.Add(Polar(7, a + 17)); points.Add(Polar(7, a + 28)); }
+                            gear.AddPolygon(points.ToArray()); g.DrawPath(p, gear); g.DrawEllipse(p, 9, 9, 6, 6);
+                        }
+                        break;
+                    case "history": g.DrawArc(p, 3.8F, 3.8F, 16.4F, 16.4F, 215, 300); g.DrawLines(p, new[] { new PointF(3.2F, 4.2F), new PointF(4.6F, 8.7F), new PointF(9F, 7.4F) }); g.DrawLines(p, new[] { new PointF(12, 7.5F), new PointF(12, 12), new PointF(15, 13.8F) }); break;
+                    case "clock": g.DrawEllipse(p, 3.5F, 3.5F, 17, 17); g.DrawLines(p, new[] { new PointF(12, 7.5F), new PointF(12, 12), new PointF(15, 13.8F) }); break;
+                    case "person": g.DrawEllipse(p, 8.3F, 3.5F, 7.4F, 7.4F); using (GraphicsPath body = new GraphicsPath()) { body.AddBezier(4.5F, 20.5F, 4.5F, 15.6F, 8, 13.8F, 12, 13.8F); body.AddBezier(12, 13.8F, 16, 13.8F, 19.5F, 15.6F, 19.5F, 20.5F); g.DrawPath(p, body); } break;
+                    case "people": g.DrawEllipse(p, 5, 4.5F, 6.5F, 6.5F); g.DrawBezier(p, 2.5F, 19.5F, 2.5F, 15.2F, 5, 13.6F, 8.2F, 13.6F); g.DrawBezier(p, 8.2F, 13.6F, 11.4F, 13.6F, 14, 15.2F, 14, 19.5F); g.DrawArc(p, 13.5F, 5, 5.5F, 5.5F, 250, 230); g.DrawBezier(p, 16.5F, 13.7F, 19.2F, 14, 21.5F, 15.6F, 21.5F, 19.5F); break;
+                    case "user-plus": g.DrawEllipse(p, 5.3F, 3.5F, 7.4F, 7.4F); g.DrawBezier(p, 1.8F, 20.5F, 1.8F, 15.6F, 5.2F, 13.8F, 9, 13.8F); g.DrawBezier(p, 9, 13.8F, 12.8F, 13.8F, 16.2F, 15.6F, 16.2F, 20.5F); g.DrawLine(p, 19, 6, 19, 12); g.DrawLine(p, 16, 9, 22, 9); break;
+                    case "type": g.DrawLines(p, new[] { new PointF(3, 19), new PointF(8.5F, 5), new PointF(14, 19) }); g.DrawLine(p, 5, 14.5F, 12, 14.5F); g.DrawLine(p, 16.5F, 10, 22, 10); g.DrawLine(p, 19.25F, 10, 19.25F, 19); break;
+                    case "palette":
+                        using (GraphicsPath pal = new GraphicsPath()) { pal.AddArc(3, 3, 18, 18, 75, 285); pal.AddBezier(21, 12, 21, 15.5F, 16.5F, 14.5F, 15.5F, 17); pal.AddBezier(15.5F, 17, 14.7F, 19.5F, 15.2F, 21, 13.4F, 20.9F); g.DrawPath(p, pal); }
+                        g.FillEllipse(b, 6.6F, 10.4F, 2.6F, 2.6F); g.FillEllipse(b, 8.8F, 6, 2.6F, 2.6F); g.FillEllipse(b, 13.6F, 6, 2.6F, 2.6F); break;
+                    case "inbox":
+                    case "download": g.DrawLine(p, 12, 4, 12, 14.5F); g.DrawLines(p, new[] { new PointF(8, 10.5F), new PointF(12, 14.5F), new PointF(16, 10.5F) }); g.DrawLines(p, new[] { new PointF(4, 14.5F), new PointF(4, 18.5F), new PointF(5.5F, 20), new PointF(18.5F, 20), new PointF(20, 18.5F), new PointF(20, 14.5F) }); break;
+                    case "pin": g.DrawLines(p, new[] { new PointF(9, 3.5F), new PointF(15, 3.5F), new PointF(14.2F, 9.6F), new PointF(17.5F, 13.6F), new PointF(6.5F, 13.6F), new PointF(9.8F, 9.6F), new PointF(9, 3.5F) }); g.DrawLine(p, 12, 13.6F, 12, 20.5F); break;
+                    case "info": g.DrawEllipse(p, 3, 3, 18, 18); g.DrawLine(p, 12, 11, 12, 16.5F); g.FillEllipse(b, 10.9F, 6.6F, 2.2F, 2.2F); break;
+                    case "error": g.FillEllipse(b, 2.5F, 2.5F, 19, 19); using (Pen white = new Pen(Color.White, 2.2F) { StartCap = LineCap.Round, EndCap = LineCap.Round }) g.DrawLine(white, 12, 7, 12, 13); using (SolidBrush white = new SolidBrush(Color.White)) g.FillEllipse(white, 10.8F, 15.4F, 2.4F, 2.4F); break;
+                    case "check": g.DrawLines(p, new[] { new PointF(5, 12.5F), new PointF(10, 17.5F), new PointF(19, 7) }); break;
+                    case "chevron-down": g.DrawLines(p, new[] { new PointF(6, 9.5F), new PointF(12, 15.5F), new PointF(18, 9.5F) }); break;
+                    case "chevron-right": g.DrawLines(p, new[] { new PointF(9.5F, 6), new PointF(15.5F, 12), new PointF(9.5F, 18) }); break;
+                    case "play": using (GraphicsPath tri = new GraphicsPath()) { tri.AddPolygon(new[] { new PointF(8.5F, 5.5F), new PointF(19, 12), new PointF(8.5F, 18.5F) }); g.FillPath(b, tri); using (Pen join = new Pen(color, 1.6F) { LineJoin = LineJoin.Round }) g.DrawPath(join, tri); } break;
+                    case "moon": using (GraphicsPath moon = new GraphicsPath()) { moon.AddBezier(20, 14.2F, 18.6F, 18.2F, 15.2F, 20.6F, 11.6F, 20.6F); moon.AddBezier(11.6F, 20.6F, 7, 20.6F, 3.4F, 16.9F, 3.4F, 12.3F); moon.AddBezier(3.4F, 12.3F, 3.4F, 8.5F, 6, 5.2F, 9.7F, 4.2F); moon.AddBezier(9.7F, 4.2F, 8.4F, 10, 13.6F, 16, 20, 14.2F); g.DrawPath(p, moon); } break;
+                    case "power": g.DrawArc(p, 4.5F, 4.5F, 15, 15, -55, 290); g.DrawLine(p, 12, 3, 12, 11); break;
+                    case "edit": g.DrawLines(p, new[] { new PointF(4, 20), new PointF(4.8F, 15.6F), new PointF(15.4F, 5), new PointF(19, 8.6F), new PointF(8.4F, 19.2F), new PointF(4, 20) }); g.DrawLine(p, 13.2F, 7.2F, 16.8F, 10.8F); break;
+                    case "trash": g.DrawLine(p, 4, 6.5F, 20, 6.5F); g.DrawLines(p, new[] { new PointF(9.5F, 6.5F), new PointF(9.5F, 4), new PointF(14.5F, 4), new PointF(14.5F, 6.5F) }); g.DrawLines(p, new[] { new PointF(6, 6.5F), new PointF(7, 19.5F), new PointF(8.4F, 20.8F), new PointF(15.6F, 20.8F), new PointF(17, 19.5F), new PointF(18, 6.5F) }); g.DrawLine(p, 10, 10.5F, 10, 16.5F); g.DrawLine(p, 14, 10.5F, 14, 16.5F); break;
+                    case "eraser": g.DrawLines(p, new[] { new PointF(8.6F, 20), new PointF(4.2F, 15.6F), new PointF(14.2F, 5.6F), new PointF(20.2F, 11.6F), new PointF(11.8F, 20), new PointF(20, 20) }); g.DrawLine(p, 9, 10.8F, 15, 16.8F); break;
+                    case "forward": using (GraphicsPath arrow = new GraphicsPath()) { arrow.AddBezier(4, 19, 4, 12.5F, 8.5F, 10, 15.5F, 10); g.DrawPath(p, arrow); } g.DrawLines(p, new[] { new PointF(12, 5.5F), new PointF(16.5F, 10), new PointF(12, 14.5F) }); break;
+                    case "open": g.DrawLines(p, new[] { new PointF(19, 13.5F), new PointF(19, 18), new PointF(17.5F, 19.5F), new PointF(6.5F, 19.5F), new PointF(5, 18), new PointF(5, 7), new PointF(6.5F, 5.5F), new PointF(10.5F, 5.5F) }); g.DrawLine(p, 11.5F, 12.5F, 19.5F, 4.5F); g.DrawLines(p, new[] { new PointF(14, 4.5F), new PointF(19.5F, 4.5F), new PointF(19.5F, 10) }); break;
+                    case "apps": foreach (PointF corner in new[] { new PointF(4, 4), new PointF(13.5F, 4), new PointF(4, 13.5F), new PointF(13.5F, 13.5F) }) using (GraphicsPath tile = RoundedF(new RectangleF(corner.X, corner.Y, 6.5F, 6.5F), 1.6F)) g.DrawPath(p, tile); break;
+                    case "link": g.TranslateTransform(12, 12); g.RotateTransform(-45); g.TranslateTransform(-12, -12); using (GraphicsPath a = RoundedF(new RectangleF(2.5F, 8.8F, 10.5F, 6.4F), 3.2F)) g.DrawPath(p, a); using (GraphicsPath c = RoundedF(new RectangleF(11, 8.8F, 10.5F, 6.4F), 3.2F)) g.DrawPath(p, c); break;
+                    case "chat": using (GraphicsPath bubble = new GraphicsPath()) { bubble.AddArc(3, 4, 6, 6, 180, 90); bubble.AddArc(15, 4, 6, 6, 270, 90); bubble.AddArc(15, 11.5F, 6, 6, 0, 90); bubble.AddLine(18, 17.5F, 10, 17.5F); bubble.AddLine(10, 17.5F, 6, 21); bubble.AddLine(6, 21, 6, 17.4F); bubble.AddArc(3, 11.5F, 6, 6, 90, 90); bubble.CloseFigure(); g.DrawPath(p, bubble); } break;
+                    case "image": using (GraphicsPath frame = RoundedF(new RectangleF(3.5F, 4.5F, 17, 15), 2.5F)) g.DrawPath(p, frame); g.DrawEllipse(p, 7, 8, 3.2F, 3.2F); g.DrawLines(p, new[] { new PointF(4.5F, 17.5F), new PointF(9.5F, 12.8F), new PointF(12.8F, 15.6F), new PointF(15.3F, 13.2F), new PointF(19.6F, 17) }); break;
+                    case "bell": using (GraphicsPath bell = new GraphicsPath()) { bell.AddBezier(5.5F, 17, 7, 15, 6.5F, 13, 6.5F, 10.5F); bell.AddBezier(6.5F, 10.5F, 6.5F, 7, 9, 4.5F, 12, 4.5F); bell.AddBezier(12, 4.5F, 15, 4.5F, 17.5F, 7, 17.5F, 10.5F); bell.AddBezier(17.5F, 10.5F, 17.5F, 13, 17, 15, 18.5F, 17); bell.CloseFigure(); g.DrawPath(p, bell); } g.DrawArc(p, 10, 17.5F, 4, 3.5F, 0, 180); break;
+                    case "pulse": g.DrawLines(p, new[] { new PointF(2.5F, 12.5F), new PointF(7, 12.5F), new PointF(9.6F, 6), new PointF(14, 18.5F), new PointF(16.4F, 12.5F), new PointF(21.5F, 12.5F) }); break;
+                    case "sun": g.DrawEllipse(p, 8, 8, 8, 8); for (int k = 0; k < 8; k++) { PointF a = Polar(6.2, k * 45), c = Polar(8.6, k * 45); g.DrawLine(p, a, c); } break;
+                    case "arrow-down": g.DrawLines(p, new[] { new PointF(6.5F, 10), new PointF(12, 15.5F), new PointF(17.5F, 10) }); break;
+                    case "arrow-up": g.DrawLine(p, 12, 19, 12, 5.5F); g.DrawLines(p, new[] { new PointF(6.5F, 11), new PointF(12, 5.5F), new PointF(17.5F, 11) }); break;
+                    // 以下仅用于聊天壁纸涂鸦。
+                    case "heart": using (GraphicsPath heart = new GraphicsPath()) { heart.AddBezier(12, 20, 5, 15.5F, 3, 12, 3, 8.8F); heart.AddBezier(3, 8.8F, 3, 6, 5.2F, 4, 7.8F, 4); heart.AddBezier(7.8F, 4, 9.6F, 4, 11.2F, 5.1F, 12, 6.8F); heart.AddBezier(12, 6.8F, 12.8F, 5.1F, 14.4F, 4, 16.2F, 4); heart.AddBezier(16.2F, 4, 18.8F, 4, 21, 6, 21, 8.8F); heart.AddBezier(21, 8.8F, 21, 12, 19, 15.5F, 12, 20); g.DrawPath(p, heart); } break;
+                    case "star": { PointF[] star = new PointF[10]; for (int k = 0; k < 10; k++) star[k] = Polar(k % 2 == 0 ? 9.5 : 4.2, k * 36 - 90); using (GraphicsPath shape = new GraphicsPath()) { shape.AddPolygon(star); g.DrawPath(p, shape); } } break;
+                    case "sparkle": using (GraphicsPath spark = new GraphicsPath()) { spark.AddBezier(12, 3, 12.8F, 9, 15, 11.2F, 21, 12); spark.AddBezier(21, 12, 15, 12.8F, 12.8F, 15, 12, 21); spark.AddBezier(12, 21, 11.2F, 15, 9, 12.8F, 3, 12); spark.AddBezier(3, 12, 9, 11.2F, 11.2F, 9, 12, 3); g.DrawPath(p, spark); } break;
+                    case "cloud": using (GraphicsPath cloud = new GraphicsPath()) { cloud.AddArc(3, 10.5F, 7, 7, 90, 180); cloud.AddArc(6.5F, 5, 9, 9, 190, 150); cloud.AddArc(13, 8.5F, 8, 8, 260, 190); cloud.CloseFigure(); g.DrawPath(p, cloud); } break;
+                    case "music": g.DrawEllipse(p, 4.5F, 15, 5, 4.2F); g.DrawEllipse(p, 14.5F, 13, 5, 4.2F); g.DrawLines(p, new[] { new PointF(9.5F, 17), new PointF(9.5F, 5.5F), new PointF(19.5F, 3.5F), new PointF(19.5F, 15) }); g.DrawLine(p, 9.5F, 9, 19.5F, 7); break;
+                    case "coffee": g.DrawLines(p, new[] { new PointF(4.5F, 9), new PointF(5.5F, 17.5F), new PointF(7.5F, 19.5F), new PointF(13, 19.5F), new PointF(15, 17.5F), new PointF(16, 9), new PointF(4.5F, 9) }); g.DrawArc(p, 14.5F, 10.5F, 5.5F, 5, -90, 180); g.DrawBezier(p, 8, 3.5F, 7, 5, 9, 5.5F, 8, 7); g.DrawBezier(p, 12, 3.5F, 11, 5, 13, 5.5F, 12, 7); break;
+                    case "monitor": using (GraphicsPath screen = RoundedF(new RectangleF(3, 4, 18, 12.5F), 2)) g.DrawPath(p, screen); g.DrawLine(p, 12, 16.5F, 12, 20); g.DrawLine(p, 8, 20, 16, 20); break;
+                }
             }
             g.Restore(old);
         }
+        private static PointF Polar(double radius, double degrees) { double a = degrees * Math.PI / 180; return new PointF((float)(12 + Math.Cos(a) * radius), (float)(12 + Math.Sin(a) * radius)); }
         public static Label Label(string text, Font font, Color color)
         {
             return new Label { Text = text, Font = font, ForeColor = color, AutoSize = false, TextAlign = ContentAlignment.MiddleLeft, BackColor = Color.Transparent };
@@ -230,20 +353,26 @@ namespace FeiqLight
             using(Graphics g=Graphics.FromImage(image))
             {
                 g.SmoothingMode=SmoothingMode.AntiAlias;
-                // 单独预留外发光画布，头像原图最后覆盖，内部颜色和字形不会被光晕染色。
-                if(online) using(GraphicsPath path=new GraphicsPath())
-                {
-                    path.AddEllipse(0,0,extent,extent);
-                    using(PathGradientBrush glow=new PathGradientBrush(path))
-                    {
-                        glow.CenterColor=Color.FromArgb(125,51,144,236);glow.SurroundColors=new[]{Color.FromArgb(0,51,144,236)};
-                        float focus=(size-3F)/extent;glow.FocusScales=new PointF(focus,focus);
-                        g.FillPath(glow,path);
-                    }
-                }
                 EmojiAvatars.Draw(g,new Rectangle(halo,halo,size,size),identity);
+                // 在线：右下角绿点，外圈取界面底色与头像分隔；离线不加任何标记，头像主体像素保持一致。
+                if(online)
+                {
+                    float dot=Math.Max(9F,size*.3F),ring=Math.Max(1.5F,size*.055F);
+                    RectangleF outer=new RectangleF(halo+size-dot*.86F,halo+size-dot*.86F,dot,dot);
+                    using(SolidBrush b=new SolidBrush(Surface))g.FillEllipse(b,outer);
+                    using(SolidBrush b=new SolidBrush(Online))g.FillEllipse(b,RectangleF.Inflate(outer,-ring,-ring));
+                }
             }
             return image;
+        }
+        // 列表与选择器反复绘制同一头像：按尺寸、身份和在线状态复用位图，调用方不得释放返回值。
+        private static readonly Dictionary<string, Bitmap> avatars = new Dictionary<string, Bitmap>();
+        internal static Bitmap CachedAvatar(int size, string identity, bool online)
+        {
+            string key = size + "|" + (online ? "1" : "0") + "|" + identity; Bitmap image;
+            if (avatars.TryGetValue(key, out image)) return image;
+            if (avatars.Count >= 192) { foreach (Bitmap stale in avatars.Values) stale.Dispose(); avatars.Clear(); }
+            image = ContactAvatar(size, identity, online); avatars[key] = image; return image;
         }
         public static Color AvatarColor(string name)
         {
@@ -251,12 +380,62 @@ namespace FeiqLight
             uint hash = 0; foreach (char c in name ?? "") hash = unchecked(hash * 31 + c);
             return colors[hash % colors.Length];
         }
-        public static GraphicsPath Rounded(Rectangle bounds, int radius)
+        public static GraphicsPath Rounded(Rectangle bounds, int radius) { return RoundedF(bounds, radius); }
+        public static GraphicsPath RoundedF(RectangleF bounds, float radius)
         {
-            GraphicsPath path = new GraphicsPath(); int d = radius * 2;
+            GraphicsPath path = new GraphicsPath(); radius = Math.Min(radius, Math.Min(bounds.Width, bounds.Height) / 2);
+            if (radius <= .5F) { path.AddRectangle(bounds); return path; }
+            float d = radius * 2;
             path.AddArc(bounds.Left, bounds.Top, d, d, 180, 90); path.AddArc(bounds.Right - d, bounds.Top, d, d, 270, 90);
             path.AddArc(bounds.Right - d, bounds.Bottom - d, d, d, 0, 90); path.AddArc(bounds.Left, bounds.Bottom - d, d, d, 90, 90); path.CloseFigure(); return path;
         }
+        // 程序图标：渐变圆角底 + “Q”形对话气泡（尾笔即气泡尾巴）+ 圈内纸飞机寓意“飞”。
+        // 40 像素以下省略纸飞机，16/24/32 尺寸保持清晰的 Q 字轮廓；Android 矢量图标使用同一几何。
+        public static Bitmap AppLogo(int size)
+        {
+            Bitmap image = new Bitmap(size, size);
+            using (Graphics g = Graphics.FromImage(image)) DrawLogo(g, new RectangleF(0, 0, size, size));
+            return image;
+        }
+        public static void DrawLogo(Graphics g, RectangleF bounds)
+        {
+            GraphicsState state = g.Save();
+            g.SmoothingMode = SmoothingMode.AntiAlias; g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+            float size = Math.Min(bounds.Width, bounds.Height); g.TranslateTransform(bounds.X, bounds.Y); g.ScaleTransform(size / 256F, size / 256F);
+            Color[] colors = { Color.FromArgb(64, 206, 252), Color.FromArgb(51, 144, 236), Color.FromArgb(98, 90, 232) };
+            using (GraphicsPath tile = RoundedF(new RectangleF(6, 6, 244, 244), 62))
+            {
+                using (LinearGradientBrush brush = new LinearGradientBrush(new PointF(24, 8), new PointF(232, 248), colors[0], colors[2]))
+                { brush.InterpolationColors = new ColorBlend { Colors = colors, Positions = new[] { 0F, .5F, 1F } }; g.FillPath(brush, tile); }
+                Region clip = g.Clip; g.SetClip(tile, CombineMode.Intersect);
+                using (GraphicsPath glow = new GraphicsPath())
+                {
+                    glow.AddEllipse(-70, -160, 340, 310);
+                    using (PathGradientBrush shine = new PathGradientBrush(glow)) { shine.CenterColor = Color.FromArgb(56, 255, 255, 255); shine.SurroundColors = new[] { Color.FromArgb(0, 255, 255, 255) }; g.FillPath(shine, glow); }
+                }
+                g.Clip = clip;
+            }
+            const float cx = 122, cy = 120, radius = 60, stroke = 30;
+            using (Pen ring = new Pen(Color.White, stroke)) g.DrawEllipse(ring, cx - radius, cy - radius, radius * 2, radius * 2);
+            using (SolidBrush white = new SolidBrush(Color.White))
+            using (GraphicsPath tail = new GraphicsPath())
+            {
+                tail.AddBezier(LogoPoint(68, 14), LogoPoint(88, 30), new PointF(208, 188), new PointF(214, 214));
+                tail.AddBezier(new PointF(214, 214), new PointF(184, 212), LogoPoint(86, 62), LogoPoint(68, 76)); tail.CloseFigure();
+                g.FillPath(white, tail);
+                if (size >= 40)
+                {
+                    using (GraphicsPath plane = new GraphicsPath())
+                    {
+                        plane.AddPolygon(new[] { new PointF(96, 121), new PointF(148, 97), new PointF(135, 147), new PointF(124, 131) });
+                        g.FillPath(white, plane);
+                    }
+                    using (Pen fold = new Pen(colors[1], 4.2F) { StartCap = LineCap.Round, EndCap = LineCap.Round }) g.DrawLine(fold, 124, 130, 144, 102);
+                }
+            }
+            g.Restore(state);
+        }
+        private static PointF LogoPoint(double radius, double degrees) { double a = degrees * Math.PI / 180; return new PointF((float)(122 + Math.Cos(a) * radius), (float)(120 + Math.Sin(a) * radius)); }
         private static Icon MakeIcon()
         {
             using (System.IO.MemoryStream stream = new System.IO.MemoryStream(AppIconBytes()))
@@ -277,7 +456,7 @@ namespace FeiqLight
                     writer.Write((byte)(size==256?0:size));writer.Write((byte)(size==256?0:size));writer.Write((ushort)0);
                     writer.Write((ushort)1);writer.Write((ushort)32);writer.Write(length);writer.Write(offset);offset+=length;
                 }
-                foreach(int size in sizes) using(Bitmap bitmap=Avatar(size,"Q")) {
+                foreach(int size in sizes) using(Bitmap bitmap=AppLogo(size)) {
                     int stride=((size+31)/32)*4;
                     writer.Write(40);writer.Write(size);writer.Write(size*2);writer.Write((ushort)1);writer.Write((ushort)32);
                     writer.Write(0);writer.Write(size*size*4);writer.Write(0);writer.Write(0);writer.Write(0);writer.Write(0);
@@ -287,98 +466,260 @@ namespace FeiqLight
                 return stream.ToArray();
             }
         }
+        // Windows 10 1809+ 的原生滚动条跟随深浅主题；旧系统忽略主题名，仍保持可用。
+        public static void ThemeScrollbars(Control control)
+        {
+            control.HandleCreated += delegate { ApplyScrollTheme(control); };
+            if (control.IsHandleCreated) ApplyScrollTheme(control);
+        }
+        private static void ApplyScrollTheme(Control control)
+        {
+            try { SetWindowTheme(control.Handle, Dark ? "DarkMode_Explorer" : "Explorer", null); }
+            catch (DllNotFoundException) { } catch (EntryPointNotFoundException) { }
+        }
+        internal static bool Windows11 { get { return Environment.OSVersion.Version.Major >= 10 && Environment.OSVersion.Version.Build >= 22000; } }
+        internal static void RoundWindow(IntPtr handle, int preference)
+        {
+            try { DwmSetWindowAttribute(handle, 33, ref preference, sizeof(int)); }
+            catch (DllNotFoundException) { } catch (EntryPointNotFoundException) { }
+        }
+        [DllImport("dwmapi.dll")] private static extern int DwmSetWindowAttribute(IntPtr window, int attribute, ref int value, int size);
+        [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)] private static extern int SetWindowTheme(IntPtr window, string application, string list);
     }
     public sealed class RoundedButton : Button
     {
         public string Glyph = "";
         public int Radius = Theme.ControlRadius;
-        private bool hover;
-        public RoundedButton() { SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true); FlatStyle = FlatStyle.Flat; FlatAppearance.BorderSize = 0; }
-        protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
-        protected override void OnMouseLeave(EventArgs e) { hover = false; Invalidate(); base.OnMouseLeave(e); }
+        // 标签样式：无底色，激活时强调色文字与指示条由容器绘制；Badge 为未读计数。
+        public bool Tab, Active;
+        public int Badge;
+        // 窗口关闭键等特殊悬停色；为空时按底色自动加深。
+        public Color HoverBack = Color.Empty, HoverFore = Color.Empty;
+        private readonly Tween hover;
+        private Point ripple;
+        private double rippleStart = -100000, rippleEnd = -100000;
+        private bool pressed;
+        private readonly Func<bool> rippleStep;
+        public RoundedButton()
+        {
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true); FlatStyle = FlatStyle.Flat; FlatAppearance.BorderSize = 0;
+            hover = new Tween(this, 150, 0);
+            rippleStep = delegate { if (IsDisposed) return false; Invalidate(); return pressed || Motion.Now - rippleEnd < 420; };
+        }
+        protected override void OnMouseEnter(EventArgs e) { hover.Set(1); base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { hover.Set(0); base.OnMouseLeave(e); }
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Left && Enabled && Motion.Enabled) { ripple = e.Location; rippleStart = Motion.Now; rippleEnd = Double.MaxValue; pressed = true; Motion.Run(rippleStep); }
+            base.OnMouseDown(e);
+        }
+        protected override void OnMouseUp(MouseEventArgs e) { if (pressed) { pressed = false; rippleEnd = Math.Max(Motion.Now, rippleStart + 180); } base.OnMouseUp(e); }
+        protected override void OnEnabledChanged(EventArgs e) { base.OnEnabledChanged(e); Invalidate(); }
+        private Color ParentBack() { Control parent = Parent; while (parent != null && parent.BackColor.A < 255) parent = parent.Parent; return parent == null ? Theme.Surface : parent.BackColor; }
         protected override void OnPaint(PaintEventArgs e)
         {
-            Color background = !Enabled ? Theme.Ice : hover ? Theme.Blend(Theme.Ink, BackColor, .06F) : BackColor;
-            e.Graphics.Clear(Parent == null ? Theme.Surface : Parent.BackColor); e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            Rectangle r = new Rectangle(1, 1, Math.Max(2, Width - 2), Math.Max(2, Height - 2));
-            using (GraphicsPath path = Theme.Rounded(r, Math.Min((int)(Radius * e.Graphics.DpiX / 96F), Math.Min(r.Width, r.Height) / 2)))
-            { using (SolidBrush b = new SolidBrush(background)) e.Graphics.FillPath(b, path); if (Focused && ShowFocusCues) using (Pen p = new Pen(Theme.Blue)) e.Graphics.DrawPath(p, path); }
-            Color color = Enabled ? ForeColor : Theme.Muted;
-            if (Glyph.Length > 0) { int size = (int)(22 * e.Graphics.DpiX / 96F); Theme.Glyph(e.Graphics, Glyph, new Rectangle((Width - size) / 2, (Height - size) / 2, size, size), color); }
-            else TextRenderer.DrawText(e.Graphics, Text, Font, r, color, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            Graphics g = e.Graphics; Color back = ParentBack(); g.Clear(back); g.SmoothingMode = SmoothingMode.AntiAlias;
+            float scale = g.DpiX / 96F; double h = hover.Value;
+            bool primary = !Tab && BackColor.ToArgb() == Theme.Blue.ToArgb();
+            Color fill = Tab ? back : BackColor;
+            Color hovered = !HoverBack.IsEmpty ? HoverBack : primary ? Theme.Blend(Color.Black, fill, .12F) : Theme.Blend(Theme.Ink, fill, Theme.Dark ? .10F : .06F);
+            // 禁用态与容器底色混合而不是统一刷成灰块，按钮轮廓仍可辨认。
+            if (Enabled) fill = Motion.Mix(fill, hovered, Tab ? 0 : h); else if (!Tab) fill = Theme.Blend(fill, back, primary ? .45F : .6F);
+            RectangleF area = new RectangleF(.5F, .5F, Width - 1, Height - 1);
+            float radius = Math.Min(Radius * scale, Math.Min(area.Width, area.Height) / 2);
+            using (GraphicsPath path = Theme.RoundedF(area, radius))
+            {
+                if (fill.ToArgb() != back.ToArgb()) using (SolidBrush b = new SolidBrush(fill)) g.FillPath(b, path);
+                double since = Motion.Now - rippleStart;
+                if (since >= 0 && since < 100000 && (pressed || Motion.Now - rippleEnd < 420))
+                {
+                    double grow = Motion.EaseOut(Math.Min(1, since / 380)), fade = pressed ? 1 : Math.Max(0, 1 - (Motion.Now - rippleEnd) / 420);
+                    float reach = (float)(Math.Sqrt(Width * Width + Height * Height) * (.25 + .85 * grow));
+                    Region clip = g.Clip; g.SetClip(path, CombineMode.Intersect);
+                    using (SolidBrush wave = new SolidBrush(Color.FromArgb((int)(fade * (primary || !HoverBack.IsEmpty ? 46 : Theme.Dark ? 34 : 22)), primary || !HoverBack.IsEmpty ? Color.White : Theme.Ink)))
+                        g.FillEllipse(wave, ripple.X - reach, ripple.Y - reach, reach * 2, reach * 2);
+                    g.Clip = clip;
+                }
+                if (Focused && ShowFocusCues) using (Pen ring = new Pen(Theme.Blend(Theme.Blue, back, .7F), 2 * scale)) using (GraphicsPath inner = Theme.RoundedF(RectangleF.Inflate(area, -1.5F * scale, -1.5F * scale), Math.Max(1, radius - 1.5F * scale))) g.DrawPath(ring, inner);
+            }
+            Color color = Enabled ? ForeColor : Theme.Blend(ForeColor, fill, .45F);
+            if (Tab) color = Active ? Theme.Blue : Motion.Mix(Theme.Muted, Theme.Ink, h);
+            else if (!HoverFore.IsEmpty && Enabled) color = Motion.Mix(ForeColor, HoverFore, h);
+            if (Glyph.Length > 0)
+            {
+                float icon = Math.Min(22 * scale, Math.Min(Width, Height) - 10 * scale);
+                Theme.Glyph(g, Glyph, new RectangleF((Width - icon) / 2F, (Height - icon) / 2F, icon, icon), color);
+                return;
+            }
+            Rectangle text = new Rectangle(1, 1, Math.Max(2, Width - 2), Math.Max(2, Height - 2));
+            if (Tab && Badge > 0)
+            {
+                string count = Badge > 99 ? "99+" : Badge.ToString();
+                Size label = TextRenderer.MeasureText(g, Text, Font, Size.Empty, TextFormatFlags.NoPadding), badge = TextRenderer.MeasureText(g, count, Theme.Small, Size.Empty, TextFormatFlags.NoPadding);
+                int gap = (int)(5 * scale), pill = Math.Max((int)(18 * scale), badge.Width + (int)(10 * scale)), total = label.Width + gap + pill, left = (Width - total) / 2;
+                TextRenderer.DrawText(g, Text, Font, new Rectangle(left, 0, label.Width + 2, Height), color, TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
+                RectangleF bubble = new RectangleF(left + label.Width + gap, (Height - 18 * scale) / 2F, pill, 18 * scale);
+                using (GraphicsPath shape = Theme.RoundedF(bubble, bubble.Height / 2)) using (SolidBrush b = new SolidBrush(Active ? Theme.Blue : Theme.Blend(Theme.Muted, back, .75F))) g.FillPath(b, shape);
+                TextRenderer.DrawText(g, count, Theme.Small, Rectangle.Round(bubble), Color.White, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+                return;
+            }
+            TextRenderer.DrawText(g, Text, Font, text, color, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
         }
     }
     public sealed class RoundedPanel : Panel
     {
         public int Radius = 14;
         public Color Fill = Theme.Ice;
-        public RoundedPanel() { DoubleBuffered = true; BackColor = Theme.Surface; }
+        public Color Border = Color.Empty;
+        public RoundedPanel() { DoubleBuffered = true; BackColor = Theme.Surface; ResizeRedraw = true; }
         protected override void OnPaintBackground(PaintEventArgs e)
         {
             e.Graphics.Clear(BackColor); if (Width < 4 || Height < 4) return;
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            using (GraphicsPath path = Theme.Rounded(new Rectangle(0, 0, Width - 1, Height - 1), Math.Min((int)(Radius * e.Graphics.DpiX / 96F), Math.Min(Width, Height) / 2)))
-            using (SolidBrush b = new SolidBrush(Fill)) e.Graphics.FillPath(b, path);
+            using (GraphicsPath path = Theme.RoundedF(new RectangleF(.5F, .5F, Width - 1, Height - 1), Math.Min(Radius * e.Graphics.DpiX / 96F, Math.Min(Width, Height) / 2F)))
+            {
+                using (SolidBrush b = new SolidBrush(Fill)) e.Graphics.FillPath(b, path);
+                if (!Border.IsEmpty) using (Pen pen = new Pen(Border)) e.Graphics.DrawPath(pen, path);
+            }
         }
     }
     public sealed class RoundedInput : RoundedInputBase { }
     public class RoundedInputBase : Panel
     {
         public readonly TextBox Input = new TextBox();
+        private readonly Tween focus;
         public RoundedInputBase()
         {
-            DoubleBuffered = true; BackColor = Theme.Surface; Padding = new Padding(15, 11, 15, 9); Height = 44;
+            DoubleBuffered = true; ResizeRedraw = true; BackColor = Theme.Surface; Padding = new Padding(15, 11, 15, 9); Height = 44;
             Input.BorderStyle = BorderStyle.None; Input.BackColor = Theme.Ice; Input.ForeColor = Theme.Ink; Input.Dock = DockStyle.Fill; Input.Font = Theme.Body; Controls.Add(Input); Theme.AttachEditMenu(Input);
-            Input.Enter += delegate { Invalidate(); }; Input.Leave += delegate { Invalidate(); };
+            focus = new Tween(this, 160, 0);
+            Input.Enter += delegate { focus.Set(1); }; Input.Leave += delegate { focus.Set(0); };
         }
         protected override void OnPaintBackground(PaintEventArgs e)
         {
             e.Graphics.Clear(BackColor); if (Width < 4 || Height < 4) return; e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            using (GraphicsPath path = Theme.Rounded(new Rectangle(0, 0, Width - 1, Height - 1), Math.Min((int)(Theme.ControlRadius * e.Graphics.DpiX / 96F), Math.Min(Width, Height) / 2)))
-            { using (SolidBrush b = new SolidBrush(Theme.Ice)) e.Graphics.FillPath(b, path); if (ContainsFocus) using (Pen pen = new Pen(Theme.Blue)) e.Graphics.DrawPath(pen, path); }
+            float scale = e.Graphics.DpiX / 96F;
+            using (GraphicsPath path = Theme.RoundedF(new RectangleF(.5F, .5F, Width - 1, Height - 1), Math.Min(Theme.ControlRadius * scale, Math.Min(Width, Height) / 2F)))
+            {
+                using (SolidBrush b = new SolidBrush(Input.BackColor)) e.Graphics.FillPath(b, path);
+                double f = focus.Value; if (f > 0) using (Pen pen = new Pen(Color.FromArgb((int)(255 * f), Theme.Blue), 1.5F * scale)) e.Graphics.DrawPath(pen, path);
+            }
         }
         public string Placeholder { set { if (!Input.IsHandleCreated) Input.CreateControl(); SendMessage(Input.Handle, 0x1501, new IntPtr(1), value); } }
         [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)] private static extern IntPtr SendMessage(IntPtr handle, int msg, IntPtr w, string text);
     }
     public sealed class ToggleSwitch : CheckBox
     {
-        public ToggleSwitch() { SetStyle(ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint, true); AutoSize = false; Height = 42; Cursor = Cursors.Hand; }
+        // 说明文字随开关一起绘制，长说明自动换行；开关滑块随状态平滑过渡。
+        public string Description = "";
+        private readonly Tween knob, hover;
+        public ToggleSwitch() { SetStyle(ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.ResizeRedraw, true); AutoSize = false; Height = 42; Cursor = Cursors.Hand; knob = new Tween(this, 170, 0); hover = new Tween(this, 140, 0); }
+        protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); knob.Set(Checked ? 1 : 0, false); }
+        protected override void OnCheckedChanged(EventArgs e) { knob.Set(Checked ? 1 : 0); base.OnCheckedChanged(e); }
+        protected override void OnMouseEnter(EventArgs e) { hover.Set(1); base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { hover.Set(0); base.OnMouseLeave(e); }
+        protected override void OnEnabledChanged(EventArgs e) { base.OnEnabledChanged(e); Invalidate(); }
+        public int PreferredHeightFor(int width)
+        {
+            float scale = DeviceDpi / 96F; int textWidth = Math.Max(40, width - (int)(60 * scale));
+            int title = TextRenderer.MeasureText(Text, Font, new Size(textWidth, 0), TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix).Height;
+            int detail = String.IsNullOrEmpty(Description) ? 0 : TextRenderer.MeasureText(Description, Theme.Small, new Size(textWidth, 0), TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix).Height + (int)(3 * scale);
+            return Math.Max((int)(40 * scale), title + detail + (int)(18 * scale));
+        }
         protected override void OnPaint(PaintEventArgs e)
         {
-            e.Graphics.Clear(BackColor); e.Graphics.SmoothingMode = SmoothingMode.AntiAlias; int w = (int)(36 * e.Graphics.DpiX / 96F), h = w / 2;
-            Rectangle r = new Rectangle(Width - w - 4, (Height - h) / 2, w, h);
-            using (GraphicsPath path = Theme.Rounded(r, h / 2)) using (SolidBrush b = new SolidBrush(Checked ? Theme.Blue : Theme.Line)) e.Graphics.FillPath(b, path);
-            using (SolidBrush b = new SolidBrush(Color.White)) e.Graphics.FillEllipse(b, Checked ? r.Right - h + 2 : r.Left + 2, r.Top + 2, h - 4, h - 4);
-            TextRenderer.DrawText(e.Graphics, Text, Font, new Rectangle(0, 0, Width - w - 14, Height), Theme.Ink, TextFormatFlags.VerticalCenter);
-            if (Focused && ShowFocusCues) ControlPaint.DrawFocusRectangle(e.Graphics, ClientRectangle);
+            Graphics g = e.Graphics; g.Clear(BackColor); g.SmoothingMode = SmoothingMode.AntiAlias; float scale = g.DpiX / 96F;
+            int w = (int)(38 * scale), h = (int)(22 * scale); double k = knob.Value;
+            int textWidth = Math.Max(10, Width - w - (int)(22 * scale));
+            Size title = TextRenderer.MeasureText(g, Text, Font, new Size(textWidth, 0), TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix);
+            Size detail = String.IsNullOrEmpty(Description) ? Size.Empty : TextRenderer.MeasureText(g, Description, Theme.Small, new Size(textWidth, 0), TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix);
+            int block = title.Height + (detail.Height > 0 ? detail.Height + (int)(3 * scale) : 0), top = Math.Max(0, (Height - block) / 2);
+            Color ink = Enabled ? Theme.Ink : Theme.Blend(Theme.Ink, BackColor, .5F);
+            TextRenderer.DrawText(g, Text, Font, new Rectangle(0, top, textWidth, title.Height), ink, TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix);
+            if (detail.Height > 0) TextRenderer.DrawText(g, Description, Theme.Small, new Rectangle(0, top + title.Height + (int)(3 * scale), textWidth, detail.Height), Enabled ? Theme.Muted : Theme.Blend(Theme.Muted, BackColor, .5F), TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix);
+            RectangleF track = new RectangleF(Width - w - 2 * scale, top + Math.Min(title.Height, block) / 2F - h / 2F, w, h);
+            if (detail.Height == 0) track.Y = (Height - h) / 2F;
+            Color off = Theme.Blend(Theme.Muted, BackColor, Theme.Dark ? .45F : .38F), on = Theme.Blue;
+            Color fill = Motion.Mix(off, on, k); if (!Enabled) fill = Theme.Blend(fill, BackColor, .5F); else if (hover.Value > 0) fill = Motion.Mix(fill, Theme.Blend(Theme.Ink, fill, .12F), hover.Value * .6);
+            using (GraphicsPath path = Theme.RoundedF(track, h / 2F)) using (SolidBrush b = new SolidBrush(fill)) g.FillPath(b, path);
+            float dot = h - 6 * scale, x = track.Left + 3 * scale + (float)((track.Width - dot - 6 * scale) * k);
+            using (SolidBrush shadow = new SolidBrush(Color.FromArgb(40, 0, 0, 0))) g.FillEllipse(shadow, x, track.Top + 3.6F * scale, dot, dot);
+            using (SolidBrush b = new SolidBrush(Color.White)) g.FillEllipse(b, x, track.Top + 3 * scale, dot, dot);
+            if (Focused && ShowFocusCues) using (Pen ring = new Pen(Theme.Blend(Theme.Blue, BackColor, .6F), 2 * scale)) using (GraphicsPath outline = Theme.RoundedF(RectangleF.Inflate(track, 2.5F * scale, 2.5F * scale), h / 2F + 2.5F * scale)) g.DrawPath(ring, outline);
+        }
+    }
+    // 自绘滑杆：保留 TrackBar 的取值、键盘与无障碍语义，点击轨道直接跳到对应值并可拖动。
+    public sealed class ThemedSlider : TrackBar
+    {
+        private bool dragging;
+        public ThemedSlider() { SetStyle(ControlStyles.UserPaint | ControlStyles.UserMouse | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true); TickStyle = TickStyle.None; AutoSize = false; Height = 36; Cursor = Cursors.Hand; }
+        protected override void OnValueChanged(EventArgs e) { base.OnValueChanged(e); Invalidate(); }
+        protected override void OnGotFocus(EventArgs e) { base.OnGotFocus(e); Invalidate(); }
+        protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); Invalidate(); }
+        private float Pad { get { return 12 * DeviceDpi / 96F; } }
+        private int ValueAt(int x) { float span = Math.Max(1, Width - Pad * 2); double ratio = Math.Max(0, Math.Min(1, (x - Pad) / span)); return Minimum + (int)Math.Round(ratio * (Maximum - Minimum)); }
+        protected override void OnMouseDown(MouseEventArgs e) { base.OnMouseDown(e); if (e.Button != MouseButtons.Left) return; Focus(); dragging = true; Capture = true; Value = ValueAt(e.X); }
+        protected override void OnMouseMove(MouseEventArgs e) { base.OnMouseMove(e); if (dragging) Value = ValueAt(e.X); }
+        protected override void OnMouseUp(MouseEventArgs e) { base.OnMouseUp(e); dragging = false; Capture = false; }
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics; g.Clear(BackColor); g.SmoothingMode = SmoothingMode.AntiAlias; float scale = g.DpiX / 96F;
+            float left = Pad, right = Width - Pad, y = Height / 2F, ratio = Maximum == Minimum ? 0 : (float)(Value - Minimum) / (Maximum - Minimum), x = left + (right - left) * ratio;
+            using (Pen track = new Pen(Theme.Line, 4 * scale) { StartCap = LineCap.Round, EndCap = LineCap.Round }) g.DrawLine(track, left, y, right, y);
+            using (Pen done = new Pen(Theme.Blue, 4 * scale) { StartCap = LineCap.Round, EndCap = LineCap.Round }) if (x > left) g.DrawLine(done, left, y, x, y);
+            using (SolidBrush tick = new SolidBrush(Theme.Blend(Theme.Muted, BackColor, .45F)))
+                for (int v = Minimum; v <= Maximum && Maximum - Minimum <= 24; v++) { float tx = left + (right - left) * (v - Minimum) / Math.Max(1, Maximum - Minimum); if (tx > x + 6 * scale) g.FillEllipse(tick, tx - 1.5F * scale, y - 1.5F * scale, 3 * scale, 3 * scale); }
+            float knob = 18 * scale;
+            using (SolidBrush shadow = new SolidBrush(Color.FromArgb(45, 0, 0, 0))) g.FillEllipse(shadow, x - knob / 2, y - knob / 2 + scale, knob, knob);
+            using (SolidBrush b = new SolidBrush(Color.White)) g.FillEllipse(b, x - knob / 2, y - knob / 2, knob, knob);
+            using (Pen ring = new Pen(Theme.Blue, 3 * scale)) g.DrawEllipse(ring, x - knob / 2 + 1.5F * scale, y - knob / 2 + 1.5F * scale, knob - 3 * scale, knob - 3 * scale);
+            if (Focused && ShowFocusCues) using (Pen focus = new Pen(Theme.Blend(Theme.Blue, BackColor, .35F), 4 * scale)) g.DrawEllipse(focus, x - knob / 2 - 3 * scale, y - knob / 2 - 3 * scale, knob + 6 * scale, knob + 6 * scale);
         }
     }
     public sealed class ModernMenuRenderer : ToolStripProfessionalRenderer
     {
-        private static Color ItemColor(ToolStripItem item) { return !item.Enabled?Theme.Blend(Theme.Muted,Theme.Surface,.65F):Theme.DestructiveMenu(item.Text)?Color.FromArgb(210,78,84):Theme.Ink; }
+        public ModernMenuRenderer() { RoundedEdges = false; }
+        private static Color ItemColor(ToolStripItem item) { return !item.Enabled?Theme.Blend(Theme.Muted,Theme.Surface,.6F):Theme.DestructiveMenu(item.Text)?Theme.Danger:Theme.Ink; }
+        private static float Scale(Graphics g) { return g.DpiX/96F; }
         protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e) {
-            e.TextColor=ItemColor(e.Item);
-            ToolStripDropDownMenu owner=e.ToolStrip as ToolStripDropDownMenu;
-            int left=(int)((owner!=null&&!owner.ShowImageMargin?30:42)*e.Graphics.DpiX/96F);
-            // 图标与正文各有固定栏，避免原生 image margin 太窄时两者挤在一起。
-            int delta=Math.Max(0,left-e.TextRectangle.Left);
-            e.TextRectangle=new Rectangle(e.TextRectangle.X+delta,0,Math.Max(1,e.TextRectangle.Width-delta),e.Item.Height);
+            ToolStripMenuItem menuItem=e.Item as ToolStripMenuItem; float scale=Scale(e.Graphics);
+            bool shortcut=menuItem!=null&&!String.IsNullOrEmpty(menuItem.ShortcutKeyDisplayString)&&e.Text==menuItem.ShortcutKeyDisplayString&&e.Text!=e.Item.Text;
+            e.TextColor=shortcut?Theme.Blend(Theme.Muted,Theme.Surface,.85F):ItemColor(e.Item);
+            if(!shortcut) {
+                ToolStripDropDownMenu owner=e.ToolStrip as ToolStripDropDownMenu;
+                int left=(int)((owner!=null&&!owner.ShowImageMargin?32:46)*scale);
+                // 图标与正文各有固定栏，避免原生 image margin 太窄时两者挤在一起。
+                int delta=Math.Max(0,left-e.TextRectangle.Left);
+                e.TextRectangle=new Rectangle(e.TextRectangle.X+delta,0,Math.Max(1,e.TextRectangle.Width-delta),e.Item.Height);
+            } else e.TextRectangle=new Rectangle(e.TextRectangle.X,0,e.TextRectangle.Width,e.Item.Height);
             e.TextFormat|=TextFormatFlags.VerticalCenter;base.OnRenderItemText(e);
         }
         protected override void OnRenderImageMargin(ToolStripRenderEventArgs e) { }
-        protected override void OnRenderItemCheck(ToolStripItemImageRenderEventArgs e) { int size=(int)(18*e.Graphics.DpiX/96F); Theme.Glyph(e.Graphics,"check",new Rectangle((int)(10*e.Graphics.DpiX/96F),(e.Item.Height-size)/2,size,size),Theme.Blue); }
-        protected override void OnRenderArrow(ToolStripArrowRenderEventArgs e) { e.ArrowColor=ItemColor(e.Item); base.OnRenderArrow(e); }
-        protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e) { using(Pen p=new Pen(Theme.Line)) e.Graphics.DrawLine(p,(int)(42*e.Graphics.DpiX/96F),e.Item.Height/2,e.Item.Width-12,e.Item.Height/2); }
+        protected override void OnRenderItemCheck(ToolStripItemImageRenderEventArgs e) { if(e.Item.Tag as string=="switch")return; float scale=Scale(e.Graphics);int size=(int)(18*scale); Theme.Glyph(e.Graphics,"check",new Rectangle((int)(14*scale),(e.Item.Height-size)/2,size,size),Theme.Blue); }
+        protected override void OnRenderArrow(ToolStripArrowRenderEventArgs e) { float scale=Scale(e.Graphics);int size=(int)(14*scale);Theme.Glyph(e.Graphics,"chevron-right",new Rectangle(e.ArrowRectangle.Left+(e.ArrowRectangle.Width-size)/2,e.ArrowRectangle.Top+(e.ArrowRectangle.Height-size)/2,size,size),Theme.Blend(Theme.Muted,Theme.Surface,.9F)); }
+        protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e) { float scale=Scale(e.Graphics); using(Pen p=new Pen(Theme.Line)) e.Graphics.DrawLine(p,(int)(12*scale),e.Item.Height/2,e.Item.Width-(int)(12*scale),e.Item.Height/2); }
         protected override void OnRenderToolStripBackground(ToolStripRenderEventArgs e) {e.Graphics.Clear(Theme.Surface);}
-        protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e) { e.Graphics.SmoothingMode=SmoothingMode.AntiAlias; using(Pen pen=new Pen(Theme.Line)) using(GraphicsPath path=Theme.Rounded(new Rectangle(0,0,e.ToolStrip.Width-1,e.ToolStrip.Height-1),Theme.ControlRadius)) e.Graphics.DrawPath(pen,path); }
+        protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e)
+        {
+            // Windows 11 由 DWM 绘制圆角与描边；旧系统窗口为直角，只画贴边细线，不画会露出方角的圆角框。
+            if(Theme.Windows11)return;
+            using(Pen pen=new Pen(Theme.Dark?Theme.Blend(Color.White,Theme.Surface,.12F):Theme.Blend(Color.Black,Theme.Surface,.12F))) e.Graphics.DrawRectangle(pen,0,0,e.ToolStrip.Width-1,e.ToolStrip.Height-1);
+        }
         protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e)
         {
+            float scale=Scale(e.Graphics); e.Graphics.SmoothingMode=SmoothingMode.AntiAlias;
             if(e.Item.Selected && e.Item.Enabled) {
-                Rectangle r = new Rectangle(1,1,e.Item.Width-2,e.Item.Height-2);
-                using(GraphicsPath path=Theme.Rounded(r,7)) using(SolidBrush b=new SolidBrush(Theme.Sky)) e.Graphics.FillPath(b,path);
+                RectangleF r = new RectangleF(1,1,e.Item.Width-2,e.Item.Height-2);
+                using(GraphicsPath path=Theme.RoundedF(r,7*scale)) using(SolidBrush b=new SolidBrush(Theme.DestructiveMenu(e.Item.Text)?Theme.Blend(Theme.Danger,Theme.Surface,.10F):Theme.Hover)) e.Graphics.FillPath(b,path);
             }
             ToolStripMenuItem item=e.Item as ToolStripMenuItem;
-            if(item!=null && !item.Checked && item.Image==null) { int size=(int)(18*e.Graphics.DpiX/96F); Theme.Glyph(e.Graphics,Theme.MenuGlyph(item.Text),new Rectangle((int)(10*e.Graphics.DpiX/96F),(item.Height-size)/2,size,size),ItemColor(item)); }
+            if(item!=null && (!item.Checked||item.Tag as string=="switch") && item.Image==null) { int size=(int)(19*scale); Theme.Glyph(e.Graphics,Theme.MenuGlyph(item.Text),new Rectangle((int)(14*scale),(item.Height-size)/2,size,size),item.Enabled&&!Theme.DestructiveMenu(item.Text)?Theme.Blend(Theme.Muted,Theme.Ink,.35F):ItemColor(item)); }
+            // 带开关的菜单项（如夜间模式）在右侧绘制状态，避免用勾选冒充开关。
+            if(item!=null && item.Tag as string=="switch") {
+                RectangleF track=new RectangleF(item.Width-(16+30)*scale,(item.Height-17*scale)/2,30*scale,17*scale);
+                using(GraphicsPath path=Theme.RoundedF(track,track.Height/2))using(SolidBrush b=new SolidBrush(item.Checked?Theme.Blue:Theme.Blend(Theme.Muted,Theme.Surface,.4F)))e.Graphics.FillPath(b,path);
+                float dot=track.Height-5*scale;using(SolidBrush b=new SolidBrush(Color.White))e.Graphics.FillEllipse(b,item.Checked?track.Right-dot-2.5F*scale:track.Left+2.5F*scale,track.Top+2.5F*scale,dot,dot);
+            }
         }
     }
     public class ModernWindow : Form
@@ -392,8 +733,8 @@ namespace FeiqLight
         private bool secondaryWindow;
         protected void UseSecondaryChrome()
         {
-            secondaryWindow=true;Padding=new Padding(3);chrome.Height=60;caption.Font=Theme.Section;caption.ForeColor=Theme.Ink;
-            Control actions=chrome.GetControlFromPosition(1,0);if(actions!=null)actions.Padding=new Padding(0,12,0,0);
+            secondaryWindow=true;Padding=new Padding(3);chrome.Height=56;caption.Font=Theme.Section;caption.ForeColor=Theme.Ink;
+            Control actions=chrome.GetControlFromPosition(1,0);if(actions!=null)actions.Padding=new Padding(0,10,0,0);
             chrome.Paint+=delegate(object sender,PaintEventArgs e){using(Pen line=new Pen(Theme.Line))e.Graphics.DrawLine(line,0,chrome.Height-1,chrome.Width,chrome.Height-1);};
             Invalidate();
         }
@@ -401,7 +742,7 @@ namespace FeiqLight
         public bool ResizeWindow
         {
             get { return resizeWindow; }
-            set { resizeWindow = value; if (minimize != null) { minimize.Visible = maximize.Visible = value; chrome.ColumnStyles[1].Width = value ? 126 : 42; chrome.Height = value ? 36 : 52; caption.Font = value ? Theme.Small : Theme.Title; caption.ForeColor = value ? Theme.Muted : Theme.Ink; } if(IsHandleCreated)UpdateStyles(); }
+            set { resizeWindow = value; if (minimize != null) { minimize.Visible = maximize.Visible = value; chrome.ColumnStyles[1].Width = value ? 138 : 46; chrome.Height = value ? 36 : 54; caption.Font = value ? Theme.Small : Theme.Title; caption.ForeColor = value ? Theme.Muted : Theme.Ink; caption.Padding = new Padding(value ? 15 : 22, value ? 0 : 6, 0, 0); } if(IsHandleCreated)UpdateStyles(); }
         }
         protected override CreateParams CreateParams
         {
@@ -415,12 +756,14 @@ namespace FeiqLight
         public ModernWindow()
         {
             Theme.Apply(this); DoubleBuffered = true; SetStyle(ControlStyles.ResizeRedraw, true); FormBorderStyle = FormBorderStyle.None; Padding = new Padding(1); StartPosition = FormStartPosition.CenterScreen; MinimumSize = new Size(400, 300);
-            Controls.Add(Surface); Controls.Add(chrome); chrome.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); chrome.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 126)); chrome.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); caption.Dock = DockStyle.Fill; caption.Padding = new Padding(15, 0, 0, 0); caption.Margin = Padding.Empty; chrome.Controls.Add(caption, 0, 0);
-            FlowLayoutPanel actions = new FlowLayoutPanel { Dock = DockStyle.Right, Width = 126, FlowDirection = FlowDirection.LeftToRight, WrapContents = false, Margin = Padding.Empty };
+            Controls.Add(Surface); Controls.Add(chrome); chrome.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); chrome.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 138)); chrome.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); caption.Dock = DockStyle.Fill; caption.Padding = new Padding(15, 0, 0, 0); caption.Margin = Padding.Empty; chrome.Controls.Add(caption, 0, 0);
+            FlowLayoutPanel actions = new FlowLayoutPanel { Dock = DockStyle.Right, Width = 138, FlowDirection = FlowDirection.LeftToRight, WrapContents = false, Margin = Padding.Empty };
             minimize = Theme.IconButton("min", "最小化", delegate { WindowState = FormWindowState.Minimized; }, false);
             maximize = Theme.IconButton("max", "最大化", delegate { if (ResizeWindow) WindowState = WindowState == FormWindowState.Maximized ? FormWindowState.Normal : FormWindowState.Maximized; }, false);
-            Button close = Theme.IconButton("close", "关闭窗口", delegate { Close(); }, false);
-            foreach (Button button in new[] { minimize, maximize, close }) { button.Margin = Padding.Empty; button.Size = new Size(40, 32); actions.Controls.Add(button); }
+            RoundedButton close = (RoundedButton)Theme.IconButton("close", "关闭窗口", delegate { Close(); }, false);
+            // 标题栏按钮沿用系统惯例：直角、关闭键悬停为红底白字。
+            close.HoverBack = Color.FromArgb(232, 17, 35); close.HoverFore = Color.White;
+            foreach (Button button in new[] { minimize, maximize, close }) { button.Margin = Padding.Empty; button.Size = new Size(46, 32); ((RoundedButton)button).Radius = 0; actions.Controls.Add(button); }
             actions.Dock = DockStyle.Fill; actions.Margin = Padding.Empty; chrome.Controls.Add(actions, 1, 0); caption.MouseDown += Drag; chrome.MouseDown += Drag;
             caption.DoubleClick += delegate { if (ResizeWindow) WindowState = WindowState == FormWindowState.Maximized ? FormWindowState.Normal : FormWindowState.Maximized; };
             TextChanged += delegate { caption.Text = Text; };
@@ -434,10 +777,8 @@ namespace FeiqLight
             base.OnHandleCreated(e);
             // 交给 DWM 处理圆角，不能在每个 WM_SIZE 重建 Region（会强制全窗重绘）。
             // 旧系统不支持此属性时保留方角，不影响缩放与输入。
-            try { int preference = 2; DwmSetWindowAttribute(Handle, 33, ref preference, sizeof(int)); }
-            catch (DllNotFoundException) { } catch (EntryPointNotFoundException) { }
+            Theme.RoundWindow(Handle, 2);
         }
-        [System.Runtime.InteropServices.DllImport("dwmapi.dll")] private static extern int DwmSetWindowAttribute(IntPtr window, int attribute, ref int value, int size);
         private void Drag(object sender, MouseEventArgs e) { if (e.Button == MouseButtons.Left) { ReleaseCapture(); SendMessage(Handle, 0xA1, new IntPtr(2), IntPtr.Zero); } }
         protected override void WndProc(ref Message m)
         {
@@ -448,7 +789,7 @@ namespace FeiqLight
         }
         protected override void OnPaint(PaintEventArgs e) {
             base.OnPaint(e);
-            using(Pen p=new Pen(secondaryWindow?Theme.Blend(Theme.Blue,Theme.Line,.55F):Theme.Line,secondaryWindow?2:1))e.Graphics.DrawRectangle(p,1,1,Width-3,Height-3);
+            using(Pen p=new Pen(secondaryWindow?Theme.Blend(Theme.Blue,Theme.Line,.55F):Theme.Blend(Theme.Ink,Theme.Surface,Theme.Dark?.22F:.16F),secondaryWindow?2:1))e.Graphics.DrawRectangle(p,secondaryWindow?1:0,secondaryWindow?1:0,Width-(secondaryWindow?3:1),Height-(secondaryWindow?3:1));
             if(secondaryWindow)using(SolidBrush accent=new SolidBrush(Theme.Blue))e.Graphics.FillRectangle(accent,0,0,Width,3);
         }
         [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern bool ReleaseCapture();

@@ -35,7 +35,9 @@ namespace FeiqLight
     {
         internal sealed class Run { public string Text, Url; public Rectangle Bounds; public bool Emoji, Highlight; }
         internal readonly List<Run> Runs=new List<Run>();
-        internal int Height, Width;
+        internal int Height, Width, LineHeight;
+        // 最后一行已占用的宽度；以换行结尾时为 0，用于判断时间能否与末行并排。
+        internal int LastLineRight { get { int top=Height-LineHeight,right=0;foreach(Run run in Runs)if(run.Bounds.Y==top)right=Math.Max(right,run.Bounds.Right);return right; } }
         private const TextFormatFlags Flags=TextFormatFlags.NoPadding|TextFormatFlags.NoPrefix|TextFormatFlags.SingleLine;
         internal MessageLayout(string text,Font font,int maxWidth,string query = null)
         {
@@ -70,7 +72,7 @@ namespace FeiqLight
                 }
                 run.Text+=part;run.Bounds=new Rectangle(run.Bounds.X,y,w,line);x=run.Bounds.Right;Width=Math.Max(Width,x);
             }
-            Height=y+line;
+            Height=y+line;LineHeight=line;
         }
         internal void Draw(Graphics graphics,Point origin,Font font,List<Tuple<Rectangle,string>> hits)
         {
@@ -78,8 +80,8 @@ namespace FeiqLight
                 Rectangle r=run.Bounds;r.Offset(origin);
                 if(run.Highlight)using(SolidBrush fill=new SolidBrush(Theme.SearchHighlight))graphics.FillRectangle(fill,r);
                 if(run.Emoji){ColorEmoji.Draw(graphics,run.Text,r);continue;}
-                TextRenderer.DrawText(graphics,run.Text,font,r,run.Url==null?Theme.Ink:Theme.Blue,Flags);
-                if(run.Url!=null) {using(Pen pen=new Pen(Theme.Blue))graphics.DrawLine(pen,r.Left,r.Bottom-3,r.Right,r.Bottom-3);hits.Add(Tuple.Create(r,run.Url));}
+                TextRenderer.DrawText(graphics,run.Text,font,r,run.Url==null?Theme.Ink:Theme.Link,Flags);
+                if(run.Url!=null) {using(Pen pen=new Pen(Theme.Link))graphics.DrawLine(pen,r.Left,r.Bottom-3,r.Right,r.Bottom-3);hits.Add(Tuple.Create(r,run.Url));}
             }
         }
     }
