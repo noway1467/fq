@@ -116,6 +116,34 @@ namespace FeiqLight.Tests
         {
             typeof(ToolStripDropDown).GetMethod("ProcessDialogKey", BindingFlags.Instance | BindingFlags.NonPublic).Invoke(menu, new object[] { key });
         }
+        // 菜单排版：窗口不窄于菜单项，正文连同快捷键、箭头或开关留白放得下，且实际绘制到整段文字末尾（截断时只剩前半段）。
+        private static void CheckMenuText(ToolStripDropDown menu, string preview)
+        {
+            float scale; using (Graphics screen = Graphics.FromHwnd(IntPtr.Zero)) scale = screen.DpiX / 96F;
+            using (Bitmap bitmap = new Bitmap(menu.Width, menu.Height))
+            {
+                menu.DrawToBitmap(bitmap, new Rectangle(Point.Empty, menu.Size));
+                bitmap.Save(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, preview + ".png"), ImageFormat.Png);
+                foreach (ToolStripMenuItem item in menu.Items.OfType<ToolStripMenuItem>().Where(i => i.Available && !(i is ProfileMenuItem)))
+                {
+                    Rectangle bounds = item.Bounds; Check(bounds.Right <= menu.Width, "菜单项超出窗口：" + item.Text);
+                    int left = Theme.MenuTextLeft(menu, scale), trailing = Theme.MenuTrailing(item, scale), glyphs = -1;
+                    int shortcut = String.IsNullOrEmpty(item.ShortcutKeyDisplayString) ? 0 : TextRenderer.MeasureText(item.ShortcutKeyDisplayString, item.Font).Width;
+                    Check(left + TextRenderer.MeasureText(item.Text, item.Font).Width + (shortcut > 0 ? (int)(24 * scale) + shortcut : 0) + trailing <= bounds.Width, "菜单项宽度不足：" + item.Text);
+                    // 同一字体在空白画布上完整绘制一次，以其最右墨迹为准；MeasureText 含额外留白，不能当作字形宽度。
+                    using (Bitmap probe = new Bitmap(bounds.Width, bounds.Height))
+                    using (Graphics g = Graphics.FromImage(probe))
+                    {
+                        g.Clear(Color.White); TextRenderer.DrawText(g, item.Text, item.Font, Point.Empty, Color.Black);
+                        for (int x = 0; x < probe.Width; x++) for (int y = 0; y < probe.Height; y++) if (probe.GetPixel(x, y).R < 195) glyphs = x;
+                    }
+                    Color back = bitmap.GetPixel(bounds.Right - 2, bounds.Top + 2); int ink = -1;
+                    for (int x = bounds.Left + left; x < bounds.Right - trailing - shortcut; x++)
+                        for (int y = bounds.Top; y < bounds.Bottom; y++) { Color c = bitmap.GetPixel(x, y); if (Math.Max(Math.Abs(c.R - back.R), Math.Max(Math.Abs(c.G - back.G), Math.Abs(c.B - back.B))) > 60) ink = x; }
+                    Check(ink >= bounds.Left + left + glyphs - 2, "菜单文字被截断：" + item.Text + " 绘制到 " + ink + "，需要 " + (bounds.Left + left + glyphs));
+                }
+            }
+        }
         private static void MenuDialog<T>(Action openMenu, string item, Action<T> inspect, bool keyboard = false) where T : Form
         {
             Exception asynchronous = null; bool shown = false;
@@ -755,7 +783,7 @@ namespace FeiqLight.Tests
                                     Theme.Change(dark,"blue");Find<Button>(chatA,"会话菜单").PerformClick();ContextMenuStrip menu=(ContextMenuStrip)OpenMenu();
                                     var actions=menu.Items.OfType<ToolStripMenuItem>().ToArray();var glyphs=actions.Select(i=>Theme.MenuGlyph(i.Text)).ToArray();
                                     Check(glyphs.Length==6&&glyphs.All(s=>s.Length>0&&s!="more")&&glyphs.Distinct().Count()==6,"聊天菜单图标重复或缺失");
-                                    Check(menu.Items.OfType<ToolStripSeparator>().Count()==2&&menu.Width>=220,"菜单分组或宽度未生效");
+                                    Check(menu.Items.OfType<ToolStripSeparator>().Count()==2&&menu.Width>=220,"菜单分组或宽度未生效");CheckMenuText(menu,"preview-chat-menu-text-"+(dark?"dark":"light"));
                                     ToolStripMenuItem font=actions.Single(i=>i.Text=="字号");font.ShowDropDown();Application.DoEvents();
                                     ToolStripDropDown sizes=font.DropDown;var options=sizes.Items.OfType<ToolStripMenuItem>().ToArray();
                                     Check(options.All(i=>Theme.MenuGlyph(i.Text)=="")&&options.Count(i=>i.Checked)==1,"字号菜单有装饰图标或单选标记错误");
@@ -780,7 +808,7 @@ namespace FeiqLight.Tests
                             IDataObject clipboard = Clipboard.GetDataObject();
                             try
                             {
-                                editor.Text = "剪切文本"; editor.Select(0, 2); menu.Show(editor, new Point(2, 2)); ClickMenu(menu, "复制"); Check(Clipboard.GetText() == "剪切", "复制选区失败");
+                                editor.Text = "剪切文本"; editor.Select(0, 2); menu.Show(editor, new Point(2, 2)); CheckMenuText(menu, "preview-edit-menu"); ClickMenu(menu, "复制"); Check(Clipboard.GetText() == "剪切", "复制选区失败");
                                 menu.Show(editor, new Point(2, 2)); ClickMenu(menu, "剪切"); Check(editor.Text == "文本", "剪切失败");
                                 menu.Show(editor, new Point(2, 2)); ClickMenu(menu, "粘贴"); Check(editor.Text == "剪切文本", "粘贴失败");
                                 menu.Show(editor, new Point(2, 2)); ClickMenu(menu, "全选"); Check(editor.SelectionLength == editor.TextLength, "全选失败");
@@ -914,7 +942,7 @@ namespace FeiqLight.Tests
                                     {
                                         menu.Items.Add(new ToolStripMenuItem("复制消息") { ShortcutKeyDisplayString="Ctrl+C" });menu.Items.Add("转发…");menu.Items.Add("打开文件所在目录");menu.Items.Add(new ToolStripSeparator());menu.Items.Add("删除");
                                         menu.Show(mainA,new Point(70,90));menu.Items[1].Select();Application.DoEvents();
-                                        Check(menu.ShowImageMargin&&menu.Items[0].Padding.Vertical>=14,"菜单缺少图标留白或垂直间距");
+                                        Check(menu.ShowImageMargin&&menu.Items[0].Padding.Vertical>=14,"菜单缺少图标留白或垂直间距");CheckMenuText(menu,"preview-menu-text-"+(dark?"dark":"light"));
                                         using(Bitmap bitmap=new Bitmap(menu.Width,menu.Height)) {menu.DrawToBitmap(bitmap,new Rectangle(Point.Empty,menu.Size));bitmap.Save(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"preview-menu-"+(dark?"dark":"light")+".png"),ImageFormat.Png);}
                                         MenuKey(menu,Keys.Escape);Check(!menu.Visible,"菜单无法键盘关闭");
                                     }
@@ -971,6 +999,22 @@ namespace FeiqLight.Tests
                         Check(storeA.LoadSettings().Nickname == "菜单设置测试", "取消设置仍写入了配置");
                         Find<Button>(mainA, "菜单").PerformClick(); MenuKey(OpenMenu(), Keys.Escape);
                         Check(!first.Visible && !first.IsDisposed, "Esc 没有安全关闭菜单");
+                    });
+                    test("托盘菜单：首次右键贴住点击点、文字完整、窗口与菜单项同宽", () =>
+                    {
+                        NotifyIcon tray = (NotifyIcon)typeof(MainForm).GetField("tray", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(mainA);
+                        ContextMenuStrip menu = tray.ContextMenuStrip;
+                        Check(Object.ReferenceEquals(tray.Icon, Theme.TrayIcon) && tray.Icon.Size == SystemInformation.SmallIconSize, "托盘图标没有使用系统小图标尺寸");
+                        Rectangle area = Screen.PrimaryScreen.WorkingArea; Point click = new Point(area.Right - 160, area.Bottom - 8);
+                        // 与 NotifyIcon 右键同一入口：先按菜单当前尺寸算出向上展开的位置，再触发 Opening。
+                        typeof(ContextMenuStrip).GetMethod("ShowInTaskbar", BindingFlags.Instance | BindingFlags.NonPublic).Invoke(menu, new object[] { click.X, click.Y });
+                        try
+                        {
+                            Application.DoEvents();
+                            Check(menu.Visible && menu.Bounds.Right == click.X && menu.Bounds.Bottom == click.Y, "托盘菜单首次弹出没有贴住点击点：" + menu.Bounds);
+                            CheckMenuText(menu, "preview-tray-menu");
+                        }
+                        finally { menu.Close(); Application.DoEvents(); }
                     });
                     test("菜单回归：托盘菜单设置、添加联系人和关于对话框", () =>
                     {

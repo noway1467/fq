@@ -91,6 +91,8 @@ namespace FeiqLight
         public static readonly Font Strong = new Font("Microsoft YaHei UI", 10F, FontStyle.Bold);
         public static readonly Font Small = new Font("Microsoft YaHei UI", 8F);
         public static readonly Icon AppIcon = MakeIcon();
+        // 托盘按系统小图标尺寸从同一 ICO 取图（100% 为 16、125% 为 20），不让 Shell 把 32 像素图标缩小发虚。
+        public static readonly Icon TrayIcon = new Icon(AppIcon, SystemInformation.SmallIconSize);
         public static void Apply(Form form)
         {
             form.Font = Body; form.ForeColor = Ink; form.BackColor = Theme.Surface; form.Icon = AppIcon;
@@ -129,21 +131,41 @@ namespace FeiqLight
             menu.Opened+=delegate{start=Motion.Now;if(Motion.Enabled)Motion.Run(fade);else menu.Opacity=1;};
             menu.Closed+=delegate{menu.Opacity=1;};
         }
-        private static void StyleMenu(ToolStripDropDown menu)
+        // Opening 时统一配色与尺寸；托盘菜单在 Opening 之前就按当前尺寸定位，需在创建后先调用一次。
+        internal static void StyleMenu(ToolStripDropDown menu)
         {
             menu.BackColor=Surface; menu.ForeColor=Ink; menu.Font=Body;
-            float scale=menu.DeviceDpi/96F; menu.Padding=new Padding((int)(6*scale));
+            // 与渲染器同取实际绘制 DPI：未启用每监视器 DPI 时 DeviceDpi 恒为 96，125% 下会比绘制的图标栏和文字窄一截。
+            float scale; using(Graphics screen=Graphics.FromHwnd(IntPtr.Zero)) scale=screen.DpiX/96F;
+            int content=0;
             foreach(ToolStripItem item in menu.Items)
             {
                 item.Padding=item is ToolStripSeparator?new Padding(0,(int)(4*scale),0,(int)(4*scale)):new Padding((int)(10*scale),(int)(8*scale),(int)(18*scale),(int)(8*scale));
                 item.Margin=Padding.Empty;
                 ToolStripMenuItem child=item as ToolStripMenuItem;
                 if(child!=null && child.HasDropDownItems) { child.DropDown.Renderer=menu.Renderer; PrepareDropDown(child.DropDown); StyleMenu(child.DropDown); }
+                // 资料项自绘并省略过长昵称，不参与撑宽；隐藏项也计入，Opening 中切换可见性时宽度不跳。
+                if(child==null || item.Tag as string=="profile") continue;
+                int need=MenuTextLeft(menu,scale)+TextRenderer.MeasureText(child.Text,item.Font).Width+MenuTrailing(item,scale);
+                if(!String.IsNullOrEmpty(child.ShortcutKeyDisplayString)) need+=(int)(24*scale)+TextRenderer.MeasureText(child.ShortcutKeyDisplayString,item.Font).Width;
+                content=Math.Max(content,need);
             }
-            int width=Math.Max(Math.Max(menu.MinimumSize.Width,(int)(200*scale)),menu.GetPreferredSize(Size.Empty).Width);
+            // 原生下拉菜单只按共享文字区求宽且会把 Padding 改回 (图标栏,2,1,2)，自设的项宽不会撑开窗口。
+            // 宽度写回 MinimumSize，窗口与菜单项同宽；顶层菜单至少 200，子菜单沿用调用方给的最小宽度。
+            int width=Math.Max(Math.Max(menu.MinimumSize.Width,menu.OwnerItem==null?(int)(200*scale):0),Math.Max(content,menu.GetPreferredSize(Size.Empty).Width));
+            menu.MinimumSize=new Size(width,0);
+            // 菜单项从 x=0 开始（图标栏占用的左 Padding 在布局时扣除），只需让出右侧 1 像素边距。
             foreach(ToolStripItem item in menu.Items) {
-                item.AutoSize=false;item.Size=new Size(Math.Max((int)(96*scale),width-menu.Padding.Horizontal),item is ToolStripSeparator?(int)(9*scale):item.Tag as string=="profile"?(int)(62*scale):(int)(36*scale));
+                item.AutoSize=false;item.Size=new Size(Math.Max((int)(96*scale),width-menu.Padding.Right),item is ToolStripSeparator?(int)(9*scale):item.Tag as string=="profile"?(int)(62*scale):(int)(36*scale));
             }
+        }
+        // 自绘菜单的横向排布：正文从图标栏后开始，右侧依次让出快捷键、子菜单箭头或开关；测宽与绘制共用。
+        internal static int MenuTextLeft(ToolStrip owner,float scale) { ToolStripDropDownMenu menu=owner as ToolStripDropDownMenu; return (int)((menu!=null&&!menu.ShowImageMargin?32:46)*scale); }
+        internal static int MenuTrailing(ToolStripItem item,float scale)
+        {
+            ToolStripMenuItem menuItem=item as ToolStripMenuItem;
+            if(item.Tag as string=="switch") return (int)(56*scale);
+            return (int)((menuItem!=null&&menuItem.HasDropDownItems?40:16)*scale);
         }
         // 只有会丢弃数据或结束程序的操作标红；收起会话不是破坏性操作。
         public static bool DestructiveMenu(string text) { return text=="退出" || text=="断开" || text.StartsWith("删除") || text.StartsWith("清空") || text.StartsWith("拒绝"); }
@@ -389,8 +411,8 @@ namespace FeiqLight
             path.AddArc(bounds.Left, bounds.Top, d, d, 180, 90); path.AddArc(bounds.Right - d, bounds.Top, d, d, 270, 90);
             path.AddArc(bounds.Right - d, bounds.Bottom - d, d, d, 0, 90); path.AddArc(bounds.Left, bounds.Bottom - d, d, d, 90, 90); path.CloseFigure(); return path;
         }
-        // 程序图标：渐变圆角底 + “Q”形对话气泡（尾笔即气泡尾巴）+ 圈内纸飞机寓意“飞”。
-        // 40 像素以下省略纸飞机，16/24/32 尺寸保持清晰的 Q 字轮廓；Android 矢量图标使用同一几何。
+        // 程序图标与 Android res/drawable/ic_feiq.xml 同一几何（48 单位网格）：经典蓝圆底 + 白色对话气泡，气泡中部镂空一道横线。
+        // 颜色固定，不随主题强调色变化；气泡顶点取整到像素，16/20/24 像素的托盘与任务栏小图标边缘仍然清晰。
         public static Bitmap AppLogo(int size)
         {
             Bitmap image = new Bitmap(size, size);
@@ -401,41 +423,18 @@ namespace FeiqLight
         {
             GraphicsState state = g.Save();
             g.SmoothingMode = SmoothingMode.AntiAlias; g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-            float size = Math.Min(bounds.Width, bounds.Height); g.TranslateTransform(bounds.X, bounds.Y); g.ScaleTransform(size / 256F, size / 256F);
-            Color[] colors = { Color.FromArgb(64, 206, 252), Color.FromArgb(51, 144, 236), Color.FromArgb(98, 90, 232) };
-            using (GraphicsPath tile = RoundedF(new RectangleF(6, 6, 244, 244), 62))
-            {
-                using (LinearGradientBrush brush = new LinearGradientBrush(new PointF(24, 8), new PointF(232, 248), colors[0], colors[2]))
-                { brush.InterpolationColors = new ColorBlend { Colors = colors, Positions = new[] { 0F, .5F, 1F } }; g.FillPath(brush, tile); }
-                Region clip = g.Clip; g.SetClip(tile, CombineMode.Intersect);
-                using (GraphicsPath glow = new GraphicsPath())
-                {
-                    glow.AddEllipse(-70, -160, 340, 310);
-                    using (PathGradientBrush shine = new PathGradientBrush(glow)) { shine.CenterColor = Color.FromArgb(56, 255, 255, 255); shine.SurroundColors = new[] { Color.FromArgb(0, 255, 255, 255) }; g.FillPath(shine, glow); }
-                }
-                g.Clip = clip;
-            }
-            const float cx = 122, cy = 120, radius = 60, stroke = 30;
-            using (Pen ring = new Pen(Color.White, stroke)) g.DrawEllipse(ring, cx - radius, cy - radius, radius * 2, radius * 2);
+            float size = Math.Min(bounds.Width, bounds.Height); g.TranslateTransform(bounds.X, bounds.Y);
+            Func<float, float> at = v => (float)Math.Floor(v * size / 48F + .5F);
+            using (SolidBrush blue = new SolidBrush(Color.FromArgb(51, 144, 236))) g.FillEllipse(blue, 2 * size / 48F, 2 * size / 48F, 44 * size / 48F, 44 * size / 48F);
             using (SolidBrush white = new SolidBrush(Color.White))
-            using (GraphicsPath tail = new GraphicsPath())
+            using (GraphicsPath bubble = new GraphicsPath(FillMode.Alternate))
             {
-                tail.AddBezier(LogoPoint(68, 14), LogoPoint(88, 30), new PointF(208, 188), new PointF(214, 214));
-                tail.AddBezier(new PointF(214, 214), new PointF(184, 212), LogoPoint(86, 62), LogoPoint(68, 76)); tail.CloseFigure();
-                g.FillPath(white, tail);
-                if (size >= 40)
-                {
-                    using (GraphicsPath plane = new GraphicsPath())
-                    {
-                        plane.AddPolygon(new[] { new PointF(96, 121), new PointF(148, 97), new PointF(135, 147), new PointF(124, 131) });
-                        g.FillPath(white, plane);
-                    }
-                    using (Pen fold = new Pen(colors[1], 4.2F) { StartCap = LineCap.Round, EndCap = LineCap.Round }) g.DrawLine(fold, 124, 130, 144, 102);
-                }
+                bubble.AddPolygon(new[] { new PointF(at(12), at(13)), new PointF(at(36), at(13)), new PointF(at(36), at(30)), new PointF(at(23), at(30)), new PointF(at(16), at(36)), new PointF(at(16), at(30)), new PointF(at(12), at(30)) });
+                bubble.AddRectangle(RectangleF.FromLTRB(at(18), at(19), at(30), Math.Max(at(19) + 1, at(22))));
+                g.FillPath(white, bubble);
             }
             g.Restore(state);
         }
-        private static PointF LogoPoint(double radius, double degrees) { double a = degrees * Math.PI / 180; return new PointF((float)(122 + Math.Cos(a) * radius), (float)(120 + Math.Sin(a) * radius)); }
         private static Icon MakeIcon()
         {
             using (System.IO.MemoryStream stream = new System.IO.MemoryStream(AppIconBytes()))
@@ -445,7 +444,8 @@ namespace FeiqLight
         {
             // 不序列化 GetHicon 的设备相关位图：该路径可能丢失颜色/透明度。
             // EXE 与运行时图标共用显式 32-bit BGRA、多尺寸 ICO，完全不依赖主题和显示设备。
-            int[] sizes={16,24,32,48,64,128,256};
+            // 20/40 对应 125% 缩放下的小/大图标，托盘与窗口不必再从相邻尺寸缩放。
+            int[] sizes={16,20,24,32,40,48,64,128,256};
             using(System.IO.MemoryStream stream=new System.IO.MemoryStream())
             using(System.IO.BinaryWriter writer=new System.IO.BinaryWriter(stream))
             {
@@ -685,18 +685,20 @@ namespace FeiqLight
             ToolStripMenuItem menuItem=e.Item as ToolStripMenuItem; float scale=Scale(e.Graphics);
             bool shortcut=menuItem!=null&&!String.IsNullOrEmpty(menuItem.ShortcutKeyDisplayString)&&e.Text==menuItem.ShortcutKeyDisplayString&&e.Text!=e.Item.Text;
             e.TextColor=shortcut?Theme.Blend(Theme.Muted,Theme.Surface,.85F):ItemColor(e.Item);
-            if(!shortcut) {
-                ToolStripDropDownMenu owner=e.ToolStrip as ToolStripDropDownMenu;
-                int left=(int)((owner!=null&&!owner.ShowImageMargin?32:46)*scale);
-                // 图标与正文各有固定栏，避免原生 image margin 太窄时两者挤在一起。
-                int delta=Math.Max(0,left-e.TextRectangle.Left);
-                e.TextRectangle=new Rectangle(e.TextRectangle.X+delta,0,Math.Max(1,e.TextRectangle.Width-delta),e.Item.Height);
-            } else e.TextRectangle=new Rectangle(e.TextRectangle.X,0,e.TextRectangle.Width,e.Item.Height);
-            e.TextFormat|=TextFormatFlags.VerticalCenter;base.OnRenderItemText(e);
+            // 原生文字区是各项共用、按最长文字量出的窄框；正文移到固定图标栏后时不能再从它扣宽度，
+            // 改为按本项实际宽度排布：正文左对齐到右侧留白前，快捷键右对齐到同一位置，不再截掉末字。
+            int left=shortcut?e.TextRectangle.Left:Math.Max(e.TextRectangle.Left,Theme.MenuTextLeft(e.ToolStrip,scale)),right=e.Item.Width-Theme.MenuTrailing(e.Item,scale);
+            e.TextRectangle=new Rectangle(left,0,Math.Max(1,right-left),e.Item.Height);
+            e.TextFormat|=TextFormatFlags.VerticalCenter;if(!shortcut)e.TextFormat|=TextFormatFlags.EndEllipsis;base.OnRenderItemText(e);
         }
         protected override void OnRenderImageMargin(ToolStripRenderEventArgs e) { }
         protected override void OnRenderItemCheck(ToolStripItemImageRenderEventArgs e) { if(e.Item.Tag as string=="switch")return; float scale=Scale(e.Graphics);int size=(int)(18*scale); Theme.Glyph(e.Graphics,"check",new Rectangle((int)(14*scale),(e.Item.Height-size)/2,size,size),Theme.Blue); }
-        protected override void OnRenderArrow(ToolStripArrowRenderEventArgs e) { float scale=Scale(e.Graphics);int size=(int)(14*scale);Theme.Glyph(e.Graphics,"chevron-right",new Rectangle(e.ArrowRectangle.Left+(e.ArrowRectangle.Width-size)/2,e.ArrowRectangle.Top+(e.ArrowRectangle.Height-size)/2,size,size),Theme.Blend(Theme.Muted,Theme.Surface,.9F)); }
+        protected override void OnRenderArrow(ToolStripArrowRenderEventArgs e) {
+            float scale=Scale(e.Graphics);int size=(int)(14*scale);Rectangle area=e.ArrowRectangle;
+            // 子菜单箭头贴本项右缘，与正文为它让出的位置一致；原生箭头区跟随共享文字区，会落在菜单中间。
+            if(e.Item is ToolStripMenuItem&&e.Item.IsOnDropDown)area=new Rectangle(e.Item.Width-(int)(16*scale)-size,0,size,e.Item.Height);
+            Theme.Glyph(e.Graphics,"chevron-right",new Rectangle(area.Left+(area.Width-size)/2,area.Top+(area.Height-size)/2,size,size),Theme.Blend(Theme.Muted,Theme.Surface,.9F));
+        }
         protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e) { float scale=Scale(e.Graphics); using(Pen p=new Pen(Theme.Line)) e.Graphics.DrawLine(p,(int)(12*scale),e.Item.Height/2,e.Item.Width-(int)(12*scale),e.Item.Height/2); }
         protected override void OnRenderToolStripBackground(ToolStripRenderEventArgs e) {e.Graphics.Clear(Theme.Surface);}
         protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e)

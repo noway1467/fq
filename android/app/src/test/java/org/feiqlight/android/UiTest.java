@@ -257,19 +257,21 @@ public final class UiTest {
             } finally {gallery.recycle();}
         }
     }
-    @Test public void onlineAvatarGlowRendersAndClearsWithoutChangingTheFace() throws Exception {
+    @Test public void onlineAvatarDotRendersAndClearsWithoutChangingTheFace() throws Exception {
+        float density=RuntimeEnvironment.getApplication().getResources().getDisplayMetrics().density;
         for(int faceSize:new int[]{42,56,84,112}) {
             int halo=(int)Math.ceil(faceSize*.1f),size=faceSize+halo*2;
             Bitmap offline=Bitmap.createBitmap(size,size,Bitmap.Config.ARGB_8888),online=Bitmap.createBitmap(size,size,Bitmap.Config.ARGB_8888),restored=Bitmap.createBitmap(size,size,Bitmap.Config.ARGB_8888);
             try {
-                AvatarDrawable avatar=new AvatarDrawable(RuntimeEnvironment.getApplication(),"127.0.0.1:2425/ghost",false,halo);avatar.setBounds(0,0,size,size);avatar.draw(new Canvas(offline));
+                AvatarDrawable avatar=new AvatarDrawable(RuntimeEnvironment.getApplication(),"127.0.0.1:2425/ghost",false,halo,Color.WHITE,0xff3cb34f);avatar.setBounds(0,0,size,size);avatar.draw(new Canvas(offline));
                 avatar.setOnline(true);avatar.draw(new Canvas(online));assertTrue(avatar.isOnline());
                 assertEquals(offline.getPixel(size/2,size/2),online.getPixel(size/2,size/2));
-                assertEquals(0,Color.alpha(offline.getPixel(size/2,halo/2)));assertTrue("头像外没有光晕",Color.alpha(online.getPixel(size/2,halo/2))>0);
-                assertTrue("光晕没有向外渐隐",Color.alpha(online.getPixel(size/2,halo-1))>Color.alpha(online.getPixel(size/2,1)));
-                for(int y=0;y<size;y++)for(int x=0;x<size;x++)if(Color.alpha(offline.getPixel(x,y))==255)assertEquals("头像内部被染色",offline.getPixel(x,y),online.getPixel(x,y));
-                assertEquals(0,Color.alpha(online.getPixel(0,0)));
-                avatar.setOnline(false);avatar.draw(new Canvas(restored));assertTrue("离线后光边残留",offline.sameAs(restored));
+                // 与 Windows 相同：在线绿点位于右下角并带底色描边，绿点以外的头像像素与离线完全一致。
+                int center=Math.round(halo+faceSize-Math.max(9*density,faceSize*.3f)*.36f);
+                assertEquals(0xff3cb34f,online.getPixel(center,center));assertNotEquals(0xff3cb34f,offline.getPixel(center,center));
+                for(int y=0;y<size;y++)for(int x=0;x<size;x++)if(offline.getPixel(x,y)!=online.getPixel(x,y))assertTrue("绿点之外的头像被改动："+x+","+y,x>=size/2&&y>=size/2);
+                assertEquals(0,Color.alpha(online.getPixel(0,0)));assertEquals(0,Color.alpha(online.getPixel(size/2,halo/2)));
+                avatar.setOnline(false);avatar.draw(new Canvas(restored));assertTrue("离线后绿点残留",offline.sameAs(restored));
             } finally {offline.recycle();online.recycle();restored.recycle();}
         }
     }
@@ -299,17 +301,63 @@ public final class UiTest {
         } finally {ac.pause().stop().destroy();sc.destroy();}
     }
     @Test public void bubbleTailRendersMirroredWithRoundedCorners() throws Exception {
-        Bitmap out=Bitmap.createBitmap(220,100,Bitmap.Config.ARGB_8888),in=Bitmap.createBitmap(220,100,Bitmap.Config.ARGB_8888);
+        Bitmap out=Bitmap.createBitmap(220,100,Bitmap.Config.ARGB_8888),in=Bitmap.createBitmap(220,100,Bitmap.Config.ARGB_8888),grouped=Bitmap.createBitmap(220,100,Bitmap.Config.ARGB_8888);
         try {
             BubbleDrawable right=new BubbleDrawable(Color.BLUE,1,true),left=new BubbleDrawable(Color.BLUE,1,false);
             right.setBounds(0,0,220,100);left.setBounds(0,0,220,100);right.draw(new Canvas(out));left.draw(new Canvas(in));
-            assertEquals(0,Color.alpha(out.getPixel(0,0)));assertTrue(Color.alpha(out.getPixel(216,16))>0);
+            // 与 Windows 相同：组尾尾巴在右下角向外弯，右上角是大圆角，不再有顶部尖角。
+            assertEquals(0,Color.alpha(out.getPixel(0,0)));assertTrue(Color.alpha(out.getPixel(215,98))>0);assertEquals(0,Color.alpha(out.getPixel(216,16)));assertEquals(0,Color.alpha(out.getPixel(210,2)));
             File dir=new File(System.getProperty("feiq.previewDir"));dir.mkdirs();
             try(OutputStream stream=new FileOutputStream(new File(dir,"bubble-tail.png"))){out.compress(Bitmap.CompressFormat.PNG,100,stream);}
             int maxDifference=0;for(int y=0;y<100;y++)for(int x=0;x<220;x++) maxDifference=Math.max(maxDifference,Math.abs(Color.alpha(out.getPixel(x,y))-Color.alpha(in.getPixel(219-x,y))));
             // Skia 对相反绕向的曲线有子像素覆盖差异；只容许边缘抗锯齿误差，不容许错位或漏画。
             assertTrue("镜像边缘最大 alpha 差："+maxDifference,maxDifference<=32);
-        } finally {out.recycle();in.recycle();}
+            // 组内中间气泡：尾巴一侧上下改用小圆角，不画尾巴。
+            BubbleDrawable middle=new BubbleDrawable(Color.BLUE,0,1,true,false,false);middle.setBounds(0,0,220,100);middle.draw(new Canvas(grouped));
+            assertEquals(0,Color.alpha(grouped.getPixel(215,98)));assertTrue(Color.alpha(grouped.getPixel(210,2))>0);assertTrue(Color.alpha(grouped.getPixel(210,97))>0);
+        } finally {out.recycle();in.recycle();grouped.recycle();}
+    }
+    @Test public void messagesGroupLikeWindowsWithDatePills() throws Exception {
+        ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();
+        shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));
+        ActivityController<MainActivity> ac=Robolectric.buildActivity(MainActivity.class).create().start().resume().visible();MainActivity activity=ac.get();settle(service);
+        service.remove(activity);Field serviceField=MainActivity.class.getDeclaredField("service");serviceField.setAccessible(true);serviceField.set(activity,null);
+        try {
+            invoke(activity,"open",String.class,"group-test");
+            Calendar today=Calendar.getInstance();today.set(Calendar.HOUR_OF_DAY,10);today.set(Calendar.MINUTE,0);today.set(Calendar.SECOND,0);today.set(Calendar.MILLISECOND,0);
+            long base=today.getTimeInMillis();long[] times={base-12*3600000L,base,base+60000,base+120000,base+180000,base+1200000};boolean[] outgoing={false,true,true,true,false,true};
+            List<LanNode.Message> rows=new ArrayList<>();
+            for(int i=0;i<times.length;i++){LanNode.Message m=new LanNode.Message();m.number=i+1;m.time=times[i];m.outgoing=outgoing[i];m.text="分组消息 "+i;m.state=outgoing[i]?"已送达":"已收到";rows.add(m);}
+            invoke(activity,"renderMessages",List.class,rows);measure((View)field(activity,"root"),786,1704,true);screenshot(activity,"android-message-groups");
+            LinearLayout messages=(LinearLayout)field(activity,"messages");List<String> pills=new ArrayList<>();List<View> bubbles=new ArrayList<>();
+            for(int i=0;i<messages.getChildCount();i++){View child=messages.getChildAt(i);if(child.getBackground() instanceof BubbleDrawable)bubbles.add(child);else pills.add(((TextView)child).getText().toString());}
+            assertEquals(Arrays.asList("昨天","今天"),pills);assertEquals(times.length,bubbles.size());
+            // 隔日的单条与今天三条连续发出各成一组；相隔超过 5 分钟或换边重新分组。
+            boolean[] first={true,true,false,false,true,true},last={true,false,false,true,true,true};float density=activity.getResources().getDisplayMetrics().density;
+            for(int i=0;i<bubbles.size();i++) {
+                BubbleDrawable shape=(BubbleDrawable)bubbles.get(i).getBackground();
+                assertEquals("组首："+i,first[i],field(shape,"first"));assertEquals("组尾："+i,last[i],field(shape,"last"));
+                assertEquals("组间距："+i,Math.round((last[i]?10:3)*density),((LinearLayout.LayoutParams)bubbles.get(i).getLayoutParams()).bottomMargin);
+            }
+        } finally {ac.pause().stop().destroy();sc.destroy();}
+    }
+    @Test public void chatWallpaperUsesWindowsGradientDoodlesAndWaves() throws Exception {
+        Context context=RuntimeEnvironment.getApplication();int[] walls={0xffd6e9fa,0xffc6d6f6,0xffcbe5ee,0xffdbd6f5};int wall=0xffd1dff5;
+        File dir=new File(System.getProperty("feiq.previewDir"));dir.mkdirs();
+        for(String pattern:new String[]{"none","orbits","lines"}) {
+            ChatWallpaper paper=new ChatWallpaper(context,walls,wall,0xff3390ec,false,pattern,null);paper.setBounds(0,0,393,600);
+            Bitmap image=Bitmap.createBitmap(393,600,Bitmap.Config.ARGB_8888);
+            try {
+                paper.draw(new Canvas(image));
+                try(OutputStream stream=new FileOutputStream(new File(dir,"android-wallpaper-"+pattern+".png"))){assertTrue(image.compress(Bitmap.CompressFormat.PNG,100,stream));}
+                Set<Integer> colors=new HashSet<>();for(int y=0;y<600;y+=3)for(int x=0;x<393;x+=3)colors.add(image.getPixel(x,y));
+                if(pattern.equals("none")) {assertEquals(Collections.singleton(wall),colors);continue;}
+                // 四色渐变：四个锚点附近颜色明显不同；图案层确实画出线稿（涂鸦块有墨迹，或波纹路径非空）。
+                Bitmap gradient=(Bitmap)field(paper,"gradient");assertEquals(40,gradient.getWidth());assertNotEquals(gradient.getPixel(32,5),gradient.getPixel(7,47));assertTrue("渐变过于单一："+colors.size(),colors.size()>40);
+                if(pattern.equals("orbits")){Bitmap tile=(Bitmap)field(paper,"tile");int ink=0;for(int y=0;y<tile.getHeight();y+=2)for(int x=0;x<tile.getWidth();x+=2)if(Color.alpha(tile.getPixel(x,y))>0)ink++;assertTrue("涂鸦缺失",ink>200);}
+                else assertTrue("波纹缺失",((Path[])field(paper,"waves")).length>10);
+            } finally {image.recycle();}
+        }
     }
     // Robolectric 不绘制厂商原生浮动工具栏；用可观测 ActionMode 核验真实 View 事件分发与生命周期。
     private static final class SelectionMode extends ActionMode {
@@ -526,7 +574,7 @@ public final class UiTest {
         service.remove(activity);Field serviceField=MainActivity.class.getDeclaredField("service");serviceField.setAccessible(true);serviceField.set(activity,null);
         try {
             activity.getSharedPreferences("settings",0).edit().putBoolean("dark_mode",true).putString("accent","purple").apply();
-            invoke(activity,"open",String.class,"test-scroll");assertEquals(0xff292338,field(activity,"SURFACE"));assertEquals(0xff8b67d7,field(activity,"BLUE"));
+            invoke(activity,"open",String.class,"test-scroll");assertEquals(0xff211b2e,field(activity,"SURFACE"));assertEquals(0xff9a78e6,field(activity,"BLUE"));
             java.util.List<LanNode.Message> rows=new ArrayList<>();for(int i=0;i<40;i++){LanNode.Message m=new LanNode.Message();m.number=i;m.time=1;m.text="长列表消息 "+i;m.state="已收到";rows.add(m);}
             Method render=MainActivity.class.getDeclaredMethod("renderMessages",java.util.List.class);render.setAccessible(true);render.invoke(activity,rows);screenshot(activity,"android-night");shadowOf(Looper.getMainLooper()).idle();
             ScrollView scroll=(ScrollView)field(activity,"scroll");scroll.scrollTo(0,0);
@@ -706,9 +754,14 @@ public final class UiTest {
         try {
             MainActivity activity=ac.get();Method apply=MainActivity.class.getDeclaredMethod("applyTheme");apply.setAccessible(true);
             Method blend=MainActivity.class.getDeclaredMethod("blend",int.class,int.class,float.class);blend.setAccessible(true);
+            // 六套配色与 Windows Theme.Configure 同值：逐套核对强调色与表面色，选中底与发出气泡按 Windows Sky / Outgoing 公式换算。
+            Map<String,int[]> windows=new HashMap<>();windows.put("blue-false",new int[]{0xff3390ec,0xffffffff});windows.put("blue-true",new int[]{0xff3390ec,0xff17212b});windows.put("green-false",new int[]{0xff229974,0xfff7fbf8});
+            windows.put("green-true",new int[]{0xff2cb385,0xff14221d});windows.put("purple-false",new int[]{0xff8b67d7,0xfffcf9fd});windows.put("purple-true",new int[]{0xff9a78e6,0xff211b2e});
             for(boolean dark:new boolean[]{false,true})for(String accent:new String[]{"blue","green","purple"}){
                 activity.getSharedPreferences("settings",0).edit().putBoolean("dark_mode",dark).putString("accent",accent).apply();apply.invoke(activity);
+                assertEquals(windows.get(accent+"-"+dark)[0],field(activity,"BLUE"));assertEquals(windows.get(accent+"-"+dark)[1],field(activity,"SURFACE"));
                 assertEquals(blend.invoke(null,(Integer)field(activity,"BLUE"),(Integer)field(activity,"SURFACE"),dark?.30f:.17f),field(activity,"BUBBLE"));
+                assertEquals(blend.invoke(null,(Integer)field(activity,"BLUE"),(Integer)field(activity,"SURFACE"),dark?.42f:.15f),field(activity,"OUTGOING"));
             }
             activity.getSharedPreferences("settings",0).edit().putBoolean("dark_mode",false).putString("accent","blue").apply();apply.invoke(activity);
             LanNode.Message message=new LanNode.Message();message.text="原文 😊\n不要改写";LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:32425"),"ui","host","来源","测试");

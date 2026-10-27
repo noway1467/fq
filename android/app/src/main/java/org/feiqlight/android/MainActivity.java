@@ -22,17 +22,30 @@ import java.util.*;
 /** 原生 View 界面：借鉴 Telegram 的信息层级，不加载 WebView 或第三方 UI 运行时。 */
 public final class MainActivity extends Activity implements ChatService.Observer {
     private static final String GITHUB_REPOSITORY="https://github.com/noway1467/fq";
-    private int BLUE=0xff3390ec, INK=0xff17212b, MUTED=0xff738392, PALE=0xfff1f4f7, WALL=0xffe3edf5, SURFACE=Color.WHITE, BUBBLE=0xffd9edff;
+    private int BLUE=0xff3390ec, INK=0xff17212b, MUTED=0xff64727f, PALE=0xfff1f4f7, LINE=0xffe7ecf0, WALL=0xffd1dff5, SURFACE=Color.WHITE, BUBBLE=0xffd6e9fb, OUTGOING=0xffe0eefc, ONLINE=0xff3cb34f;
+    private int[] WALLS={0xffd6e9fa,0xffc6d6f6,0xffcbe5ee,0xffdbd6f5};
+    private boolean DARK;
+    // 六套配色与 Windows Theme.Configure 同表：强调、表面、正文、次要文字、输入底、分隔线、壁纸四色；派生色按同一公式换算。
+    private static final int[][] PALETTES={
+        {0xff3390ec,0xffffffff,0xff17212b,0xff64727f,0xfff1f4f7,0xffe7ecf0,0xffd6e9fa,0xffc6d6f6,0xffcbe5ee,0xffdbd6f5},
+        {0xff3390ec,0xff17212b,0xffe9eef3,0xff8a9aab,0xff22303d,0xff2b3a48,0xff0e1a28,0xff16294a,0xff0c1f2b,0xff1c2141},
+        {0xff229974,0xfff7fbf8,0xff1d3328,0xff5e7368,0xffeaf2ec,0xffdce8df,0xffdaecce,0xffbedebe,0xffe2eac8,0xffc8e2cd},
+        {0xff2cb385,0xff14221d,0xffe2f1e8,0xff8fae9f,0xff1e3129,0xff29423a,0xff0f241c,0xff16382b,0xff0e2a21,0xff1b3a31},
+        {0xff8b67d7,0xfffcf9fd,0xff33263d,0xff6e6478,0xfff2ebf6,0xffe7ddec,0xffecdef6,0xffd7ccf2,0xfff2e0ec,0xffded6f4},
+        {0xff9a78e6,0xff211b2e,0xffeee7f6,0xffa897ba,0xff2d253d,0xff3a3050,0xff1c1330,0xff2d1e47,0xff25162f,0xff2a2045}};
     private void applyTheme() {
-        SharedPreferences prefs=getSharedPreferences("settings",MODE_PRIVATE); boolean dark=prefs.getBoolean("dark_mode",false);
-        String accent=prefs.getString("accent","blue");BLUE=accent.equals("green")?0xff229974:accent.equals("purple")?0xff8b67d7:0xff3390ec;
-        SURFACE=dark?0xff1e2731:Color.WHITE;INK=dark?0xffe6ebf1:0xff17212b;MUTED=dark?0xffa6b6c7:0xff738392;
-        PALE=dark?0xff2a3644:0xfff1f4f7;WALL=dark?0xff131c26:0xffeff3f7;BUBBLE=blend(BLUE,SURFACE,dark?.23f:.12f);
-        if(accent.equals("green")){SURFACE=dark?0xff172d29:0xfff4faf4;INK=dark?0xffe4f3e9:0xff20382d;MUTED=dark?0xffa3c4b6:0xff627d6a;PALE=dark?0xff28433b:0xffe4efe2;WALL=dark?0xff10221c:0xffd5e5cc;}
-        else if(accent.equals("purple")){SURFACE=dark?0xff292338:0xfffcf7fc;INK=dark?0xfff0e8f7:0xff38283f;MUTED=dark?0xffbeb0d0:0xff84708d;PALE=dark?0xff3a304b:0xffefe5f1;WALL=dark?0xff1a1227:0xffe6d8ed;}
-        BUBBLE=blend(BLUE,SURFACE,dark?.30f:.17f);
+        SharedPreferences prefs=getSharedPreferences("settings",MODE_PRIVATE); DARK=prefs.getBoolean("dark_mode",false);
+        String accent=prefs.getString("accent","blue"); int[] p=PALETTES[(accent.equals("green")?2:accent.equals("purple")?4:0)+(DARK?1:0)];
+        BLUE=p[0];SURFACE=p[1];INK=p[2];MUTED=p[3];PALE=p[4];LINE=p[5];WALLS=new int[]{p[6],p[7],p[8],p[9]};
+        WALL=Color.rgb((Color.red(p[6])+Color.red(p[7])+Color.red(p[8])+Color.red(p[9]))/4,(Color.green(p[6])+Color.green(p[7])+Color.green(p[8])+Color.green(p[9]))/4,(Color.blue(p[6])+Color.blue(p[7])+Color.blue(p[8])+Color.blue(p[9]))/4);
+        // BUBBLE 用于选中与按压底色（Windows Sky），OUTGOING 为发出气泡（Windows Outgoing）。
+        BUBBLE=blend(BLUE,SURFACE,DARK?.30f:.17f);OUTGOING=blend(BLUE,SURFACE,DARK?.42f:.15f);ONLINE=DARK?0xff58c468:0xff3cb34f;
         getWindow().setStatusBarColor(SURFACE);getWindow().setNavigationBarColor(SURFACE);
     }
+    // 气泡元信息、日期胶囊与气泡投影：与 Windows OutgoingMeta、ServiceFill 及气泡阴影同一换算。
+    private int outgoingMeta(){return DARK?blend(BLUE,INK,.38f):blend(BLUE,INK,.62f);}
+    private int serviceFill(){return (blend(Color.BLACK,WALL,DARK?.45f:.42f)&0xffffff)|((DARK?150:165)<<24);}
+    private int bubbleShadow(){return DARK?0x46000000:(blend(Color.BLACK,BLUE,.7f)&0xffffff)|(26<<24);}
     private ChatService service;
     private DraftStore drafts;
     private ReceivedStorage receivedStorage;
@@ -54,7 +67,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
             if(!uri.isEmpty())try{backgroundBitmap=ChatWallpaper.load(this,Uri.parse(uri));}catch(Exception e){error("背景图片不可用，已使用内置背景");}
             if(old!=null)old.recycle();
         }
-        return new ChatWallpaper(this,WALL,BLUE,mode,backgroundBitmap);
+        return new ChatWallpaper(this,WALLS,WALL,BLUE,DARK,mode,backgroundBitmap);
     }
     private long historyRequestVersion, historyAppliedVersion;
     private ActionMode selectionMode;
@@ -158,7 +171,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         headings.addView(title); headings.addView(subtitle); toolbar.addView(headings,weight());
         IconButton action=new IconButton(selected.isEmpty()?"add":"more",selected.isEmpty()?"手动添加联系人":"会话菜单",MUTED);
         toolbar.addView(action,new LinearLayout.LayoutParams(dp(48),dp(48))); action.setOnClickListener(v->{ if(selected.isEmpty()) addPeer(); else {ChatStore.Conversation c=conversation(selected);if(c!=null)conversationMenu(c);} });
-        View line=new View(this); line.setBackgroundColor(blend(INK,SURFACE,.09f)); root.addView(line,new LinearLayout.LayoutParams(-1,dp(1)));
+        View line=new View(this); line.setBackgroundColor(LINE); root.addView(line,new LinearLayout.LayoutParams(-1,dp(1)));
         body=column(); root.addView(body,new LinearLayout.LayoutParams(-1,0,1));
         if(selected.isEmpty()) renderList(); else renderChat();
         changed();
@@ -302,13 +315,16 @@ public final class MainActivity extends Activity implements ChatService.Observer
         int previousY=scroll.getScrollY();
         boolean bottom=scroll.getChildAt(0).getHeight()-previousY-scroll.getHeight()<dp(100); boolean first=historySignature.isEmpty(); historySignature=fingerprint.toString(); messages.removeAllViews();
         int maxWidth=(int)(getResources().getDisplayMetrics().widthPixels*.79f);
-        String lastDate=""; int previewCount=0;
-        for(LanNode.Message m:rows) {
-            String date=new SimpleDateFormat("M月d日",Locale.CHINA).format(new Date(m.time));
-            if(!date.equals(lastDate)) { TextView day=text(date,11,MUTED); day.setGravity(Gravity.CENTER); LinearLayout.LayoutParams d=new LinearLayout.LayoutParams(-1,dp(36)); messages.addView(day,d); lastDate=date; }
-            LinearLayout bubble=column(); bubble.setBackground(new BubbleDrawable(m.outgoing?BUBBLE:SURFACE,getResources().getDisplayMetrics().density,m.outgoing));
-            bubble.setPadding(dp(m.outgoing?14:21),dp(8),dp(m.outgoing?21:14),dp(6));
-            LinearLayout.LayoutParams bp=new LinearLayout.LayoutParams(-2,-2); bp.gravity=m.outgoing?Gravity.END:Gravity.START; bp.bottomMargin=dp(9); messages.addView(bubble,bp);
+        String lastDate=""; int previewCount=0; float density=getResources().getDisplayMetrics().density;
+        for(int index=0;index<rows.size();index++) {
+            final LanNode.Message m=rows.get(index); LanNode.Message next=index+1<rows.size()?rows.get(index+1):null;
+            String date=dayKey(m.time); boolean newDay=!date.equals(lastDate);
+            if(newDay) { TextView day=text(dayLabel(m.time),12,Color.WHITE); day.setGravity(Gravity.CENTER); day.setPadding(dp(10),dp(3),dp(10),dp(3)); day.setBackground(shape(serviceFill(),99)); LinearLayout.LayoutParams d=new LinearLayout.LayoutParams(-2,-2); d.gravity=Gravity.CENTER_HORIZONTAL; d.topMargin=dp(lastDate.isEmpty()?0:6); d.bottomMargin=dp(10); messages.addView(day,d); lastDate=date; }
+            // 与 Windows 一致：同侧且相隔 5 分钟内的消息成组，组内间距收紧，只有组尾带尾巴。
+            boolean groupFirst=newDay||!continues(rows.get(index-1),m), groupLast=next==null||!continues(m,next)||!dayKey(next.time).equals(date);
+            LinearLayout bubble=column(); bubble.setBackground(new BubbleDrawable(m.outgoing?OUTGOING:SURFACE,bubbleShadow(),density,m.outgoing,groupFirst,groupLast));
+            bubble.setPadding(dp(m.outgoing?14:21),dp(8),dp(m.outgoing?21:14),0);
+            LinearLayout.LayoutParams bp=new LinearLayout.LayoutParams(-2,-2); bp.gravity=m.outgoing?Gravity.END:Gravity.START; bp.bottomMargin=dp(groupLast?10:3); messages.addView(bubble,bp);
             if(!m.text.isEmpty()) {
                 String preview=MessageText.preview(m.text);TextView content=text(preview,messageSize(),INK);selectable(content);MessageLinks.apply(content,BLUE);content.setMaxWidth(maxWidth-dp(35));content.setLineSpacing(dp(3),1);bubble.addView(content);
                 if(!preview.equals(m.text)){TextView more=text("查看全文",14,BLUE);more.setMinHeight(dp(44));more.setGravity(Gravity.CENTER_VERTICAL);more.setFocusable(true);more.setOnClickListener(v->showFullText(m.text));bubble.addView(more);}
@@ -347,7 +363,8 @@ public final class MainActivity extends Activity implements ChatService.Observer
                     });
                 });
             }
-            TextView stamp=text(new SimpleDateFormat("HH:mm",Locale.CHINA).format(new Date(m.time))+(m.outgoing?"  "+m.state:""),10,MUTED); stamp.setMaxWidth(maxWidth-dp(35)); stamp.setGravity(Gravity.END); stamp.setPadding(0,dp(6),0,0); bubble.addView(stamp,new LinearLayout.LayoutParams(-1,-2));
+            // 时间行保留整行点击高度并延伸到气泡底边，文字在行内垂直居中，气泡底部不再空出一截。
+            TextView stamp=text(new SimpleDateFormat("HH:mm",Locale.CHINA).format(new Date(m.time))+(m.outgoing?"  "+m.state:""),10,m.outgoing?outgoingMeta():MUTED); stamp.setMaxWidth(maxWidth-dp(35)); stamp.setGravity(Gravity.END|Gravity.CENTER_VERTICAL); bubble.addView(stamp,new LinearLayout.LayoutParams(-1,-2));
             final LanNode.Peer source=conversation==null?null:conversation.peer;
             bubble.setOnLongClickListener(v->{ if(source!=null) forward(m,source); return true; });
             stamp.append("  ···"); stamp.setContentDescription("消息操作：复制、转发"); stamp.setMinHeight(dp(m.files.isEmpty()?40:32));
@@ -359,6 +376,15 @@ public final class MainActivity extends Activity implements ChatService.Observer
     private void scrollToLatest() {
         positionBeforeDraw(true,0);
     }
+    private static String dayKey(long time) { return new SimpleDateFormat("yyyy-MM-dd",Locale.CHINA).format(new Date(time)); }
+    // 日期胶囊文案与 Windows 相同：今天、昨天，其余显示月日，跨年时带年份。
+    private static String dayLabel(long time) {
+        Calendar now=Calendar.getInstance(),day=Calendar.getInstance();day.setTimeInMillis(time);String key=dayKey(time);
+        if(key.equals(dayKey(now.getTimeInMillis()))) return "今天";
+        int year=now.get(Calendar.YEAR);now.add(Calendar.DAY_OF_MONTH,-1);if(key.equals(dayKey(now.getTimeInMillis()))) return "昨天";
+        return new SimpleDateFormat(day.get(Calendar.YEAR)==year?"M月d日":"yyyy年M月d日",Locale.CHINA).format(new Date(time));
+    }
+    private static boolean continues(LanNode.Message previous,LanNode.Message next) { long gap=next.time-previous.time; return previous.outgoing==next.outgoing&&gap>-60000&&gap<300000; }
     @Override public void transfersChanged() {
         // 进度只更新当前卡片，不重新查询历史/创建全部气泡，也不改变用户的阅读位置。
         if(!visible||service==null||!selected.equals(progressPeer))return;
@@ -558,7 +584,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
             public int getCount(){return matches.size();} public Object getItem(int position){return matches.get(position);} public long getItemId(int position){return position;}
             public View getView(int position,View recycled,ViewGroup parent) {
                 LanNode.Message message=matches.get(position);String query=input.getText().toString();
-                LinearLayout item=column();item.setPadding(dp(10),dp(8),dp(10),dp(8));LinearLayout bubble=column();bubble.setPadding(dp(14),dp(10),dp(14),dp(10));bubble.setBackground(shape(message.outgoing?BUBBLE:SURFACE,CONTROL_RADIUS));item.addView(bubble);
+                LinearLayout item=column();item.setPadding(dp(10),dp(8),dp(10),dp(8));LinearLayout bubble=column();bubble.setPadding(dp(14),dp(10),dp(14),dp(10));bubble.setBackground(shape(message.outgoing?OUTGOING:SURFACE,CONTROL_RADIUS));item.addView(bubble);
                 TextView stamp=text(new SimpleDateFormat("M月d日 HH:mm",Locale.CHINA).format(new Date(message.time))+" · "+(message.outgoing?"我":conversation.displayName()),12,MUTED);bubble.addView(stamp);
                 if(!message.text.isEmpty()) {
                     TextView content=text("",messageSize(),INK);content.setText(searchHighlight(searchPreview(message.text,query),query));selectable(content);MessageLinks.apply(content,BLUE);content.setLineSpacing(dp(3),1);content.setPadding(0,dp(6),0,dp(4));bubble.addView(content);
@@ -938,7 +964,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         avatar.setText("");
         avatar.setContentDescription(name+"，"+avatars.description(index)+"，"+(online?"在线":"离线"));
         if(avatar.getBackground() instanceof AvatarDrawable && ((AvatarDrawable)avatar.getBackground()).avatarIndex()==index) ((AvatarDrawable)avatar.getBackground()).setOnline(online);
-        else avatar.setBackground(new AvatarDrawable(this,id,online,dp(6)));
+        else avatar.setBackground(new AvatarDrawable(this,id,online,dp(6),SURFACE,ONLINE));
     }
     private final class ConversationAdapter extends BaseAdapter {
         private final List<ChatStore.Conversation> items=new ArrayList<>();

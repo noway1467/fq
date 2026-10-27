@@ -79,8 +79,10 @@ public sealed class MainForm : ModernWindow
             Button settings = Theme.IconButton("settings", "设置", delegate { OpenSettings(); }, false); settings.Dock = DockStyle.Right; settings.Size = new Size(40, 40); settings.Margin = new Padding(0, 0, 4, 0); footer.Controls.Add(settings);
             sidebar.Controls.Add(footer, 0, 3);
             chatHost.Hint = "选择联系人开始聊天";
-            tray = new NotifyIcon { Icon = Theme.AppIcon, Text = "飞Q", Visible = true };
+            tray = new NotifyIcon { Icon = Theme.TrayIcon, Text = "飞Q", Visible = true };
             ContextMenuStrip trayMenu = Theme.Menu(); trayMenu.Items.Add("打开", null, delegate { Restore(); }); trayMenu.Items.Add("设置", null, delegate { OpenSettings(); }); trayMenu.Items.Add("退出", null, delegate { Ui(ExitApplication); }); tray.ContextMenuStrip = trayMenu;
+            // NotifyIcon 在 Opening 之前按菜单当前尺寸计算弹出位置，先排好版，首次右键也从鼠标处向上展开。
+            Theme.StyleMenu(trayMenu);
             tray.DoubleClick += delegate { Restore(); }; tray.BalloonTipClicked += delegate { Restore(); if (latestSender != null) OpenChat(latestSender); };
             network.PeersChanged += OnPeersChanged; network.MessageReceived += OnMessage; network.DeliveryChanged += OnDelivery; network.Error += OnError; network.TransferChanged += OnTransfer;
             RefreshFilters();

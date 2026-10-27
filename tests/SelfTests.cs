@@ -108,12 +108,23 @@ namespace FeiqLight.Tests
                         using(LanService restored=new LanService(store.LoadSettings(),FreePort(),true,"local"))Assert(restored.Peers.Single().Id==oldId&&restored.Peers.Single().DeviceId==id,"重启丢失身份映射");
                     }
                 });
-                Run("应用图标：七尺寸真彩色 ICO 和运行时颜色一致", () => {
-                    byte[] bytes=Theme.AppIconBytes();Assert(BitConverter.ToUInt16(bytes,4)==7,"缺少多尺寸图标");
-                    using(var stream=new MemoryStream(bytes))using(var icon=new System.Drawing.Icon(stream,32,32))using(var bitmap=icon.ToBitmap()) {
-                        var color=bitmap.GetPixel(16,5);Assert(color.B>color.R+50&&color.G>color.R+10,"应用图标变灰");
+                Run("应用图标：九尺寸真彩色 ICO、与 Android ic_feiq 同一几何、托盘取系统小图标", () => {
+                    byte[] bytes=Theme.AppIconBytes();Assert(BitConverter.ToUInt16(bytes,4)==9,"缺少多尺寸图标");
+                    foreach(int size in new[]{16,20,24,32,40,48,64,128})
+                        using(var stream=new MemoryStream(bytes))using(var icon=new System.Drawing.Icon(stream,size,size))using(var bitmap=icon.ToBitmap()) {
+                            var color=bitmap.GetPixel(size/2,size*5/32);Assert(bitmap.Width==size&&bitmap.GetPixel(0,0).A==0&&color.B>color.R+50&&color.G>color.R+10,"图标尺寸缺失或变灰："+size);
+                        }
+                    // 48 像素与 Android 48 单位视口一一对应：圆外透明、蓝底、白气泡、中部横线镂空、尾巴在左下。
+                    using(var stream=new MemoryStream(bytes))using(var icon=new System.Drawing.Icon(stream,48,48))using(var bitmap=icon.ToBitmap()) {
+                        Func<int,int,bool> blue=(x,y)=>bitmap.GetPixel(x,y).ToArgb()==System.Drawing.Color.FromArgb(51,144,236).ToArgb(),white=(x,y)=>bitmap.GetPixel(x,y).ToArgb()==System.Drawing.Color.White.ToArgb();
+                        Assert(bitmap.GetPixel(1,1).A==0&&bitmap.GetPixel(46,46).A==0,"圆外不透明");
+                        Assert(blue(24,6)&&blue(24,40)&&blue(6,24),"圆底不是经典蓝");
+                        Assert(white(13,14)&&white(34,28)&&white(24,16)&&white(24,25),"对话气泡缺失");
+                        Assert(blue(19,20)&&blue(28,20),"气泡横线没有镂空");
+                        Assert(white(17,33)&&blue(22,34),"气泡尾巴位置不对");
                     }
                     using(var bitmap=Theme.AppIcon.ToBitmap())Assert(bitmap.GetPixel(16,5).B>bitmap.GetPixel(16,5).R+50,"运行时图标变灰");
+                    Assert(Theme.TrayIcon.Size==System.Windows.Forms.SystemInformation.SmallIconSize,"托盘图标不是系统小图标尺寸");
                 });
                 Run("同名会话：固定编号、旧配置迁移、隐藏备注及新增身份不重排", () => {
                     LocalStore store=new LocalStore(Path.Combine(root,"conversation-numbers"));
