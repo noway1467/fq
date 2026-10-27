@@ -35,13 +35,15 @@ public final class MainActivity extends Activity implements ChatService.Observer
         {0xff9a78e6,0xff211b2e,0xffeee7f6,0xffa897ba,0xff2d253d,0xff3a3050,0xff1c1330,0xff2d1e47,0xff25162f,0xff2a2045}};
     private void applyTheme() {
         SharedPreferences prefs=getSharedPreferences("settings",MODE_PRIVATE); DARK=prefs.getBoolean("dark_mode",false);
-        String accent=prefs.getString("accent","blue"); int[] p=PALETTES[(accent.equals("green")?2:accent.equals("purple")?4:0)+(DARK?1:0)];
-        BLUE=p[0];SURFACE=p[1];INK=p[2];MUTED=p[3];PALE=p[4];LINE=p[5];WALLS=new int[]{p[6],p[7],p[8],p[9]};
-        WALL=Color.rgb((Color.red(p[6])+Color.red(p[7])+Color.red(p[8])+Color.red(p[9]))/4,(Color.green(p[6])+Color.green(p[7])+Color.green(p[8])+Color.green(p[9]))/4,(Color.blue(p[6])+Color.blue(p[7])+Color.blue(p[8])+Color.blue(p[9]))/4);
+        int[] p=palette(prefs.getString("accent","blue"),DARK);
+        BLUE=p[0];SURFACE=p[1];INK=p[2];MUTED=p[3];PALE=p[4];LINE=p[5];WALLS=new int[]{p[6],p[7],p[8],p[9]};WALL=wall(p);
         // BUBBLE 用于选中与按压底色（Windows Sky），OUTGOING 为发出气泡（Windows Outgoing）。
         BUBBLE=blend(BLUE,SURFACE,DARK?.30f:.17f);OUTGOING=blend(BLUE,SURFACE,DARK?.42f:.15f);ONLINE=DARK?0xff58c468:0xff3cb34f;
         getWindow().setStatusBarColor(SURFACE);getWindow().setNavigationBarColor(SURFACE);
     }
+    private static int[] palette(String accent,boolean dark) { return PALETTES[(accent.equals("green")?2:accent.equals("purple")?4:0)+(dark?1:0)]; }
+    // 纯色背景与日期胶囊取壁纸四色的平均值。
+    private static int wall(int[] p) { return Color.rgb((Color.red(p[6])+Color.red(p[7])+Color.red(p[8])+Color.red(p[9]))/4,(Color.green(p[6])+Color.green(p[7])+Color.green(p[8])+Color.green(p[9]))/4,(Color.blue(p[6])+Color.blue(p[7])+Color.blue(p[8])+Color.blue(p[9]))/4); }
     // 气泡元信息、日期胶囊与气泡投影：与 Windows OutgoingMeta、ServiceFill 及气泡阴影同一换算。
     private int outgoingMeta(){return DARK?blend(BLUE,INK,.38f):blend(BLUE,INK,.62f);}
     private int serviceFill(){return (blend(Color.BLACK,WALL,DARK?.45f:.42f)&0xffffff)|((DARK?150:165)<<24);}
@@ -644,7 +646,8 @@ public final class MainActivity extends Activity implements ChatService.Observer
         TextView sampleIn=text("今天也保持联系",messageSize(),INK),sampleOut=text("消息与输入字号预览",messageSize(),INK);
         sampleIn.setPadding(dp(12),dp(8),dp(12),dp(8));sampleOut.setPadding(dp(12),dp(8),dp(12),dp(8));
         LinearLayout.LayoutParams inParams=new LinearLayout.LayoutParams(-2,-2),outParams=new LinearLayout.LayoutParams(-2,-2);outParams.gravity=Gravity.END;outParams.topMargin=dp(8);preview.addView(sampleIn,inParams);preview.addView(sampleOut,outParams);box.addView(preview,settingSpacing(0,16));
-        Runnable updatePreview=()->{View selectedColor=accent.findViewById(accent.getCheckedRadioButtonId());String key=selectedColor==null?"blue":selectedColor.getTag().toString();int blue=key.equals("green")?0xff229974:key.equals("purple")?0xff8b67d7:0xff3390ec;int surface=key.equals("green")?(dark.isChecked()?0xff172d29:0xfff4faf4):key.equals("purple")?(dark.isChecked()?0xff292338:0xfffcf7fc):dark.isChecked()?0xff1e2731:Color.WHITE,ink=dark.isChecked()?0xffe6ebf1:0xff17212b;preview.setBackground(shape(blend(blue,surface,.13f),CONTROL_RADIUS));sampleIn.setBackground(shape(surface,CONTROL_RADIUS));sampleOut.setBackground(shape(blend(blue,surface,dark.isChecked()?.30f:.17f),CONTROL_RADIUS));sampleIn.setTextColor(ink);sampleOut.setTextColor(ink);};
+        // 预览与 applyTheme 同表取色：底色为聊天背景，收到/发出样例分别取表面色与发出气泡色。
+        Runnable updatePreview=()->{View selectedColor=accent.findViewById(accent.getCheckedRadioButtonId());int[] p=palette(selectedColor==null?"blue":selectedColor.getTag().toString(),dark.isChecked());preview.setBackground(shape(wall(p),CONTROL_RADIUS));sampleIn.setBackground(shape(p[1],CONTROL_RADIUS));sampleOut.setBackground(shape(blend(p[0],p[1],dark.isChecked()?.42f:.15f),CONTROL_RADIUS));sampleIn.setTextColor(p[2]);sampleOut.setTextColor(p[2]);};
         dark.setOnCheckedChangeListener((buttonView,checked)->updatePreview.run());
         for(int i=0;i<accent.getChildCount();i++)accent.getChildAt(i).setOnClickListener(v->updatePreview.run());updatePreview.run();
         TextView sizeCaption=text("聊天字号 · "+messageSize()+" sp",14,INK);sizeCaption.setPadding(0,dp(14),0,0);box.addView(sizeCaption);
@@ -660,11 +663,14 @@ public final class MainActivity extends Activity implements ChatService.Observer
         Button chooseBackground=button("选择背景图片…",false);box.addView(chooseBackground,settingSpacing(0,4));chooseBackground.setOnClickListener(v->{try{startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("image/*").addCategory(Intent.CATEGORY_OPENABLE).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION),23);}catch(ActivityNotFoundException e){error("系统没有可用的图片选择器");}});
         TextView backgroundHint=text("图片授权立即保存；其他外观选项点击保存后生效。支持最长边抽样至 1920 像素，不影响原图。",12,MUTED);backgroundHint.setPadding(0,dp(8),0,0);box.addView(backgroundHint);
         settingHeading(box,"存储管理");
-        Button clear=button("清理已接收文件",false); LinearLayout.LayoutParams cp=new LinearLayout.LayoutParams(-1,-2); cp.topMargin=dp(16); box.addView(clear,cp); clear.setOnClickListener(v->confirm("清理文件","删除应用内已接收文件？已导出的副本不受影响。","清理",()->{ if(service!=null) service.clearFiles(); }));
+        Button clear=button("清理已接收文件",false); LinearLayout.LayoutParams cp=new LinearLayout.LayoutParams(-1,-2); cp.topMargin=dp(16); box.addView(clear,cp); clear.setOnClickListener(v->clearReceivedFiles());
         Button clearOffers=button("清理发送缓存",false); LinearLayout.LayoutParams op=new LinearLayout.LayoutParams(-1,-2); op.topMargin=dp(10); box.addView(clearOffers,op);
         clear.setGravity(Gravity.START|Gravity.CENTER_VERTICAL);clearOffers.setGravity(Gravity.START|Gravity.CENTER_VERTICAL);
         TextView limits=text("文件不设固定大小上限，受设备可用空间限制并保留 16 MiB 余量。网络失败后重新接收可续传；主动取消会清理断点。另存到目录仍需内部暂存空间。",12,MUTED); limits.setPadding(0,dp(12),0,0); box.addView(limits);
-        clearOffers.setOnClickListener(v->confirm("清理发送缓存","撤销尚未接收的文件邀请并删除暂存副本？原文件不受影响。","清理",()->{ if(service!=null) service.clearOffers(); }));
+        clearOffers.setOnClickListener(v->confirm("清理发送缓存","撤销尚未接收的文件邀请并删除暂存副本？原文件不受影响。","清理",()->{
+            if(service==null) { error("连接服务尚未就绪，请稍后重试"); return; }
+            service.clearOffers(result->error(result.files==0?"没有可清理的发送缓存":"已撤销未接收的文件邀请，删除 "+result.files+" 个暂存副本，释放 "+size(result.bytes)));
+        }));
         settingHeading(box,"故障诊断");
         Switch diagnosticSwitch=settingSwitch("记录故障诊断",prefs.getBoolean("diagnostics",false));box.addView(diagnosticSwitch,new LinearLayout.LayoutParams(-1,-2));
         box.addView(text("默认关闭，保存后生效。仅记 UTC 时间和事件码，不记聊天、身份、IP、URI 和路径；最多 128 KiB。关闭后保留，可手动清除。",12,MUTED));
@@ -848,6 +854,18 @@ public final class MainActivity extends Activity implements ChatService.Observer
         LinearLayout options=column();Dialog dialog=sheet(name,options,null,null);
         if(uri!=null){fileAction(options,dialog,"打开文件",()->openFile(uri,name,false));fileAction(options,dialog,"打开方式…",()->openFileWith(uri,name,false,true));fileAction(options,dialog,"分享文件",()->openFile(uri,name,true));}
         fileAction(options,dialog,"复制文件名",()->copyText("文件名",name));
+    }
+    // 先说明删什么、留什么再确认；没有可清理的文件直接提示，完成后报告实际结果，不让按钮“点了没反应”。
+    private void clearReceivedFiles() {
+        if(service==null) { error("连接服务尚未就绪，请稍后重试"); return; }
+        ChatService.Usage usage=service.receivedUsage();
+        if(usage.files==0) { error("应用内没有可清理的已接收文件"+(receivedStorage.tree()!=null?"；保存文件夹里的文件不会被飞Q删除，可在系统文件管理中处理":"")); return; }
+        String rest="需要重新接收才能打开，邀请已过期的需请对方重发。";
+        String detail=usage.saved==usage.files?"它们都已另存到保存文件夹，那里的文件不会删除，聊天中仍可打开。":usage.saved>0?"其中 "+usage.saved+" 个已另存到保存文件夹，那里的文件不会删除，聊天中仍可打开；其余附件"+rest:"聊天记录保留，清理后的附件"+rest;
+        confirm("清理已接收文件","删除应用内的 "+usage.files+" 个已接收文件，共 "+size(usage.bytes)+"。"+detail,"清理",()->{
+            if(service==null) { error("连接服务尚未就绪，请稍后重试"); return; }
+            service.clearFiles(result->error(result.files==0?"应用内没有可清理的已接收文件":"已清理 "+result.files+" 个应用内文件，释放 "+size(result.bytes)+(result.saved>0?"；保存文件夹中的 "+result.saved+" 个副本未删除":"")));
+        });
     }
     private void fileActions(LanNode.Peer peer,long packet,Protocol.Attachment file) {
         if(service==null) return;

@@ -353,7 +353,8 @@ public final class ReliabilityTest {
             cache(s,257L*1024*1024); TestProvider p=provider(s,1L,1); LanNode.Peer peer=peer(target.getLocalPort());
             for(Long declared:new Long[]{1L,null}) { p.declared=declared; s.sendFile(peer,Uri.parse("content://feiq.test/file")); transferDone(s); }
             assertTrue(errors.toString(),errors.isEmpty()); assertEquals(2,p.opened); assertEquals(2,((Map<?,?>)field(n,"offers")).size());
-            s.clearOffers(); transferDone(s); assertTrue(errors.toString(),errors.isEmpty()); assertEquals(0,new File(s.getFilesDir(),"offers").list().length); assertTrue(p.source.isFile()); assertTrue(((Map<?,?>)field(n,"offers")).isEmpty());
+            List<ChatService.Usage> cleared=new ArrayList<>(); s.clearOffers(cleared::add); transferDone(s); assertTrue(errors.toString(),errors.isEmpty()); assertEquals(0,new File(s.getFilesDir(),"offers").list().length); assertTrue(p.source.isFile()); assertTrue(((Map<?,?>)field(n,"offers")).isEmpty());
+            assertEquals(1,cleared.size()); assertEquals(3,cleared.get(0).files); assertTrue(cleared.get(0).bytes>=257L*1024*1024); assertEquals("",s.transferStatus());
             s.sendFile(peer,Uri.parse("content://feiq.test/file")); transferDone(s); assertEquals(1,((Map<?,?>)field(n,"offers")).size());
         } finally { sc.destroy(); }
     }
@@ -422,9 +423,27 @@ public final class ReliabilityTest {
         try {
             settle(s);File file=new File(s.getFilesDir(),"received/keep-after-cancel");Files.write(file.toPath(),new byte[]{1,2,3});
             block((ExecutorService)field(s,"transferWorker"),blocked,release);assertTrue(blocked.await(5,TimeUnit.SECONDS));
-            s.clearFiles();assertTrue(s.busy());s.cancelTransfer();release.countDown();transferDone(s);
+            s.clearFiles(result->fail("已取消的清理不应回报结果"));assertTrue(s.busy());s.cancelTransfer();release.countDown();transferDone(s);
             assertTrue("已经取消的排队清理仍删除了文件",file.isFile());assertArrayEquals(new byte[]{1,2,3},Files.readAllBytes(file.toPath()));assertTrue(s.transferStatus(),s.transferStatus().contains("取消"));
         }finally{release.countDown();sc.destroy();}
+    }
+    @Test public void clearingReceivedFilesReportsCountsAndKeepsFolderCopies()throws Exception {
+        ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService s=sc.get();List<String> errors=new ArrayList<>();
+        try {
+            settle(s);s.observe(new ChatService.Observer(){public void changed(){}public void error(String e){errors.add(e);}});
+            File received=new File(s.getFilesDir(),"received");assertTrue(received.isDirectory()||received.mkdirs());
+            File exported=new File(received,"c".repeat(64)),internal=new File(received,"d".repeat(64)),partial=new File(received,"e".repeat(64)+".part"),nested=new File(received,"nested");
+            Files.write(exported.toPath(),new byte[5]);Files.write(internal.toPath(),new byte[7]);Files.write(partial.toPath(),new byte[11]);assertTrue(nested.mkdir());
+            s.getSharedPreferences("received_locations",0).edit().putString(exported.getName(),"content://feiq.test/tree/document").commit();
+            ChatService.Usage before=s.receivedUsage();assertEquals(3,before.files);assertEquals(23,before.bytes);assertEquals(1,before.saved);
+            List<ChatService.Usage> results=new ArrayList<>();s.clearFiles(results::add);transferDone(s);
+            assertEquals(1,results.size());assertEquals(3,results.get(0).files);assertEquals(23,results.get(0).bytes);assertEquals(1,results.get(0).saved);
+            assertFalse(exported.exists());assertFalse(internal.exists());assertFalse(partial.exists());assertTrue("清理不应删除子目录",nested.isDirectory());
+            // 映射保留：保存文件夹里的副本没有被删，聊天中仍要能打开。
+            assertEquals("content://feiq.test/tree/document",s.getSharedPreferences("received_locations",0).getString(exported.getName(),""));
+            assertEquals("",s.transferStatus());assertTrue(errors.toString(),errors.isEmpty());
+            s.clearFiles(results::add);transferDone(s);assertEquals(2,results.size());assertEquals(0,results.get(1).files);assertEquals(0,s.receivedUsage().files);
+        }finally{sc.destroy();}
     }
     @Test public void duplicateRejectedInvitationDoesNotReturnToReceiveQueue()throws Exception {
         ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService s=sc.get();
@@ -443,7 +462,7 @@ public final class ReliabilityTest {
             settle(s); set(s,"node",n); s.observe(new ChatService.Observer(){public void changed(){}public void error(String e){errors.add(e);}}); File existing=cache(s,1);
             connection.connect(new InetSocketAddress(InetAddress.getLoopbackAddress(),(Integer)field(n,"port")));
             long until=System.nanoTime()+TimeUnit.SECONDS.toNanos(3); while(((Set<?>)field(n,"connections")).isEmpty()&&System.nanoTime()<until) Thread.sleep(10);
-            s.clearOffers(); transferDone(s); assertTrue(existing.isFile()); assertTrue(errors.toString(),errors.stream().anyMatch(e->e.contains("文件连接")));
+            s.clearOffers(result->fail("有文件连接时不应回报清理结果")); transferDone(s); assertTrue(existing.isFile()); assertTrue(errors.toString(),errors.stream().anyMatch(e->e.contains("文件连接")));
         } finally { sc.destroy(); }
     }
 }

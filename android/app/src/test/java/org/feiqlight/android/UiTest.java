@@ -77,6 +77,39 @@ public final class UiTest {
             dialog.dismiss();assertEquals("已保存昵称",activity.getSharedPreferences("settings",0).getString("name",""));
         } finally {if(dialog!=null)dialog.dismiss();ac.pause().stop().destroy();sc.destroy();}
     }
+    @Test public void clearingReceivedFilesExplainsWhatIsKeptAndReportsTheResult() throws Exception {
+        ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));
+        ActivityController<MainActivity> ac=Robolectric.buildActivity(MainActivity.class).create().start().resume().visible();MainActivity activity=ac.get();android.app.Dialog dialog=null;
+        try {
+            settle(service);File received=new File(activity.getFilesDir(),"received");assertTrue(received.isDirectory()||received.mkdirs());
+            File exported=new File(received,"a".repeat(64)),internal=new File(received,"b".repeat(64)),staged=new File(activity.getFilesDir(),"offers/staged/说明.txt");
+            java.nio.file.Files.write(exported.toPath(),new byte[1500]);java.nio.file.Files.write(internal.toPath(),new byte[600]);assertTrue(staged.getParentFile().mkdirs());java.nio.file.Files.write(staged.toPath(),new byte[10]);
+            // 模拟已自动另存到保存文件夹的附件：清理只删应用内副本，保存文件夹的文档与历史映射都要保留。
+            activity.getSharedPreferences("received_locations",0).edit().putString(exported.getName(),"content://feiq.test/tree/document").commit();
+            Method settings=MainActivity.class.getDeclaredMethod("settings");settings.setAccessible(true);settings.invoke(activity);dialog=org.robolectric.shadows.ShadowDialog.getLatestDialog();View panel=dialog.getWindow().getDecorView();
+            java.util.function.Consumer<String> press=label->((Button)descendants(panel).stream().filter(v->v instanceof Button&&((Button)v).getText().toString().equals(label)).findFirst().get()).performClick();
+            // 外观预览与实际主题同表取色：发出样例为发出气泡色，底色为聊天背景。
+            TextView sampleOut=(TextView)descendants(panel).stream().filter(v->v instanceof TextView&&"消息与输入字号预览".contentEquals(((TextView)v).getText())).findFirst().get();
+            assertEquals((int)(Integer)field(activity,"OUTGOING"),((android.graphics.drawable.GradientDrawable)sampleOut.getBackground()).getColor().getDefaultColor());
+            assertEquals((int)(Integer)field(activity,"WALL"),((android.graphics.drawable.GradientDrawable)((View)sampleOut.getParent()).getBackground()).getColor().getDefaultColor());
+            clickDialogButton("文件");press.accept("清理已接收文件");
+            android.app.Dialog confirm=org.robolectric.shadows.ShadowDialog.getLatestDialog();assertNotSame(dialog,confirm);assertTrue(confirm.isShowing());
+            String body=descendants(confirm.getWindow().getDecorView()).stream().filter(v->v instanceof TextView&&!(v instanceof Button)).map(v->((TextView)v).getText().toString()).reduce("",(a,b)->a+"\n"+b);dialogScreenshot(confirm,"android-clear-received-confirm");
+            clickDialogButton("清理");assertFalse(confirm.isShowing());((ExecutorService)field(service,"transferWorker")).submit(()->{}).get(5,TimeUnit.SECONDS);settle(service);
+            assertFalse(exported.exists());assertFalse(internal.exists());assertEquals("content://feiq.test/tree/document",activity.getSharedPreferences("received_locations",0).getString(exported.getName(),""));
+            String toast=org.robolectric.shadows.ShadowToast.getTextOfLatestToast();
+            assertNotNull("确认清理后没有任何结果提示",toast);assertTrue(toast,toast.contains("已清理 2 个应用内文件")&&toast.contains("2.1 KB")&&toast.contains("1 个副本未删除"));
+            assertTrue(body,body.contains("2 个已接收文件")&&body.contains("2.1 KB")&&body.contains("1 个已另存到保存文件夹"));
+            assertEquals("结果已用提示说明，不应残留含糊的“文件任务已完成”","",service.transferStatus());
+            press.accept("清理已接收文件");assertSame("没有可清理文件时不应再弹确认",confirm,org.robolectric.shadows.ShadowDialog.getLatestDialog());
+            assertTrue(org.robolectric.shadows.ShadowToast.getTextOfLatestToast(),org.robolectric.shadows.ShadowToast.getTextOfLatestToast().startsWith("应用内没有可清理的已接收文件"));
+            press.accept("清理发送缓存");clickDialogButton("清理");((ExecutorService)field(service,"transferWorker")).submit(()->{}).get(5,TimeUnit.SECONDS);settle(service);
+            assertFalse(staged.exists());assertTrue(org.robolectric.shadows.ShadowToast.getTextOfLatestToast(),org.robolectric.shadows.ShadowToast.getTextOfLatestToast().contains("删除 1 个暂存副本"));
+            Field serviceField=MainActivity.class.getDeclaredField("service");serviceField.setAccessible(true);serviceField.set(activity,null);
+            press.accept("清理已接收文件");assertTrue(org.robolectric.shadows.ShadowToast.getTextOfLatestToast(),org.robolectric.shadows.ShadowToast.getTextOfLatestToast().contains("连接服务尚未就绪"));
+            serviceField.set(activity,service);
+        } finally {if(dialog!=null)dialog.dismiss();ac.pause().stop().destroy();sc.destroy();}
+    }
     @Test public void forwardingUsesAvatarRowsAndExplicitSelectionAndFullTextIsSelectable() throws Exception {
         ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();
         shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));

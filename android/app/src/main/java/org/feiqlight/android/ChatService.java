@@ -545,21 +545,46 @@ public final class ChatService extends Service {
         }
         if(progress!=null)progress.accept(total);
     }
-    void clearFiles() {
-        if(busy()) { showError("请先完成或取消文件任务"); return; }
-        transferJob(task->{ File[] files=directory("received").listFiles(); if(files!=null) for(File file:files) { checkTransfer(task); if(file.isFile()) Files.deleteIfExists(file.toPath()); } });
+    /** 应用内文件统计：文件数、字节数，以及其中已另存到保存文件夹（那里的副本不随清理删除）的数量。 */
+    static final class Usage {
+        final int files, saved; final long bytes;
+        Usage(int files,long bytes,int saved) { this.files=files; this.bytes=bytes; this.saved=saved; }
     }
-    void clearOffers() {
+    Usage receivedUsage() {
+        File[] files=new File(getFilesDir(),"received").listFiles(); int count=0, saved=0; long bytes=0;
+        if(files!=null) for(File file:files) if(file.isFile()) { count++; bytes+=file.length(); if(storage.saved(file)!=null) saved++; }
+        return new Usage(count,bytes,saved);
+    }
+    // 只删应用内副本；保存文件夹里的文档及历史映射保留，聊天中仍可打开。结果交回界面说明，状态栏不再留含糊的“已完成”。
+    void clearFiles(Consumer<Usage> done) {
+        if(busy()) { showError("请先完成或取消文件任务"); return; }
+        transferJob(task->{
+            File[] files=directory("received").listFiles(); if(files==null) throw new IOException("无法读取应用内接收文件");
+            int count=0, saved=0; long bytes=0;
+            for(File file:files) {
+                checkTransfer(task); if(!file.isFile()) continue;
+                long length=file.length(); boolean exported=storage.saved(file)!=null;
+                if(Files.deleteIfExists(file.toPath())) { count++; bytes+=length; if(exported) saved++; }
+            }
+            Usage result=new Usage(count,bytes,saved); main.post(()->{ if(!stopped) done.accept(result); });
+        },()->{},"","已取消，可重新操作");
+    }
+    void clearOffers(Consumer<Usage> done) {
         transferJob(task->{
             LanNode current=node; if(current!=null) current.revokeOffers();
             File[] folders=directory("offers").listFiles(); if(folders==null) throw new IOException("无法读取发送缓存");
+            int count=0; long bytes=0;
             for(File folder:folders) {
                 checkTransfer(task);
-                if(folder.isDirectory()) { File[] files=folder.listFiles(); if(files==null) throw new IOException("无法读取发送缓存"); for(File file:files) { checkTransfer(task); if(file.isFile()) Files.deleteIfExists(file.toPath()); } }
+                if(folder.isDirectory()) {
+                    File[] files=folder.listFiles(); if(files==null) throw new IOException("无法读取发送缓存");
+                    for(File file:files) { checkTransfer(task); if(!file.isFile()) continue; long length=file.length(); if(Files.deleteIfExists(file.toPath())) { count++; bytes+=length; } }
+                }
                 checkTransfer(task);
                 Files.deleteIfExists(folder.toPath());
             }
-        });
+            Usage result=new Usage(count,bytes,0); main.post(()->{ if(!stopped) done.accept(result); });
+        },()->{},"","已取消，可重新操作");
     }
     private void fail(Exception e) { diagnostics.record(Diagnostics.Event.Error);showError(e.getMessage()==null?e.getClass().getSimpleName():e.getMessage()); }
     private void showError(String text) { main.post(()->{ for(Observer o:new ArrayList<>(observers)) o.error(text); }); }
