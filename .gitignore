@@ -8,6 +8,7 @@
 !/assets/
 /assets/*
 !/assets/avatars/
+!/assets/tools/
 !/android/
 !/docs/
 !/build.ps1

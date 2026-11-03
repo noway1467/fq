@@ -17,6 +17,7 @@ if ($LASTEXITCODE -ne 0) { throw '图标生成工具编译失败' }
 if ($LASTEXITCODE -ne 0) { throw '图标生成失败' }
 $common += @("/resource:$root\src\emoji-atlas.png,FeiqLight.EmojiAtlas.png","/resource:$root\src\emoji-atlas.txt,FeiqLight.EmojiAtlas.txt","/resource:$root\docs\Twemoji-LICENSE-GRAPHICS.txt,FeiqLight.Twemoji-LICENSE-GRAPHICS.txt")
 $common += @("/resource:$root\assets\avatars\atlas.png,FeiqLight.Avatars.png","/resource:$root\assets\avatars\catalog.txt,FeiqLight.Avatars.txt")
+foreach ($asset in @('index.html','app.css','app.js')) { $common += "/resource:$root\assets\tools\$asset,FeiqLight.Tools.$asset" }
 & $compiler @common '/target:winexe' "/win32icon:$testOut\app.ico" "/win32manifest:$root\src\app.manifest" "/out:$out\飞Q.exe" @sources
 if ($LASTEXITCODE -ne 0) { throw '应用编译失败' }
 if ($Test) {
@@ -26,5 +27,6 @@ if ($Test) {
     if ($LASTEXITCODE -ne 0) { throw '测试编译失败' }
     & "$testOut\FeiqLight.Tests.exe"
     if ($LASTEXITCODE -ne 0) { throw '测试未通过' }
+    & "$root\tests\shared-remote.ps1"
 }
 Get-Item -LiteralPath "$out\飞Q.exe" | Select-Object FullName,Length

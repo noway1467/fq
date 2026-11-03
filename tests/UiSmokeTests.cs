@@ -782,7 +782,9 @@ namespace FeiqLight.Tests
                                 foreach(bool dark in new[]{false,true}) {
                                     Theme.Change(dark,"blue");Find<Button>(chatA,"会话菜单").PerformClick();ContextMenuStrip menu=(ContextMenuStrip)OpenMenu();
                                     var actions=menu.Items.OfType<ToolStripMenuItem>().ToArray();var glyphs=actions.Select(i=>Theme.MenuGlyph(i.Text)).ToArray();
-                                    Check(glyphs.Length==6&&glyphs.All(s=>s.Length>0&&s!="more")&&glyphs.Distinct().Count()==6,"聊天菜单图标重复或缺失");
+                                    Check(glyphs.Length==8&&glyphs.All(s=>s.Length>0&&s!="more")&&glyphs.Distinct().Count()==8,"聊天菜单图标重复或缺失");
+                                    Check(actions.Any(i=>i.Text=="浏览共享文件…"&&Theme.MenuGlyph(i.Text)=="folder"),"缺少共享文件入口或图标");
+                                    Check(actions.Any(i=>i.Text=="控制 Android 手机…"&&Theme.MenuGlyph(i.Text)=="monitor"),"缺少手机远控入口或图标");
                                     Check(menu.Items.OfType<ToolStripSeparator>().Count()==2&&menu.Width>=220,"菜单分组或宽度未生效");CheckMenuText(menu,"preview-chat-menu-text-"+(dark?"dark":"light"));
                                     ToolStripMenuItem font=actions.Single(i=>i.Text=="字号");font.ShowDropDown();Application.DoEvents();
                                     ToolStripDropDown sizes=font.DropDown;var options=sizes.Items.OfType<ToolStripMenuItem>().ToArray();
@@ -1006,15 +1008,17 @@ namespace FeiqLight.Tests
                         ContextMenuStrip menu = tray.ContextMenuStrip;
                         Check(Object.ReferenceEquals(tray.Icon, Theme.TrayIcon) && tray.Icon.Size == SystemInformation.SmallIconSize, "托盘图标没有使用系统小图标尺寸");
                         Rectangle area = Screen.PrimaryScreen.WorkingArea; Point click = new Point(area.Right - 160, area.Bottom - 8);
-                        // 与 NotifyIcon 右键同一入口：先按菜单当前尺寸算出向上展开的位置，再触发 Opening。
-                        typeof(ContextMenuStrip).GetMethod("ShowInTaskbar", BindingFlags.Instance | BindingFlags.NonPublic).Invoke(menu, new object[] { click.X, click.Y });
+                        Point previousCursor = Cursor.Position;
                         try
                         {
+                            // 走真实托盘入口设置前台窗口；直接调用 ShowInTaskbar 会被前一模态窗口的失焦消息关闭。
+                            Cursor.Position = click;
+                            typeof(NotifyIcon).GetMethod("ShowContextMenu", BindingFlags.Instance | BindingFlags.NonPublic).Invoke(tray, null);
                             Application.DoEvents();
-                            Check(menu.Visible && menu.Bounds.Right == click.X && menu.Bounds.Bottom == click.Y, "托盘菜单首次弹出没有贴住点击点：" + menu.Bounds);
+                            Check(menu.Visible && menu.Bounds.Right == click.X && menu.Bounds.Bottom == click.Y, "托盘菜单首次弹出没有贴住点击点：" + menu.Bounds + "，点击点=" + click + "，可见=" + menu.Visible);
                             CheckMenuText(menu, "preview-tray-menu");
                         }
-                        finally { menu.Close(); Application.DoEvents(); }
+                        finally { menu.Close(); if (Cursor.Position == click) Cursor.Position = previousCursor; Application.DoEvents(); }
                     });
                     test("菜单回归：托盘菜单设置、添加联系人和关于对话框", () =>
                     {

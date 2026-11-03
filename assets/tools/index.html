@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>飞Q · 共享与远控</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <main>
+    <header class="topbar">
+      <div><strong class="brand">飞Q</strong><span id="page-title">共享文件</span></div>
+      <button id="disconnect" class="quiet" hidden>断开连接</button>
+    </header>
+    <p id="status" role="status" aria-live="polite" hidden></p>
+    <section id="login" class="connect-panel">
+      <h1 id="login-title">连接共享文件夹</h1>
+      <form id="connect-form">
+        <label for="code">连接码</label>
+        <div class="connect-row"><input id="code" aria-label="6 位连接码" inputmode="numeric" pattern="[0-9]{6}" autocomplete="off" spellcheck="false" minlength="6" maxlength="6" required><button id="connect" class="primary" type="submit">连接</button></div>
+      </form>
+      <button id="reconnect">连接上次</button>
+    </section>
+    <section id="files" hidden>
+      <div class="file-toolbar"><nav id="breadcrumbs" aria-label="目录位置"></nav><button id="refresh">刷新</button></div>
+      <label class="search-label" for="search">筛选当前文件夹</label>
+      <input id="search" type="search" placeholder="输入文件名" autocomplete="off">
+      <div class="list-heading"><span id="count">正在加载</span><span>只读共享</span></div>
+      <div id="file-list"></div>
+      <section id="player-panel" hidden>
+        <div class="player-heading"><h2 id="player-title"></h2><button id="close-player">关闭播放</button></div>
+        <video id="player" controls playsinline preload="auto"></video>
+        <p id="player-error" role="alert"></p>
+      </section>
+    </section>
+    <section id="remote" hidden>
+      <div id="screen-wrap" tabindex="0" aria-label="远程画面"><div id="screen-stage"><img id="screen" alt="" draggable="false"></div></div>
+      <aside id="control-panel">
+        <p id="remote-error" role="alert" hidden></p>
+        <div class="remote-toolbar">
+          <button id="remote-disconnect">断开</button><button id="layout" aria-pressed="false">上下布局</button><button id="rotate" class="native-only">竖屏</button><button id="fullscreen">全屏</button>
+          <button id="keyboard" aria-pressed="false">键盘</button><button id="panels">专注</button><button id="zoom">放大</button>
+          <select id="display" aria-label="显示器" hidden></select>
+        </div>
+        <div class="remote-controls">
+        <section id="phone-controls" hidden>
+          <div class="phone-buttons"><button data-phone-key="back">返回</button><button data-phone-key="home">主页</button><button data-phone-key="recents">最近任务</button></div>
+        </section>
+        <section class="pointer-controls" aria-label="鼠标操作">
+          <div class="pointer-pads">
+            <div id="touchpad" role="application" aria-label="触控板：单指移动，轻点左键，双指上下滚动" tabindex="0"></div>
+            <div id="wheel-pad" role="application" aria-label="滚轮：单指上下滑动，或按上下方向键滚动远程窗口" tabindex="0"><span aria-hidden="true">↑</span><span>滚轮</span><span aria-hidden="true">↓</span></div>
+          </div>
+          <div class="mouse-buttons"><button data-input="click">左键</button><button id="double-click">双击</button><button data-input="right">右键</button><button id="drag" aria-pressed="false">拖拽</button></div>
+        </section>
+        <section class="typing-controls" aria-label="键盘操作">
+          <textarea id="remote-text" aria-label="输入到电脑" rows="3" maxlength="4000"></textarea>
+          <div class="type-buttons"><button id="type-text" class="primary">输入文字</button><button data-key="enter">Enter</button><button data-key="newline">换行</button><button id="phone-enter" hidden>确认</button></div>
+        </section>
+        </div>
+      <div class="shortcuts" aria-label="常用快捷键">
+        <button data-key="escape">Esc</button><button data-key="tab">Tab</button><button data-key="backspace">退格</button><button data-key="selectall">全选</button><button data-key="copy">复制</button><button data-key="paste">粘贴</button><button data-key="undo">撤销</button><button data-key="find">查找</button><button data-key="switch">切换窗口</button><button data-key="up">↑</button><button data-key="down">↓</button><button data-key="left">←</button><button data-key="right">→</button><button data-key="pageup">上一页</button><button data-key="pagedown">下一页</button><button data-key="ctrlenter">Ctrl+Enter</button>
+      </div>
+      </aside>
+      <button id="restore-panel" hidden>操作</button>
+    </section>
+  </main>
+</body>
+</html>

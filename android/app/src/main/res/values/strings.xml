@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="remote_accessibility_name">飞Q远控辅助</string>
+    <string name="remote_accessibility_description">仅在你开启屏幕共享并同意远控连接后，执行对方的点击、滑动和输入。需要读取当前输入框来插入文字，不保存或上传界面文字，不支持密码框及系统授权界面。可在飞Q或通知栏随时停止。</string>
+</resources>

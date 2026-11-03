@@ -27,6 +27,8 @@ public sealed class MainForm : ModernWindow
         private ContextMenuStrip mainMenu, conversationMenu;
         private ToolStripMenuItem nightItem;
         private ProfileMenuItem profileItem;
+        private ToolsWindow toolsWindow;
+        private bool toolsRestored;
         private readonly List<RoundedButton> filters = new List<RoundedButton>();
         private bool exiting, started, automaticReceiving;
         private bool windowLoaded;
@@ -101,7 +103,20 @@ public sealed class MainForm : ModernWindow
             if (IsDisposed || Disposing || !IsHandleCreated) return;
             try { BeginInvoke((MethodInvoker)delegate { if (!IsDisposed && !Disposing) action(); }); } catch (InvalidOperationException) { }
         }
-        public void NetworkStarted() { if(!started)diagnostics.Record(DiagnosticEvent.Started); started = true; System.Threading.Interlocked.Exchange(ref peersRefreshQueued,0); RefreshPeers(); if (store.Warning != null) status.Text = store.Warning; }
+        public void NetworkStarted()
+        {
+            if(!started)diagnostics.Record(DiagnosticEvent.Started); started = true; System.Threading.Interlocked.Exchange(ref peersRefreshQueued,0); RefreshPeers(); if (store.Warning != null) status.Text = store.Warning;
+            if (!toolsRestored)
+            {
+                toolsRestored = true;
+                try
+                {
+                    ToolsPreferences.State saved = new ToolsPreferences(store.Root).Value;
+                    if (saved.ShareEnabled || saved.RemoteEnabled) { toolsWindow = new ToolsWindow(network.Port, network.LoopbackOnly, store.Root); toolsWindow.PrepareRestoredWindow(); }
+                }
+                catch (Exception e) { status.Text = "共享与远控未恢复：" + e.Message; }
+            }
+        }
         internal void PrepareNetworkCallbacks() { if(!IsHandleCreated)CreateHandle(); }
         private bool RememberPeerAddresses()
         {
@@ -239,6 +254,8 @@ public sealed class MainForm : ModernWindow
             if(conversationMenu==null)conversationMenu=Theme.Menu();
             foreach(ToolStripItem item in conversationMenu.Items.Cast<ToolStripItem>().ToArray())item.Dispose();
             conversationMenu.Items.Clear();
+            conversationMenu.Items.Add("浏览共享文件…",null,delegate { OpenShared(peer); });
+            conversationMenu.Items.Add("控制 Android 手机…",null,delegate { OpenPhone(peer); });
             conversationMenu.Items.Add("设置备注…",null,delegate { EditConversation(peer); });
             conversationMenu.Items.Add(peer.Pinned?"取消置顶":"置顶会话",null,delegate {
                 bool old=peer.Pinned;peer.Pinned=!old;if(!RememberPeerAddresses())peer.Pinned=old;fingerprint=null;RefreshPeers();
@@ -294,6 +311,31 @@ public sealed class MainForm : ModernWindow
                 try { if (startupAvailable) startup.SaveSettings(store, network.Settings, dialog.Value); else store.SaveSettings(dialog.Value); network.Settings = dialog.Value; Theme.Change(dialog.Value.DarkMode,dialog.Value.Accent); foreach(ChatForm chat in chats.Values)chat.ApplyAppearance(); RefreshFilters(); RefreshNetwork(); ReceiveAutomatically(); } catch (Exception e) { status.Text = "设置保存失败：" + e.Message; }
             }
         }
+        internal void OpenShared(Peer peer)
+        {
+            try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("http://" + peer.Endpoint.Address + ":" + ToolsHttp.PortFor(peer.Endpoint.Port) + "/#share") { UseShellExecute = true }); }
+            catch (Exception e) { using (NoticeDialog notice = new NoticeDialog("无法打开共享页面", e.Message)) notice.ShowDialog(this); }
+        }
+        internal async void OpenPhone(Peer peer)
+        {
+            int port = peer.Endpoint.Port >= 65534 ? peer.Endpoint.Port - 2 : peer.Endpoint.Port + 2;
+            string url = "http://" + peer.Endpoint.Address + ":" + port;
+            try
+            {
+                await System.Threading.Tasks.Task.Run(() => {
+                    var request = (System.Net.HttpWebRequest)System.Net.WebRequest.Create(url + "/api/status"); request.Proxy = null; request.Timeout = 4000; request.ReadWriteTimeout = 4000;
+                    using (var response = request.GetResponse()) using (var reader = new StreamReader(response.GetResponseStream()))
+                    { char[] buffer = new char[2048]; int count = reader.ReadBlock(buffer, 0, buffer.Length); if (count == buffer.Length) throw new InvalidOperationException("状态响应过长"); var data = new System.Web.Script.Serialization.JavaScriptSerializer().Deserialize<Dictionary<string, object>>(new string(buffer, 0, count)); if (!data.ContainsKey("remote") || !Object.Equals(data["remote"], true)) throw new InvalidOperationException("手机尚未开启远控"); }
+                });
+                if (!IsDisposed) System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url + "/#remote") { UseShellExecute = true });
+            }
+            catch (Exception) { if (!IsDisposed) using (NoticeDialog notice = new NoticeDialog("无法控制", "手机未连接或尚未开启远控")) notice.ShowDialog(this); }
+        }
+        private void OpenTools()
+        {
+            try { if (toolsWindow == null || toolsWindow.IsDisposed) toolsWindow = new ToolsWindow(network.Port, network.LoopbackOnly, store.Root); toolsWindow.Show(); if (toolsWindow.WindowState == FormWindowState.Minimized) toolsWindow.WindowState = FormWindowState.Normal; toolsWindow.Activate(); }
+            catch (Exception e) { using (NoticeDialog notice = new NoticeDialog("共享与远控未开启", "请检查额外 TCP 端口是否被占用。\n" + e.Message)) notice.ShowDialog(this); }
+        }
         private void ShowMenu(object sender, EventArgs args)
         {
             // Closed 发生时菜单点击派发可能仍在执行；模态窗口还会开启嵌套消息循环。
@@ -309,6 +351,7 @@ public sealed class MainForm : ModernWindow
                 nightItem = new ToolStripMenuItem("夜间模式", null, delegate { ToggleNight(); }) { Tag = "switch" };
                 mainMenu.Items.Add(nightItem);
                 mainMenu.Items.Add("设置", null, delegate { OpenSettings(); });
+                mainMenu.Items.Add("共享与远控…", null, delegate { OpenTools(); });
                 mainMenu.Items.Add("已移除的联系人…", null,delegate {using(ForwardDialog dialog=new ForwardDialog(network.Peers.Where(p=>p.Hidden).ToArray(),-1))if(dialog.ShowDialog(this)==DialogResult.OK)OpenChat(dialog.Target);});
                 mainMenu.Items.Add("关于", null, delegate { using (AboutDialog dialog = new AboutDialog()) dialog.ShowDialog(this); });
                 mainMenu.Items.Add(new ToolStripSeparator());
@@ -388,6 +431,7 @@ public sealed class MainForm : ModernWindow
         {
             if (disposing && !IsDisposed)
             {
+                if (toolsWindow != null) toolsWindow.Dispose();
                 windowSaveTimer.Stop(); SaveWindowPlacement(); windowSaveTimer.Dispose();
                 diagnostics.Record(DiagnosticEvent.Stopped);network.Dispose();
                 try { store.CompletePending(); } catch (IOException e) { status.Text = "记录保存失败：" + e.Message; }

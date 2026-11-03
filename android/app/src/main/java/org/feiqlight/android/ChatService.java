@@ -39,6 +39,11 @@ public final class ChatService extends Service {
         ReceiveRequest(LanNode.Peer peer,long packet,Protocol.Attachment file) { this.peer=peer; this.packet=packet; this.file=file; }
     }
     private volatile LanNode node;
+    private SharedFiles sharedFiles;
+    interface SharedFactory { SharedFiles create(Uri tree,int port)throws IOException; }
+    SharedFactory sharedFactory=(tree,port)->new SharedFiles(this,tree,port,false);
+    private long sharingEpoch;
+    private int connectedPort;
     private volatile boolean stopped, connecting;
     private final Object connectionLock=new Object();
     private volatile long connectionEpoch;
@@ -159,6 +164,8 @@ public final class ChatService extends Service {
                         connectivity.registerNetworkCallback(new NetworkRequest.Builder().addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN).build(),callback);
                     } catch (RuntimeException e) { showError("自动发现可能受限，可尝试手动 IP："+e.getMessage()); }
                     diagnostics.record(Diagnostics.Event.Connected);connecting=false; status="已连接 · UDP / TCP "+prefs.getInt("port",2425); changed();
+                    connectedPort=prefs.getInt("port",2425);
+                    restoreSharing();
                     getSystemService(NotificationManager.class).notify(1,notification("connection","飞Q正在运行","可接收局域网消息 · 点击返回",true));
                 });
                 try { publish(); } catch(Exception e) { fail(e); }
@@ -207,6 +214,28 @@ public final class ChatService extends Service {
         queue(()->{try {store.remove(id,clear,hide);publish();main.post(()->done.accept(true));}catch(Exception e){fail(e);main.post(()->done.accept(false));}});
     }
     boolean online() { return node!=null && !connecting; }
+    SharedFiles sharedFiles() { return sharedFiles; }
+    private void closeSharing() { sharingEpoch++; if(sharedFiles!=null){sharedFiles.close();sharedFiles=null;} }
+    void stopSharing() { closeSharing();try{new SharedFolderSettings(this).stop();}catch(IOException e){showError(e.getMessage());} }
+    void restoreSharing() {
+        SharedFolderSettings saved=new SharedFolderSettings(this);
+        if(saved.enabled()&&saved.tree()!=null)shareFolder(saved.tree(),ignored->{});
+    }
+    void shareFolder(Uri tree,Consumer<Boolean> done) {
+        if(!online()){showError("请先连接局域网");done.accept(false);return;}
+        closeSharing();long version=sharingEpoch,connection=connectionEpoch;int port=ToolsHttp.portFor(connectedPort);
+        io.execute(()->{
+            try {
+                SharedFolderSettings settings=new SharedFolderSettings(this);settings.requireGrant(tree);
+                SharedFiles next=sharedFactory.create(tree,port);
+                main.post(()->{
+                    if(stopped||version!=sharingEpoch||connection!=connectionEpoch){next.close();done.accept(false);return;}
+                    try{settings.save(tree);sharedFiles=next;done.accept(true);}
+                    catch(IOException e){next.close();showError(e.getMessage());done.accept(false);}
+                });
+            }catch(Exception e){main.post(()->{if(!stopped&&version==sharingEpoch){showError("共享未开启："+e.getMessage());done.accept(false);}});}
+        });
+    }
     boolean busy() { return busy.get(); }
     String status() { return status; }
     // 工作线程结束到主线程终态回调之间，不能继续显示“尚未发送”的旧准备提示。
@@ -337,6 +366,8 @@ public final class ChatService extends Service {
         } finally {if(!sent){Files.deleteIfExists(file.toPath());Files.deleteIfExists(folder.toPath());}}
     }
     void disconnect() {
+        PhoneRemoteService.stopActive();
+        closeSharing();
         diagnostics.record(Diagnostics.Event.Disconnected);
         getSharedPreferences("settings",MODE_PRIVATE).edit().putBoolean("connection_enabled",false).apply();
         synchronized(connectionLock) {
@@ -589,6 +620,7 @@ public final class ChatService extends Service {
     private void fail(Exception e) { diagnostics.record(Diagnostics.Event.Error);showError(e.getMessage()==null?e.getClass().getSimpleName():e.getMessage()); }
     private void showError(String text) { main.post(()->{ for(Observer o:new ArrayList<>(observers)) o.error(text); }); }
     @Override public void onDestroy() {
+        closeSharing();
         diagnostics.record(Diagnostics.Event.Stopped);
         synchronized(connectionLock) {
             stopped=true; connectionEpoch++; connecting=false; disconnecting=true;

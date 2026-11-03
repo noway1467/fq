@@ -179,6 +179,9 @@ namespace FeiqLight
             if(text=="全选") return "select";
             if(text=="删除") return "trash";
             if(text.StartsWith("查看全文")) return "doc";
+            if(text.Contains("共享文件")) return "folder";
+            if(text.Contains("共享与远控")) return "monitor";
+            if(text.Contains("控制 Android 手机")) return "monitor";
             if(text.Contains("目录") || text.Contains("位置")) return "folder";
             if(text.StartsWith("打开方式")) return "apps";
             if(text=="打开文件") return "open";

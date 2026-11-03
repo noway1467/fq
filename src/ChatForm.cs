@@ -288,6 +288,8 @@ namespace FeiqLight
             {
                 chatMenu = Theme.Menu(); chatMenu.MinimumSize = new Size((int)(236 * DeviceDpi / 96F), 0);
                 chatMenu.Items.Add("发送文件", null, SelectFiles); chatMenu.Items.Add("聊天记录", null, ShowHistory);
+                chatMenu.Items.Add("浏览共享文件…", null, delegate { main.OpenShared(peer); });
+                chatMenu.Items.Add("控制 Android 手机…", null, delegate { main.OpenPhone(peer); });
                 chatMenu.Items.Add(new ToolStripSeparator());
                 chatMenu.Items.Add("管理会话…",null,delegate { main.ShowConversationMenu(peer); });
                 ToolStripMenuItem font = new ToolStripMenuItem("字号");

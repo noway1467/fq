@@ -508,9 +508,11 @@ public final class MainActivity extends Activity implements ChatService.Observer
     }
     private void showMenu(View anchor) {
         LinearLayout options=column(); Dialog dialog=sheet("飞Q",options,null,null);
-        String[] labels={"刷新","添加联系人","已移除的联系人","设置","关于",service!=null&&service.canDisconnect()?"断开":"连接"};
+        Intent lastRemote=RemoteActivity.lastConnection(this);
+        if(lastRemote!=null)fileAction(options,dialog,"上次远程连接",()->startActivity(lastRemote));
+        String[] labels={"刷新","添加联系人","共享本机文件夹","允许控制本机","已移除的联系人","设置","关于",service!=null&&service.canDisconnect()?"断开":"连接"};
         for(String label:labels) {
-            fileAction(options,dialog,label,()->{ if(label.equals("已移除的联系人")) hiddenConversations(); else if(label.equals("设置")) settings(); else if(label.equals("添加联系人")) addPeer(); else if(label.equals("刷新")) { if(service!=null) service.refresh(); } else if(label.equals("断开")) { if(service!=null) service.disconnect(); } else if(label.equals("关于")) showAbout(); else connect(); });
+            fileAction(options,dialog,label,()->{ if(label.equals("允许控制本机"))startActivity(new Intent(this,PhoneRemoteActivity.class));else if(label.equals("共享本机文件夹")) sharing(); else if(label.equals("已移除的联系人")) hiddenConversations(); else if(label.equals("设置")) settings(); else if(label.equals("添加联系人")) addPeer(); else if(label.equals("刷新")) { if(service!=null) service.refresh(); } else if(label.equals("断开")) { if(service!=null) service.disconnect(); } else if(label.equals("关于")) showAbout(); else connect(); });
         }
     }
     private void showAbout() {
@@ -533,6 +535,9 @@ public final class MainActivity extends Activity implements ChatService.Observer
     private void conversationMenu(ChatStore.Conversation c) {
         LinearLayout options=column();Dialog menu=sheet(c.displayName(),options,null,null);
         fileAction(options,menu,"聊天记录",()->showHistory(c));
+        fileAction(options,menu,"浏览共享文件",()->openTools(c,false));
+        fileAction(options,menu,"控制 Windows 桌面",()->openTools(c,true));
+        fileAction(options,menu,"控制 Android 手机",()->openPhone(c));
         fileAction(options,menu,"设置备注",()->{
             LinearLayout box=column();EditText note=formField(box,"仅本机显示，留空恢复昵称",c.note==null?"":c.note);note.setFilters(new InputFilter[]{new InputFilter.LengthFilter(64)});
             sheet("联系人备注",box,"保存",dialog->{if(service!=null)service.editConversation(c.peer.id(),note.getText().toString(),c.pinned);dialog.dismiss();});
@@ -542,6 +547,31 @@ public final class MainActivity extends Activity implements ChatService.Observer
         fileAction(options,menu,"删除联系人",()->deleteConversation(c,false));
     }
     private void closeHistory() { if(historyDialog!=null){historyDialog.dismiss();historyDialog=null;} }
+    private void openTools(ChatStore.Conversation conversation,boolean remote) {
+        String address=conversation.peer.endpoint.getAddress().getHostAddress();
+        Uri uri=Uri.parse("http://"+address+":"+ToolsHttp.portFor(conversation.peer.endpoint.getPort())+"/#"+(remote?"remote":"share"));
+        if(remote){startActivity(new Intent(this,RemoteActivity.class).setData(uri));return;}
+        try {startActivity(new Intent(Intent.ACTION_VIEW,uri).addCategory(Intent.CATEGORY_BROWSABLE));}
+        catch(ActivityNotFoundException e){error("请安装支持 HTML5 视频的浏览器后再打开");}
+    }
+    private void openPhone(ChatStore.Conversation conversation){
+        Uri uri=Uri.parse("http://"+conversation.peer.endpoint.getAddress().getHostAddress()+":"+PhoneRemoteAccess.portFor(conversation.peer.endpoint.getPort())+"/#remote");
+        startActivity(new Intent(this,RemoteActivity.class).setData(uri).putExtra("phone",true));
+    }
+    private void sharing() {
+        if(service==null||!service.online()){error("请先连接局域网");return;}
+        SharedFiles current=service.sharedFiles();LinearLayout box=column();
+        TextView note=text(current==null?"未共享":"连接码  "+current.code(),20,INK);note.setTextIsSelectable(true);box.addView(note);
+        Dialog dialog=sheet("共享本机文件夹",box,null,null);
+        Uri savedTree=new SharedFolderSettings(this).tree();
+        if(current==null&&savedTree!=null)fileAction(box,dialog,"开启上次的共享文件夹",()->{ChatService expected=service;if(expected!=null)expected.shareFolder(savedTree,success->{if(success&&!isFinishing()&&!isDestroyed()&&service==expected)sharing();});});
+        fileAction(box,dialog,current==null?"选择文件夹并开启":"更换文件夹 / 更新连接码",()->{
+            try {Intent pick=new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION|Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);if(savedTree!=null)pick.putExtra(android.provider.DocumentsContract.EXTRA_INITIAL_URI,savedTree);startActivityForResult(pick,24);}
+            catch(ActivityNotFoundException e){error("系统没有可用的文件夹选择器");}
+        });
+        if(current!=null)fileAction(box,dialog,"停止共享",()->{if(service!=null)service.stopSharing();});
+        fileAction(box,dialog,"清除已配对设备",()->{try{PhoneRemoteService.stopActive();SharedFiles active=service==null?null:service.sharedFiles();if(active!=null)active.forgetPairings();else new ToolsPairings(this).clear();}catch(java.io.IOException e){error(e.getMessage());}});
+    }
     private CharSequence searchHighlight(String value,String query) {
         SpannableString spans=new SpannableString(value);
         if(query.isEmpty())return spans;
@@ -832,7 +862,8 @@ public final class MainActivity extends Activity implements ChatService.Observer
             c.save();Rect b=getBounds();c.translate(b.left,b.top);c.scale(b.width()/24f,b.height()/24f);Path p=new Path();
             if(label.startsWith("复制")) { c.drawRoundRect(8,8,20,21,2,2,paint);p.moveTo(5,16);p.lineTo(3,16);p.lineTo(3,3);p.lineTo(15,3);p.lineTo(15,5);c.drawPath(p,paint); }
             else if(label.contains("转发")||label.contains("分享")) { p.moveTo(3,4);p.lineTo(21,12);p.lineTo(3,20);p.lineTo(6,12);p.close();c.drawPath(p,paint);c.drawLine(6,12,21,12,paint); }
-            else if(label.contains("目录")||label.contains("位置")) { p.moveTo(3,6);p.lineTo(9,6);p.lineTo(11,9);p.lineTo(21,9);p.lineTo(21,20);p.lineTo(3,20);p.close();c.drawPath(p,paint); }
+            else if(label.contains("目录")||label.contains("位置")||label.contains("共享")||label.contains("文件夹")) { p.moveTo(3,6);p.lineTo(9,6);p.lineTo(11,9);p.lineTo(21,9);p.lineTo(21,20);p.lineTo(3,20);p.close();c.drawPath(p,paint); }
+            else if(label.contains("Windows")){c.drawRoundRect(3,4,21,17,2,2,paint);c.drawLine(12,17,12,21,paint);c.drawLine(8,21,16,21,paint);}
             else if(label.contains("刷新")||label.contains("重试")) { c.drawArc(4,4,20,20,40,285,false,paint);p.moveTo(15,3);p.lineTo(20,4);p.lineTo(19,9);c.drawPath(p,paint); }
             else if(label.contains("备注")){p.moveTo(4,17);p.lineTo(16,5);p.lineTo(20,9);p.lineTo(8,21);p.lineTo(3,22);p.close();c.drawPath(p,paint);}
             else if(label.contains("置顶")){p.moveTo(8,3);p.lineTo(17,3);p.lineTo(15,10);p.lineTo(20,14);p.lineTo(5,14);p.lineTo(10,10);p.close();c.drawPath(p,paint);c.drawLine(12,14,12,22,paint);}
@@ -939,6 +970,12 @@ public final class MainActivity extends Activity implements ChatService.Observer
     @Override protected void onActivityResult(int request,int result,Intent data) {
         super.onActivityResult(request,result,data); if(result!=RESULT_OK||data==null) return;
         if(request!=20&&data.getData()==null) return;
+        if(request==24) {
+            ChatService expected=service;
+            if(expected==null){error("连接服务未就绪，请重新选择");return;}
+            try{new SharedFolderSettings(this).acquire(data.getData(),data.getFlags());}catch(java.io.IOException e){error(e.getMessage());return;}
+            expected.shareFolder(data.getData(),success->{if(success&&!isFinishing()&&!isDestroyed()&&service==expected)sharing();});return;
+        }
         if(request==23) {
             try {
                 Uri uri=data.getData();try(android.os.ParcelFileDescriptor fd=getContentResolver().openFileDescriptor(uri,"r")){if(fd!=null&&fd.getStatSize()>20*1024*1024)throw new java.io.IOException("请选择不超过 20 MiB 的图片");}

@@ -95,6 +95,8 @@ public final class FileFeaturesTest {
                 uris.add(DocumentsContract.buildDocumentUri("feiq.documents",id));
             }
             service.sendFiles(sender.peers().get(0),uris);waitFor(service,()->!service.busy());
+            // 发送线程结束不代表对端回调已执行；高负载下仍要等待真实收到邀请。
+            waitFor(service,()->!received.isEmpty());
             assertEquals("发送完成仍显示常驻说明","",service.transferStatus());
             assertFalse(String.valueOf(field(service,"transferStatus")),received.isEmpty());
             assertEquals(1,received.size());LanNode.Message message=received.get(0);assertEquals(2,message.files.size());

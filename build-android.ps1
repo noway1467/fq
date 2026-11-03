@@ -2,6 +2,7 @@
     [string]$SdkRoot = $env:ANDROID_HOME,
     [string]$JavaHome = $env:JAVA_HOME,
     [string]$GradleHome,
+    [string]$OutputDirectory,
     [switch]$Test,
     [switch]$Offline
 )
@@ -29,8 +30,9 @@ try {
     if ($Offline) { $tasks += '--offline' }
     & $gradle @tasks
     if ($LASTEXITCODE -ne 0) { throw 'Android 构建或验证失败，未更新交付 APK。' }
-    $out = Join-Path $root 'dist'; New-Item -ItemType Directory -Force -Path $out | Out-Null
-    $apk = Join-Path $out '飞Q-android-0.4.2.apk'
+    $out = if ($OutputDirectory) { [IO.Path]::GetFullPath($OutputDirectory) } else { Join-Path $root 'dist' }; New-Item -ItemType Directory -Force -Path $out | Out-Null
+    $metadata = Get-Content -LiteralPath "$android\app\build\outputs\apk\preview\output-metadata.json" -Raw | ConvertFrom-Json
+    $apk = Join-Path $out ("飞Q-android-" + $metadata.elements[0].versionName + '.apk')
     Copy-Item -LiteralPath "$android\app\build\outputs\apk\preview\app-preview.apk" -Destination $apk -Force
     Get-Item -LiteralPath $apk | Select-Object FullName,Length
     Get-FileHash -LiteralPath $apk -Algorithm SHA256
