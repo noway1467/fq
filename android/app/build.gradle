@@ -7,14 +7,16 @@ android {
         applicationId 'org.feiqlight.android'
         minSdk 26
         targetSdk 36
-        versionCode 39
-        versionName '0.6.2'
+        versionCode 40
+        versionName '0.6.3'
     }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
     buildFeatures { buildConfig true }
+    // 固定使用项目既有签名，避免构建账户或环境变化后无法保留数据覆盖安装。
+    signingConfigs.debug.storeFile = file('../../build/android-home/debug.keystore')
     sourceSets.main.assets.srcDirs += ['../../assets/avatars']
     sourceSets.main.assets.srcDirs += ['../../assets/tools']
     buildTypes {

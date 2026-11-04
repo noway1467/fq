@@ -46,9 +46,9 @@ namespace FeiqLight
             {
                 string error = null;
                 if (preferences.Value.ShareEnabled)
-                    try { Share(preferences.Value.Folder); }
+                    try { StartSharing(preferences.Value.Folder, false); }
                     catch (Exception e) { if (!(e is IOException || e is UnauthorizedAccessException || e is ToolsHttp.HttpError || e is ArgumentException)) throw; error = "共享目录未恢复：" + e.Message; }
-                if (preferences.Value.RemoteEnabled) AllowRemote();
+                if (preferences.Value.RemoteEnabled) StartRemote(false);
                 return error;
             }
         }
@@ -65,23 +65,26 @@ namespace FeiqLight
                 do { random.GetBytes(bytes); value = BitConverter.ToUInt32(bytes, 0); } while (value >= 4294000000u);
             return (value % 1000000).ToString("D6", System.Globalization.CultureInfo.InvariantCulture);
         }
-        internal void Share(string path)
+        internal void Share(string path) { StartSharing(path, true); }
+        private void StartSharing(string path, bool save)
         {
             string full = Path.GetFullPath(path); CheckNoLinks(full);
             if (!Directory.Exists(full)) throw new IOException("共享文件夹不存在");
             lock (gate)
             {
                 if (closed) throw new ObjectDisposedException("ToolsService");
-                preferences.Save(full, true, preferences.Value.RemoteEnabled);
+                // 启动恢复只读取配置，避免更新后的首次启动因文件暂时不可写而丢失服务。
+                if (save) preferences.Save(full, true, preferences.Value.RemoteEnabled);
                 shareEpoch++; folder = full; entries.Clear(); sessions.RemoveAll(s => s.Mode == "share");
                 shareCode = ConnectionCode(); shareUntil = clock.ElapsedMilliseconds + 600000;
             }
         }
         internal void StopSharing() { lock (gate) { EndSharing(); preferences.Save(preferences.Value.Folder, false, preferences.Value.RemoteEnabled); } }
         private void EndSharing() { shareEpoch++; folder = null; shareCode = ""; shareUntil = 0; entries.Clear(); sessions.RemoveAll(s => s.Mode == "share"); }
-        internal void AllowRemote()
+        internal void AllowRemote() { StartRemote(true); }
+        private void StartRemote(bool save)
         {
-            lock (gate) { if (closed) throw new ObjectDisposedException("ToolsService"); preferences.Save(preferences.Value.Folder, preferences.Value.ShareEnabled, true); EndRemote(); remoteEnabled = true; remoteCode = ConnectionCode(); remoteUntil = clock.ElapsedMilliseconds + 600000; }
+            lock (gate) { if (closed) throw new ObjectDisposedException("ToolsService"); if (save) preferences.Save(preferences.Value.Folder, preferences.Value.ShareEnabled, true); EndRemote(); remoteEnabled = true; remoteCode = ConnectionCode(); remoteUntil = clock.ElapsedMilliseconds + 600000; }
         }
         internal void StopRemote() { lock (gate) { EndRemote(); preferences.Save(preferences.Value.Folder, preferences.Value.ShareEnabled, false); } }
         private void EndRemote() { remoteEpoch++; remoteEnabled = false; remotePending = false; remoteCode = ""; remoteUntil = 0; sessions.RemoveAll(s => s.Mode == "remote"); if (ReleaseInput != null) ReleaseInput(); }

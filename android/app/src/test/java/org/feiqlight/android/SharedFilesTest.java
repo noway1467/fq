@@ -163,6 +163,30 @@ public final class SharedFilesTest {
         try{stopped.requireGrant(TREE);fail("已撤销目录权限仍可恢复");}catch(IOException expected){}
         assertEquals(TREE,new SharedFolderSettings(context).tree());
     }
+    @Test public void legacySettingsAndPairingFormatRemainUsableWithoutReset()throws Exception{
+        // 固定旧版键名和存储格式，避免读写一起改名后新建数据测试仍通过。
+        context.getContentResolver().takePersistableUriPermission(TREE,Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        SharedPreferences folders=context.getSharedPreferences("shared_folder",Context.MODE_PRIVATE);
+        assertTrue(folders.edit().putString("tree",TREE.toString()).putBoolean("enabled",true).commit());
+        String token=String.join("",Collections.nCopies(64,"a"));
+        String hash=Base64.getEncoder().encodeToString(java.security.MessageDigest.getInstance("SHA-256").digest(token.getBytes(StandardCharsets.UTF_8)));
+        SharedPreferences pairings=context.getSharedPreferences("tools_pairings",Context.MODE_PRIVATE);
+        assertTrue(pairings.edit().putString(hash,"share:"+TREE+"|"+(System.currentTimeMillis()+86400000L)).commit());
+        Map<String,?> folderBefore=new HashMap<>(folders.getAll()),pairBefore=new HashMap<>(pairings.getAll());
+        SharedFolderSettings restored=new SharedFolderSettings(context);assertTrue(restored.enabled());assertEquals(TREE,restored.tree());restored.requireGrant(TREE);
+        try(SharedFiles server=new SharedFiles(context,restored.tree(),0,true)){
+            Reply reconnect=request(server.port(),"/api/reconnect","fq_pair_share_"+server.port()+"="+token,"{\"mode\":\"share\"}","X-FQ-Reconnect: 1\r\n","POST");
+            assertEquals(200,reconnect.code);assertEquals(200,get(server,"/api/list","fq_share="+reconnect.json().getString("token")).code);
+        }
+        assertEquals(folderBefore,folders.getAll());assertEquals(pairBefore,pairings.getAll());
+        String remoteToken=String.join("",Collections.nCopies(64,"b"));
+        String remoteHash=Base64.getEncoder().encodeToString(java.security.MessageDigest.getInstance("SHA-256").digest(remoteToken.getBytes(StandardCharsets.UTF_8)));
+        assertTrue(pairings.edit().putString(remoteHash,"phone-remote|"+(System.currentTimeMillis()+86400000L)).putBoolean("allow:"+remoteHash,true).commit());
+        assertTrue(new ToolsPairings(context).alwaysAllows(remoteToken,"phone-remote"));
+        SharedPreferences settings=context.getSharedPreferences("settings",Context.MODE_PRIVATE);
+        assertTrue(settings.edit().putString("last_remote_target","http://127.0.0.1:2426/#remote").putBoolean("last_remote_phone",false).commit());
+        Intent last=RemoteActivity.lastConnection(context);assertNotNull(last);assertEquals("http://127.0.0.1:2426/#remote",last.getData().toString());
+    }
     @Test public void unsupportedTemporaryGrantIsNotSilentlySaved()throws Exception{
         SharedFolderSettings settings=new SharedFolderSettings(context);
         try{settings.acquire(TREE,Intent.FLAG_GRANT_READ_URI_PERMISSION);fail("临时授权被当成可恢复");}catch(IOException expected){}

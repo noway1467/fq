@@ -67,7 +67,7 @@ namespace FeiqLight.Tests
             if (args.Length > 0 && args[0] == "render") { Render(root); return 0; }
             if (args.Length > 0 && args[0] == "desktop") { Desktop(root); return Environment.ExitCode; }
             if (args.Length > 0 && args[0] == "wheel-desktop") { WheelDesktop(root); return Environment.ExitCode; }
-            if (args.Length > 2 && args[0] == "upgrade") { try { Upgrade(root, Path.GetFullPath(args[2])); return 0; } catch(Exception error) { Console.WriteLine("UPGRADE FAIL: " + error.GetType().Name + " " + error.Message); return 1; } }
+            if (args.Length > 2 && args[0] == "upgrade") { try { Upgrade(root, Path.GetFullPath(args[2]), args.Length > 3 ? Path.GetFullPath(args[3]) : Path.GetFullPath(args[2])); return 0; } catch(Exception error) { Console.WriteLine("UPGRADE FAIL: " + error.GetType().Name + " " + error.Message); return 1; } }
             int passed = 0, failed = 0;
             Action<string, Action> run = (name, test) => { try { test(); Console.WriteLine("PASS " + name); passed++; } catch (Exception e) { Console.WriteLine("FAIL " + name + ": " + e); failed++; } };
             string folder = Path.Combine(root, "shared"); Directory.CreateDirectory(folder); Directory.CreateDirectory(Path.Combine(folder, "子目录"));
@@ -284,6 +284,20 @@ namespace FeiqLight.Tests
                 Directory.CreateDirectory(missing);
                 using(ToolsService restored=new ToolsService(0,true,profile)){Assert(restored.RestoreSettings()==null&&restored.Folder==missing,"目录恢复后不能重开");}
             });
+            run("恢复只读取旧配置，写入暂时受阻也能恢复共享和远控", () => {
+                string profile=Path.Combine(root,"read-only-"+Guid.NewGuid().ToString("N"));
+                new ToolsPreferences(profile).Save(folder,true,true);
+                string path=Path.Combine(profile,"tools-settings.json");byte[] original=File.ReadAllBytes(path);
+                using(FileStream locked=new FileStream(path,FileMode.Open,FileAccess.Read,FileShare.Read))
+                using(ToolsService restored=new ToolsService(0,true,profile))
+                {
+                    Assert(restored.RestoreSettings()==null,"恢复服务仍依赖重写配置");
+                    Assert(restored.Folder==Path.GetFullPath(folder)&&restored.RemoteEnabled,"未恢复开启状态");
+                    Assert(File.ReadAllBytes(path).SequenceEqual(original),"恢复覆盖了旧配置");
+                    bool rejected=false;try{restored.StopSharing();}catch(IOException){rejected=true;}
+                    Assert(rejected&&restored.Folder==null,"显式停止必须先停服务并报告保存失败");
+                }
+            });
             run("主程序网络启动后恢复服务，退出不把配置改成停止", () => {
                 string profile=Path.Combine(root,"startup-tools-"+Guid.NewGuid().ToString("N"));int port;
                 TcpListener probe=new TcpListener(IPAddress.Loopback,0);probe.Start();port=((IPEndPoint)probe.LocalEndpoint).Port;probe.Stop();
@@ -323,20 +337,29 @@ namespace FeiqLight.Tests
             EnumWindows((window,unused)=>{uint id;GetWindowThreadProcessId(window,out id);if(id==process.Id){StringBuilder title=new StringBuilder(64);GetWindowText(window,title,title.Capacity);if(title.ToString()=="飞Q")PostMessage(window,0x10,IntPtr.Zero,IntPtr.Zero);}return true;},IntPtr.Zero);
             Assert(process.WaitForExit(5000),"测试程序未退出，请保留资料检查 PID="+process.Id);
         }
-        private static void Upgrade(string root,string executable)
+        private static void Upgrade(string root,string executable,string previousExecutable)
         {
             string profile=Path.Combine(root,"profile"),folder=Path.Combine(root,"shared");Directory.CreateDirectory(folder);File.WriteAllText(Path.Combine(folder,"测试文件.txt"),"shared after replacement",new UTF8Encoding(false));
-            int port;TcpListener probe=new TcpListener(IPAddress.Loopback,0);probe.Start();port=((IPEndPoint)probe.LocalEndpoint).Port;probe.Stop();
+            int port=UpgradePort();
             new LocalStore(profile).SaveSettings(new AppSettings {Nickname="隔离升级验证",CloseToTray=false,Notifications=false,ReceiveFolder=Path.Combine(root,"received")});
             string pair,remotePair;
-            using(ToolsService setup=new ToolsService(port,true,profile))
+            // 由旧成品的实际实现写出配置，不能用新源码生成数据冒充跨版本升级。
+            Type oldService=System.Reflection.Assembly.LoadFile(previousExecutable).GetType("FeiqLight.ToolsService",true);
+            const System.Reflection.BindingFlags members=System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic;
+            using(IDisposable setup=(IDisposable)Activator.CreateInstance(oldService,members,null,new object[]{port,true,profile},null))
             {
-                setup.Share(folder);Reply login=Request(port,"/api/login","","{\"mode\":\"share\",\"code\":\""+setup.ShareCode+"\"}");Assert(login.Code==200,"初始化共享配对失败");pair=PairCookie(login);
-                setup.AllowRemote();setup.ConfirmRemoteDevice=address=>2;login=Request(port,"/api/login","","{\"mode\":\"remote\",\"code\":\""+setup.RemoteCode+"\"}");Assert(login.Code==200,"初始化远控配对失败");remotePair=PairCookie(login);
+                oldService.GetMethod("Share",members).Invoke(setup,new object[]{folder});
+                string shareCode=(string)oldService.GetProperty("ShareCode",members).GetValue(setup,null);
+                Reply login=Request(port,"/api/login","","{\"mode\":\"share\",\"code\":\""+shareCode+"\"}");Assert(login.Code==200,"旧版初始化共享配对失败");pair=PairCookie(login);
+                oldService.GetMethod("AllowRemote",members).Invoke(setup,null);
+                oldService.GetField("ConfirmRemoteDevice",members).SetValue(setup,new Func<string,int>(address=>2));
+                string remoteCode=(string)oldService.GetProperty("RemoteCode",members).GetValue(setup,null);
+                login=Request(port,"/api/login","","{\"mode\":\"remote\",\"code\":\""+remoteCode+"\"}");Assert(login.Code==200,"旧版初始化远控配对失败");remotePair=PairCookie(login);
             }
+            byte[] pairings=File.ReadAllBytes(Path.Combine(profile,"tools-pairings.json"));
             for(int run=0;run<2;run++)
             {
-                string package=Path.Combine(root,run==0?"first":"replacement");Directory.CreateDirectory(package);string copy=Path.Combine(package,"飞Q.exe");File.Copy(executable,copy,true);
+                string package=Path.Combine(root,run==0?"first":"replacement");Directory.CreateDirectory(package);string copy=Path.Combine(package,"飞Q.exe");File.Copy(run==0?previousExecutable:executable,copy,true);
                 using(Process process=Process.Start(new ProcessStartInfo(copy,"--autostart --loopback --port "+(port-1)+" --profile \""+profile+"\""){UseShellExecute=false,WindowStyle=ProcessWindowStyle.Hidden}))
                 {
                     try
@@ -348,10 +371,29 @@ namespace FeiqLight.Tests
                         Reply control=Request(port,"/api/reconnect",remotePair,"{\"mode\":\"remote\"}","X-FQ-Reconnect: 1\r\n");Assert(control.Code==200,"换包后丢失始终允许");
                         string session="fq_remote="+control.Json()["token"];Request(port,"/api/logout",session,"{\"mode\":\"remote\"}",TokenHeader(session));
                     }
+                    catch(Exception error){Console.WriteLine("升级验证失败："+error.Message+"；聊天端口="+(port-1)+"，共享端口="+port+"，PID="+process.Id);throw;}
                     finally{ClosePackage(process);}
                 }
+                Assert(File.ReadAllBytes(Path.Combine(profile,"tools-pairings.json")).SequenceEqual(pairings),"启动或升级重写了原配对记录");
             }
-            Console.WriteLine("PASS packaged EXE replacement: shared directory, enabled switches, share pairing and trusted remote pairing survive two process launches; no desktop input injected");
+            Console.WriteLine("PASS packaged EXE upgrade "+FileVersionInfo.GetVersionInfo(previousExecutable).ProductVersion+" -> "+FileVersionInfo.GetVersionInfo(executable).ProductVersion+": shared directory, enabled switches and trusted pairings preserved; no desktop input injected");
+        }
+        private static int UpgradePort()
+        {
+            // 成品同时绑定聊天 UDP/TCP 和相邻 HTTP 端口，不能只检查 HTTP 是否空闲。
+            for(int attempt=0;attempt<20;attempt++)
+            {
+                TcpListener http=new TcpListener(IPAddress.Loopback,0),chat=null;UdpClient udp=null;
+                try
+                {
+                    http.Start();int port=((IPEndPoint)http.LocalEndpoint).Port;
+                    chat=new TcpListener(IPAddress.Loopback,port-1);chat.Start();
+                    udp=new UdpClient(new IPEndPoint(IPAddress.Loopback,port-1));return port;
+                }
+                catch(SocketException){if(attempt==19)throw;}
+                finally{if(udp!=null)udp.Close();if(chat!=null)chat.Stop();http.Stop();}
+            }
+            throw new IOException("无法分配升级验证端口");
         }
         private static void Desktop(string root)
         {
