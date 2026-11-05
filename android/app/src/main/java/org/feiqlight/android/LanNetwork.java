@@ -12,27 +12,44 @@ final class LanNetwork implements LanNode.SocketBinding {
     private final Map<DatagramSocket,Network> bound=new WeakHashMap<>();
     private Network cachedNetwork;
     private LinkProperties cachedLinks;
-    private volatile boolean dirty=true;
+    private Object cachedKey;
+    private final java.util.concurrent.atomic.AtomicLong revision=new java.util.concurrent.atomic.AtomicLong(1);
+    private long checkedRevision;
     private long checkedAt;
     private IOException cachedFailure;
     LanNetwork(ConnectivityManager manager) { this.manager=manager; }
-    @Override public void changed() {dirty=true;}
+    @Override public void changed() {revision.incrementAndGet();}
     static boolean physical(NetworkCapabilities capabilities) {
         return capabilities!=null && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
             && !capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
             && (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)||capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET));
     }
     synchronized Network select() throws IOException {
-        if(dirty || System.nanoTime()-checkedAt>java.util.concurrent.TimeUnit.SECONDS.toNanos(5)) {
+        long version=revision.get();
+        if(version!=checkedRevision || System.nanoTime()-checkedAt>java.util.concurrent.TimeUnit.SECONDS.toNanos(5)) {
             // 网络回调主动失效，短 TTL 补漏；同一批发现/ACK 不再逐包调用系统 Binder。
-            dirty=false;checkedAt=System.nanoTime();cachedFailure=null;cachedNetwork=null;cachedLinks=null;
-            try {cachedNetwork=scan();if(cachedNetwork!=null)cachedLinks=manager.getLinkProperties(cachedNetwork);}
+            checkedRevision=version;checkedAt=System.nanoTime();cachedFailure=null;cachedNetwork=null;cachedLinks=null;cachedKey=null;
+            try {
+                cachedNetwork=scan();
+                if(cachedNetwork!=null) {
+                    cachedLinks=manager.getLinkProperties(cachedNetwork);
+                    if(cachedLinks==null) {cachedNetwork=null;}
+                    else {
+                        List<String> addresses=new ArrayList<>();
+                        for(LinkAddress link:cachedLinks.getLinkAddresses())if(link.getAddress() instanceof Inet4Address)addresses.add(link.toString());
+                        Collections.sort(addresses);
+                        if(addresses.isEmpty())cachedNetwork=null;
+                        else cachedKey=Arrays.asList(cachedNetwork,cachedLinks.getInterfaceName(),addresses);
+                    }
+                }
+            }
             catch(IOException e){cachedFailure=e;}
             catch(RuntimeException e){cachedFailure=new IOException("无法读取局域网状态，请检查系统网络权限",e);}
         }
         if(cachedFailure!=null)throw new IOException(cachedFailure.getMessage(),cachedFailure);
         return cachedNetwork;
     }
+    @Override public synchronized Object networkKey() throws IOException {select();return cachedKey;}
     private Network scan() throws IOException {
         if(manager==null) return null;
         Network chosen=null; int best=-1; boolean vpn=false;
@@ -51,16 +68,17 @@ final class LanNetwork implements LanNode.SocketBinding {
     }
     @Override public synchronized void bind(DatagramSocket socket) throws IOException {
         Network network=select();
-        if(network==null) {if(bound.containsKey(socket))throw new IOException("局域网已断开，请连接 Wi-Fi/以太网后重试");return;}
+        if(network==null) throw new IOException("网络已断开，等待 Wi-Fi/以太网恢复");
         if(network.equals(bound.get(socket)))return;
         try {network.bindSocket(socket);bound.put(socket,network);} catch(IOException e) {changed();throw blocked(e);}
     }
     @Override public void bind(Socket socket) throws IOException {
-        Network network=select(); if(network!=null) try {network.bindSocket(socket);} catch(IOException e) {changed();throw blocked(e);}
+        Network network=select(); if(network==null)throw new IOException("网络已断开，等待 Wi-Fi/以太网恢复");
+        try {network.bindSocket(socket);} catch(IOException e) {changed();throw blocked(e);}
     }
     private IOException blocked(IOException cause) { return new IOException("局域网直连被系统限制，请检查 VPN 的允许局域网/应用排除与阻止非 VPN 连接设置。",cause); }
     @Override public synchronized Collection<InetAddress> broadcasts() throws IOException {
-        Network network=select(); if(network==null) return null;
+        Network network=select(); if(network==null) return Collections.emptyList();
         LinkProperties links=cachedLinks; if(links==null) throw new IOException("局域网已切换，请稍后刷新");
         List<InetAddress> result=new ArrayList<>();
         for(LinkAddress link:links.getLinkAddresses()) {

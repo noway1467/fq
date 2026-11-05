@@ -6,6 +6,7 @@ import java.nio.file.Files;
 import java.security.SecureRandom;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /** 无 Android 依赖的通信核心，JVM 测试直接运行 APK 使用的同一份代码。 */
@@ -41,23 +42,36 @@ public final class LanNode implements AutoCloseable {
         void peersChanged();
         void message(Peer peer, Message message, boolean update);
         void error(String text);
+        default void networkStateChanged(boolean available,String reason) { }
         default void fileProgress(Peer peer,long packet,long file,int percent,String state) { }
     }
     public interface SocketBinding {
         void bind(DatagramSocket socket) throws IOException;
         void bind(Socket socket) throws IOException;
         default Collection<InetAddress> broadcasts() throws IOException { return null; }
+        // null 表示没有实体局域网；键只包含路由身份和 IPv4，不包含互联网验证状态。
+        default Object networkKey() throws IOException { return this; }
         default void changed() { }
     }
     private volatile SocketBinding socketBinding;
-    public void setSocketBinding(SocketBinding binding) { if(udp!=null) throw new IllegalStateException("需在启动前设置网络"); socketBinding=binding; }
-    public void networkChanged() {SocketBinding binding=socketBinding;if(binding!=null)binding.changed();revalidate();}
+    public void setSocketBinding(SocketBinding binding) { if(started) throw new IllegalStateException("需在启动前设置网络"); socketBinding=binding; }
+    private final AtomicBoolean networkDirty=new AtomicBoolean();
+    private volatile long fastRefreshUntil;
+    public void networkChanged() {
+        if(closed)return;
+        SocketBinding binding=socketBinding;if(binding!=null)binding.changed();
+        fastRefreshUntil=System.nanoTime()+TimeUnit.SECONDS.toNanos(10);
+        if(networkDirty.compareAndSet(false,true))try {timer.execute(this::tick);}catch(RejectedExecutionException ignored) { }
+    }
     // 静默 6 秒后逐个单播 ENTRY，连续 3 次无回应判离线；网络切换或手动刷新后 2 次无回应即离线。
     long heartbeatIdle=TimeUnit.SECONDS.toNanos(6), heartbeatRetry=TimeUnit.SECONDS.toNanos(3);
     int idleMisses=3, verifyMisses=2;
     private volatile long verifyFrom=System.nanoTime();
     /** 网络切换、用户刷新或回到前台时立即复核：仍能回应的联系人保持在线，失联者约 6 秒内离线。 */
-    public void revalidate() { verifyFrom=System.nanoTime(); }
+    public void revalidate() {
+        long now=System.nanoTime();verifyFrom=now;
+        synchronized(gate){for(Peer peer:peers.values())if(peer.online && peer.misses==0)peer.probed=now-heartbeatRetry;}
+    }
     public interface Progress { void update(int percent); }
     public static final class Transfer implements AutoCloseable {
         private volatile boolean cancelled;
@@ -93,17 +107,21 @@ public final class LanNode implements AutoCloseable {
     private final String login, host;
     private String deviceId;
     public void setDeviceId(String value) {
-        if(udp!=null)throw new IllegalStateException("需在启动前设置身份");
+        if(started)throw new IllegalStateException("需在启动前设置身份");
         deviceId=Protocol.normalizeDeviceId(value);
     }
     public void rememberPeers(Collection<Peer> saved) {
         synchronized(gate) { for(Peer peer:saved) if(peers.size()<1000 && (!loopback || peer.endpoint.getAddress().isLoopbackAddress())) { peer.conversationId=peer.id();peers.put(peer.id(),peer); } }
     }
     public volatile String nickname, group;
-    private DatagramSocket udp;
+    private volatile DatagramSocket udp;
     private ServerSocket tcp;
-    private volatile boolean closed;
-    private long refreshAt;
+    private volatile boolean closed,started,networkAvailable;
+    private volatile String networkStatus="网络已断开，等待 Wi-Fi/以太网恢复";
+    private Object networkKey;
+    private volatile long refreshAt;
+    public boolean networkAvailable() { return !closed && networkAvailable; }
+    public String networkStatus() { return networkStatus; }
 
     public LanNode(int port,boolean loopback,String login,String host,String nickname,String group,Listener listener) {
         if (port<1024 || port>65535) throw new IllegalArgumentException("端口须为 1024–65535");
@@ -111,16 +129,46 @@ public final class LanNode implements AutoCloseable {
         this.nickname=nickname; this.group=group; this.listener=listener;
     }
     public void start() throws IOException {
-        if (closed || udp!=null) throw new IOException("服务已启动或关闭");
+        if (closed || started) throw new IOException("服务已启动或关闭");
+        started=true;
         try {
             InetAddress address=InetAddress.getByName(loopback?"127.0.0.1":"0.0.0.0");
-            udp=new DatagramSocket(null); udp.setReuseAddress(false); udp.setBroadcast(!loopback); udp.bind(new InetSocketAddress(address,port));
-            if(!loopback && socketBinding!=null) socketBinding.bind(udp);
             tcp=new ServerSocket(); tcp.setReuseAddress(false); tcp.bind(new InetSocketAddress(address,port),4);
-            Thread rx=new Thread(this::receiveLoop,"feiq-udp"), accept=new Thread(this::acceptLoop,"feiq-files");
-            rx.setDaemon(true); accept.setDaemon(true); rx.start(); accept.start();
-            timer.scheduleWithFixedDelay(this::tick,1,1,TimeUnit.SECONDS); refresh();
+            refresh();
+            Thread accept=new Thread(this::acceptLoop,"feiq-files");accept.setDaemon(true);accept.start();
+            timer.scheduleWithFixedDelay(this::tick,1,1,TimeUnit.SECONDS);
         } catch (IOException | RuntimeException e) { close(); throw e; }
+    }
+    private void networkState(boolean available,String reason) {
+        if(closed || (networkAvailable==available && networkStatus.equals(reason)))return;
+        networkAvailable=available;networkStatus=reason;listener.networkStateChanged(available,reason);
+    }
+    private void switchNetwork(Object key) throws IOException {
+        synchronized(gate) {
+            if(closed || (Objects.equals(key,networkKey) && (key==null || udp!=null)))return;
+            synchronized(udpSendGate) {
+                DatagramSocket old=udp;udp=null;networkKey=null;
+                if(old!=null)old.close();
+                // 旧网的在线证据、重发和文件授权不能带到新网；已落盘的接收断点保留。
+                for(Peer peer:peers.values()){peer.online=false;peer.misses=0;}
+                for(Pending p:pending.values()){p.message.state="网络已切换，未确认送达";listener.message(p.peer,p.message.copy(),true);}pending.clear();
+                for(Offer offer:offers.values())endOffer(offer,"网络已切换，请重新发送邀请");offers.clear();
+                for(Socket socket:connections)try{socket.close();}catch(IOException ignored){ }
+                listener.peersChanged();
+                networkState(false,"网络已断开，等待 Wi-Fi/以太网恢复");
+                if(key==null)return;
+                DatagramSocket next=new DatagramSocket(null);
+                try {
+                    next.setReuseAddress(false);next.setBroadcast(!loopback);
+                    next.bind(new InetSocketAddress(InetAddress.getByName(loopback?"127.0.0.1":"0.0.0.0"),port));
+                    // Network.bindSocket 会访问 socket 监视器，必须在 receive 开始前完成，不能重绑阻塞中的旧 socket。
+                    if(!loopback && socketBinding!=null)try{socketBinding.bind(next);}
+                    catch(IOException e){next.close();networkState(false,e.getMessage());return;}
+                    udp=next;networkKey=key;
+                    Thread rx=new Thread(()->receiveLoop(next),"feiq-udp");rx.setDaemon(true);rx.start();
+                } catch(IOException | RuntimeException e) {next.close();throw e;}
+            }
+        }
     }
     public List<Peer> peers() { synchronized (gate) { return new ArrayList<>(peers.values()); } }
     public static InetSocketAddress endpoint(String text) throws IOException {
@@ -138,11 +186,9 @@ public final class LanNode implements AutoCloseable {
     // TCP 请求仍以首个 NUL 结束，身份扩展只用于 UDP，兼容旧端文件服务。
     private byte[] encode(int command,String body,String extra) { return Protocol.encode(sequence.incrementAndGet(),login,host,command|Protocol.UTF8,body,extra,(command&255)==Protocol.GET_FILE?null:deviceId); }
     private void send(byte[] bytes,InetSocketAddress to) throws IOException {
-        if (closed || udp==null) throw new IOException("尚未连接局域网");
         if (!(to.getAddress() instanceof Inet4Address) || (loopback && !to.getAddress().isLoopbackAddress())) throw new IOException("无效的目标地址");
         synchronized(udpSendGate) {
-            // 适配层只在实体网络改变后重绑，同一轮发现/ACK 复用绑定。
-            if(!loopback && socketBinding!=null) socketBinding.bind(udp);
+            if(closed || udp==null)throw new IOException(networkStatus);
             udp.send(new DatagramPacket(bytes,bytes.length,to));
         }
     }
@@ -158,10 +204,25 @@ public final class LanNode implements AutoCloseable {
         }
     }
     public void refresh() throws IOException {
+        revalidate();fastRefreshUntil=System.nanoTime()+TimeUnit.SECONDS.toNanos(10);refreshNow();
+    }
+    private synchronized void refreshNow() throws IOException {
+        if(closed || !started)return;
         refreshAt=System.nanoTime();
+        Object key=this;
+        if(!loopback && socketBinding!=null) {
+            socketBinding.changed();
+            try {key=socketBinding.networkKey();}
+            catch(IOException e){switchNetwork(null);networkState(false,e.getMessage());return;}
+        }
+        switchNetwork(key);
+        if(key==null){networkState(false,"网络已断开，等待 Wi-Fi/以太网恢复");return;}
+        if(udp==null)return;
         Set<InetAddress> addresses=new HashSet<>();
         if (!loopback) {
-            Collection<InetAddress> physical=socketBinding==null?null:socketBinding.broadcasts();
+            Collection<InetAddress> physical;
+            try{physical=socketBinding==null?null:socketBinding.broadcasts();}
+            catch(IOException e){switchNetwork(null);networkState(false,e.getMessage());return;}
             if(physical!=null) addresses.addAll(physical);
             else {
             addresses.add(InetAddress.getByName("255.255.255.255"));
@@ -172,24 +233,27 @@ public final class LanNode implements AutoCloseable {
             }
             }
         }
-        for (InetAddress address:addresses) try { probe(new InetSocketAddress(address,port)); } catch (IOException e) { listener.error("广播不可用，可尝试手动添加 IP"); }
-        Set<InetSocketAddress> targets; long now=System.nanoTime();
+        IOException failure=null;boolean sent=addresses.isEmpty();
+        for (InetAddress address:addresses) try { probe(new InetSocketAddress(address,port));sent=true; } catch (IOException e) {failure=e;}
+        Set<InetSocketAddress> targets;
         synchronized(gate) {
             targets=new LinkedHashSet<>(remembered);
-            // 每次单播都计为一次待回应探测，对方任何报文都会清零。
-            for(Peer peer:peers.values()) { targets.add(peer.endpoint); peer.probed=now; peer.misses++; }
+            // 发现补包不改心跳计时；连续刷新既不能推迟判离线，也不能重复累计尚未超时的探测。
+            for(Peer peer:peers.values())targets.add(peer.endpoint);
         }
-        for(InetSocketAddress target:targets) try { probe(target); } catch(IOException ignored) { }
+        for(InetSocketAddress target:targets) try { probe(target);sent=true; } catch(IOException ignored) { }
+        if(!sent && failure!=null){switchNetwork(null);networkState(false,"局域网暂不可用，正在重试："+failure.getMessage());}
+        else networkState(true,"");
     }
-    private void receiveLoop() {
+    private void receiveLoop(DatagramSocket source) {
         byte[] buffer=new byte[60001];
-        while (!closed) try {
-            DatagramPacket datagram=new DatagramPacket(buffer,buffer.length); udp.receive(datagram);
+        while (!closed && !source.isClosed()) try {
+            DatagramPacket datagram=new DatagramPacket(buffer,buffer.length); source.receive(datagram);
             Protocol.Packet packet=Protocol.parse(Arrays.copyOf(datagram.getData(),datagram.getLength()));
             if (packet==null || !(datagram.getAddress() instanceof Inet4Address)) continue;
             if (packet.login.equals(login) && packet.host.equals(host) && datagram.getPort()==port) continue;
-            handle(packet,new InetSocketAddress(datagram.getAddress(),datagram.getPort()));
-        } catch (IOException e) { if (!closed) { listener.error("网络接收失败："+e.getMessage()); try { Thread.sleep(100); } catch (InterruptedException stop) { return; } } }
+            synchronized(gate) {if(source==udp)handle(packet,new InetSocketAddress(datagram.getAddress(),datagram.getPort()));}
+        } catch (IOException e) { if (!closed && source==udp) { listener.error("网络接收失败："+e.getMessage()); try { Thread.sleep(100); } catch (InterruptedException stop) { return; } } }
           catch (RuntimeException e) { if (!closed) listener.error("消息处理失败："+e.getMessage()); }
     }
     private void handle(Protocol.Packet p,InetSocketAddress from) throws IOException {
@@ -276,6 +340,9 @@ public final class LanNode implements AutoCloseable {
         if (closed) return;
         try {
             long now=System.nanoTime(); boolean changed=false; List<InetSocketAddress> probes=new ArrayList<>();
+            boolean dirty=networkDirty.getAndSet(false);
+            long interval=now-fastRefreshUntil<0?TimeUnit.SECONDS.toNanos(1):TimeUnit.SECONDS.toNanos(networkAvailable?30:3);
+            if(dirty || now-refreshAt>=interval)refreshNow();
             synchronized (gate) {
                 Iterator<Pending> it=pending.values().iterator();
                 while (it.hasNext()) {
@@ -297,7 +364,6 @@ public final class LanNode implements AutoCloseable {
             }
             for (InetSocketAddress target:probes) try { probe(target); } catch (IOException ignored) { }
             if (changed) listener.peersChanged();
-            if (now-refreshAt>TimeUnit.SECONDS.toNanos(30)) refresh();
         } catch (IOException | RuntimeException e) { if (!closed) listener.error("网络维护失败："+e.getMessage()); }
     }
     private void acceptLoop() {

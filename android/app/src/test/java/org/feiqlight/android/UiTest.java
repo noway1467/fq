@@ -115,8 +115,9 @@ public final class UiTest {
         shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));
         ActivityController<MainActivity> ac=Robolectric.buildActivity(MainActivity.class).create().start().resume().visible();MainActivity activity=ac.get();android.app.Dialog dialog=null;
         LanNode.Listener quiet=new LanNode.Listener(){public void peersChanged(){}public void error(String t){}public void message(LanNode.Peer p,LanNode.Message m,boolean update){}};
-        try(LanNode node=new LanNode(32429,true,"ui-forward","host","测试","",quiet)) {
-            settle(service);Field nf=ChatService.class.getDeclaredField("node");nf.setAccessible(true);nf.set(service,node);
+        int port;try(java.net.ServerSocket socket=new java.net.ServerSocket(0,1,java.net.InetAddress.getLoopbackAddress())){port=socket.getLocalPort();}
+        try(LanNode node=new LanNode(port,true,"ui-forward","host","测试","",quiet)) {
+            node.start();settle(service);Field nf=ChatService.class.getDeclaredField("node");nf.setAccessible(true);nf.set(service,node);
             for(int i=0;i<3;i++){LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:"+(32425+i)),"peer"+i,"host",i==0?"upstair win10":"phone","");LanNode.Message m=new LanNode.Message();m.number=i+1;m.time=i+1;m.text="历史";service.incoming(peer,m,false);}
             settle(service);for(ChatStore.Conversation c:service.conversations())c.peer.online=true;
             LanNode.Message message=new LanNode.Message();message.text="正文 中文 👩🏽‍💻\n第二行\n".repeat(3000);

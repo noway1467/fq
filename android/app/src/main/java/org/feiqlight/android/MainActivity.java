@@ -193,7 +193,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         LinearLayout footer=column(); connectionBar=footer; footer.setPadding(dp(20),dp(8),dp(20),dp(16)); body.addView(footer);
         connect=button("连接",true);
         LinearLayout.LayoutParams params=new LinearLayout.LayoutParams(-1,dp(50)); params.topMargin=dp(12); footer.addView(connect,params);
-        connect.setOnClickListener(v->{ if(service!=null&&service.online()) service.refresh(); else connect(); });
+        connect.setOnClickListener(v->{ if(service!=null&&service.connectionActive()) service.refresh(); else connect(); });
     }
     private int editorGeneration;
     private void renderChat() {
@@ -284,7 +284,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
             if(selected.isEmpty()) {
                 subtitle.setText(service==null?"":service.online()?service.conversations().stream().filter(c->c.peer.online).count()+" 人在线":service.status());
                 if(adapter!=null) adapter.refresh();
-                if(connect!=null) connect.setText(service!=null&&service.online()?"刷新":"连接");
+                if(connect!=null) connect.setText(service!=null&&service.connectionActive()?"刷新":"连接");
                 if(connectionBar!=null) connectionBar.setVisibility(service!=null&&service.online()?View.GONE:View.VISIBLE);
                 if(empty!=null) empty.setText(search!=null&&!search.getText().toString().isEmpty()?"没有结果":"暂无会话");
             } else {

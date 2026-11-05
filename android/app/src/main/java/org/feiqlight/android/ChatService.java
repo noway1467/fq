@@ -25,7 +25,7 @@ public final class ChatService extends Service {
     private final Handler main=new Handler(Looper.getMainLooper());
     private final ExecutorService io=Executors.newSingleThreadExecutor();
     private final ExecutorService discovery=Executors.newSingleThreadExecutor();
-    private final AtomicBoolean refreshQueued=new AtomicBoolean(),publishQueued=new AtomicBoolean();
+    private final AtomicBoolean refreshQueued=new AtomicBoolean(),refreshAgain=new AtomicBoolean(),publishQueued=new AtomicBoolean();
     private final ExecutorService transferWorker=Executors.newSingleThreadExecutor();
     private final AtomicBoolean busy=new AtomicBoolean();
     private final Set<Observer> observers=new HashSet<>();
@@ -132,6 +132,9 @@ public final class ChatService extends Service {
                 next=connectionFactory.apply(prefs,new LanNode.Listener() {
                     @Override public void peersChanged() { if(currentConnection(epoch)) requestPublish(); }
                     @Override public void error(String text) { if(currentConnection(epoch)) showError(text); }
+                    @Override public void networkStateChanged(boolean available,String reason) {
+                        main.post(()->{if(currentConnection(epoch))updateNetworkStatus();});
+                    }
                     @Override public void message(LanNode.Peer peer,LanNode.Message message,boolean update) { if(currentConnection(epoch)||update) incoming(peer,message,update,epoch); }
                     @Override public void fileProgress(LanNode.Peer peer,long packet,long file,int percent,String state) {
                         main.post(()->{if(currentConnection(epoch))ChatService.this.fileProgress(peer.id(),packet,file,true,percent,state,null);});
@@ -155,18 +158,20 @@ public final class ChatService extends Service {
                         if (wifi!=null) { multicast=wifi.createMulticastLock("FeiqLight"); multicast.setReferenceCounted(false); multicast.acquire(); }
                         connectivity=getSystemService(ConnectivityManager.class);
                         callback=new ConnectivityManager.NetworkCallback() {
-                            private void update() {if(currentConnection(epoch)&&node==connected){connected.networkChanged();refresh();}}
+                            private void update() {if(currentConnection(epoch)&&node==connected)connected.networkChanged();}
                             @Override public void onAvailable(Network network) { diagnostics.record(Diagnostics.Event.NetworkChanged);update(); }
                             @Override public void onLost(Network network) { update(); }
                             @Override public void onLinkPropertiesChanged(Network network,LinkProperties properties) { update(); }
                             @Override public void onCapabilitiesChanged(Network network,NetworkCapabilities capabilities) { update(); }
                         };
-                        connectivity.registerNetworkCallback(new NetworkRequest.Builder().addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN).build(),callback);
+                        connectivity.registerNetworkCallback(new NetworkRequest.Builder()
+                            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI).addTransportType(NetworkCapabilities.TRANSPORT_ETHERNET)
+                            .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN).build(),callback);
                     } catch (RuntimeException e) { showError("自动发现可能受限，可尝试手动 IP："+e.getMessage()); }
-                    diagnostics.record(Diagnostics.Event.Connected);connecting=false; status="已连接 · UDP / TCP "+prefs.getInt("port",2425); changed();
+                    diagnostics.record(Diagnostics.Event.Connected);connecting=false;
                     connectedPort=prefs.getInt("port",2425);
-                    restoreSharing();
-                    getSystemService(NotificationManager.class).notify(1,notification("connection","飞Q正在运行","可接收局域网消息 · 点击返回",true));
+                    updateNetworkStatus();
+                    connected.networkChanged();
                 });
                 try { publish(); } catch(Exception e) { fail(e); }
             } catch (Exception e) {
@@ -198,7 +203,7 @@ public final class ChatService extends Service {
     }
     void receiveSettingsChanged() { drainReceives(); changed(); }
     private void drainReceives() {
-        if(stopped||disconnecting||node==null||busy()||!storage.automatic()||waiting.isEmpty()) return;
+        if(stopped||disconnecting||!online()||busy()||!storage.automatic()||waiting.isEmpty()) return;
         ReceiveRequest next=waiting.values().iterator().next(); receive(next.peer,next.packet,next.file);
     }
     void observe(Observer o) { observers.add(o); o.changed(); }
@@ -213,7 +218,15 @@ public final class ChatService extends Service {
         if(clear && (busy() || waiting.values().stream().anyMatch(r->r.peer.id().equals(id)))) {showError("请先完成或拒绝待接收文件，再清空记录");done.accept(false);return;}
         queue(()->{try {store.remove(id,clear,hide);publish();main.post(()->done.accept(true));}catch(Exception e){fail(e);main.post(()->done.accept(false));}});
     }
-    boolean online() { return node!=null && !connecting; }
+    boolean online() { LanNode current=node;return current!=null && !connecting && current.networkAvailable(); }
+    private void updateNetworkStatus() {
+        LanNode current=node;if(current==null || connecting || stopped)return;
+        String next=current.networkAvailable()?"已连接 · UDP / TCP "+connectedPort:current.networkStatus();
+        if(next.equals(status))return;
+        status=next;changed();
+        getSystemService(NotificationManager.class).notify(1,notification("connection","飞Q正在运行",online()?"可接收局域网消息 · 点击返回":status,true));
+        if(online()){if(sharedFiles==null)restoreSharing();drainReceives();}
+    }
     SharedFiles sharedFiles() { return sharedFiles; }
     private void closeSharing() { sharingEpoch++; if(sharedFiles!=null){sharedFiles.close();sharedFiles=null;} }
     void stopSharing() { closeSharing();try{new SharedFolderSettings(this).stop();}catch(IOException e){showError(e.getMessage());} }
@@ -266,10 +279,15 @@ public final class ChatService extends Service {
         main.post(()->{ if (!stopped) { conversations=list; changed(); } });
     }
     void refresh() {
-        if(stopped||!refreshQueued.compareAndSet(false,true))return;
+        if(stopped)return;
+        refreshAgain.set(true);if(!refreshQueued.compareAndSet(false,true))return;
         LanNode current=node;long epoch=connectionEpoch;
-        // 用户刷新与网络回调都要立即复核在线状态，不再等两分钟超时。
-        try {discovery.execute(()->{try {if(current!=null&&node==current&&currentConnection(epoch)){current.revalidate();current.refresh();}}catch(IOException e){if(currentConnection(epoch))fail(e);}finally{refreshQueued.set(false);}});}
+        // 扫描期间的新请求至少再执行一次，不能把 DHCP 就绪后的最后一次刷新丢掉。
+        try {discovery.execute(()->{
+            try {do {refreshAgain.set(false);if(current!=null&&node==current&&currentConnection(epoch))current.refresh();}while(refreshAgain.get()&&currentConnection(epoch));}
+            catch(IOException e){if(currentConnection(epoch))fail(e);}
+            finally{refreshQueued.set(false);if(refreshAgain.get()&&!stopped)refresh();}
+        });}
         catch(RejectedExecutionException ignored){refreshQueued.set(false);}
     }
     // 回到前台只让维护线程单播复核在线联系人，不额外广播或访问系统网络接口。
@@ -278,7 +296,7 @@ public final class ChatService extends Service {
         if(stopped)return;long epoch=connectionEpoch;
         try {discovery.execute(()->{try {if(currentConnection(epoch))requireNode().probe(LanNode.endpoint(address));}catch(IOException e){if(currentConnection(epoch))fail(e);}});}catch(RejectedExecutionException ignored){}
     }
-    private LanNode requireNode() throws IOException { LanNode current=node; if (current==null||stopped||disconnecting) throw new IOException("请先连接局域网"); return current; }
+    private LanNode requireNode() throws IOException { LanNode current=node; if (current==null||stopped||disconnecting) throw new IOException("请先连接局域网");if(!current.networkAvailable())throw new IOException(current.networkStatus());return current; }
     void send(LanNode.Peer peer,String text,Consumer<Boolean> done) {
         DraftStore drafts=new DraftStore(this); DraftStore.Snapshot sent=drafts.snapshot(peer.id());
         if(stopped){main.post(()->done.accept(false));return;}

@@ -37,6 +37,18 @@ public final class IdleSendLatency {
             System.out.println("REAL_UDP_SEND_0_MS="+elapsed);passed=elapsed<1000;
             if(passed)waker.cancel(false);
             System.out.println(passed?"IDLE_SEND_PASS: no inbound packet needed":"IDLE_SEND_FAIL: outgoing waited for inbound packet");
+            java.lang.reflect.Method switchNetwork=LanNode.class.getDeclaredMethod("switchNetwork",Object.class);switchNetwork.setAccessible(true);
+            start=System.nanoTime();
+            Future<?> switched=sender.submit(()->{try{switchNetwork.invoke(node,new Object[]{null});node.refresh();}catch(Exception e){throw new RuntimeException(e);}});
+            switched.get(1,TimeUnit.SECONDS);elapsed=TimeUnit.NANOSECONDS.toMillis(System.nanoTime()-start);
+            if(!udp.isClosed()||field.get(node)==udp)throw new AssertionError("切网仍复用旧 UDP socket");
+            node.probe(peer.endpoint);target.receive(packet);
+            if(Protocol.parse(Arrays.copyOf(packet.getData(),packet.getLength())).mode()!=Protocol.ENTRY)throw new AssertionError("新 UDP socket 无法发送发现报文");
+            byte[] answer=Protocol.encode(1,"target","test",Protocol.ANSWER|Protocol.UTF8,"test","test");
+            target.send(new DatagramPacket(answer,answer.length,InetAddress.getLoopbackAddress(),packet.getPort()));
+            long until=System.nanoTime()+TimeUnit.SECONDS.toNanos(1);while(node.peers().isEmpty()&&System.nanoTime()<until)Thread.sleep(10);
+            if(node.peers().isEmpty()||!node.peers().get(0).online)throw new AssertionError("新 UDP socket 无法接收应答");
+            System.out.println("IDLE_NETWORK_SWITCH_MS="+elapsed+"; new socket send/receive PASS");
             // 关闭套接字会解除阻塞接收，不使用强制终止或接触用户局域网。
         } finally {wake.shutdownNow();sender.shutdownNow();wake.awaitTermination(5,TimeUnit.SECONDS);sender.awaitTermination(5,TimeUnit.SECONDS);}
         if(!passed)throw new AssertionError("空闲发送 0 超过 1 秒");

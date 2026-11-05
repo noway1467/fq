@@ -18,7 +18,8 @@ public final class LanNetworkTest {
     @org.robolectric.annotation.Implements(ConnectivityManager.class)
     public static class CountingConnectivity extends ShadowConnectivityManager {
         int queries;
-        @org.robolectric.annotation.Implementation protected Network[] getAllNetworks() {queries++;return super.getAllNetworks();}
+        Runnable duringQuery;
+        @org.robolectric.annotation.Implementation protected Network[] getAllNetworks() {queries++;if(duringQuery!=null){Runnable action=duringQuery;duringQuery=null;action.run();}return super.getAllNetworks();}
     }
     @org.robolectric.annotation.Implements(Network.class)
     public static class CountingNetwork extends ShadowNetwork {
@@ -66,5 +67,32 @@ public final class LanNetworkTest {
                 node.setSocketBinding(new org.feiqlight.android.core.LanNode.SocketBinding(){public void bind(DatagramSocket s){fail("回环测试碰到真实网络");}public void bind(Socket s){fail("回环测试碰到真实网络");}});node.start();node.refresh();
             }
         }
+    }
+    @Test public void noLanNeverFallsBackToCellularOrDefaultBroadcast() throws Exception {
+        ConnectivityManager cm=(ConnectivityManager)RuntimeEnvironment.getApplication().getSystemService(Context.CONNECTIVITY_SERVICE);shadowOf(cm).clearAllNetworks();
+        add(cm,910,NetworkCapabilities.TRANSPORT_CELLULAR,"192.0.2.8",24);LanNetwork route=new LanNetwork(cm);
+        assertNull(route.networkKey());assertTrue(route.broadcasts().isEmpty());
+        try(DatagramSocket udp=new DatagramSocket(null);Socket tcp=new Socket()) {
+            try{route.bind(udp);fail("没有 Wi-Fi 时仍放行 UDP");}catch(IOException expected){assertTrue(expected.getMessage().contains("网络已断开"));}
+            try{route.bind(tcp);fail("没有 Wi-Fi 时仍放行 TCP");}catch(IOException expected){assertTrue(expected.getMessage().contains("网络已断开"));}
+        }
+    }
+    @Test public void routeKeyChangesForDhcpAndWifiButNotInternetValidation() throws Exception {
+        ConnectivityManager cm=(ConnectivityManager)RuntimeEnvironment.getApplication().getSystemService(Context.CONNECTIVITY_SERVICE);shadowOf(cm).clearAllNetworks();
+        Network wifi=add(cm,911,NetworkCapabilities.TRANSPORT_WIFI,"192.0.2.8",24);LanNetwork route=new LanNetwork(cm);Object first=route.networkKey();
+        NetworkCapabilities caps=cm.getNetworkCapabilities(wifi);shadowOf(caps).addCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED);shadowOf(cm).setNetworkCapabilities(wifi,caps);
+        route.changed();assertEquals("互联网状态不应触发局域网断线",first,route.networkKey());
+        shadowOf(cm).setLinkProperties(wifi,new LinkProperties());route.changed();assertNull("尚未取得 IPv4 不能算可用网络",route.networkKey());
+        shadowOf(cm).removeNetwork(wifi);wifi=add(cm,911,NetworkCapabilities.TRANSPORT_WIFI,"198.51.100.8",23);route.changed();
+        Object changedAddress=route.networkKey();assertNotEquals(first,changedAddress);assertEquals("198.51.101.255",route.broadcasts().iterator().next().getHostAddress());
+        shadowOf(cm).removeNetwork(wifi);add(cm,912,NetworkCapabilities.TRANSPORT_WIFI,"198.51.100.8",23);route.changed();
+        assertNotEquals("不同 Wi-Fi 即使 IP 相同也必须更换 socket",changedAddress,route.networkKey());
+    }
+    @Test @Config(shadows=CountingConnectivity.class)
+    public void networkChangeDuringScanIsNotLost() throws Exception {
+        ConnectivityManager cm=(ConnectivityManager)RuntimeEnvironment.getApplication().getSystemService(Context.CONNECTIVITY_SERVICE);shadowOf(cm).clearAllNetworks();
+        add(cm,913,NetworkCapabilities.TRANSPORT_WIFI,"192.0.2.8",24);LanNetwork route=new LanNetwork(cm);
+        CountingConnectivity manager=org.robolectric.shadow.api.Shadow.extract(cm);manager.duringQuery=route::changed;
+        route.networkKey();route.networkKey();assertEquals("扫描中的网络回调不能被已检查标记覆盖",2,manager.queries);
     }
 }
