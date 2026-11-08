@@ -50,7 +50,7 @@ namespace FeiqLight
         private bool drawerOpen;
         private ContextMenuStrip chatMenu, fileMenu;
         private EmojiPicker emojiPicker;
-        private readonly RoundedPanel inputShell = new RoundedPanel { Fill = Theme.Ice, Radius = 22, Padding = new Padding(16, 9, 14, 7) };
+        private readonly RoundedPanel inputShell = new RoundedPanel { Fill = Theme.Ice, Radius = 22, Padding = new Padding(16, 12, 16, 12) };
         public ChatForm(Peer peer, LanService network, LocalStore store, MainForm main)
         {
             this.peer = peer; this.network = network; this.store = store; this.main = main;

@@ -138,7 +138,25 @@ namespace FeiqLight
     public sealed class ChatEditor : RichTextBox
     {
         public string Placeholder = "输入消息…";
-        protected override void OnTextChanged(EventArgs e) { base.OnTextChanged(e); if (TextLength <= 1) Invalidate(); }
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        private struct TextArea { internal int Left, Top, Right, Bottom; }
+        [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr handle, int message, IntPtr wparam, ref TextArea area);
+        private Rectangle textArea;
+        private void AlignText()
+        {
+            if (!IsHandleCreated || IsDisposed || Disposing || ClientSize.Width < 4) return;
+            // RichEdit 的正文和提示语共用排版框；单行居中，多行从顶部开始，避免输入后文字跳位。
+            int top = GetLineFromCharIndex(TextLength) == 0 ? Math.Max(0, (ClientSize.Height - Font.Height) / 2) : 0;
+            Rectangle next = Rectangle.FromLTRB(1, top, ClientSize.Width - 1, ClientSize.Height);
+            if (next == textArea) return;
+            textArea = next;
+            TextArea area = new TextArea { Left = next.Left, Top = next.Top, Right = next.Right, Bottom = next.Bottom };
+            SendMessage(Handle, 0x00B3, IntPtr.Zero, ref area); Invalidate();
+        }
+        protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); textArea = Rectangle.Empty; AlignText(); }
+        protected override void OnResize(EventArgs e) { base.OnResize(e); AlignText(); }
+        protected override void OnFontChanged(EventArgs e) { base.OnFontChanged(e); textArea = Rectangle.Empty; AlignText(); }
+        protected override void OnTextChanged(EventArgs e) { base.OnTextChanged(e); AlignText(); if (TextLength <= 1) Invalidate(); }
         protected override void OnGotFocus(EventArgs e) { base.OnGotFocus(e); Invalidate(); }
         protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); Invalidate(); }
         protected override void WndProc(ref Message m)
@@ -146,7 +164,7 @@ namespace FeiqLight
             base.WndProc(ref m);
             if (m.Msg == 0x000F && TextLength == 0 && !String.IsNullOrEmpty(Placeholder) && IsHandleCreated)
                 using (Graphics g = CreateGraphics())
-                    TextRenderer.DrawText(g, Placeholder, Font, new Rectangle(1, 0, ClientSize.Width - 2, Font.Height + 4), Theme.Blend(Theme.Muted, BackColor, .85F), TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.Left | TextFormatFlags.NoPadding);
+                    TextRenderer.DrawText(g, Placeholder, Font, new Rectangle(GetPositionFromCharIndex(0), new Size(Math.Max(1, textArea.Width), Font.Height)), Theme.Muted, TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.Left | TextFormatFlags.NoPadding);
         }
     }
     // 拖入文件时覆盖消息区的投放提示；自身也接收投放。

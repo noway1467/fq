@@ -11,7 +11,11 @@ namespace FeiqLight
     {
         private readonly ToolsService service;
         private readonly RemoteDesktop desktop = new RemoteDesktop();
-        private readonly Label share, remote, connection;
+        private readonly Label share, shareCode, remote, connection, empty;
+        private readonly ListBox folders = new ListBox();
+        private readonly Button startShare, stopShare, removeFolder, copyCode, stopControl;
+        private readonly ToolTip tips = new ToolTip();
+        private readonly Font codeFont = new Font("Consolas", 20F, FontStyle.Bold);
         private readonly Timer timer = new Timer { Interval = 1000 };
         private Form banner;
         private bool hotkey;
@@ -20,23 +24,46 @@ namespace FeiqLight
         [DllImport("user32.dll")] private static extern bool UnregisterHotKey(IntPtr window, int id);
         internal ToolsWindow(int port, bool loopback, string root = null)
         {
-            Text = "共享与远控"; ClientSize = new Size(600, 472); MinimumSize = new Size(540, 440); UseSecondaryChrome();
+            Text = "共享与远控"; ClientSize = new Size(840, 740); MinimumSize = new Size(680, 620); UseSecondaryChrome();
             service = new ToolsService(ToolsHttp.PortFor(port), loopback, root); service.Capture = desktop.Capture; service.Displays = desktop.Displays; service.Input = desktop.Apply; service.ReleaseInput = desktop.Release; service.ConfirmRemoteDevice = Confirm;
-            Panel scroll = new Panel { Dock = DockStyle.Fill, AutoScroll = true };
-            TableLayoutPanel body = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 1, RowCount = 8, Padding = new Padding(24), Margin = Padding.Empty };
+            TableLayoutPanel body = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 7, Padding = new Padding(24, 16, 24, 12), Margin = Padding.Empty };
             body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            foreach (int height in new[] { 32, 60, 48, 40, 48, 48, 32, 48 }) body.RowStyles.Add(new RowStyle(SizeType.Absolute, height));
-            scroll.Controls.Add(body); Surface.Controls.Add(scroll);
-            AddLabel(body, "共享文件夹", 32, true);
-            share = AddLabel(body, "未共享", 60, false);
-            AddButtons(body, "开启 / 更换文件夹", Choose, "停止共享", delegate { ChangeSettings(service.StopSharing); });
-            AddLabel(body, "远程控制", 40, true);
-            remote = AddLabel(body, "未开启", 48, false);
-            AddButtons(body, "生成远控连接码", delegate { ChangeSettings(service.AllowRemote); }, "立即停止远控", StopRemote);
-            connection = AddLabel(body, "", 32, false);
-            Button forget = Theme.Button("清除已配对设备", delegate { try { service.ForgetPairings(); UpdateState(); } catch (System.IO.IOException e) { using (NoticeDialog notice = new NoticeDialog("无法清除配对", e.Message)) notice.ShowDialog(this); } }, false);
-            forget.Width = 190; body.Controls.Add(forget);
-            Shown += delegate { UpdateState(); };
+            foreach (int height in new[] { 36, 80, -1, 52, 24, 152, 44 }) body.RowStyles.Add(new RowStyle(height < 0 ? SizeType.Percent : SizeType.Absolute, height < 0 ? 100 : height));
+            Surface.Controls.Add(body);
+            AddLabel(body, "共享文件夹", true);
+            RoundedPanel summary = new RoundedPanel { Dock = DockStyle.Fill, Fill = Theme.Ice, Radius = Theme.ControlRadius, Padding = new Padding(16, 8, 12, 8), Margin = new Padding(0, 0, 0, 12) };
+            TableLayoutPanel summaryRow = new TableLayoutPanel { Dock = DockStyle.Fill, BackColor = Theme.Ice, ColumnCount = 3, RowCount = 1, Margin = Padding.Empty };
+            summaryRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); summaryRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 156)); summaryRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 104)); summaryRow.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            share = Theme.Label("未共享", Theme.Body, Theme.Ink); share.Dock = DockStyle.Fill; share.Margin = Padding.Empty; summaryRow.Controls.Add(share, 0, 0);
+            shareCode = Theme.Label("—", codeFont, Theme.Ink); shareCode.Dock = DockStyle.Fill; shareCode.TextAlign = ContentAlignment.MiddleCenter; shareCode.Margin = Padding.Empty; shareCode.AccessibleName = "共享连接码"; summaryRow.Controls.Add(shareCode, 1, 0);
+            copyCode = Theme.Button("复制连接码", delegate { try { Clipboard.SetText(service.ShareCode); } catch (ExternalException) { using (NoticeDialog notice = new NoticeDialog("复制失败", "剪贴板正被其他程序占用，请稍后重试。")) notice.ShowDialog(this); } }, false); copyCode.Dock = DockStyle.Fill; copyCode.Margin = new Padding(4, 4, 0, 4); summaryRow.Controls.Add(copyCode, 2, 0); summary.Controls.Add(summaryRow); body.Controls.Add(summary, 0, 1);
+            RoundedPanel listFrame = new RoundedPanel { Dock = DockStyle.Fill, Fill = Theme.Surface, Border = Theme.Line, Radius = Theme.ControlRadius, Padding = new Padding(8), Margin = Padding.Empty };
+            folders.Dock = DockStyle.Fill; folders.BorderStyle = BorderStyle.None; folders.BackColor = Theme.Surface; folders.ForeColor = Theme.Ink; folders.IntegralHeight = false; folders.DrawMode = DrawMode.OwnerDrawFixed; folders.ItemHeight = 60; folders.AccessibleName = "共享文件夹列表";
+            folders.DrawItem += DrawFolder; folders.SelectedIndexChanged += delegate { removeFolder.Enabled = folders.SelectedItem != null; tips.SetToolTip(folders, folders.SelectedItem as string); };
+            folders.MouseMove += delegate(object sender, MouseEventArgs e) { int index = folders.IndexFromPoint(e.Location); string path = index < 0 ? "" : (string)folders.Items[index]; if (tips.GetToolTip(folders) != path) tips.SetToolTip(folders, path); };
+            Theme.ThemeScrollbars(folders); listFrame.Controls.Add(folders);
+            empty = Theme.Label("暂无共享文件夹", Theme.Body, Theme.Muted); empty.TextAlign = ContentAlignment.MiddleCenter; empty.Dock = DockStyle.Fill; listFrame.Controls.Add(empty); body.Controls.Add(listFrame, 0, 2);
+            FlowLayoutPanel shareActions = Actions();
+            Button addFolder = AddButton(shareActions, "添加文件夹", Choose, true, 128);
+            startShare = AddButton(shareActions, "开启共享", delegate { ChangeSettings(service.StartSavedSharing); }, false, 128);
+            stopShare = AddButton(shareActions, "停止共享", delegate { ChangeSettings(service.StopSharing); }, false, 108);
+            removeFolder = AddButton(shareActions, "移除所选", delegate { string path = folders.SelectedItem as string; if (path != null) ChangeSettings(() => service.RemoveFolder(path)); }, false, 108);
+            body.Controls.Add(shareActions, 0, 3);
+            Label hint = AddLabel(body, "只读共享 · 最多 20 个文件夹", false); hint.Font = Theme.Small;
+            tips.SetToolTip(addFolder, "支持多选；增减目录后需重新配对。");
+            tips.SetToolTip(removeFolder, "仅取消共享，不删除文件；现有连接会断开。");
+            tips.SetToolTip(startShare, "连接码有效 10 分钟；更新后现有连接会断开。");
+            tips.SetToolTip(shareCode, "共享连接码 · 有效 10 分钟");
+            RoundedPanel remoteCard = new RoundedPanel { Dock = DockStyle.Fill, Fill = Theme.Ice, Radius = Theme.ControlRadius, Padding = new Padding(16, 8, 16, 8), Margin = new Padding(0, 8, 0, 8) };
+            TableLayoutPanel remoteBody = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, BackColor = Theme.Ice, Margin = Padding.Empty }; remoteBody.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); foreach (int height in new[] { 28, 36, 48 }) remoteBody.RowStyles.Add(new RowStyle(SizeType.Absolute, height));
+            AddLabel(remoteBody, "远程控制", true); remote = AddLabel(remoteBody, "未开启", false);
+            tips.SetToolTip(remote, "连接需本机确认，已信任的设备除外。Ctrl+Alt+F12 停止。");
+            FlowLayoutPanel remoteActions = Actions(); remoteActions.BackColor = Theme.Ice; AddButton(remoteActions, "生成远控连接码", delegate { ChangeSettings(service.AllowRemote); }, false, 156); stopControl = AddButton(remoteActions, "立即停止远控", StopRemote, false, 144); remoteBody.Controls.Add(remoteActions); remoteCard.Controls.Add(remoteBody); body.Controls.Add(remoteCard, 0, 5);
+            Panel footer = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty };
+            Button forget = Theme.Button("清除已配对设备", delegate { using (ConfirmDialog prompt = new ConfirmDialog("清除已配对设备？", "将断开连接并撤销信任，下次需重新配对。", "清除配对", true)) if (prompt.ShowDialog(this) == DialogResult.OK) ChangeSettings(service.ForgetPairings); }, false);
+            forget.Dock = DockStyle.Right; forget.Width = 156; forget.Margin = Padding.Empty; footer.Controls.Add(forget);
+            connection = Theme.Label("", Theme.Small, Theme.Muted); connection.Dock = DockStyle.Fill; connection.AutoEllipsis = true; footer.Controls.Add(connection); connection.BringToFront(); body.Controls.Add(footer, 0, 6);
+            Shown += delegate { using (Graphics graphics = folders.CreateGraphics()) folders.ItemHeight = (int)(60 * graphics.DpiX / 96F); UpdateState(); };
             SystemEvents.SessionSwitch += OnSessionSwitch;
             SystemEvents.DisplaySettingsChanging += OnDisplayChange;
             timer.Tick += delegate { if (!service.RemoteActive) desktop.Release(); UpdateState(); }; timer.Start(); UpdateState();
@@ -51,27 +78,36 @@ namespace FeiqLight
         private void ChangeSettings(Action change)
         {
             try { change(); restoreError = null; UpdateState(); }
-            catch (Exception e) { if (!(e is System.IO.IOException || e is UnauthorizedAccessException)) throw; UpdateState(); using (NoticeDialog notice = new NoticeDialog("设置未保存", e.Message)) notice.ShowDialog(this); }
+            catch (Exception e) { if (!(e is System.IO.IOException || e is UnauthorizedAccessException || e is ToolsHttp.HttpError || e is ArgumentException)) throw; UpdateState(); using (NoticeDialog notice = new NoticeDialog("操作未完成", e.Message)) notice.ShowDialog(this); }
         }
-        private static Label AddLabel(TableLayoutPanel panel, string text, int height, bool heading)
+        private static Label AddLabel(TableLayoutPanel panel, string text, bool heading)
         {
-            Label label = Theme.Label(text, heading ? Theme.Section : Theme.Body, heading ? Theme.Ink : Theme.Muted); label.Height = height; label.Dock = DockStyle.Fill; label.Margin = Padding.Empty; panel.Controls.Add(label); return label;
+            Label label = Theme.Label(text, heading ? Theme.Strong : Theme.Body, heading ? Theme.Ink : Theme.Muted); label.Dock = DockStyle.Fill; label.Margin = Padding.Empty; panel.Controls.Add(label); return label;
         }
-        private static void AddButtons(TableLayoutPanel panel, string first, Action action, string second, Action other)
+        private static FlowLayoutPanel Actions() { return new FlowLayoutPanel { Dock = DockStyle.Fill, Margin = Padding.Empty, Padding = new Padding(0, 8, 0, 4), WrapContents = false }; }
+        private static Button AddButton(FlowLayoutPanel row, string text, Action action, bool primary, int width)
         {
-            FlowLayoutPanel row = new FlowLayoutPanel { Dock = DockStyle.Fill, Height = 48, Margin = Padding.Empty, WrapContents = false };
-            Button one = Theme.Button(first, delegate { action(); }, true), two = Theme.Button(second, delegate { other(); }, false);
-            one.Width = 190; two.Width = 160; row.Controls.Add(one); row.Controls.Add(two); panel.Controls.Add(row);
+            Button button = Theme.Button(text, delegate { action(); }, primary); button.Size = new Size(width, 36); button.Margin = new Padding(0, 0, 8, 0); row.Controls.Add(button); return button;
         }
         private void Choose()
         {
-            if (service.Folder == null && !String.IsNullOrEmpty(service.SavedFolder))
+            try
             {
-                try { service.Share(service.SavedFolder); restoreError = null; UpdateState(); return; }
-                catch (Exception e) { if (!(e is System.IO.IOException || e is UnauthorizedAccessException || e is ToolsHttp.HttpError)) throw; using (NoticeDialog notice = new NoticeDialog("原目录不可用", e.Message)) notice.ShowDialog(this); }
+                string[] selected = SharedFolderPicker.Show(this);
+                if (selected.Length > 0) ChangeSettings(() => service.AddFolders(selected));
             }
-            using (FolderBrowserDialog picker = new FolderBrowserDialog { Description = "选择只读共享的文件夹（包含子文件夹）", SelectedPath = service.SavedFolder ?? "", ShowNewFolderButton = false })
-                if (picker.ShowDialog(this) == DialogResult.OK) try { service.Share(picker.SelectedPath); restoreError = null; UpdateState(); } catch (Exception e) { using (NoticeDialog notice = new NoticeDialog("无法共享", e.Message)) notice.ShowDialog(this); }
+            catch (COMException e) { using (NoticeDialog notice = new NoticeDialog("无法打开文件夹选择器", e.Message)) notice.ShowDialog(this); }
+        }
+        private void DrawFolder(object sender, DrawItemEventArgs e)
+        {
+            if (e.Index < 0 || e.Index >= folders.Items.Count) return;
+            float scale = e.Graphics.DpiX / 96F; string path = (string)folders.Items[e.Index]; bool selected = (e.State & DrawItemState.Selected) != 0;
+            using (Brush fill = new SolidBrush(selected ? Theme.Sky : Theme.Surface)) e.Graphics.FillRectangle(fill, e.Bounds);
+            Theme.Glyph(e.Graphics, "folder", new Rectangle(e.Bounds.Left + (int)(12 * scale), e.Bounds.Top + (int)(18 * scale), (int)(24 * scale), (int)(24 * scale)), Theme.Blue);
+            Rectangle text = new Rectangle(e.Bounds.Left + (int)(48 * scale), e.Bounds.Top + (int)(8 * scale), Math.Max(1, e.Bounds.Width - (int)(60 * scale)), (int)(24 * scale));
+            TextRenderer.DrawText(e.Graphics, ToolsService.FolderName(path), Theme.Section, text, Theme.Ink, TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+            text.Y += (int)(24 * scale); text.Height = (int)(20 * scale); TextRenderer.DrawText(e.Graphics, path, Theme.Small, text, Theme.Muted, TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.PathEllipsis);
+            if ((e.State & DrawItemState.Focus) != 0) e.DrawFocusRectangle();
         }
         private int Confirm(string address)
         {
@@ -79,16 +115,11 @@ namespace FeiqLight
             try { return (int)Invoke(new Func<int>(() =>
             {
                 if (IsDisposed) return 0;
-                using (ModernWindow prompt = new ModernWindow { Text = "是否允许远程控制？", MinimumSize = new Size(400, 220), ClientSize = new Size(520, 256), ResizeWindow = false, TopMost = true })
+                using (ConfirmDialog prompt = new ConfirmDialog("是否允许远程控制？", address + " 将能查看屏幕并操作电脑。\nCtrl+Alt+F12 停止。", "允许本次控制", false, "始终允许此设备"))
                 using (Timer timeout = new Timer { Interval = 30000 })
                 {
-                    Label description = Theme.Label(address + " 请求控制此电脑", Theme.Section, Theme.Ink); description.Dock = DockStyle.Fill; description.Padding = new Padding(24);
-                    FlowLayoutPanel buttons = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 60, Padding = new Padding(20, 4, 0, 0) };
-                    Button deny = Theme.Button("拒绝", delegate { prompt.DialogResult = DialogResult.Cancel; }, false);
-                    CheckBox always = new CheckBox { Text = "始终允许此设备", Dock = DockStyle.Bottom, Height = 40, Padding = new Padding(24, 0, 0, 0), ForeColor = Theme.Ink, Font = Theme.Body };
-                    buttons.Controls.Add(deny); buttons.Controls.Add(Theme.Button("允许本次控制", delegate { prompt.DialogResult = DialogResult.OK; }, true)); prompt.CancelButton = deny;
-                    prompt.Surface.Controls.Add(description); prompt.Surface.Controls.Add(always); prompt.Surface.Controls.Add(buttons); timeout.Tick += delegate { prompt.DialogResult = DialogResult.Cancel; }; timeout.Start();
-                    return prompt.ShowDialog(this) == DialogResult.OK ? always.Checked ? 2 : 1 : 0;
+                    prompt.TopMost = true; timeout.Tick += delegate { prompt.DialogResult = DialogResult.Cancel; }; timeout.Start();
+                    return prompt.ShowDialog(this) == DialogResult.OK ? prompt.OptionChecked ? 2 : 1 : 0;
                 }
             })); }
             catch (InvalidOperationException) { return 0; }
@@ -119,15 +150,27 @@ namespace FeiqLight
         {
             bool active = service.RemoteActive;
             if (active && banner == null) ShowBanner();
-            share.Text = service.Folder == null ? (String.IsNullOrEmpty(service.SavedFolder) ? "未共享" : service.SavedFolder + "\n已停止") : service.Folder + "\n连接码  " + service.ShareCode;
-            remote.Text = active ? "已连接  " + service.RemoteAddress : !service.RemoteEnabled ? "未开启" : service.RemoteCode.Length == 6 ? "连接码  " + service.RemoteCode : "等待已配对设备";
-            connection.Text = restoreError ?? "TCP " + service.Port;
+            string[] saved = service.SavedFolders; bool sharing = service.Folders.Length > 0; string code = service.ShareCode;
+            share.Text = sharing ? "共享中 · " + saved.Length + " 个文件夹" : saved.Length == 0 ? "未共享" : "已停止 · " + saved.Length + " 个文件夹";
+            shareCode.Text = sharing && code.Length == 6 ? code : "—"; copyCode.Enabled = sharing && code.Length == 6;
+            if (sharing && code.Length != 6) share.Text = "共享中 · 连接码已过期";
+            startShare.Enabled = saved.Length > 0; startShare.Text = sharing ? "更新连接码" : "开启共享"; stopShare.Enabled = sharing; stopControl.Enabled = service.RemoteEnabled;
+            if (!folders.Items.Cast<string>().SequenceEqual(saved))
+            {
+                string selected = folders.SelectedItem as string; int index = folders.SelectedIndex;
+                folders.BeginUpdate(); folders.Items.Clear(); folders.Items.AddRange(saved);
+                if (saved.Length > 0) folders.SelectedIndex = selected != null && Array.IndexOf(saved, selected) >= 0 ? Array.IndexOf(saved, selected) : Math.Min(Math.Max(0, index), saved.Length - 1);
+                folders.EndUpdate();
+            }
+            removeFolder.Enabled = folders.SelectedItem != null; empty.Visible = saved.Length == 0; folders.Visible = saved.Length > 0;
+            remote.Text = active ? "已连接 · " + service.RemoteAddress : !service.RemoteEnabled ? "未开启" : service.RemoteCode.Length == 6 ? "连接码  " + service.RemoteCode : "等待已配对设备";
+            connection.Text = restoreError ?? "TCP " + service.Port; connection.ForeColor = restoreError == null ? Theme.Muted : Theme.Danger; tips.SetToolTip(connection, restoreError ?? "仅限可信局域网使用");
             if (!active && banner != null) { Form old = banner; banner = null; old.Dispose(); }
         }
         protected override void WndProc(ref Message message) { if (message.Msg == 0x312 && message.WParam.ToInt32() == 941) StopRemote(); base.WndProc(ref message); }
         protected override void Dispose(bool disposing)
         {
-            if (disposing) { timer.Stop(); timer.Dispose(); SystemEvents.SessionSwitch -= OnSessionSwitch; SystemEvents.DisplaySettingsChanging -= OnDisplayChange; if (hotkey) UnregisterHotKey(Handle, 941); service.Dispose(); if (banner != null) { banner.Dispose(); banner = null; } }
+            if (disposing) { timer.Stop(); timer.Dispose(); tips.Dispose(); codeFont.Dispose(); SystemEvents.SessionSwitch -= OnSessionSwitch; SystemEvents.DisplaySettingsChanging -= OnDisplayChange; if (hotkey) UnregisterHotKey(Handle, 941); service.Dispose(); if (banner != null) { banner.Dispose(); banner = null; } }
             base.Dispose(disposing);
         }
     }

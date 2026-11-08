@@ -61,6 +61,8 @@ namespace FeiqLight.Tests
         }
         [STAThread] private static int Main(string[] args)
         {
+            // 测试回调异常交给测试计失败，不能弹出系统错误框阻塞用户桌面。
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);
             Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
             string root = Path.GetFullPath(args.Length > 1 ? args[1] : Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "tools-test-data")); Directory.CreateDirectory(root);
             if (args.Length > 0 && args[0] == "serve") { Serve(root); return 0; }
@@ -105,6 +107,46 @@ namespace FeiqLight.Tests
                     Assert(Request(server.Port, "/api/screen", cookie).Code == 401, "共享令牌获得了远控权限");
                     Assert(Request(server.Port, "/api/logout", cookie, "{\"mode\":\"share\"}").Code == 403, "缺少 CSRF 校验");
                 }
+            });
+            run("多目录：追加、重复路径去重、逐目录读取及移除后的授权撤销", () => {
+                string second = Path.Combine(root, "另一文件夹"); Directory.CreateDirectory(second); File.WriteAllText(Path.Combine(second, "second.txt"), "second folder", new UTF8Encoding(false));
+                using (ToolsService server = new ToolsService(0, true))
+                {
+                    server.Share(folder); Reply first = Request(server.Port, "/api/login", "", "{\"mode\":\"share\",\"code\":\"" + server.ShareCode + "\"}");
+                    string oldCookie = "fq_share=" + first.Json()["token"], oldPair = PairCookie(first);
+                    server.AddFolders(new[] { second, folder + "\\" }); Assert(server.Folders.Length == 2 && server.SavedFolders.Length == 2, "追加覆盖旧目录或未去重");
+                    Assert(Request(server.Port, "/api/list", oldCookie).Code == 401, "旧会话仍然有效"); Assert(Reconnect(server, "share", oldPair).Code == 401, "旧配对获得新目录权限");
+                    string cookie = Login(server, "share"); var roots = Items(Request(server.Port, "/api/list", cookie)); Assert(roots.Length == 2 && roots.All(i => (bool)i["dir"]), "没有虚拟目录列表");
+                    var secondRoot = roots.Single(i => (string)i["name"] == "另一文件夹"); var children = Items(Request(server.Port, "/api/list?id=" + secondRoot["id"], cookie)); string file = "/file?id=" + children.Single()["id"];
+                    Assert(Encoding.UTF8.GetString(Request(server.Port, file, cookie).Body) == "second folder", "读取第二个目录失败");
+                    Assert(Request(server.Port, "/file?id=" + secondRoot["id"], cookie).Code == 404, "把目录当文件读取");
+                    server.RemoveFolder(second); Assert(server.Folders.SequenceEqual(new[] { folder }), "移除影响其他目录"); Assert(Request(server.Port, file, cookie).Code == 401, "移除未撤销下载");
+                    string fresh = Login(server, "share"); Assert(Request(server.Port, file, fresh).Code == 404, "旧索引仍可读取移除目录"); Assert(File.Exists(Path.Combine(second, "second.txt")), "移除删除了用户文件");
+                    Assert(Items(Request(server.Port, "/api/list", fresh)).Any(i => (string)i["name"] == "视频 sample.mp4"), "单目录旧浏览方式不兼容");
+                    server.RemoveFolder(folder); Assert(server.Folder == null && server.SavedFolders.Length == 0, "移除最后一项未关闭");
+                }
+            });
+            run("多目录设置：重启恢复、停止后移除不重开、无效目录追加不影响原共享", () => {
+                string profile = Path.Combine(root, "multi-" + Guid.NewGuid().ToString("N")); string second = Path.Combine(folder, "子目录");
+                using (ToolsService server = new ToolsService(0, true, profile))
+                {
+                    server.AddFolders(new[] { folder, second }); string cookie = Login(server, "share");
+                    bool rejected = false; try { server.AddFolders(new[] { Path.Combine(root, "missing-" + Guid.NewGuid().ToString("N")) }); } catch (IOException) { rejected = true; }
+                    Assert(rejected && Request(server.Port, "/api/list", cookie).Code == 200 && server.SavedFolders.Length == 2, "追加失败破坏原共享"); server.AllowRemote();
+                }
+                using (ToolsService server = new ToolsService(0, true, profile))
+                {
+                    Assert(server.RestoreSettings() == null && server.Folders.Length == 2 && server.RemoteEnabled, "多目录恢复失败或远控操作丢失目录");
+                    server.StopSharing(); server.RemoveFolder(second); Assert(server.Folder == null && server.SavedFolders.SequenceEqual(new[] { folder }), "停止后移除重新开放共享");
+                }
+                using (ToolsService server = new ToolsService(0, true, profile)) { server.RestoreSettings(); Assert(server.Folder == null, "重启忽略停止意愿"); server.StartSavedSharing(); Assert(server.Folder == folder, "保留目录无法再次开启"); }
+            });
+            run("多目录迁移：旧 Folder 配置只读恢复、目录失效不悄悄共享其余目录", () => {
+                string profile = Path.Combine(root, "legacy-multi-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(profile); string path = Path.Combine(profile, "tools-settings.json");
+                string original = new JavaScriptSerializer().Serialize(new { Folder = folder, ShareEnabled = true, RemoteEnabled = false }); File.WriteAllText(path, original, new UTF8Encoding(false));
+                using (ToolsService server = new ToolsService(0, true, profile)) { Assert(server.RestoreSettings() == null && server.Folders.SequenceEqual(new[] { folder }), "旧配置迁移失败"); Assert(File.ReadAllText(path) == original, "恢复重写了旧配置"); }
+                new ToolsPreferences(profile).SaveFolders(new[] { folder, Path.Combine(root, "missing-" + Guid.NewGuid().ToString("N")) }, true, false);
+                using (ToolsService server = new ToolsService(0, true, profile)) { Assert(server.RestoreSettings() != null && server.Folder == null && server.SavedFolders.Length == 2, "失效目录被忽略或清除了原设置"); }
             });
             run("撤销：停止共享、更换目录、注销使旧连接失效", () => {
                 using (ToolsService server = new ToolsService(0, true))
@@ -212,9 +254,10 @@ namespace FeiqLight.Tests
                 {
                     window.Show();Application.DoEvents();bool checkedBox=false;
                     click.Tick+=delegate {
-                        Form prompt=Application.OpenForms.Cast<Form>().FirstOrDefault(f=>f.Text=="是否允许远程控制？");if(prompt==null)return;
-                        var surface=((ModernWindow)prompt).Surface;var always=surface.Controls.OfType<CheckBox>().Single();always.Checked=true;checkedBox=true;click.Stop();
-                        surface.Controls.OfType<FlowLayoutPanel>().Single().Controls.OfType<Button>().Single(b=>b.Text=="允许本次控制").PerformClick();
+                        ConfirmDialog prompt=Application.OpenForms.OfType<ConfirmDialog>().FirstOrDefault(f=>f.Text=="是否允许远程控制？");if(prompt==null)return;
+                        click.Stop();
+                        var controls=Descendants(prompt.Surface).ToArray();var always=controls.OfType<ToggleSwitch>().Single(c=>c.AccessibleName=="始终允许此设备");always.Checked=true;checkedBox=true;
+                        controls.OfType<Button>().Single(b=>b.Text=="允许本次控制").PerformClick();
                     };
                     click.Start();int result=(int)typeof(ToolsWindow).GetMethod("Confirm",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic).Invoke(window,new object[]{"127.0.0.1"});
                     Assert(checkedBox&&result==2,"勾选未持久授权");window.Close();
@@ -325,6 +368,14 @@ namespace FeiqLight.Tests
                 File.WriteAllText(Path.Combine(root, "server.json"), new JavaScriptSerializer().Serialize(new { port = service.Port, share = service.ShareCode, remote = service.RemoteCode }), new UTF8Encoding(false));
                 Stopwatch clock = Stopwatch.StartNew(); while (clock.Elapsed.TotalMinutes < 15 && !File.Exists(Path.Combine(root, "stop"))) Thread.Sleep(100);
             }
+        }
+        private static Dictionary<string, object>[] Items(Reply reply)
+        {
+            Assert(reply.Code == 200, "目录请求失败"); return ((System.Collections.IEnumerable)reply.Json()["items"]).Cast<Dictionary<string, object>>().ToArray();
+        }
+        private static IEnumerable<Control> Descendants(Control parent)
+        {
+            foreach (Control child in parent.Controls) { yield return child; foreach (Control nested in Descendants(child)) yield return nested; }
         }
         private delegate bool WindowVisitor(IntPtr window, IntPtr parameter);
         [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern bool EnumWindows(WindowVisitor visitor, IntPtr parameter);

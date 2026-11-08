@@ -747,7 +747,7 @@ namespace FeiqLight
         public bool ResizeWindow
         {
             get { return resizeWindow; }
-            set { resizeWindow = value; if (minimize != null) { minimize.Visible = maximize.Visible = value; chrome.ColumnStyles[1].Width = value ? 138 : 46; chrome.Height = value ? 36 : 54; caption.Font = value ? Theme.Small : Theme.Title; caption.ForeColor = value ? Theme.Muted : Theme.Ink; caption.Padding = new Padding(value ? 15 : 22, value ? 0 : 6, 0, 0); } if(IsHandleCreated)UpdateStyles(); }
+            set { resizeWindow = value; if (minimize != null) { minimize.Visible = maximize.Visible = value; chrome.ColumnStyles[1].Width = value ? 138 : 46; chrome.Height = value ? 36 : 54; caption.Font = value ? Theme.Small : Theme.Title; caption.ForeColor = value ? Theme.Muted : Theme.Ink; caption.Padding = new Padding(value ? 15 : 24, 0, 0, 0); Control actions = chrome.GetControlFromPosition(1, 0); if (actions != null) actions.Padding = new Padding(0, value ? 0 : 11, 0, 0); } if(IsHandleCreated)UpdateStyles(); }
         }
         protected override CreateParams CreateParams
         {

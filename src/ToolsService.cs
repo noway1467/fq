@@ -21,7 +21,8 @@ namespace FeiqLight
         private readonly ToolsHttp http;
         private readonly ToolsPairings pairings;
         private readonly ToolsPreferences preferences;
-        private string folder, shareCode = "", remoteCode = "";
+        private string[] folders = new string[0];
+        private string shareCode = "", remoteCode = "";
         private long shareUntil, remoteUntil, attemptsSince;
         private int attempts, remoteEpoch, shareEpoch;
         private bool closed, remoteEnabled, remotePending;
@@ -32,13 +33,15 @@ namespace FeiqLight
         internal Action<Dictionary<string, object>> Input;
         internal Action ReleaseInput;
         internal int Port { get { return http.Port; } }
-        internal string Folder { get { lock (gate) return folder; } }
+        internal string Folder { get { lock (gate) return folders.FirstOrDefault(); } }
+        internal string[] Folders { get { lock (gate) return folders.ToArray(); } }
         internal string ShareCode { get { lock (gate) return clock.ElapsedMilliseconds < shareUntil ? shareCode : "已过期，请重新开启"; } }
         internal string RemoteCode { get { lock (gate) return clock.ElapsedMilliseconds < remoteUntil ? remoteCode : "已使用或过期"; } }
         internal bool RemoteActive { get { lock (gate) return sessions.Any(s => s.Mode == "remote" && Valid(s)); } }
         internal string RemoteAddress { get { lock (gate) { Session session = sessions.FirstOrDefault(s => s.Mode == "remote" && Valid(s)); return session == null ? "" : session.Address; } } }
         internal bool RemoteEnabled { get { lock (gate) return remoteEnabled; } }
         internal string SavedFolder { get { lock (gate) return preferences.Value.Folder; } }
+        internal string[] SavedFolders { get { lock (gate) return preferences.Value.Folders.ToArray(); } }
         internal ToolsService(int port, bool loopback, string root = null) { pairings = new ToolsPairings(root); preferences = new ToolsPreferences(root); http = new ToolsHttp(port, loopback, Handle); }
         internal string RestoreSettings()
         {
@@ -46,7 +49,7 @@ namespace FeiqLight
             {
                 string error = null;
                 if (preferences.Value.ShareEnabled)
-                    try { StartSharing(preferences.Value.Folder, false); }
+                    try { StartSharing(preferences.Value.Folders, false); }
                     catch (Exception e) { if (!(e is IOException || e is UnauthorizedAccessException || e is ToolsHttp.HttpError || e is ArgumentException)) throw; error = "共享目录未恢复：" + e.Message; }
                 if (preferences.Value.RemoteEnabled) StartRemote(false);
                 return error;
@@ -65,31 +68,56 @@ namespace FeiqLight
                 do { random.GetBytes(bytes); value = BitConverter.ToUInt32(bytes, 0); } while (value >= 4294000000u);
             return (value % 1000000).ToString("D6", System.Globalization.CultureInfo.InvariantCulture);
         }
-        internal void Share(string path) { StartSharing(path, true); }
-        private void StartSharing(string path, bool save)
+        internal void Share(string path) { StartSharing(new[] { path }, true); }
+        internal void StartSavedSharing() { lock (gate) StartSharing(preferences.Value.Folders, true); }
+        internal void AddFolders(IEnumerable<string> paths)
         {
-            string full = Path.GetFullPath(path); CheckNoLinks(full);
-            if (!Directory.Exists(full)) throw new IOException("共享文件夹不存在");
+            lock (gate) StartSharing(preferences.Value.Folders.Concat(paths).ToArray(), true);
+        }
+        internal void RemoveFolder(string path)
+        {
+            lock (gate)
+            {
+                string[] remaining = preferences.Value.Folders.Where(p => !String.Equals(p, path, StringComparison.OrdinalIgnoreCase)).ToArray();
+                if (remaining.Length == preferences.Value.Folders.Length) return;
+                bool enabled = folders.Length > 0 && remaining.Length > 0;
+                // 移除必须立即撤销访问，即使配置保存失败，也不能继续暴露被移除的目录。
+                EndSharing();
+                preferences.SaveFolders(remaining, enabled, preferences.Value.RemoteEnabled);
+                if (enabled) StartSharing(remaining, false);
+            }
+        }
+        private void StartSharing(string[] paths, bool save)
+        {
+            string[] full = paths.Select(p => Path.GetFullPath(p).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar)
+                .Select(p => p.Length > 3 ? p.TrimEnd(Path.DirectorySeparatorChar) : p).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            if (full.Length == 0 || full.Length > 20) throw new IOException("请选择 1 至 20 个共享文件夹");
+            foreach (string path in full) { CheckNoLinks(path); if (!Directory.Exists(path)) throw new IOException("共享文件夹不存在：" + path); }
             lock (gate)
             {
                 if (closed) throw new ObjectDisposedException("ToolsService");
-                // 启动恢复只读取配置，避免更新后的首次启动因文件暂时不可写而丢失服务。
-                if (save) preferences.Save(full, true, preferences.Value.RemoteEnabled);
-                shareEpoch++; folder = full; entries.Clear(); sessions.RemoveAll(s => s.Mode == "share");
+                if (save) preferences.SaveFolders(full, true, preferences.Value.RemoteEnabled);
+                EndSharing(); folders = full;
                 shareCode = ConnectionCode(); shareUntil = clock.ElapsedMilliseconds + 600000;
             }
         }
-        internal void StopSharing() { lock (gate) { EndSharing(); preferences.Save(preferences.Value.Folder, false, preferences.Value.RemoteEnabled); } }
-        private void EndSharing() { shareEpoch++; folder = null; shareCode = ""; shareUntil = 0; entries.Clear(); sessions.RemoveAll(s => s.Mode == "share"); }
+        internal void StopSharing() { lock (gate) { EndSharing(); preferences.SaveFolders(preferences.Value.Folders, false, preferences.Value.RemoteEnabled); } }
+        private void EndSharing() { shareEpoch++; folders = new string[0]; shareCode = ""; shareUntil = 0; entries.Clear(); sessions.RemoveAll(s => s.Mode == "share"); }
         internal void AllowRemote() { StartRemote(true); }
         private void StartRemote(bool save)
         {
-            lock (gate) { if (closed) throw new ObjectDisposedException("ToolsService"); if (save) preferences.Save(preferences.Value.Folder, preferences.Value.ShareEnabled, true); EndRemote(); remoteEnabled = true; remoteCode = ConnectionCode(); remoteUntil = clock.ElapsedMilliseconds + 600000; }
+            lock (gate) { if (closed) throw new ObjectDisposedException("ToolsService"); if (save) preferences.SaveFolders(preferences.Value.Folders, preferences.Value.ShareEnabled, true); EndRemote(); remoteEnabled = true; remoteCode = ConnectionCode(); remoteUntil = clock.ElapsedMilliseconds + 600000; }
         }
-        internal void StopRemote() { lock (gate) { EndRemote(); preferences.Save(preferences.Value.Folder, preferences.Value.ShareEnabled, false); } }
+        internal void StopRemote() { lock (gate) { EndRemote(); preferences.SaveFolders(preferences.Value.Folders, preferences.Value.ShareEnabled, false); } }
         private void EndRemote() { remoteEpoch++; remoteEnabled = false; remotePending = false; remoteCode = ""; remoteUntil = 0; sessions.RemoveAll(s => s.Mode == "remote"); if (ReleaseInput != null) ReleaseInput(); }
         internal void ForgetPairings() { lock (gate) { pairings.Clear(); shareEpoch++; StopRemote(); sessions.Clear(); } }
-        private string Scope(string mode) { return mode == "remote" ? "remote" : "share:" + (folder ?? "").ToUpperInvariant(); }
+        private string Scope(string mode)
+        {
+            if (mode == "remote") return "remote";
+            if (folders.Length <= 1) return "share:" + (folders.FirstOrDefault() ?? "").ToUpperInvariant();
+            // 配对绑定整个目录集合；追加目录不能让旧配对悄悄获得新目录权限。
+            return "shares:" + String.Join("|", folders.Select(p => p.ToUpperInvariant()).OrderBy(p => p, StringComparer.Ordinal).Select(p => p.Length + ":" + p));
+        }
         private string PairCookie(string mode) { return "fq_pair_" + mode + "_" + Port; }
         private static string Cookie(ToolsHttp.Request request, string name)
         {
@@ -123,7 +151,7 @@ namespace FeiqLight
                 expected = mode == "share" ? shareCode : remoteCode;
                 epoch = mode == "share" ? shareEpoch : remoteEpoch; scope = Scope(mode);
                 trusted = reconnect && pairings.AlwaysAllows(remembered, scope);
-                if (closed || (mode == "share" ? folder == null : !remoteEnabled)) throw new ToolsHttp.HttpError(403, "对方尚未开启此功能");
+                if (closed || (mode == "share" ? folders.Length == 0 : !remoteEnabled)) throw new ToolsHttp.HttpError(403, "对方尚未开启此功能");
                 if (reconnect) { if (!pairings.Contains(remembered, scope)) throw new ToolsHttp.HttpError(401, "没有可用的上次连接，请输入连接码"); }
                 else if (expected.Length == 0 || code != expected || clock.ElapsedMilliseconds >= (mode == "share" ? shareUntil : remoteUntil)) throw new ToolsHttp.HttpError(403, "连接码错误或已过期");
                 if (sessions.Count >= 8) throw new ToolsHttp.HttpError(409, "连接人数已满");
@@ -157,7 +185,7 @@ namespace FeiqLight
         private void Handle(ToolsHttp.Request request, ToolsHttp.Response response)
         {
             if (request.Method != "GET" && request.Method != "HEAD" && request.Method != "POST") throw new ToolsHttp.HttpError(405, "不支持此操作");
-            if (request.Method == "GET" && request.Path == "/api/status") { lock (gate) response.Json(new { remote = remoteEnabled, share = folder != null, platform = "windows" }); return; }
+            if (request.Method == "GET" && request.Path == "/api/status") { lock (gate) response.Json(new { remote = remoteEnabled, share = folders.Length > 0, platform = "windows" }); return; }
             if (request.Method == "POST" && (request.Path == "/api/login" || request.Path == "/api/reconnect")) { Login(request, response, request.Path == "/api/reconnect"); return; }
             if (request.Method == "POST" && request.Path == "/api/logout")
             {
@@ -196,6 +224,11 @@ namespace FeiqLight
                 lock (gate)
                 {
                     if (!Valid(session)) throw new ToolsHttp.HttpError(401, "共享已关闭");
+                    if (request.Parameter("id").Length == 0 && folders.Length > 1)
+                    {
+                        response.Json(new { name = "共享文件夹", items = folders.Select(p => new { id = Id(p), name = FolderName(p), dir = true, size = 0, seek = true }).ToArray() });
+                        return;
+                    }
                     string path = Resolve(request.Parameter("id")); CheckNoLinks(path);
                     if (!Directory.Exists(path)) throw new ToolsHttp.HttpError(404, "目录已不存在");
                     string[] children = Directory.EnumerateFileSystemEntries(path).Take(1001).ToArray();
@@ -223,10 +256,11 @@ namespace FeiqLight
         }
         private string Resolve(string id)
         {
-            if (folder == null) throw new ToolsHttp.HttpError(403, "共享已关闭");
-            if (id.Length == 0) return folder;
+            if (folders.Length == 0) throw new ToolsHttp.HttpError(403, "共享已关闭");
+            if (id.Length == 0 && folders.Length == 1) return folders[0];
             string path; if (!entries.TryGetValue(id, out path)) throw new ToolsHttp.HttpError(404, "文件索引已失效，请刷新目录"); return path;
         }
+        internal static string FolderName(string path) { string name = Path.GetFileName(path.TrimEnd('\\')); return name.Length == 0 ? path : name; }
         private string Id(string path)
         {
             foreach (KeyValuePair<string, string> pair in entries) if (pair.Value == path) return pair.Key;
@@ -241,15 +275,16 @@ namespace FeiqLight
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern uint GetFinalPathNameByHandle(SafeFileHandle file, StringBuilder path, uint size, uint flags);
         private void FileResponse(ToolsHttp.Request request, ToolsHttp.Response response, Session session)
         {
-            string path, root;
-            lock (gate) { path = Resolve(request.Parameter("id")); root = folder; }
+            string path; string[] roots;
+            lock (gate) { path = Resolve(request.Parameter("id")); roots = folders.ToArray(); }
+            if (Directory.Exists(path)) throw new ToolsHttp.HttpError(404, "请选择文件");
             CheckNoLinks(path);
             using (FileStream input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, FileOptions.SequentialScan))
             {
                 // 打开句柄后再次核对真实目标，防止检查与打开之间被换成指向目录外的链接。
                 StringBuilder actual = new StringBuilder(32768); uint count = GetFinalPathNameByHandle(input.SafeFileHandle, actual, (uint)actual.Capacity, 0);
                 string resolved = actual.ToString(); if (resolved.StartsWith("\\\\?\\UNC\\")) resolved = "\\\\" + resolved.Substring(8); else if (resolved.StartsWith("\\\\?\\")) resolved = resolved.Substring(4);
-                if (count == 0 || count >= actual.Capacity || !resolved.StartsWith(root.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase)) throw new ToolsHttp.HttpError(403, "文件已离开共享目录");
+                if (count == 0 || count >= actual.Capacity || !roots.Any(root => resolved.StartsWith(root.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase))) throw new ToolsHttp.HttpError(403, "文件已离开共享目录");
                 long length = input.Length; long[] range = ToolsHttp.Range(request.Header("Range"), length);
                 if (range == null) { response.Bytes(new byte[0], "application/octet-stream", 416, "Content-Range: bytes */" + length + "\r\n"); return; }
                 string extra = "Accept-Ranges: bytes\r\n";
