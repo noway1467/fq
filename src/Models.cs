@@ -12,6 +12,7 @@ namespace FeiqLight
     public sealed class AppSettings
     {
         public string DeviceId { get; set; }
+        public string Avatar { get; set; }
         public string Nickname { get; set; }
         public string Group { get; set; }
         public string Signature { get; set; }
@@ -20,6 +21,7 @@ namespace FeiqLight
         public bool Notifications { get; set; }
         public bool DiagnosticsEnabled { get; set; }
         public bool DarkMode { get; set; }
+        public bool FollowSystemTheme { get; set; }
         public string Accent { get; set; }
         public int ChatFontSize { get; set; }
         public string ChatBackground { get; set; }
@@ -34,6 +36,7 @@ namespace FeiqLight
         public AppSettings()
         {
             DeviceId = Guid.NewGuid().ToString("N");
+            Avatar = "default";
             Nickname = Environment.UserName; Group = "我的局域网";
             Signature = "在同一个局域网，简单聊一聊。";
             CloseToTray = true; Notifications = true; AutoReceiveFiles = true; ReceiveFolder = DefaultReceiveFolder;
@@ -55,6 +58,7 @@ namespace FeiqLight
     public sealed class SavedConversation
     {
         public string DeviceId { get; set; }
+        public string Avatar { get; set; }
         public string ConversationId { get; set; }
         public string Endpoint { get; set; }
         public string Login { get; set; }
@@ -72,11 +76,11 @@ namespace FeiqLight
         public Peer OfflinePeer()
         {
             // 历史资料不是当前在线或编码能力的证据；真正收到报文后再更新同一个 Peer。
-            return new Peer { ConversationId=Id,DeviceId=DeviceId,Endpoint=AppSettings.ParseKnownPeer(Endpoint),Login=Login,Host=Host,Nickname=Nickname,Group=Group,Online=false,Utf8=false,Note=Note,Pinned=Pinned,Hidden=Hidden,ConversationNumber=ConversationNumber };
+            return new Peer { ConversationId=Id,DeviceId=DeviceId,Avatar=Avatar,Endpoint=AppSettings.ParseKnownPeer(Endpoint),Login=Login,Host=Host,Nickname=Nickname,Group=Group,Online=false,Utf8=false,Note=Note,Pinned=Pinned,Hidden=Hidden,ConversationNumber=ConversationNumber };
         }
         public bool SameAs(SavedConversation other)
         {
-            return DeviceId==other.DeviceId&&Id==other.Id&&Endpoint==other.Endpoint&&Login==other.Login&&Host==other.Host&&Nickname==other.Nickname&&Group==other.Group&&Preview==other.Preview&&MessageUtcTicks==other.MessageUtcTicks&&Unread==other.Unread&&Note==other.Note&&Pinned==other.Pinned&&Hidden==other.Hidden&&ConversationNumber==other.ConversationNumber;
+            return DeviceId==other.DeviceId&&Avatar==other.Avatar&&Id==other.Id&&Endpoint==other.Endpoint&&Login==other.Login&&Host==other.Host&&Nickname==other.Nickname&&Group==other.Group&&Preview==other.Preview&&MessageUtcTicks==other.MessageUtcTicks&&Unread==other.Unread&&Note==other.Note&&Pinned==other.Pinned&&Hidden==other.Hidden&&ConversationNumber==other.ConversationNumber;
         }
         public static SavedConversation[] Normalize(IEnumerable<SavedConversation> values)
         {
@@ -86,7 +90,7 @@ namespace FeiqLight
                 if(item==null||item.Login==null||item.Login.Length>128||Protocol.Field(item.Login)!=item.Login)continue;
                 IPEndPoint endpoint=AppSettings.ParseKnownPeer(item.Endpoint);if(endpoint==null)continue;
                 SavedConversation clean=new SavedConversation { Endpoint=endpoint.ToString(),Login=item.Login,
-                    DeviceId=Protocol.NormalizeDeviceId(item.DeviceId),ConversationId=String.IsNullOrEmpty(item.ConversationId)?null:Protocol.Prefix(item.ConversationId,256),
+                    DeviceId=Protocol.NormalizeDeviceId(item.DeviceId),Avatar=Protocol.NormalizeAvatar(item.Avatar),ConversationId=String.IsNullOrEmpty(item.ConversationId)?null:Protocol.Prefix(item.ConversationId,256),
                     Note=Protocol.Prefix((item.Note??"").Trim(),64),Pinned=item.Pinned,Hidden=item.Hidden,ConversationNumber=item.ConversationNumber>0&&item.ConversationNumber<=1000000?item.ConversationNumber:0,
                     Host=Protocol.Prefix(item.Host??"",128),Nickname=Protocol.Prefix(String.IsNullOrWhiteSpace(item.Nickname)?item.Login:item.Nickname,128),
                     Group=Protocol.Prefix(item.Group??"我的局域网",128),Preview=Protocol.Prefix((item.Preview??"").Replace('\0',' ').Replace('\r',' ').Replace('\n',' '),160),
@@ -131,6 +135,7 @@ namespace FeiqLight
     public sealed class Peer
     {
         public string DeviceId, ConversationId;
+        public string Avatar;
         public string Id { get { return ConversationId ?? (DeviceId == null ? Endpoint + "/" + Login : "device:" + DeviceId); } }
         public IPEndPoint Endpoint;
         public string Login;
@@ -200,6 +205,7 @@ namespace FeiqLight
         public bool HasAttachments { get; set; }
         public string[] AttachmentNames { get; set; }
         public FileTransferState[] Transfers { get; set; }
+        public bool Deleted { get; set; }
         public string DisplayText()
         {
             string text = Text ?? "";
@@ -252,6 +258,7 @@ namespace FeiqLight
         private readonly Dictionary<string, ChatRecord> activePending = new Dictionary<string, ChatRecord>();
         private readonly Dictionary<string, DateTime> clearedThrough = new Dictionary<string, DateTime>();
         private readonly Dictionary<string, HashSet<long>> incomingPackets = new Dictionary<string, HashSet<long>>();
+        private readonly Dictionary<string, HashSet<string>> deletedRecords = new Dictionary<string, HashSet<string>>();
         private volatile bool preserveUnreadableSettings;
         public string Warning { get; private set; }
         public LocalStore(string root) { Root = Path.GetFullPath(root); Directory.CreateDirectory(Root); }
@@ -265,6 +272,7 @@ namespace FeiqLight
                 AppSettings s = json.Deserialize<AppSettings>(File.ReadAllText(path, Encoding.UTF8));
                 if (s == null || String.IsNullOrWhiteSpace(s.Nickname)) throw new FormatException();
                 s.DeviceId = Protocol.NormalizeDeviceId(s.DeviceId) ?? Guid.NewGuid().ToString("N");
+                s.Avatar = Protocol.NormalizeAvatar(s.Avatar) ?? "default";
                 if (String.IsNullOrWhiteSpace(s.ReceiveFolder)) s.ReceiveFolder = AppSettings.DefaultReceiveFolder;
                 s.KnownPeers = AppSettings.NormalizeKnownPeers(s.KnownPeers);
                 s.Conversations = SavedConversation.Normalize(s.Conversations);
@@ -330,6 +338,7 @@ namespace FeiqLight
             {
                 DateTime cutoff;
                 if (clearedThrough.TryGetValue(record.PeerId, out cutoff) && record.Time <= cutoff) return false;
+                if (DeletedKeys(record.PeerId).Contains(RecordKey(record))) return false;
                 HashSet<long> packets;
                 if (!incomingPackets.TryGetValue(record.PeerId, out packets))
                 {
@@ -358,6 +367,7 @@ namespace FeiqLight
         {
             lock (gate)
             {
+                if (DeletedKeys(record.PeerId).Contains(RecordKey(record))) return;
                 DateTime cutoff;
                 if(clearedThrough.TryGetValue(record.PeerId,out cutoff)&&record.Time<=cutoff)return;
                 byte[] bytes = new UTF8Encoding(false).GetBytes(json.Serialize(record) + "\n");
@@ -395,10 +405,72 @@ namespace FeiqLight
                 string path=HistoryPath(peerId);
                 if(File.Exists(path))File.Delete(path);
                 incomingPackets.Remove(peerId);
+                deletedRecords.Remove(peerId);
                 // ACK 和退出收尾不应把刚清空的旧消息重新写回。
                 clearedThrough[peerId]=DateTime.Now;
                 foreach(string key in activePending.Where(p=>p.Value.PeerId==peerId).Select(p=>p.Key).ToArray())activePending.Remove(key);
             }
+        }
+        public void DeleteRecords(string peerId, IEnumerable<ChatRecord> records)
+        {
+            if (String.IsNullOrEmpty(peerId)) throw new ArgumentException("会话不能为空。", "peerId");
+            ChatRecord[] selected = records.ToArray();
+            if (selected.Any(r => r == null || r.PeerId != peerId)) throw new ArgumentException("只能删除当前会话的消息。", "records");
+            HashSet<string> keys = new HashSet<string>(selected.Select(RecordKey), StringComparer.Ordinal);
+            if (keys.Count == 0) return;
+            lock (gate)
+            {
+                string path = HistoryPath(peerId);
+                if (!File.Exists(path)) return;
+                string temporary = path + ".delete-" + Guid.NewGuid().ToString("N") + ".tmp";
+                HashSet<string> written = new HashSet<string>();
+                try
+                {
+                    using (StreamReader reader = new StreamReader(path, Encoding.UTF8))
+                    using (StreamWriter writer = new StreamWriter(temporary, false, new UTF8Encoding(false)))
+                    {
+                        string line;
+                        while ((line = reader.ReadLine()) != null)
+                        {
+                            ChatRecord item = null;
+                            try
+                            {
+                                item = json.Deserialize<ChatRecord>(line);
+                            }
+                            catch (ArgumentException) { }
+                            catch (InvalidOperationException) { }
+                            if (item != null && item.PeerId == peerId && keys.Contains(RecordKey(item)))
+                            {
+                                // 留下不含正文或附件路径的消息号，重启后的重复包和旧 ACK 也不能恢复已删除消息。
+                                if (written.Add(RecordKey(item))) writer.WriteLine(json.Serialize(new ChatRecord { PeerId = peerId, Packet = item.Packet, Outgoing = item.Outgoing, Text = "", Deleted = true }));
+                            }
+                            else writer.WriteLine(line);
+                        }
+                    }
+                    File.Replace(temporary, path, null);
+                    HashSet<string> deleted;
+                    if (deletedRecords.TryGetValue(peerId, out deleted)) deleted.UnionWith(written);
+                    foreach (ChatRecord record in selected.Where(r => written.Contains(RecordKey(r)))) activePending.Remove(record.PeerId + "/" + record.Packet);
+                }
+                finally { if (File.Exists(temporary)) File.Delete(temporary); }
+            }
+        }
+        private static string RecordKey(ChatRecord record) { return record.Outgoing + ":" + record.Packet; }
+        private HashSet<string> DeletedKeys(string peerId)
+        {
+            HashSet<string> keys;
+            if (deletedRecords.TryGetValue(peerId, out keys)) return keys;
+            keys = new HashSet<string>();
+            string path = HistoryPath(peerId);
+            if (File.Exists(path)) foreach (string line in File.ReadLines(path, Encoding.UTF8))
+            {
+                if (!line.Contains("\"Deleted\":true")) continue;
+                try { ChatRecord item = json.Deserialize<ChatRecord>(line); if (item != null && item.PeerId == peerId && item.Deleted) keys.Add(RecordKey(item)); }
+                catch (ArgumentException) { }
+                catch (InvalidOperationException) { }
+            }
+            if (deletedRecords.Count >= 32) deletedRecords.Clear();
+            deletedRecords[peerId] = keys; return keys;
         }
         public List<ChatRecord> History(string peerId, int limit)
         {
@@ -409,6 +481,7 @@ namespace FeiqLight
                 Dictionary<string, LinkedListNode<ChatRecord>> index = new Dictionary<string, LinkedListNode<ChatRecord>>();
                 string path = HistoryPath(peerId);
                 if (!File.Exists(path)) return result.ToList();
+                HashSet<string> deleted = DeletedKeys(peerId);
                 // 只扫描文件尾部，避免多年聊天记录拖慢打开窗口；原始历史不截断。
                 using (FileStream stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
                 using (StreamReader reader = new StreamReader(stream, Encoding.UTF8))
@@ -421,7 +494,7 @@ namespace FeiqLight
                         try
                         {
                             ChatRecord item = json.Deserialize<ChatRecord>(line);
-                            if (item == null || item.PeerId != peerId || item.Text == null) continue;
+                            if (item == null || item.PeerId != peerId || item.Text == null || item.Deleted || deleted.Contains(RecordKey(item))) continue;
                             // JavaScriptSerializer 读回的是 UTC；聊天显示统一本地时间，保留同一个时间点。
                             if(item.Time.Kind==DateTimeKind.Utc)item.Time=item.Time.ToLocalTime();
                             string key = item.Outgoing + ":" + item.Packet;

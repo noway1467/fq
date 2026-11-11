@@ -120,7 +120,7 @@ namespace FeiqLight
     // 主菜单顶部的个人资料条目：头像、昵称与本机地址，点击进入设置。
     public sealed class ProfileMenuItem : ToolStripMenuItem
     {
-        public string Identity = "", Detail = "";
+        public string Identity = "", Detail = "", Avatar;
         public ProfileMenuItem() { Tag = "profile"; }
         protected override void OnPaint(PaintEventArgs e)
         {
@@ -128,7 +128,7 @@ namespace FeiqLight
             Rectangle area = new Rectangle(Point.Empty, Size);
             if (Selected) using (GraphicsPath path = Theme.RoundedF(new RectangleF(1, 1, Width - 2, Height - 2), 8 * scale)) using (SolidBrush b = new SolidBrush(Theme.Hover)) g.FillPath(b, path);
             int avatar = (int)(42 * scale), halo = Theme.AvatarHalo(avatar), left = (int)(12 * scale), top = (Height - avatar) / 2;
-            g.DrawImageUnscaled(Theme.CachedAvatar(avatar, Identity, false), left - halo, top - halo);
+            g.DrawImageUnscaled(Theme.CachedAvatar(avatar, Identity, false, Avatar), left - halo, top - halo);
             int textLeft = left + avatar + (int)(12 * scale);
             TextRenderer.DrawText(g, Text, Theme.Strong, new Rectangle(textLeft, top + (int)(1 * scale), Math.Max(1, Width - textLeft - (int)(10 * scale)), (int)(22 * scale)), Theme.Ink, TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
             TextRenderer.DrawText(g, Detail, Theme.Small, new Rectangle(textLeft, top + (int)(23 * scale), Math.Max(1, Width - textLeft - (int)(10 * scale)), (int)(18 * scale)), Theme.Muted, TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);

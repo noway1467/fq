@@ -93,7 +93,7 @@ namespace FeiqLight
                 if (back != Theme.Surface) using (GraphicsPath path = Theme.Rounded(highlight, Dp(10))) using (SolidBrush b = new SolidBrush(back)) g.FillPath(b, path);
                 Color ink = selected ? Color.White : Theme.Ink, muted = selected ? Color.FromArgb(225, 255, 255, 255) : Theme.Muted;
                 Rectangle face = new Rectangle(pad + Dp(4), row.Top + (RowHeight - avatar) / 2, avatar, avatar);
-                g.DrawImageUnscaled(Theme.CachedAvatar(avatar, item.Peer.Id, false), face.X - halo, face.Y - halo);
+                g.DrawImageUnscaled(Theme.CachedAvatar(avatar, item.Peer.Id, false, item.Peer.Avatar), face.X - halo, face.Y - halo);
                 if (item.Peer.Online)
                 {
                     // 在线圆点外圈取行底色，选中与悬停时都与背景衔接。

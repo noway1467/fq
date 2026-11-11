@@ -16,7 +16,7 @@ public final class LanNode implements AutoCloseable {
     public static final class Peer {
         public volatile InetSocketAddress endpoint;
         public volatile String login, host, deviceId, conversationId;
-        public volatile String name, group;
+        public volatile String name, group, avatar;
         public volatile boolean utf8, online;
         public volatile long lastSeen;
         // 仅供在线复核：最近一次单播探测及之后连续未回应次数；初值取创建时刻，nanoTime 原点为负也不会误判。
@@ -106,6 +106,8 @@ public final class LanNode implements AutoCloseable {
     private final int port;
     private final String login, host;
     private String deviceId;
+    private volatile String avatar="default";
+    public void setAvatar(String value) {String normalized=Protocol.normalizeAvatar(value);if(normalized==null)throw new IllegalArgumentException("头像数据无效");avatar=normalized;}
     public void setDeviceId(String value) {
         if(started)throw new IllegalStateException("需在启动前设置身份");
         deviceId=Protocol.normalizeDeviceId(value);
@@ -184,7 +186,7 @@ public final class LanNode implements AutoCloseable {
         } catch (IllegalArgumentException e) { throw new IOException("IPv4 地址或端口无效"); }
     }
     // TCP 请求仍以首个 NUL 结束，身份扩展只用于 UDP，兼容旧端文件服务。
-    private byte[] encode(int command,String body,String extra) { return Protocol.encode(sequence.incrementAndGet(),login,host,command|Protocol.UTF8,body,extra,(command&255)==Protocol.GET_FILE?null:deviceId); }
+    private byte[] encode(int command,String body,String extra) {int mode=command&255;return Protocol.encode(sequence.incrementAndGet(),login,host,command|Protocol.UTF8,body,extra,mode==Protocol.GET_FILE?null:deviceId,mode==Protocol.ENTRY||mode==Protocol.ANSWER||mode==Protocol.ABSENCE?avatar:null);}
     private void send(byte[] bytes,InetSocketAddress to) throws IOException {
         if (!(to.getAddress() instanceof Inet4Address) || (loopback && !to.getAddress().isLoopbackAddress())) throw new IOException("无效的目标地址");
         synchronized(udpSendGate) {
@@ -283,6 +285,7 @@ public final class LanNode implements AutoCloseable {
             peer.conversationId=peer.id(); if(p.deviceId!=null)peer.deviceId=p.deviceId;
             peer.endpoint=from;peer.login=p.login;peer.host=p.host;
             if (p.mode()==Protocol.ENTRY || p.mode()==Protocol.ANSWER || p.mode()==Protocol.ABSENCE) {
+                if(p.avatar!=null) peer.avatar=p.avatar;
                 peer.name=p.body.trim().isEmpty()?p.login:Protocol.prefix(p.body,128);
                 peer.group=Protocol.prefix(p.extra,128);
             }

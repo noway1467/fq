@@ -31,12 +31,14 @@ final class ChatStore extends SQLiteOpenHelper {
         String displayName() { return baseDisplayName()+nameSuffix(); }
     }
     private static String displayBase(String name,String note) {return note==null||note.trim().isEmpty()?(name==null?"":name):note;}
-    ChatStore(Context context) { super(context,"chat.db",null,6); }
+    ChatStore(Context context) { super(context,"chat.db",null,7); }
     @Override public void onCreate(SQLiteDatabase db) {
         db.execSQL("CREATE TABLE peers (id TEXT PRIMARY KEY, endpoint TEXT, login TEXT, host TEXT, name TEXT, grp TEXT, preview TEXT DEFAULT '', time INTEGER DEFAULT 0, unread INTEGER DEFAULT 0, utf8 INTEGER DEFAULT 0, note TEXT DEFAULT '', pinned INTEGER DEFAULT 0, hidden INTEGER DEFAULT 0, conversation_number INTEGER NOT NULL DEFAULT 0)");
         db.execSQL("CREATE TABLE messages (id INTEGER PRIMARY KEY, peer TEXT, packet INTEGER, outgoing INTEGER, time INTEGER, text TEXT, state TEXT, files TEXT, local_files TEXT DEFAULT '[]', UNIQUE(peer,packet,outgoing))");
         db.execSQL("CREATE INDEX messages_peer_time ON messages(peer,time)");
         db.execSQL("ALTER TABLE peers ADD COLUMN device_id TEXT");
+        db.execSQL("ALTER TABLE peers ADD COLUMN avatar TEXT");
+        db.execSQL("CREATE TABLE deleted_messages(peer TEXT NOT NULL, packet INTEGER NOT NULL, outgoing INTEGER NOT NULL, PRIMARY KEY(peer,packet,outgoing))");
     }
     @Override public void onUpgrade(SQLiteDatabase db,int oldVersion,int newVersion) {
         if(oldVersion<2) db.execSQL("ALTER TABLE peers ADD COLUMN utf8 INTEGER DEFAULT 0");
@@ -45,11 +47,14 @@ final class ChatStore extends SQLiteOpenHelper {
         // 只补本地显示编号，不改联系人主键、消息归属或原有备注。
         if(oldVersion<5) { db.execSQL("ALTER TABLE peers ADD COLUMN conversation_number INTEGER NOT NULL DEFAULT 0"); db.execSQL("UPDATE peers SET conversation_number=rowid"); }
         if(oldVersion<6) db.execSQL("ALTER TABLE peers ADD COLUMN device_id TEXT");
+        if(oldVersion<7 && newVersion>=7) db.execSQL("ALTER TABLE peers ADD COLUMN avatar TEXT");
+        if(oldVersion<7 && newVersion>=7) db.execSQL("CREATE TABLE deleted_messages(peer TEXT NOT NULL, packet INTEGER NOT NULL, outgoing INTEGER NOT NULL, PRIMARY KEY(peer,packet,outgoing))");
     }
     void peer(LanNode.Peer p) {
         ContentValues v=new ContentValues(); v.put("id",p.id()); v.put("endpoint",p.endpoint.getAddress().getHostAddress()+":"+p.endpoint.getPort());
         v.put("login",p.login); v.put("host",p.host); v.put("name",p.name); v.put("grp",p.group); v.put("utf8",p.utf8?1:0);
         v.put("device_id",p.deviceId);
+        if(p.avatar!=null) v.put("avatar",Protocol.normalizeAvatar(p.avatar));
         SQLiteDatabase db=getWritableDatabase(); if (db.update("peers",v,"id=?",new String[]{p.id()})==0) {
             v.put("conversation_number",DatabaseUtils.longForQuery(db,"SELECT COALESCE(MAX(conversation_number),0)+1 FROM peers",null));db.insertOrThrow("peers",null,v);
         }
@@ -67,6 +72,7 @@ final class ChatStore extends SQLiteOpenHelper {
             v.put("local_files",new org.json.JSONArray(m.localPaths).toString());
             // REPLACE 会删除旧行再分配 id，导致同毫秒消息在 ACK 后换序；原位更新保持排序稳定。
             String[] key={p.id(),Long.toString(m.number),m.outgoing?"1":"0"}; boolean inserted;
+            if(DatabaseUtils.longForQuery(db,"SELECT COUNT(*) FROM deleted_messages WHERE peer=? AND packet=? AND outgoing=?",key)>0){db.setTransactionSuccessful();return false;}
             try(Cursor existing=db.rawQuery("SELECT id FROM messages WHERE peer=? AND packet=? AND outgoing=? LIMIT 1",key)) { inserted=!existing.moveToFirst(); }
             // 已清空的消息不能被迟到的 ACK / 文件状态回调复活。
             if(inserted && update) { db.setTransactionSuccessful(); return false; }
@@ -85,6 +91,23 @@ final class ChatStore extends SQLiteOpenHelper {
         } finally { db.endTransaction(); }
     }
     void recoverPending() { getWritableDatabase().execSQL("UPDATE messages SET state='上次退出，未确认送达' WHERE state='等待确认'"); }
+    void deleteMessages(String peer,List<LanNode.Message> selected) {
+        SQLiteDatabase db=getWritableDatabase();db.beginTransaction();
+        try {
+            for(LanNode.Message message:selected) {
+                String[] key={peer,Long.toString(message.number),message.outgoing?"1":"0"};
+                if(db.delete("messages","peer=? AND packet=? AND outgoing=?",key)>0) {
+                    // 删除消息号与正文删除在同一事务里，重启后的重复包不能恢复记录。
+                    db.execSQL("INSERT OR IGNORE INTO deleted_messages(peer,packet,outgoing) VALUES(?,?,?)",new Object[]{peer,message.number,message.outgoing?1:0});
+                }
+            }
+            String preview="";long time=0;
+            try(Cursor last=db.rawQuery("SELECT text,files,time FROM messages WHERE peer=? ORDER BY time DESC,id DESC LIMIT 1",new String[]{peer})) {
+                if(last.moveToFirst()){preview=last.getString(0);time=last.getLong(2);List<Protocol.Attachment> files=Protocol.parseStoredFiles(last.getString(1));if(preview.isEmpty()&&!files.isEmpty())preview="[文件] "+files.get(0).name;}
+            }
+            db.execSQL("UPDATE peers SET preview=?,time=? WHERE id=?",new Object[]{preview,time,peer});db.setTransactionSuccessful();
+        } finally {db.endTransaction();}
+    }
     void read(String id) { getWritableDatabase().execSQL("UPDATE peers SET unread=0 WHERE id=?",new Object[]{id}); }
     void edit(String id,String note,boolean pinned) {
         ContentValues v=new ContentValues();v.put("note",note.trim());v.put("pinned",pinned?1:0);getWritableDatabase().update("peers",v,"id=?",new String[]{id});
@@ -98,10 +121,11 @@ final class ChatStore extends SQLiteOpenHelper {
     }
     List<Conversation> conversations() {
         List<Conversation> result=new ArrayList<>();
-        try (Cursor c=getReadableDatabase().rawQuery("SELECT endpoint,login,host,name,grp,preview,time,unread,utf8,note,pinned,hidden,conversation_number,id,device_id FROM peers ORDER BY pinned DESC,time DESC,name LIMIT 1000",null)) {
+        try (Cursor c=getReadableDatabase().rawQuery("SELECT endpoint,login,host,name,grp,preview,time,unread,utf8,note,pinned,hidden,conversation_number,id,device_id,avatar FROM peers ORDER BY pinned DESC,time DESC,name LIMIT 1000",null)) {
             while (c.moveToNext()) try {
                 Conversation item=new Conversation(); item.peer=new LanNode.Peer(LanNode.endpoint(c.getString(0)),c.getString(1),c.getString(2),c.getString(3),c.getString(4));
                 item.peer.conversationId=c.getString(13);item.peer.deviceId=Protocol.normalizeDeviceId(c.getString(14));
+                item.peer.avatar=Protocol.normalizeAvatar(c.getString(15));
                 item.preview=c.getString(5); item.time=c.getLong(6); item.unread=c.getInt(7); item.peer.utf8=c.getInt(8)!=0; item.note=c.getString(9);item.pinned=c.getInt(10)!=0;item.hidden=c.getInt(11)!=0;item.number=c.getLong(12);result.add(item);
             } catch (IOException ignored) { }
         }

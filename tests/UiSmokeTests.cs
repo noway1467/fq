@@ -310,7 +310,7 @@ namespace FeiqLight.Tests
                                 byte[] bytes = Protocol.Encode(42, "cancel-ui", "local", Protocol.SendMessage | Protocol.FileAttach | Protocol.Utf8, "取消测试", Protocol.FileList(new[] { new Attachment { Id = 0, Name = "取消.bin", Size = 1048576 } }));
                                 announce.Send(bytes, bytes.Length, new IPEndPoint(IPAddress.Loopback, receiverPort));
                                 Pump(() => Directory.Exists(cancelledFolder) && Directory.GetFiles(cancelledFolder, "*.part").Length == 1, "自动接收未连接停滞测试服务器");
-                                main.OpenChat(receiver.Peers.Single(p => p.Login == "cancel-ui")); ChatForm cancelChat = main.ActiveChat; Button(cancelChat, "取消").PerformClick();
+                                main.OpenChat(receiver.Peers.Single(p => p.Login == "cancel-ui")); ChatForm cancelChat = main.ActiveChat; Find<Button>(cancelChat, "文件接收按钮").PerformClick();
                                 Pump(() => !Directory.GetFiles(cancelledFolder).Any() && All(cancelChat).OfType<Button>().Any(button => button.Text == "接收" && button.Enabled) && Button(cancelChat,"拒绝").Enabled, "取消没有中止传输或清理半成品");
                                 Check(cancelChat.PendingFileCount == 1 && !cancelChat.HasAutomaticFile, "取消后立即重试或丢失任务");
                                 Button(cancelChat,"拒绝").PerformClick(); Check(cancelChat.PendingFileCount == 0, "取消后不能拒绝邀请");
@@ -322,8 +322,233 @@ namespace FeiqLight.Tests
                 finally { main.ExitApplication(); Application.DoEvents(); }
             }
         }
+        internal static void RunSettingsMessageTests(string directory, Action<string, Action> test)
+        {
+            test("跟随系统主题：旧配置兼容、保存取消、系统通知与手动覆盖", () => {
+                LocalStore store=new LocalStore(Path.Combine(directory,"system-theme"));File.WriteAllText(Path.Combine(store.Root,"settings.json"),"{\"Nickname\":\"旧夜间设置\",\"DarkMode\":true}");AppSettings saved=store.LoadSettings();saved.ReceiveFolder=Path.Combine(store.Root,"received");
+                Check(saved.DarkMode&&!saved.FollowSystemTheme,"旧配置被改为跟随系统");
+                using(SettingsDialog dialog=new SettingsDialog(saved,store.Root,2425)) {
+                    dialog.Show();SettingsTab(dialog,"外观");Find<ToggleSwitch>(dialog,"跟随系统切换").Checked=true;ToggleSwitch dark=Find<ToggleSwitch>(dialog,"夜间模式");Check(!dark.Enabled&&dark.Checked==Theme.SystemDark,"跟随系统时手动夜间开关状态不符");
+                    Render(dialog,"preview-follow-system-settings");Button(dialog,"保存").PerformClick();store.SaveSettings(dialog.Value);dialog.Close();
+                }
+                Check(store.LoadSettings().FollowSystemTheme,"跟随系统未持久化");
+                using(LanService node=new LanService(store.LoadSettings(),Port(),true,"system-theme")) using(MainForm main=new MainForm(node,store)) {
+                    main.Show();Theme.Change(!Theme.SystemDark,"blue");
+                    typeof(MainForm).GetMethod("SystemThemeChanged",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(main,new object[]{main,new Microsoft.Win32.UserPreferenceChangedEventArgs(Microsoft.Win32.UserPreferenceCategory.General)});Application.DoEvents();Check(Theme.Dark==Theme.SystemDark,"系统通知未应用主题");
+                    bool previous=Theme.Dark;typeof(MainForm).GetMethod("ToggleNight",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(main,null);Check(!node.Settings.FollowSystemTheme&&Theme.Dark!=previous,"手动切换仍被系统模式覆盖");main.ExitApplication();
+                }
+                Theme.Change(false,"blue");
+            });
+            test("自选头像：内置选择、本地图片副本、设置保存取消与明暗预览", () => {
+                string folder = Path.Combine(directory, "avatar-ui"); Directory.CreateDirectory(folder); string source = Path.Combine(folder, "原头像.png");
+                using(Bitmap bitmap = new Bitmap(120, 80)) using(Graphics g = Graphics.FromImage(bitmap)) { g.Clear(Color.FromArgb(30, 130, 170)); g.FillEllipse(Brushes.White, 40, 15, 40, 40); bitmap.Save(source, ImageFormat.Png); }
+                string image = EmojiAvatars.FromLocalImage(source); Check(Protocol.NormalizeAvatar(image) == image, "本地头像格式不合法");
+                File.Move(source, Path.Combine(folder, "移动后的原图.png"));
+                LocalStore store = new LocalStore(folder); AppSettings original = new AppSettings { Nickname = "头像测试", Avatar = "default", ReceiveFolder = Path.Combine(folder, "received") };
+                foreach(bool night in new[] { false, true }) {
+                    Theme.Change(night, "blue");
+                    using(AvatarPickerDialog picker = new AvatarPickerDialog(image, original.DeviceId)) {
+                        picker.Show(); Application.DoEvents(); Check(Find<TableLayoutPanel>(picker, "内置头像列表").Controls.Count == 24, "内置头像数量不符");
+                        Render(picker, "preview-avatar-picker-picture" + (night ? "-dark" : "-light"));
+                        Find<Button>(picker, "内置头像：熬夜猫头鹰").PerformClick(); Check(picker.SelectedValue == "builtin:15", "未选中内置头像");
+                        Render(picker, "preview-avatar-picker-builtin" + (night ? "-dark" : "-light")); picker.Close();
+                    }
+                }
+                Theme.Change(false, "blue");
+                using(SettingsDialog dialog = new SettingsDialog(original, folder, 2425)) {
+                    dialog.Show(); Application.DoEvents();
+                    using(System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 20 }) {
+                        timer.Tick += delegate { AvatarPickerDialog picker = Application.OpenForms.OfType<AvatarPickerDialog>().FirstOrDefault(); if(picker != null) { timer.Stop(); Find<Button>(picker, "内置头像：熬夜猫头鹰").PerformClick(); Button(picker, "使用此头像").PerformClick(); } };
+                        timer.Start(); Button(dialog, "更换头像").PerformClick();
+                    }
+                    Button(dialog, "保存").PerformClick(); Check(dialog.Value.Avatar == "builtin:15", "设置未保存所选头像"); store.SaveSettings(dialog.Value); dialog.Close();
+                }
+                AppSettings saved = store.LoadSettings(); Check(saved.Avatar == "builtin:15", "重启丢失内置头像");
+                saved.Avatar = image; store.SaveSettings(saved); Check(store.LoadSettings().Avatar == image, "图片副本未持久化");
+                using(SettingsDialog dialog = new SettingsDialog(saved, folder, 2425)) { dialog.Show(); Application.DoEvents(); Button(dialog, "取消").PerformClick(); Check(dialog.Value == null && store.LoadSettings().Avatar == image, "取消改写了头像"); dialog.Close(); }
+                using(Bitmap picture = Theme.ContactAvatar(64, "peer", false, image)) Check(picture.GetPixel(picture.Width / 2, picture.Height / 2).R > 180, "原图移动后头像未显示");
+            });
+            test("头像协议：新旧报文兼容、非法数据与超大画布拒绝", () => {
+                Packet packet; string id = "0123456789abcdef0123456789abcdef";
+                byte[] bytes = Protocol.Encode(1, "user", "host", Protocol.Entry | Protocol.Utf8, "昵称", "部门", id, "builtin:23");
+                Check(Protocol.TryParse(bytes, out packet) && packet.DeviceId == id && packet.Avatar == "builtin:23" && packet.Body == "昵称" && packet.Extra == "部门", "头像扩展破坏既有字段");
+                Check(Protocol.TryParse(Protocol.Encode(2, "user", "host", Protocol.Entry | Protocol.Utf8, "旧客户端", "组", id), out packet) && packet.Avatar == null, "旧报文被要求提供头像");
+                Check(Protocol.NormalizeAvatar("builtin:24") == null && Protocol.NormalizeAvatar("image:invalid") == null, "非法头像被接受");
+                string source = Path.Combine(directory, "avatar-protocol.png"); using(Bitmap image = new Bitmap(64, 64)) { image.Save(source, ImageFormat.Png); }
+                string avatar = EmojiAvatars.FromLocalImage(source); bytes = Convert.FromBase64String(avatar.Substring(6));
+                for(int i = 2; i + 8 < bytes.Length; i++) if(bytes[i] == 255 && bytes[i + 1] == 192) { bytes[i + 7] = 1; break; }
+                Check(Protocol.NormalizeAvatar("image:" + Convert.ToBase64String(bytes)) == null, "超大头像画布被接受");
+            });
+            test("头像同步：真实 Windows 双节点发现、改图、恢复默认与离线保存", () => {
+                LocalStore store = new LocalStore(Path.Combine(directory, "avatar-network"));
+                using(LanService sender = new LanService(new AppSettings { Avatar = "builtin:5", Nickname = "头像发送端" }, Port(), true, "avatar-sender"))
+                using(LanService receiver = new LanService(new AppSettings { Notifications = false, CloseToTray = false }, Port(), true, "avatar-receiver"))
+                using(MainForm main = new MainForm(receiver, store)) {
+                    main.PrepareNetworkCallbacks(); sender.Start(); receiver.Start(); main.Show(); main.NetworkStarted(); sender.Probe(new IPEndPoint(IPAddress.Loopback, receiver.Port));
+                    Pump(() => receiver.Peers.Any(p => p.Avatar == "builtin:5"), "未收到内置头像"); Peer peer = receiver.Peers.Single(); main.OpenChat(peer);
+                    string source = Path.Combine(store.Root, "头像.png"); using(Bitmap picture = new Bitmap(64, 64)) using(Graphics g = Graphics.FromImage(picture)) { g.Clear(Color.OrangeRed); picture.Save(source, ImageFormat.Png); }
+                    string selected = EmojiAvatars.FromLocalImage(source); sender.Settings.Avatar = selected; sender.Refresh();
+                    Pump(() => peer.Avatar == selected && store.LoadSettings().Conversations.Single().Avatar == selected, "图片头像未同步持久化");
+                    Render(main, "preview-avatar-received");
+                    PictureBox portrait = Find<PictureBox>(main.ActiveChat, "聊天联系人头像"); Check(((Bitmap)portrait.Image).GetPixel(portrait.Image.Width / 2, portrait.Image.Height / 2).R > 200, "聊天标题未刷新头像");
+                    sender.Settings.Avatar = "default"; sender.Refresh(); Pump(() => peer.Avatar == "default" && store.LoadSettings().Conversations.Single().Avatar == "default", "恢复默认未同步"); main.ExitApplication();
+                }
+                Check(new LocalStore(store.Root).LoadSettings().Conversations.Single().Avatar == "default", "离线头像未保存");
+            });
+            test("单条与批量删除：持久化、方向隔离、正文移除、附件和草稿保留", () => {
+                string folder = Path.Combine(directory, "delete-store"); LocalStore store = new LocalStore(folder);
+                string file = Path.Combine(folder, "保留的附件.txt"); File.WriteAllText(file, "附件不能随消息删除"); store.SaveDraft("peer", "保留草稿");
+                ChatRecord incoming = new ChatRecord { PeerId = "peer", Packet = 10, Text = "删除的入站正文", Time = DateTime.Now, LocalFiles = new[] { file } };
+                ChatRecord outgoing = new ChatRecord { PeerId = "peer", Packet = 10, Text = "保留的同号出站", Time = DateTime.Now, Outgoing = true, State = "等待确认" };
+                ChatRecord other = new ChatRecord { PeerId = "other", Packet = 10, Text = "其他会话", Time = DateTime.Now };
+                store.AppendIncoming(incoming); store.Append(outgoing); store.Append(other); incoming.State = "已保存"; store.Append(incoming);
+                store.DeleteRecords("peer", new[] { incoming });
+                Check(store.History("peer", 20).Single().Outgoing, "删除入站时误删同号出站");
+                store = new LocalStore(folder);
+                Check(!store.AppendIncoming(incoming), "重启后重复入站消息复活");
+                store.DeleteRecords("peer", store.History("peer", 20)); outgoing.State = "已送达"; store.Append(outgoing); store.CompletePending();
+                store = new LocalStore(folder); store.Append(outgoing);
+                Check(store.History("peer", 20).Count == 0, "重启后的 ACK 恢复已删除消息");
+                Check(store.History("other", 20).Single().Text == other.Text && store.LoadDraft("peer") == "保留草稿" && File.ReadAllText(file) == "附件不能随消息删除", "误改其他会话、草稿或附件");
+                Check(!File.ReadAllText(Directory.GetFiles(folder, "history-*.jsonl").Single(p => File.ReadAllText(p).Contains("\"Deleted\":true"))).Contains(incoming.Text), "删除后仍保留正文");
+            });
+            test("消息删除失败：文件占用时原历史和后续送达写入保持可用", () => {
+                LocalStore store = new LocalStore(Path.Combine(directory, "delete-locked")); ChatRecord record = new ChatRecord { PeerId = "peer", Packet = 1, Outgoing = true, Text = "原消息", Time = DateTime.Now, State = "等待确认" }; store.Append(record);
+                string path = Directory.GetFiles(store.Root, "history-*.jsonl").Single(); byte[] before = File.ReadAllBytes(path); bool failed = false;
+                using(FileStream locked = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read)) {
+                    try { store.DeleteRecords("peer", new[] { record }); } catch(IOException) { failed = true; }
+                }
+                Check(failed && before.SequenceEqual(File.ReadAllBytes(path)), "删除失败破坏了原历史");
+                record.State = "已送达"; store.Append(record); Check(store.History("peer", 10).Single().State == "已送达", "删除失败仍屏蔽了 ACK");
+                Check(Directory.GetFiles(store.Root, "*.tmp").Length == 0, "删除失败残留临时文件");
+            });
+            test("删除标记：历史超过尾部读取窗口仍阻止重复消息", () => {
+                LocalStore store = new LocalStore(Path.Combine(directory, "delete-old")); ChatRecord record = new ChatRecord { PeerId = "peer", Packet = 1, Text = "已删除", Time = DateTime.Now };
+                store.AppendIncoming(record); store.DeleteRecords("peer", new[] { record });
+                for(int i = 0; i < 70; i++) store.Append(new ChatRecord { PeerId = "peer", Packet = 10 + i, Text = new string('a', 65536), Time = DateTime.Now });
+                Check(new FileInfo(Directory.GetFiles(store.Root, "*.jsonl").Single()).Length > 4 * 1024 * 1024, "未覆盖历史窗口边界");
+                store = new LocalStore(store.Root); Check(!store.AppendIncoming(record), "尾部窗口外删除标记失效"); Check(store.History("peer", 1).Single().Packet == 79, "删除标记影响新消息");
+            });
+            test("设置布局：明暗主题、全部分类、最小和最大窗口、错误行不覆盖按钮", () => {
+                foreach(bool night in new[] { false, true }) {
+                    Theme.Change(night, "blue");
+                    using(SettingsDialog dialog = new SettingsDialog(new AppSettings { Nickname = "中文 English", Signature = "较长的签名 English signature", ReceiveFolder = Path.Combine(directory, "settings-layout-received") }, directory, 2425)) {
+                        dialog.Show(); Application.DoEvents();
+                        Panel body = (Panel)typeof(SettingsDialog).GetField("body", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(dialog);
+                        foreach(string tab in new[] { "通用", "外观", "文件", "诊断" }) {
+                            SettingsTab(dialog, tab); Check(!body.HorizontalScroll.Visible, "设置出现横向滚动条：" + tab);
+                            foreach(ToggleSwitch toggle in All(dialog).OfType<ToggleSwitch>().Where(t => t.Visible)) Check(toggle.Height >= toggle.PreferredHeightFor(toggle.Width), "开关说明被截断：" + toggle.Text);
+                            Render(dialog, "preview-settings-fixed-" + tab + (night ? "-dark" : "-light"));
+                        }
+                        dialog.Size = dialog.MinimumSize; Application.DoEvents(); SettingsTab(dialog, "通用");
+                        body.ScrollControlIntoView(Find<ToggleSwitch>(dialog, "开机自启动")); Application.DoEvents();
+                        Check(!body.HorizontalScroll.Visible, "最小设置窗口横向越界"); Render(dialog, "preview-settings-fixed-minimum" + (night ? "-dark" : "-light"));
+                        Find<TextBox>(dialog, "昵称").Text = ""; Button(dialog, "保存").PerformClick(); Application.DoEvents();
+                        Label error = Find<Label>(dialog, "设置错误");
+                        foreach(Button button in new[] { Button(dialog, "保存"), Button(dialog, "取消") }) {
+                            Rectangle errorBounds = new Rectangle(error.PointToScreen(Point.Empty), error.Size), buttonBounds = new Rectangle(button.PointToScreen(Point.Empty), button.Size);
+                            Check(error.Visible && !errorBounds.IntersectsWith(buttonBounds), "错误提示覆盖按钮");
+                            Check(button.Parent.ClientRectangle.Contains(button.Bounds), "操作按钮越界");
+                        }
+                        Render(dialog, "preview-settings-fixed-error" + (night ? "-dark" : "-light"));
+                        dialog.WindowState = FormWindowState.Maximized; Application.DoEvents(); Check(!body.HorizontalScroll.Visible, "最大化设置窗口越界");
+                        Render(dialog, "preview-settings-fixed-maximized" + (night ? "-dark" : "-light")); dialog.Close();
+                    }
+                }
+                Theme.Change(false, "blue");
+            });
+            test("消息操作：右键单删、取消确认、多选批删、计数与会话预览同步", () => {
+                string folder = Path.Combine(directory, "delete-ui"); LocalStore store = new LocalStore(folder);
+                int port = Port(); AppSettings settings = new AppSettings { Notifications = false, CloseToTray = false, ReceiveFolder = Path.Combine(folder, "received"), Conversations = new[] { new SavedConversation { Endpoint = "127.0.0.1:" + Port(), Login = "delete-peer", Nickname = "删除测试" } } };
+                using(LanService node = new LanService(settings, port, true, "delete-local")) using(MainForm main = new MainForm(node, store)) {
+                    Peer peer = node.Peers.Single();
+                    ChatRecord[] records = Enumerable.Range(0, 6).Select(i => new ChatRecord { PeerId = peer.Id, Packet = 100 + i, Text = "消息 " + i, Sender = "测试", Time = DateTime.Now, Outgoing = true, State = "已送达" }).ToArray();
+                    foreach(ChatRecord record in records) store.Append(record);
+                    main.Show(); main.OpenChat(peer); Application.DoEvents(); ChatForm chat = main.ActiveChat; BubbleHistory history = All(chat).OfType<BubbleHistory>().Single();
+                    Action<int, MouseButtons> mouse = (index, button) => {
+                        var bounds = (List<Rectangle>)typeof(BubbleHistory).GetField("bounds", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(history);
+                        Rectangle r = bounds[index]; int y = r.Y + r.Height / 2 + history.AutoScrollPosition.Y;
+                        typeof(BubbleHistory).GetMethod("OnMouseDown", BindingFlags.Instance | BindingFlags.NonPublic).Invoke(history, new object[] { new MouseEventArgs(button, 1, r.X + r.Width / 2, y, 0) });
+                    };
+                    Action<bool> deleteLatest = accept => {
+                        mouse(5, MouseButtons.Right); history.ContextMenuStrip.Show(history, new Point(40, 40)); Application.DoEvents();
+                        using(System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 20 }) {
+                            timer.Tick += delegate { ConfirmDialog confirm = Application.OpenForms.OfType<ConfirmDialog>().FirstOrDefault(); if(confirm != null) { timer.Stop(); Button(confirm, accept ? "删除" : "取消").PerformClick(); } };
+                            timer.Start(); ClickMenu(history.ContextMenuStrip, "删除这条消息");
+                        }
+                    };
+                    deleteLatest(false); Check(store.History(peer.Id, 20).Count == 6, "取消确认仍删除消息");
+                    deleteLatest(true); Application.DoEvents(); Check(store.History(peer.Id, 20).Count == 5 && !history.Text.Contains("消息 5"), "单条删除未同步界面与存储");
+                    Check(store.LoadSettings().Conversations.Single().Preview.EndsWith("消息 4"), "删除最新消息后会话预览仍显示旧内容");
+                    mouse(0, MouseButtons.Right); history.ContextMenuStrip.Show(history, new Point(40, 40)); Application.DoEvents(); ClickMenu(history.ContextMenuStrip, "选择多条消息"); Application.DoEvents();
+                    mouse(1, MouseButtons.Left); Check(history.SelectionCount == 2 && Find<TableLayoutPanel>(chat, "消息多选操作栏").Visible, "多选计数或操作栏未出现");
+                    Render(main, "preview-messages-multi-select");
+                    using(System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 20 }) {
+                        timer.Tick += delegate { ConfirmDialog confirm = Application.OpenForms.OfType<ConfirmDialog>().FirstOrDefault(); if(confirm != null) { timer.Stop(); Button(confirm, "删除").PerformClick(); } };
+                        timer.Start(); Button(Find<TableLayoutPanel>(chat, "消息多选操作栏"), "删除").PerformClick();
+                    }
+                    Check(store.History(peer.Id, 20).Count == 3 && !history.SelectionMode && !history.Text.Contains("消息 0") && !history.Text.Contains("消息 1"), "批量删除结果不符");
+                    MethodInfo select = typeof(BubbleHistory).GetMethod("SelectMessage", BindingFlags.Instance | BindingFlags.NonPublic);
+                    select.Invoke(history, new object[] { 0, MouseButtons.Left, Keys.None }); select.Invoke(history, new object[] { 1, MouseButtons.Left, Keys.Control }); Check(history.SelectionCount == 2, "Ctrl 多选未保留前一条");
+                    history.EndSelection(); select.Invoke(history, new object[] { 0, MouseButtons.Left, Keys.None }); select.Invoke(history, new object[] { 2, MouseButtons.Left, Keys.Shift }); Check(history.SelectionCount == 3, "Shift 区间选择不符");
+                    history.SelectAllMessages(); Check(history.SelectionCount == 3, "全选数量错误"); history.EndSelection();
+                    node.Settings.DarkMode = true; Theme.Change(true, "blue"); history.SelectAllMessages(); Render(main, "preview-messages-multi-select-dark"); history.EndSelection(); Theme.Change(false, "blue");
+                    main.ExitApplication();
+                }
+                Check(new LocalStore(folder).History(settings.Conversations.Single().Id, 20).Count == 3, "关闭重启后恢复已删除消息");
+            });
+            test("多选附件：点击不打开文件、取消和新消息不破坏选区", () => {
+                using(Form form = new Form { ClientSize = new Size(600, 440) }) using(BubbleHistory history = new BubbleHistory { Dock = DockStyle.Fill }) {
+                    form.Controls.Add(history); form.Show();
+                    ChatRecord file = new ChatRecord { PeerId = "peer", Packet = 1, Text = "附件", Time = DateTime.Now, Transfers = new[] { new FileTransferState { Id = 0, Name = "文件.txt", Size = 12, Status = "待接收 · 点击接收" } } };
+                    history.SetRecords(new[] { file }); history.Refresh(); history.BeginSelection();
+                    var hits = (List<Tuple<Rectangle, ChatRecord, int>>)typeof(BubbleHistory).GetField("fileHits", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(history);
+                    Rectangle area = hits.Single().Item1; int requested = 0; history.FileRequested += delegate { requested++; };
+                    foreach(string method in new[] { "OnMouseDown", "OnMouseUp" }) typeof(BubbleHistory).GetMethod(method, BindingFlags.Instance | BindingFlags.NonPublic).Invoke(history, new object[] { new MouseEventArgs(MouseButtons.Left, 1, area.X + 10, area.Y + 10, 0) });
+                    Check(requested == 0 && history.SelectionCount == 1, "多选时触发了附件接收");
+                    history.Append(new ChatRecord { PeerId = "peer", Packet = 2, Text = "新消息", Time = DateTime.Now }); Check(history.SelectionCount == 1, "新消息改变选区");
+                    typeof(BubbleHistory).GetMethod("OnKeyDown", BindingFlags.Instance | BindingFlags.NonPublic).Invoke(history, new object[] { new KeyEventArgs(Keys.Escape) });
+                    Check(!history.SelectionMode && history.SelectionCount == 0, "Esc 未退出多选"); form.Close();
+                }
+            });
+            test("消息删除保护：待接收与发送邀请需先处理文件", () => {
+                LocalStore store = new LocalStore(Path.Combine(directory, "delete-pending"));
+                AppSettings settings = new AppSettings { Notifications = false, CloseToTray = false, AutoReceiveFiles = false, Conversations = new[] { new SavedConversation { Endpoint = "127.0.0.1:" + Port(), Login = "pending-peer", Nickname = "文件任务" } } };
+                using(LanService node = new LanService(settings, Port(), true, "pending-local")) using(MainForm main = new MainForm(node, store)) {
+                    Peer peer = node.Peers.Single();
+                    ChatRecord outgoing = new ChatRecord { PeerId = peer.Id, Packet = 20, Text = "发出的邀请", Outgoing = true, Time = DateTime.Now, Transfers = new[] { new FileTransferState { Id = 0, Name = "文件.txt", Status = "等待对方接收" } } };
+                    ChatRecord incoming = new ChatRecord { PeerId = peer.Id, Packet = 21, Text = "收到的邀请", Time = DateTime.Now };
+                    store.Append(outgoing); store.AppendIncoming(incoming); main.Show(); main.OpenChat(peer);
+                    main.ActiveChat.AddAttachments(new IncomingMessage { Peer = peer, Record = incoming, Files = new List<Attachment> { new Attachment { Id = 0, Name = "待接收.txt", Size = 12 } } });
+                    foreach(ChatRecord record in new[] { outgoing, incoming }) {
+                        bool noticed = false;
+                        using(System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 20 }) {
+                            timer.Tick += delegate {
+                                NoticeDialog notice = Application.OpenForms.OfType<NoticeDialog>().FirstOrDefault();
+                                if(notice != null) { noticed = true; timer.Stop(); Button(notice, "确定").PerformClick(); }
+                                ConfirmDialog confirm = Application.OpenForms.OfType<ConfirmDialog>().FirstOrDefault();
+                                if(confirm != null) { timer.Stop(); Button(confirm, "取消").PerformClick(); }
+                            };
+                            timer.Start(); Check(!main.DeleteMessages(peer, new[] { record }), "删除了未完成文件任务的消息");
+                        }
+                        Check(noticed && store.History(peer.Id, 10).Count == 2, "文件任务保护提示或历史保留错误");
+                    }
+                    main.ExitApplication();
+                }
+            });
+            test("多选删除滚动：删除大量旧消息后退出多选不会使用旧布局索引", () => {
+                using(Form form=new Form { ClientSize=new Size(560,400) }) using(BubbleHistory history=new BubbleHistory { Dock=DockStyle.Fill }) {
+                    Panel bar=new Panel { Dock=DockStyle.Top, Height=56, Visible=false };form.Controls.Add(history);form.Controls.Add(bar);history.SelectionChanged+=delegate {bar.Visible=history.SelectionMode;};form.Show();
+                    ChatRecord[] rows=Enumerable.Range(0,180).Select(i=>new ChatRecord { PeerId="peer",Packet=i,Text=new string('a',80),Time=DateTime.Now }).ToArray();history.SetRecords(rows);history.BeginSelection();
+                    history.AutoScrollPosition=new Point(0,history.AutoScrollMinSize.Height-history.Height*2);
+                    history.RemoveRecords(rows.Take(170));Application.DoEvents();
+                    Check(!history.SelectionMode&&history.Text.Split('\n').Length==10,"删除后选区或记录数量错误");Check(history.AutoScrollPosition.Y<=0,"删除后滚动位置越界");form.Close();
+                }
+            });
+        }
         public static void Run(string directory, Action<string, Action> test)
         {
+            RunSettingsMessageTests(directory, test);
             test("图片粘贴：快捷键与右键、真实 PNG 传输、移除清理及已发保留",()=>{
                 string folder=Path.Combine(directory,"clipboard-image");LocalStore store=new LocalStore(Path.Combine(folder,"profile"));
                 IDataObject clipboard=Clipboard.GetDataObject();
@@ -548,7 +773,13 @@ namespace FeiqLight.Tests
                 for(int i=0;i<4000;i++)log.Record(DiagnosticEvent.FileStatus);
                 string[] files=Directory.GetFiles(Path.Combine(folder,"diagnostics"));Check(files.Length==2&&files.All(f=>new FileInfo(f).Length<=Diagnostics.Limit),"诊断轮转超限");
                 string text=log.Read();settings.DiagnosticsEnabled=false;log.Record(DiagnosticEvent.NetworkError);Check(text==log.Read(),"关闭后仍在写入");
-                Check(!text.Contains(folder)&&!text.Contains(Environment.UserName),"诊断泄露身份或路径");
+                string[] lines=text.Split(new[]{'\r','\n'},StringSplitOptions.RemoveEmptyEntries);
+                Check(lines[0]=="飞Q "+typeof(Diagnostics).Assembly.GetName().Version+" / Windows / UTC"&&!text.Contains(folder),"诊断头部含额外信息或路径");
+                // 用户名可能与版本号或时间片段相同；逐字段校验才能准确判断是否写入身份。
+                Check(lines.Skip(1).All(line=>{
+                    string[] fields=line.Split(' ');DateTime time;
+                    return fields.Length==2&&DateTime.TryParseExact(fields[0],"O",System.Globalization.CultureInfo.InvariantCulture,System.Globalization.DateTimeStyles.RoundtripKind,out time)&&time.Kind==DateTimeKind.Utc&&fields[1]==DiagnosticEvent.FileStatus.ToString();
+                }),"诊断包含时间和固定事件码之外的信息");
                 log.Clear();Check(Directory.GetFiles(Path.Combine(folder,"diagnostics")).Length==0&&File.Exists(Path.Combine(folder,"settings.json")),"清除误删设置");
                 settings.ReceiveFolder=Path.Combine(folder,"received");
                 using(SettingsDialog dialog=new SettingsDialog(settings,folder,2425)) {

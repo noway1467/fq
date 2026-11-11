@@ -16,11 +16,13 @@ public final class AndroidInterop {
         };
         try(LanNode node=new LanNode(port,true,"android-test","JVM-Android-Core","安卓测试😀","互通验证",listener)) {
             node.setDeviceId("0123456789abcdef0123456789abcdef");
+            node.setAvatar("builtin:5");
             node.start(); node.probe(LanNode.endpoint("127.0.0.1:"+windows)); LanNode.Peer peer=null;
             for(int i=0;i<500&&peer==null;i++) { for(LanNode.Peer p:node.peers()) if(p.login.equals("windows-test")) peer=p; Thread.sleep(10); }
             if(peer==null) throw new AssertionError("Windows 发现失败");
             if(peer.deviceId==null || !peer.id().startsWith("device:"))throw new AssertionError("Windows 稳定身份未互通");
             if(!peer.name.equals("Windows 测试👩🏽‍💻")) throw new AssertionError("Windows 昵称乱码");
+            if(!"builtin:15".equals(peer.avatar))throw new AssertionError("Windows 内置头像未同步");
             for(int i=0;i<5;i++) {
                 Thread.sleep(150);long started=System.nanoTime();node.sendMessage(peer,"0",Collections.emptyList());
                 LanNode.Message echo=incoming.poll(2,TimeUnit.SECONDS),confirm=updates.poll(2,TimeUnit.SECONDS);
@@ -28,6 +30,14 @@ public final class AndroidInterop {
                 if(echo==null||!echo.text.equals("IDLE_ECHO:0")||confirm==null||!confirm.state.equals("已送达")||elapsed>=1000)throw new AssertionError("空闲单字符往返延迟 "+elapsed+" ms");
                 System.out.println("WINDOWS_ZERO_ROUNDTRIP_MS="+elapsed);
             }
+            node.sendMessage(peer,"REQUEST_AVATAR_IMAGE",Collections.emptyList());LanNode.Message avatarReady=incoming.poll(5,TimeUnit.SECONDS);updates.poll(5,TimeUnit.SECONDS);
+            if(avatarReady==null||!avatarReady.text.equals("AVATAR_IMAGE_READY"))throw new AssertionError("Windows 图片头像未发送");
+            String avatar="image:"+Base64.getEncoder().encodeToString(Files.readAllBytes(root.resolve("avatar.jpg")));
+            for(int i=0;i<200&&!avatar.equals(peer.avatar);i++)Thread.sleep(10);
+            if(!avatar.equals(peer.avatar))throw new AssertionError("Windows 图片头像解析不一致");
+            node.setAvatar(avatar);node.refresh();node.sendMessage(peer,"VERIFY_AVATAR_IMAGE",Collections.emptyList());LanNode.Message avatarDone=incoming.poll(5,TimeUnit.SECONDS);updates.poll(5,TimeUnit.SECONDS);
+            if(avatarDone==null||!avatarDone.text.equals("AVATAR_IMAGE_OK"))throw new AssertionError("Android 图片头像未同步到 Windows");
+            System.out.println("AVATAR_INTEROP PASS: 双向内置头像与 JPEG 图片头像一致");
             long size=Long.parseLong(args[3]); byte[] bytes=new byte[65536]; for(int i=0;i<bytes.length;i++) bytes[i]=(byte)(i*17+3);
             File source=root.resolve("安卓资料👩🏽‍💻.bin").toFile();
             try(OutputStream out=new BufferedOutputStream(new FileOutputStream(source))) { for(long left=size;left>0;) { int count=(int)Math.min(left,bytes.length);out.write(bytes,0,count);left-=count; } }

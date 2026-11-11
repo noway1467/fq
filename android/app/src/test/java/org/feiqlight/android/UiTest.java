@@ -172,7 +172,7 @@ public final class UiTest {
         }
         Map<String,String> names=new HashMap<>();
         try(ChatStore store=new ChatStore(context)) {
-            List<ChatStore.Conversation> all=store.conversations();assertEquals(6,store.getReadableDatabase().getVersion());assertEquals(2,all.stream().map(ChatStore.Conversation::displayName).distinct().count());
+            List<ChatStore.Conversation> all=store.conversations();assertEquals(7,store.getReadableDatabase().getVersion());assertEquals(2,all.stream().map(ChatStore.Conversation::displayName).distinct().count());
             for(ChatStore.Conversation c:all) {assertTrue(c.number>0);names.put(c.peer.id(),c.displayName());assertEquals("历史 #"+c.number,store.history(c.peer.id()).get(0).text);store.peer(c.peer);}
             assertTrue(all.get(0).hidden);assertTrue(all.get(0).pinned);
             LanNode.Peer fresh=new LanNode.Peer(LanNode.endpoint("127.0.0.1:32424"),"fresh","host","phone","");store.peer(fresh);assertEquals(3,store.conversations().stream().filter(c->c.peer.id().equals(fresh.id())).findFirst().get().number);
@@ -326,9 +326,9 @@ public final class UiTest {
                 TextView portrait=(TextView)field(activity,"chatAvatar");assertTrue(((AvatarDrawable)portrait.getBackground()).isOnline());screenshot(activity,"android-presence-chat-"+(dark?"dark":"light"));
                 assertEquals("",portrait.getText().toString());AvatarDrawable original=(AvatarDrawable)portrait.getBackground();assertEquals(EmojiAvatars.get(activity).index(rows.get(0).peer.id()),original.avatarIndex());
                 rows.get(0).note="刚改的备注";activity.changed();assertSame("改备注不应重新分配头像",original,portrait.getBackground());assertTrue(portrait.getContentDescription().toString().startsWith("刚改的备注"));
-                Method bind=MainActivity.class.getDeclaredMethod("bindAvatar",TextView.class,String.class,String.class,boolean.class);bind.setAccessible(true);
-                bind.invoke(activity,portrait,"0","同名联系人",false);assertEquals(0,((AvatarDrawable)portrait.getBackground()).avatarIndex());
-                bind.invoke(activity,portrait,"1","同名联系人",true);assertEquals(1,((AvatarDrawable)portrait.getBackground()).avatarIndex());activity.changed();
+                Method bind=MainActivity.class.getDeclaredMethod("bindAvatar",TextView.class,String.class,String.class,boolean.class,String.class);bind.setAccessible(true);
+                bind.invoke(activity,portrait,"0","同名联系人",false,null);assertEquals(0,((AvatarDrawable)portrait.getBackground()).avatarIndex());
+                bind.invoke(activity,portrait,"1","同名联系人",true,null);assertEquals(1,((AvatarDrawable)portrait.getBackground()).avatarIndex());activity.changed();
                 rows.get(0).peer.online=false;activity.changed();assertFalse(((AvatarDrawable)portrait.getBackground()).isOnline());assertTrue(portrait.getContentDescription().toString().endsWith("离线"));
                 rows.get(0).peer.online=true;activity.changed();assertTrue(((AvatarDrawable)portrait.getBackground()).isOnline());
             }
@@ -682,7 +682,7 @@ public final class UiTest {
             db.execSQL("CREATE TABLE messages (id INTEGER PRIMARY KEY,peer TEXT,packet INTEGER,outgoing INTEGER,time INTEGER,text TEXT,state TEXT,files TEXT,local_files TEXT DEFAULT '[]',UNIQUE(peer,packet,outgoing))");
             db.execSQL("INSERT INTO peers(id,endpoint,login,host,name,grp) VALUES('127.0.0.1:32425/old','127.0.0.1:32425','old','host','旧联系人','')");db.execSQL("INSERT INTO messages(peer,packet,outgoing,time,text,state,files) VALUES('127.0.0.1:32425/old',1,0,1,'升级前消息','已收到','')");db.setVersion(3);
         }
-        try(ChatStore store=new ChatStore(context)){ChatStore.Conversation c=store.conversations().get(0);assertEquals("旧联系人",c.displayName());assertEquals("升级前消息",store.history(c.peer.id()).get(0).text);assertFalse(c.pinned);assertFalse(c.hidden);assertEquals(6,store.getReadableDatabase().getVersion());store.edit(c.peer.id(),"升级后备注",true);assertEquals("升级后备注",store.conversations().get(0).displayName());}
+        try(ChatStore store=new ChatStore(context)){ChatStore.Conversation c=store.conversations().get(0);assertEquals("旧联系人",c.displayName());assertEquals("升级前消息",store.history(c.peer.id()).get(0).text);assertFalse(c.pinned);assertFalse(c.hidden);assertEquals(7,store.getReadableDatabase().getVersion());store.edit(c.peer.id(),"升级后备注",true);assertEquals("升级后备注",store.conversations().get(0).displayName());}
     }
     @Test public void conversationMetadataSurvivesDiscoveryAndClearDoesNotResurrectAck() throws Exception {
         Context context=RuntimeEnvironment.getApplication();

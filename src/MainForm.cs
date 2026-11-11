@@ -90,6 +90,12 @@ public sealed class MainForm : ModernWindow
             RefreshFilters();
             ApplyWallpaper();
             Theme.Changed += ApplyWallpaper;
+            Microsoft.Win32.SystemEvents.UserPreferenceChanged += SystemThemeChanged;
+        }
+        private void SystemThemeChanged(object sender, Microsoft.Win32.UserPreferenceChangedEventArgs e) { Ui(ApplySystemTheme); }
+        private void ApplySystemTheme() {
+            if(!network.Settings.FollowSystemTheme || Theme.Dark == Theme.SystemDark) return;
+            Theme.Change(Theme.SystemDark, network.Settings.Accent); foreach(ChatForm chat in chats.Values) chat.ApplyAppearance(); RefreshFilters();
         }
         // 主界面未打开会话时的背景与聊天页保持一致，切换主题或背景设置后立即刷新。
         private void ApplyWallpaper()
@@ -126,7 +132,7 @@ public sealed class MainForm : ModernWindow
             SavedConversation[] old=SavedConversation.Normalize(network.Settings.Conversations);
             SavedConversation[] current=SavedConversation.Normalize(peers.Select(p=>new SavedConversation {
                 Endpoint=p.Endpoint.ToString(),Login=p.Login,Host=p.Host,Nickname=p.Nickname,Group=p.Group,Note=p.Note,Pinned=p.Pinned,Hidden=p.Hidden,ConversationNumber=p.ConversationNumber,
-                DeviceId=p.DeviceId,ConversationId=p.Id,
+                DeviceId=p.DeviceId,Avatar=p.Avatar,ConversationId=p.Id,
                 Preview=previews.ContainsKey(p.Id)?previews[p.Id]:"",Unread=unread.ContainsKey(p.Id)?unread[p.Id]:0,
                 MessageUtcTicks=times.ContainsKey(p.Id)&&times[p.Id]!=default(DateTime)?times[p.Id].ToUniversalTime().Ticks:0 }));
             if (new HashSet<string>(previous).SetEquals(next)&&old.Length==current.Length&&old.Zip(current,(a,b)=>a.SameAs(b)).All(equal=>equal)) return true;
@@ -180,6 +186,27 @@ public sealed class MainForm : ModernWindow
         internal void TrySave(ChatRecord record) { try { store.Append(record); } catch (Exception e) { status.Text = "记录保存失败：" + e.Message; } }
         internal void SaveDraft(string peerId, string text) { try { store.SaveDraft(peerId, text); } catch (Exception e) { status.Text = "草稿保存失败：" + e.Message; } }
         internal void Sent(Peer peer, ChatRecord record) { TrySave(record); Remember(peer, record); RefreshPeers(); }
+        internal bool DeleteMessages(Peer peer, ChatRecord[] records)
+        {
+            ChatForm chat; chats.TryGetValue(peer.Id, out chat);
+            if (chat != null && chat.HasPendingMessages(records)) {
+                using(NoticeDialog notice = new NoticeDialog("请先处理文件", "选中的消息含有待接收或传输中的文件，请完成或拒绝后再删除。")) notice.ShowDialog(this);
+                return false;
+            }
+            string title = records.Length == 1 ? "删除这条消息？" : "删除选中的 " + records.Length + " 条消息？";
+            using(ConfirmDialog confirm = new ConfirmDialog(title, "仅删除这台电脑上的消息记录，对方的记录和已保存的附件文件会保留。", "删除", true))
+                if(confirm.ShowDialog(this) != DialogResult.OK) return false;
+            try {
+                // 持久化成功后再更新界面，写入失败时仍保留原选区和消息。
+                store.DeleteRecords(peer.Id, records);
+                if(chat != null) chat.RemoveMessages(records);
+                ChatRecord last = store.History(peer.Id, 1).LastOrDefault();
+                if(last == null) { previews.Remove(peer.Id); times.Remove(peer.Id); recent.Remove(peer.Id); }
+                else { previews[peer.Id] = (last.Outgoing ? "你：" : "") + last.Text; times[peer.Id] = last.Time; }
+                fingerprint = null; RefreshPeers(); return true;
+            }
+            catch(Exception error) { using(NoticeDialog notice = new NoticeDialog("删除未完成", error.Message)) notice.ShowDialog(this); return false; }
+        }
         internal void Forward(ChatRecord original)
         {
             try
@@ -236,7 +263,7 @@ public sealed class MainForm : ModernWindow
         {
             bool persisted=RememberPeerAddresses();
             List<Peer> all = network.Peers.Where(p=>!p.Hidden).ToList(); string query = search.Text.Trim();
-            string next = filter + "|" + query + "|" + started + "|" + String.Join("|", all.Select(p => p.Id + p.DisplayName + p.Pinned + p.Online + p.Group + p.Endpoint + p.Host)) + "|" + String.Join("|", recent) + "|" + String.Join("|", unread.Select(p => p.Key + p.Value)) + "|" + String.Join("|", previews.Values);
+            string next = filter + "|" + query + "|" + started + "|" + String.Join("|", all.Select(p => p.Id + p.DisplayName + p.Pinned + p.Online + p.Group + p.Endpoint + p.Host + p.Avatar)) + "|" + String.Join("|", recent) + "|" + String.Join("|", unread.Select(p => p.Key + p.Value)) + "|" + String.Join("|", previews.Values);
             if (next == fingerprint) return; fingerprint = next;
             var rows = all.Where(p => filter != 2 || p.Online).Where(p => filter != 1 || (unread.ContainsKey(p.Id) && unread[p.Id] > 0))
                 .Where(p => (p.DisplayName + " " + p.Nickname + " " + p.Group + " " + p.Host + " " + p.Endpoint + " " + (previews.ContainsKey(p.Id) ? previews[p.Id] : "")).IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0)
@@ -308,7 +335,7 @@ public sealed class MainForm : ModernWindow
                 dialog.Value.KnownPeers = network.Settings.KnownPeers;
                 dialog.Value.Conversations = network.Settings.Conversations;
                 dialog.Value.DeviceId = network.Settings.DeviceId;
-                try { if (startupAvailable) startup.SaveSettings(store, network.Settings, dialog.Value); else store.SaveSettings(dialog.Value); network.Settings = dialog.Value; Theme.Change(dialog.Value.DarkMode,dialog.Value.Accent); foreach(ChatForm chat in chats.Values)chat.ApplyAppearance(); RefreshFilters(); RefreshNetwork(); ReceiveAutomatically(); } catch (Exception e) { status.Text = "设置保存失败：" + e.Message; }
+                try { if (startupAvailable) startup.SaveSettings(store, network.Settings, dialog.Value); else store.SaveSettings(dialog.Value); network.Settings = dialog.Value; Theme.Change(dialog.Value.FollowSystemTheme ? Theme.SystemDark : dialog.Value.DarkMode,dialog.Value.Accent); foreach(ChatForm chat in chats.Values)chat.ApplyAppearance(); RefreshFilters(); RefreshNetwork(); ReceiveAutomatically(); } catch (Exception e) { status.Text = "设置保存失败：" + e.Message; }
             }
         }
         internal void OpenShared(Peer peer)
@@ -343,7 +370,7 @@ public sealed class MainForm : ModernWindow
             if (mainMenu == null)
             {
                 mainMenu = Theme.Menu(); mainMenu.MinimumSize = new Size((int)(236 * DeviceDpi / 96F), 0);
-                profileItem = new ProfileMenuItem { Text = network.Settings.Nickname, Detail = "本机 · 端口 " + network.Port, Identity = network.Login };
+                profileItem = new ProfileMenuItem { Text = network.Settings.Nickname, Detail = "本机 · 端口 " + network.Port, Identity = "device:" + network.Settings.DeviceId, Avatar = network.Settings.Avatar };
                 profileItem.Click += delegate { OpenSettings(); };
                 mainMenu.Items.Add(profileItem);
                 mainMenu.Items.Add(new ToolStripSeparator());
@@ -359,8 +386,8 @@ public sealed class MainForm : ModernWindow
                 mainMenu.Items.Add("退出", null, delegate { Ui(ExitApplication); });
                 mainMenu.Opening += delegate
                 {
-                    profileItem.Text = network.Settings.Nickname; profileItem.Detail = "本机 · 端口 " + network.Port;
-                    nightItem.Checked = network.Settings.DarkMode;
+                    profileItem.Text = network.Settings.Nickname; profileItem.Detail = "本机 · 端口 " + network.Port; profileItem.Avatar = network.Settings.Avatar;
+                    nightItem.Checked = Theme.Dark;
                 };
             }
             mainMenu.Show((Control)sender, new Point(0, ((Control)sender).Height));
@@ -368,10 +395,10 @@ public sealed class MainForm : ModernWindow
         // 菜单里的夜间开关与设置页共用同一持久化字段，切换后立即重绘并保留当前强调色。
         private void ToggleNight()
         {
-            bool dark = !network.Settings.DarkMode;
-            network.Settings.DarkMode = dark;
+            bool previous = network.Settings.DarkMode, follow = network.Settings.FollowSystemTheme, dark = !Theme.Dark;
+            network.Settings.DarkMode = dark; network.Settings.FollowSystemTheme = false;
             try { store.SaveSettings(network.Settings); }
-            catch (Exception e) { network.Settings.DarkMode = !dark; status.Text = "主题保存失败：" + e.Message; return; }
+            catch (Exception e) { network.Settings.DarkMode = previous; network.Settings.FollowSystemTheme = follow; status.Text = "主题保存失败：" + e.Message; return; }
             Theme.Change(dark, network.Settings.Accent);
             foreach (ChatForm chat in chats.Values) chat.ApplyAppearance();
             RefreshFilters(); ApplyWallpaper();
@@ -437,7 +464,7 @@ public sealed class MainForm : ModernWindow
                 try { store.CompletePending(); } catch (IOException e) { status.Text = "记录保存失败：" + e.Message; }
                 catch (UnauthorizedAccessException e) { status.Text = "记录保存失败：" + e.Message; }
             }
-            if (disposing) { Theme.Changed -= ApplyWallpaper; network.PeersChanged -= OnPeersChanged; network.MessageReceived -= OnMessage; network.DeliveryChanged -= OnDelivery; network.Error -= OnError; network.TransferChanged -= OnTransfer; if (mainMenu != null) mainMenu.Dispose(); if(conversationMenu!=null)conversationMenu.Dispose(); if (tray != null) { tray.Visible = false; if (tray.ContextMenuStrip != null) tray.ContextMenuStrip.Dispose(); tray.Dispose(); } foreach (ChatForm chat in chats.Values) chat.Dispose(); }
+            if (disposing) { Microsoft.Win32.SystemEvents.UserPreferenceChanged -= SystemThemeChanged; Theme.Changed -= ApplyWallpaper; network.PeersChanged -= OnPeersChanged; network.MessageReceived -= OnMessage; network.DeliveryChanged -= OnDelivery; network.Error -= OnError; network.TransferChanged -= OnTransfer; if (mainMenu != null) mainMenu.Dispose(); if(conversationMenu!=null)conversationMenu.Dispose(); if (tray != null) { tray.Visible = false; if (tray.ContextMenuStrip != null) tray.ContextMenuStrip.Dispose(); tray.Dispose(); } foreach (ChatForm chat in chats.Values) chat.Dispose(); }
             base.Dispose(disposing);
         }
     }

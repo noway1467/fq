@@ -13,14 +13,24 @@ final class AvatarDrawable extends Drawable {
     private final RectF target = new RectF();
     private final float halo, density;
     private boolean online;
+    private final String avatar;
+    private final Bitmap picture;
     AvatarDrawable(Context context, String identity, boolean online, float halo) { this(context, identity, online, halo, Color.WHITE, 0xff3cb34f); }
     AvatarDrawable(Context context, String identity, boolean online, float halo, int surface, int presence) {
-        avatars=EmojiAvatars.get(context);index=avatars.index(identity);face.setColor(avatars.color(index));
+        this(context,identity,online,halo,surface,presence,null);
+    }
+    AvatarDrawable(Context context, String identity, boolean online, float halo, int surface, int presence, String value) {
+        avatar=org.feiqlight.android.core.Protocol.normalizeAvatar(value);
+        avatars=EmojiAvatars.get(context);index=avatar!=null && avatar.startsWith("builtin:")?Integer.parseInt(avatar.substring(8)):avatars.index(identity);face.setColor(avatars.color(index));
+        Bitmap decoded=null;
+        if(avatar!=null && avatar.startsWith("image:")) { byte[] data=java.util.Base64.getDecoder().decode(avatar.substring(6)); decoded=BitmapFactory.decodeByteArray(data,0,data.length); }
+        picture=decoded;
         source=new Rect(index%6*80+4,index/6*80+4,index%6*80+76,index/6*80+76);
         ring.setColor(surface);dot.setColor(presence);density=context.getResources().getDisplayMetrics().density;
         this.online=online;this.halo=halo;
     }
     int avatarIndex() { return index; }
+    String avatarValue() { return avatar; }
     boolean isOnline() { return online; }
     void setOnline(boolean value) { if(online!=value) { online=value; invalidateSelf(); } }
     @Override protected void onBoundsChange(Rect bounds) {
@@ -33,7 +43,11 @@ final class AvatarDrawable extends Drawable {
         Rect bounds=getBounds(); float radius=Math.min(bounds.width(),bounds.height())/2f, x=bounds.exactCenterX(), y=bounds.exactCenterY();
         if(radius<=halo) return;
         canvas.drawCircle(x,y,radius-halo,face);
-        canvas.drawBitmap(avatars.atlas,source,target,emoji);
+        if(picture==null) canvas.drawBitmap(avatars.atlas,source,target,emoji);
+        else {
+            int saved=canvas.save(); Path circle=new Path();circle.addCircle(x,y,radius-halo,Path.Direction.CW);canvas.clipPath(circle);
+            canvas.drawBitmap(picture,null,new RectF(x-radius+halo,y-radius+halo,x+radius-halo,y+radius-halo),emoji);canvas.restoreToCount(saved);
+        }
         if(online) {
             // 与 Windows ContactAvatar 同一比例：点径为头像直径的 30%，向右下探出 14%，底色描边约 5.5%。
             float size=(radius-halo)*2, outer=Math.max(9*density,size*.3f), edge=Math.max(1.5f*density,size*.055f);

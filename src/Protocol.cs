@@ -12,6 +12,7 @@ namespace FeiqLight
         public long Number;
         public string Login;
         public string DeviceId;
+        public string Avatar;
         public string Host;
         public uint Command;
         public string Body;
@@ -40,14 +41,45 @@ namespace FeiqLight
         {
             Guid id; return value != null && Guid.TryParseExact(value, "N", out id) && id != Guid.Empty ? id.ToString("N") : null;
         }
-        public static byte[] Encode(long number, string login, string host, uint command, string body, string extra, string deviceId = null)
+        public static string NormalizeAvatar(string value)
+        {
+            if(value == "default") return value;
+            int index;
+            if(value != null && value.StartsWith("builtin:", StringComparison.Ordinal) && Int32.TryParse(value.Substring(8), out index) && index >= 0 && index < 24) return "builtin:" + index;
+            if(value == null || !value.StartsWith("image:", StringComparison.Ordinal) || value.Length > 5470) return null;
+            try {
+                byte[] bytes = Convert.FromBase64String(value.Substring(6));
+                if(bytes.Length < 12 || bytes.Length > 4096 || bytes[0] != 255 || bytes[1] != 216 || bytes[bytes.Length - 2] != 255 || bytes[bytes.Length - 1] != 217) return null;
+                // 先读取 JPEG 尺寸，再交给图像解码器；网络输入不能声明超大画布消耗内存。
+                for(int offset = 2; offset + 8 < bytes.Length;) {
+                    if(bytes[offset++] != 255) return null;
+                    while(offset < bytes.Length && bytes[offset] == 255) offset++;
+                    if(offset + 2 >= bytes.Length) return null;
+                    int marker = bytes[offset++], length = (bytes[offset] << 8) | bytes[offset + 1];
+                    if(length < 2 || offset + length > bytes.Length) return null;
+                    if(marker == 192) {
+                        if(length < 8 || bytes[offset + 2] != 8) return null;
+                        int height = (bytes[offset + 3] << 8) | bytes[offset + 4], width = (bytes[offset + 5] << 8) | bytes[offset + 6];
+                        return width == 64 && height == 64 ? "image:" + Convert.ToBase64String(bytes) : null;
+                    }
+                    if(marker == 218 || marker == 217) return null;
+                    offset += length;
+                }
+            } catch(FormatException) { }
+            return null;
+        }
+        public static byte[] Encode(long number, string login, string host, uint command, string body, string extra, string deviceId = null, string avatar = null)
         {
             if (number < 0 || Field(login).Length > 128 || Field(host).Length > 128) throw new ArgumentException("无效的报文头。");
             if ((body ?? "").IndexOf('\0') >= 0 || (extra ?? "").IndexOf('\0') >= 0) throw new ArgumentException("消息不能包含空字符。");
             Encoding encoding = (command & Utf8) != 0 ? StrictUtf8 : StrictLegacy;
             string wire = "1:" + number.ToString(CultureInfo.InvariantCulture) + ":" + Field(login) + ":" + Field(host) + ":" + command.ToString(CultureInfo.InvariantCulture) + ":" + (body ?? "") + "\0";
-            if (extra != null || deviceId != null) wire += (extra ?? "") + "\0";
+            if (extra != null || deviceId != null || avatar != null) wire += (extra ?? "") + "\0";
             if (NormalizeDeviceId(deviceId) != null) wire += "FQID=" + NormalizeDeviceId(deviceId) + "\0";
+            if(avatar != null) {
+                string normalized = NormalizeAvatar(avatar); if(normalized == null) throw new ArgumentException("头像数据无效。");
+                wire += "FQAV=" + normalized + "\0";
+            }
             byte[] result;
             try { result = encoding.GetBytes(wire); }
             catch (EncoderFallbackException) { throw new ArgumentException((command & Utf8) != 0 ? "文本包含不完整的 Unicode 字符，请重新输入。" : "对方未声明 UTF-8 支持，当前文字或文件名无法无损发送，请刷新联系人或更换内容。"); }
@@ -71,6 +103,7 @@ namespace FeiqLight
             string[] body = parts[5].Split('\0');
             packet = new Packet { Number = number, Login = parts[2], Host = parts[3], Command = command, Body = body[0], Extra = body.Length > 1 ? body[1] : "" };
             packet.DeviceId = body.Length > 2 && body[2].StartsWith("FQID=", StringComparison.Ordinal) ? NormalizeDeviceId(body[2].Substring(5)) : null;
+            for(int i = 2; i < body.Length; i++) if(body[i].StartsWith("FQAV=", StringComparison.Ordinal)) packet.Avatar = NormalizeAvatar(body[i].Substring(5));
             return packet.Login.Length <= 128 && packet.Host.Length <= 128;
         }
         public static bool SafeFileName(string name)

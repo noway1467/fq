@@ -107,7 +107,11 @@ namespace FeiqLight
         }
         private long Next() { return Interlocked.Increment(ref sequence); }
         // TCP 文件请求以第一个 NUL 结束；尾随 UDP 身份扩展会让旧服务因未读字节关闭时发 RST。
-        private byte[] Encode(uint command, string body, string extra) { return Protocol.Encode(Next(), Login, Host, command | Protocol.Utf8, body, extra, (command & 255) == Protocol.GetFile ? null : Settings.DeviceId); }
+        private byte[] Encode(uint command, string body, string extra) {
+            uint mode = command & 255;
+            return Protocol.Encode(Next(), Login, Host, command | Protocol.Utf8, body, extra, mode == Protocol.GetFile ? null : Settings.DeviceId,
+                mode == Protocol.Entry || mode == Protocol.AnswerEntry || mode == Protocol.Absence ? Settings.Avatar ?? "default" : null);
+        }
         private void Send(byte[] bytes, IPEndPoint endpoint)
         {
             if (disposed) throw new ObjectDisposedException("LanService");
@@ -180,6 +184,7 @@ namespace FeiqLight
                 peer.Endpoint = endpoint; peer.Login = packet.Login; peer.Host = packet.Host;
                 if (entry)
                 {
+                    if(packet.Avatar != null) peer.Avatar = packet.Avatar;
                     peer.Nickname = String.IsNullOrWhiteSpace(packet.Body) ? packet.Login : Protocol.Prefix(packet.Body, 128);
                     peer.Group = String.IsNullOrWhiteSpace(packet.Extra) ? "我的局域网" : Protocol.Prefix(packet.Extra, 128);
                 }

@@ -8,6 +8,7 @@ import java.nio.charset.CharacterCodingException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Base64;
 
 /** 与桌面端相同的 IPMSG 基础子集；不承诺飞秋私有协议兼容。 */
 public final class Protocol {
@@ -18,7 +19,7 @@ public final class Protocol {
     public static final class Packet {
         public long number;
         public int command;
-        public String login, host, body, extra, deviceId;
+        public String login, host, body, extra, deviceId, avatar;
         public int mode() { return command & 255; }
     }
     public static final class Attachment {
@@ -43,14 +44,42 @@ public final class Protocol {
     public static String normalizeDeviceId(String value) {
         return value!=null && value.matches("[0-9a-fA-F]{32}") && !value.equals("00000000000000000000000000000000") ? value.toLowerCase(Locale.ROOT) : null;
     }
+    public static String normalizeAvatar(String value) {
+        if("default".equals(value)) return value;
+        if(value!=null && value.matches("builtin:([0-9]|1[0-9]|2[0-3])")) return value;
+        if(value==null || !value.startsWith("image:") || value.length()>5470) return null;
+        try {
+            byte[] bytes=Base64.getDecoder().decode(value.substring(6));
+            if(bytes.length<12 || bytes.length>4096 || (bytes[0]&255)!=255 || (bytes[1]&255)!=216 || (bytes[bytes.length-2]&255)!=255 || (bytes[bytes.length-1]&255)!=217) return null;
+            for(int offset=2;offset+8<bytes.length;) {
+                if((bytes[offset++]&255)!=255) return null;
+                while(offset<bytes.length && (bytes[offset]&255)==255) offset++;
+                if(offset+2>=bytes.length) return null;
+                int marker=bytes[offset++]&255, length=((bytes[offset]&255)<<8)|(bytes[offset+1]&255);
+                if(length<2 || offset+length>bytes.length) return null;
+                if(marker==192) {
+                    if(length<8 || bytes[offset+2]!=8) return null;
+                    int height=((bytes[offset+3]&255)<<8)|(bytes[offset+4]&255), width=((bytes[offset+5]&255)<<8)|(bytes[offset+6]&255);
+                    return width==64 && height==64 ? "image:"+Base64.getEncoder().encodeToString(bytes) : null;
+                }
+                if(marker==218 || marker==217) return null;
+                offset+=length;
+            }
+        } catch(IllegalArgumentException ignored) { }
+        return null;
+    }
     public static byte[] encode(long number, String login, String host, int command, String body, String extra, String deviceId) {
+        return encode(number,login,host,command,body,extra,deviceId,null);
+    }
+    public static byte[] encode(long number, String login, String host, int command, String body, String extra, String deviceId, String avatar) {
         if (number < 0 || field(login).length() > 128 || field(host).length() > 128)
             throw new IllegalArgumentException("无效的报文头");
         if ((body!=null && body.indexOf('\0')>=0) || (extra!=null && extra.indexOf('\0')>=0))
             throw new IllegalArgumentException("消息不能包含空字符");
         String wire="1:"+number+":"+field(login)+":"+field(host)+":"+Integer.toUnsignedString(command)+":"+(body==null?"":body)+"\0";
-        if (extra != null || deviceId != null) wire+=(extra==null?"":extra)+"\0";
+        if (extra != null || deviceId != null || avatar!=null) wire+=(extra==null?"":extra)+"\0";
         if (normalizeDeviceId(deviceId)!=null) wire+="FQID="+normalizeDeviceId(deviceId)+"\0";
+        if(avatar!=null) {String normalized=normalizeAvatar(avatar);if(normalized==null)throw new IllegalArgumentException("头像数据无效");wire+="FQAV="+normalized+"\0";}
         byte[] bytes;
         try {
             ByteBuffer encoded=((command & UTF8)!=0 ? StandardCharsets.UTF_8 : GBK).newEncoder().encode(CharBuffer.wrap(wire));
@@ -76,7 +105,9 @@ public final class Protocol {
             String[] content=parts[5].split("\u0000",-1);
             Packet p=new Packet(); p.number=number; p.command=(int)cmd; p.login=parts[2]; p.host=parts[3];
             p.body=content[0]; p.extra=content.length>1 ? content[1] : "";
-            p.deviceId=content.length>2 && content[2].startsWith("FQID=") ? normalizeDeviceId(content[2].substring(5)) : null; return p;
+            p.deviceId=content.length>2 && content[2].startsWith("FQID=") ? normalizeDeviceId(content[2].substring(5)) : null;
+            for(int i=2;i<content.length;i++) if(content[i].startsWith("FQAV=")) p.avatar=normalizeAvatar(content[i].substring(5));
+            return p;
         } catch (IllegalArgumentException | IndexOutOfBoundsException | CharacterCodingException e) { return null; }
     }
     public static boolean safeName(String name) {

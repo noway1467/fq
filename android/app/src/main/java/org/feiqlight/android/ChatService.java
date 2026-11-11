@@ -141,6 +141,7 @@ public final class ChatService extends Service {
                     }
                 });
                 next.setDeviceId(deviceId);
+                String avatar=Protocol.normalizeAvatar(prefs.getString("avatar","default"));next.setAvatar(avatar==null?"default":avatar);
                 next.rememberPeers(store.conversations().stream().map(c->c.peer).collect(java.util.stream.Collectors.toList()));
                 next.rememberEndpoints(store.conversations().stream().map(c->c.peer.endpoint).collect(java.util.stream.Collectors.toList()));
                 next.setSocketBinding(new LanNetwork(getSystemService(ConnectivityManager.class)));
@@ -202,6 +203,22 @@ public final class ChatService extends Service {
         });
     }
     void receiveSettingsChanged() { drainReceives(); changed(); }
+    void avatarSettingsChanged() {
+        LanNode current=node;String avatar=Protocol.normalizeAvatar(getSharedPreferences("settings",MODE_PRIVATE).getString("avatar","default"));
+        if(current!=null){current.setAvatar(avatar==null?"default":avatar);refresh();}
+    }
+    void deleteMessages(String peer,List<LanNode.Message> messages,Consumer<Boolean> done) {
+        boolean pending=messages.stream().anyMatch(message->waiting.values().stream().anyMatch(r->!message.outgoing&&r.peer.id().equals(peer)&&r.packet==message.number)||message.files.stream().anyMatch(file->{
+            FileProgress progress=progress(peer,message.number,file.id,message.outgoing);
+            return (message.outgoing&&offering(peer,message.number,file.id)) || (progress!=null&&progress.state.contains("中")&&!progress.state.contains("中断")&&progress.percent<100);
+        }));
+        if(pending){showError("请先完成或拒绝选中消息的文件任务，再删除记录");done.accept(false);return;}
+        List<LanNode.Message> selected=new ArrayList<>(messages);
+        queue(()->{
+            try {store.deleteMessages(peer,selected);publish();main.post(()->{if(!stopped)done.accept(true);});}
+            catch(Exception error){fail(error);main.post(()->{if(!stopped)done.accept(false);});}
+        });
+    }
     private void drainReceives() {
         if(stopped||disconnecting||!online()||busy()||!storage.automatic()||waiting.isEmpty()) return;
         ReceiveRequest next=waiting.values().iterator().next(); receive(next.peer,next.packet,next.file);

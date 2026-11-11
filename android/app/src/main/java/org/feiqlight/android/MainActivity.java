@@ -34,13 +34,14 @@ public final class MainActivity extends Activity implements ChatService.Observer
         {0xff8b67d7,0xfffcf9fd,0xff33263d,0xff6e6478,0xfff2ebf6,0xffe7ddec,0xffecdef6,0xffd7ccf2,0xfff2e0ec,0xffded6f4},
         {0xff9a78e6,0xff211b2e,0xffeee7f6,0xffa897ba,0xff2d253d,0xff3a3050,0xff1c1330,0xff2d1e47,0xff25162f,0xff2a2045}};
     private void applyTheme() {
-        SharedPreferences prefs=getSharedPreferences("settings",MODE_PRIVATE); DARK=prefs.getBoolean("dark_mode",false);
+        SharedPreferences prefs=getSharedPreferences("settings",MODE_PRIVATE); DARK=prefs.getBoolean("follow_system_theme",false)?systemDark():prefs.getBoolean("dark_mode",false);
         int[] p=palette(prefs.getString("accent","blue"),DARK);
         BLUE=p[0];SURFACE=p[1];INK=p[2];MUTED=p[3];PALE=p[4];LINE=p[5];WALLS=new int[]{p[6],p[7],p[8],p[9]};WALL=wall(p);
         // BUBBLE 用于选中与按压底色（Windows Sky），OUTGOING 为发出气泡（Windows Outgoing）。
         BUBBLE=blend(BLUE,SURFACE,DARK?.30f:.17f);OUTGOING=blend(BLUE,SURFACE,DARK?.42f:.15f);ONLINE=DARK?0xff58c468:0xff3cb34f;
         getWindow().setStatusBarColor(SURFACE);getWindow().setNavigationBarColor(SURFACE);
     }
+    private boolean systemDark() {return (getResources().getConfiguration().uiMode & android.content.res.Configuration.UI_MODE_NIGHT_MASK)==android.content.res.Configuration.UI_MODE_NIGHT_YES;}
     private static int[] palette(String accent,boolean dark) { return PALETTES[(accent.equals("green")?2:accent.equals("purple")?4:0)+(dark?1:0)]; }
     // 纯色背景与日期胶囊取壁纸四色的平均值。
     private static int wall(int[] p) { return Color.rgb((Color.red(p[6])+Color.red(p[7])+Color.red(p[8])+Color.red(p[9]))/4,(Color.green(p[6])+Color.green(p[7])+Color.green(p[8])+Color.green(p[9]))/4,(Color.blue(p[6])+Color.blue(p[7])+Color.blue(p[8])+Color.blue(p[9]))/4); }
@@ -89,6 +90,19 @@ public final class MainActivity extends Activity implements ChatService.Observer
     private Dialog historyDialog;
     private android.window.OnBackInvokedCallback backCallback;
     private ConversationAdapter adapter;
+    private final java.util.concurrent.ExecutorService avatarLoader=java.util.concurrent.Executors.newSingleThreadExecutor();
+    private AvatarSelection avatarSelection, avatarImageRequest;
+    private static final class AvatarSelection {
+        String value; Dialog dialog; TextView preview; final List<ImageButton> choices=new ArrayList<>();
+    }
+    private boolean selectingMessages;
+    private final Set<String> messageMarks=new LinkedHashSet<>();
+    private final Map<String,View> messageViews=new HashMap<>();
+    private List<LanNode.Message> messageRows=new ArrayList<>();
+    private LinearLayout messageSelectionBar;
+    private TextView messageSelectionCount;
+    private Button deleteSelectedMessages;
+    private Integer themeScrollPosition;
     private final ServiceConnection connection=new ServiceConnection() {
         @Override public void onServiceConnected(ComponentName name,IBinder binder) {
             service=((ChatService.LocalBinder)binder).service(); if(visible) service.observe(MainActivity.this);
@@ -100,14 +114,20 @@ public final class MainActivity extends Activity implements ChatService.Observer
         super.onCreate(state);
         drafts=new DraftStore(this); receivedStorage=new ReceivedStorage(this); media=new MediaPreview(this);
         if(state!=null) { selected=state.getString("peer",""); pickerPeer=state.getString("picker",""); exportPath=state.getString("export",""); }
-        if(Build.VERSION.SDK_INT>=33) { backCallback=()->{ if(!selected.isEmpty()) open(""); else finish(); }; getOnBackInvokedDispatcher().registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT,backCallback); }
+        if(Build.VERSION.SDK_INT>=33) { backCallback=()->{ if(selectingMessages)endMessageSelection();else if(!selected.isEmpty()) open(""); else finish(); }; getOnBackInvokedDispatcher().registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT,backCallback); }
         renderPage(); bound=bindService(new Intent(this,ChatService.class),connection,BIND_AUTO_CREATE);
     }
     // 熄屏期间对端可能已切网离开，亮屏回到页面时立即复核头像在线光晕。
     @Override protected void onStart() { super.onStart(); visible=true; if(service!=null) { service.observe(this); service.active(selected); service.verifyPresence(); } restoreConnection(); }
     @Override protected void onStop() { historyAppliedVersion=++historyRequestVersion; closeHistory(); finishSelection(); saveDraft(); visible=false; if(service!=null) { service.remove(this); service.active(""); } super.onStop(); }
-    @Override protected void onDestroy() { if(media!=null) media.close(); if(backgroundBitmap!=null){backgroundBitmap.recycle();backgroundBitmap=null;} if(service!=null) service.remove(this); if(bound) unbindService(connection); if(Build.VERSION.SDK_INT>=33&&backCallback!=null) getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(backCallback); super.onDestroy(); }
+    @Override protected void onDestroy() { avatarLoader.shutdownNow();avatarImageRequest=null;if(avatarSelection!=null&&avatarSelection.dialog!=null)avatarSelection.dialog.dismiss();if(media!=null) media.close(); if(backgroundBitmap!=null){backgroundBitmap.recycle();backgroundBitmap=null;} if(service!=null) service.remove(this); if(bound) unbindService(connection); if(Build.VERSION.SDK_INT>=33&&backCallback!=null) getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(backCallback); super.onDestroy(); }
     @Override protected void onSaveInstanceState(Bundle state) { saveDraft(); state.putString("peer",selected); state.putString("picker",pickerPeer); state.putString("export",exportPath); super.onSaveInstanceState(state); }
+    @Override public void onConfigurationChanged(android.content.res.Configuration configuration) {
+        super.onConfigurationChanged(configuration);
+        if(!getSharedPreferences("settings",MODE_PRIVATE).getBoolean("follow_system_theme",false))return;
+        saveDraft();themeScrollPosition=scroll==null?null:scroll.getScrollY();boolean choosing=selectingMessages;Set<String> marks=new LinkedHashSet<>(messageMarks);
+        renderPage();selectingMessages=choosing;messageMarks.addAll(marks);updateMessageSelection();
+    }
     private int dp(float n) { return Math.round(n*getResources().getDisplayMetrics().density); }
     private GradientDrawable shape(int color,int radius) { GradientDrawable d=new GradientDrawable(); d.setColor(color); d.setCornerRadius(dp(radius)); return d; }
     private static final int CONTROL_RADIUS=10;
@@ -149,6 +169,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         });
     }
     private void renderPage() {
+        selectingMessages=false;messageMarks.clear();messageViews.clear();messageRows.clear();messageSelectionBar=null;
         closeHistory();
         historyAppliedVersion=++historyRequestVersion;
         finishSelection();
@@ -161,10 +182,10 @@ public final class MainActivity extends Activity implements ChatService.Observer
         }); root.requestApplyInsets();
         toolbar=row(); toolbar.setPadding(dp(8),0,dp(8),0); toolbar.setMinimumHeight(dp(64)); root.addView(toolbar,new LinearLayout.LayoutParams(-1,-2));
         IconButton menu=new IconButton(selected.isEmpty()?"menu":"back",selected.isEmpty()?"打开菜单":"返回会话列表",MUTED);
-        toolbar.addView(menu,new LinearLayout.LayoutParams(dp(48),dp(48))); menu.setOnClickListener(v->{ if(selected.isEmpty()) showMenu(v); else open(""); });
+        toolbar.addView(menu,new LinearLayout.LayoutParams(dp(48),dp(48))); menu.setOnClickListener(v->{ if(selectingMessages)endMessageSelection();else if(selected.isEmpty()) showMenu(v); else open(""); });
         if(!selected.isEmpty()) {
             ChatStore.Conversation current=conversation(selected); String name=current==null?"?":current.displayName();
-            TextView avatar=text("",18,Color.WHITE); avatar.setGravity(Gravity.CENTER); bindAvatar(avatar,selected,name,current!=null&&current.peer.online);
+            TextView avatar=text("",18,Color.WHITE); avatar.setGravity(Gravity.CENTER); bindAvatar(avatar,selected,name,current!=null&&current.peer.online,current==null?null:current.peer.avatar);
             chatAvatar=avatar;
             LinearLayout.LayoutParams ap=new LinearLayout.LayoutParams(dp(54),dp(54)); ap.leftMargin=-dp(6); ap.rightMargin=dp(4); toolbar.addView(avatar,ap);
         }
@@ -174,6 +195,15 @@ public final class MainActivity extends Activity implements ChatService.Observer
         IconButton action=new IconButton(selected.isEmpty()?"add":"more",selected.isEmpty()?"手动添加联系人":"会话菜单",MUTED);
         toolbar.addView(action,new LinearLayout.LayoutParams(dp(48),dp(48))); action.setOnClickListener(v->{ if(selected.isEmpty()) addPeer(); else {ChatStore.Conversation c=conversation(selected);if(c!=null)conversationMenu(c);} });
         View line=new View(this); line.setBackgroundColor(LINE); root.addView(line,new LinearLayout.LayoutParams(-1,dp(1)));
+        if(!selected.isEmpty()) {
+            messageSelectionBar=row();messageSelectionBar.setContentDescription("消息多选操作栏");messageSelectionBar.setPadding(dp(12),dp(4),dp(12),dp(4));messageSelectionBar.setVisibility(View.GONE);
+            messageSelectionCount=text("已选 0 条",14,INK);messageSelectionCount.setSingleLine();messageSelectionCount.setEllipsize(TextUtils.TruncateAt.END);messageSelectionBar.addView(messageSelectionCount,weight());
+            Button all=button("全选",false);deleteSelectedMessages=button("删除",false);deleteSelectedMessages.setTextColor(0xffd24e54);Button cancel=button("取消",false);
+            for(Button button:new Button[]{all,deleteSelectedMessages,cancel}){button.setPadding(dp(12),dp(8),dp(12),dp(8));button.setMinimumWidth(0);LinearLayout.LayoutParams gap=new LinearLayout.LayoutParams(-2,-2);gap.leftMargin=dp(4);messageSelectionBar.addView(button,gap);}
+            all.setOnClickListener(v->{messageMarks.clear();for(LanNode.Message message:messageRows)messageMarks.add(messageKey(message));updateMessageSelection();});cancel.setOnClickListener(v->endMessageSelection());
+            deleteSelectedMessages.setOnClickListener(v->{List<LanNode.Message> selectedRows=new ArrayList<>();for(LanNode.Message message:messageRows)if(messageMarks.contains(messageKey(message)))selectedRows.add(message);requestDeleteMessages(selectedRows);});
+            root.addView(messageSelectionBar,new LinearLayout.LayoutParams(-1,-2));
+        }
         body=column(); root.addView(body,new LinearLayout.LayoutParams(-1,0,1));
         if(selected.isEmpty()) renderList(); else renderChat();
         changed();
@@ -271,7 +301,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         input.getText().replace(start,end,emoji);input.setSelection(start+emoji.length());return true;
     }
     private ChatStore.Conversation conversation(String id) { if(service!=null) for(ChatStore.Conversation item:service.conversations()) if(item.peer.id().equals(id)) return item; return null; }
-    private void open(String peer) { saveDraft(); selected=peer; if(service!=null) service.active(peer); renderPage(); }
+    private void open(String peer) { themeScrollPosition=null;saveDraft(); selected=peer; if(service!=null) service.active(peer); renderPage(); }
     private void saveDraft() {
         if(isDestroyed() || editor==null || selected.isEmpty()) return;
         String text=editor.getText().toString();
@@ -292,7 +322,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
                 if(editor!=null && !editor.getText().toString().equals(saved)) { editorSavedText=saved; editor.setText(saved); }
                 ChatStore.Conversation item=conversation(selected);
                 title.setText(item==null?"聊天":item.displayName());
-                if(chatAvatar!=null) bindAvatar(chatAvatar,selected,item==null?"?":item.displayName(),item!=null&&item.peer.online);
+                if(chatAvatar!=null) bindAvatar(chatAvatar,selected,item==null?"?":item.displayName(),item!=null&&item.peer.online,item==null?null:item.peer.avatar);
                 subtitle.setText(item==null?"正在读取会话…":(item.peer.online?"在线":"离线")+item.nameSuffix()+" · "+item.peer.endpoint.getAddress().getHostAddress()+":"+item.peer.endpoint.getPort());
                 if(item!=null)title.setContentDescription(item.displayName()+" · "+item.peer.id());
                 if(service!=null) {
@@ -307,6 +337,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         } finally { rendering=false; }
     }
     private void renderMessages(List<LanNode.Message> rows) {
+        messageRows=new ArrayList<>(rows);Set<String> availableKeys=new HashSet<>();for(LanNode.Message message:rows)availableKeys.add(messageKey(message));messageMarks.retainAll(availableKeys);updateMessageSelection();
         StringBuilder fingerprint=new StringBuilder(selected);
         ChatStore.Conversation conversation=conversation(selected);
         for(LanNode.Message m:rows) { fingerprint.append(m.number).append(m.outgoing).append(m.state); if(conversation!=null) for(int i=0;i<m.files.size();i++) { File local=service.receivedFile(conversation.peer,m.number,m.files.get(i)); fingerprint.append(m.outgoing?outgoingUri(m,i):local.isFile()).append(m.outgoing?null:receivedStorage.saved(local)); } }
@@ -315,16 +346,26 @@ public final class MainActivity extends Activity implements ChatService.Observer
         fileProgressViews.clear(); progressPeer=selected;
         displayedOutgoing.clear(); for(LanNode.Message m:rows) if(m.outgoing) displayedOutgoing.add(m.number);
         int previousY=scroll.getScrollY();
-        boolean bottom=scroll.getChildAt(0).getHeight()-previousY-scroll.getHeight()<dp(100); boolean first=historySignature.isEmpty(); historySignature=fingerprint.toString(); messages.removeAllViews();
+        boolean bottom=scroll.getChildAt(0).getHeight()-previousY-scroll.getHeight()<dp(100); boolean first=historySignature.isEmpty(); historySignature=fingerprint.toString(); messages.removeAllViews();messageViews.clear();
         int maxWidth=(int)(getResources().getDisplayMetrics().widthPixels*.79f);
         String lastDate=""; int previewCount=0; float density=getResources().getDisplayMetrics().density;
+        final String cardPeer=selected;final int cardGeneration=editorGeneration;
         for(int index=0;index<rows.size();index++) {
             final LanNode.Message m=rows.get(index); LanNode.Message next=index+1<rows.size()?rows.get(index+1):null;
             String date=dayKey(m.time); boolean newDay=!date.equals(lastDate);
             if(newDay) { TextView day=text(dayLabel(m.time),12,Color.WHITE); day.setGravity(Gravity.CENTER); day.setPadding(dp(10),dp(3),dp(10),dp(3)); day.setBackground(shape(serviceFill(),99)); LinearLayout.LayoutParams d=new LinearLayout.LayoutParams(-2,-2); d.gravity=Gravity.CENTER_HORIZONTAL; d.topMargin=dp(lastDate.isEmpty()?0:6); d.bottomMargin=dp(10); messages.addView(day,d); lastDate=date; }
             // 与 Windows 一致：同侧且相隔 5 分钟内的消息成组，组内间距收紧，只有组尾带尾巴。
             boolean groupFirst=newDay||!continues(rows.get(index-1),m), groupLast=next==null||!continues(m,next)||!dayKey(next.time).equals(date);
-            LinearLayout bubble=column(); bubble.setBackground(new BubbleDrawable(m.outgoing?OUTGOING:SURFACE,bubbleShadow(),density,m.outgoing,groupFirst,groupLast));
+            final TextView[] menuStamp={null};
+            LinearLayout bubble=new LinearLayout(this) {
+                @Override public boolean dispatchTouchEvent(MotionEvent event) {
+                    // 多选接管卡片内容的点击，右下角菜单保留自己的点击入口。
+                    Rect menu=new Rect();if(menuStamp[0]!=null){menuStamp[0].getHitRect(menu);menu.left=Math.max(menu.left,menu.right-dp(48));}
+                    if(selectingMessages&&!menu.contains((int)event.getX(),(int)event.getY()))return onTouchEvent(event);
+                    return super.dispatchTouchEvent(event);
+                }
+                @Override public boolean performClick() {boolean handled=super.performClick();if(!cardPeer.equals(selected)||cardGeneration!=editorGeneration)return handled;if(selectingMessages){toggleMessage(m);return true;}return handled;}
+            };bubble.setOrientation(LinearLayout.VERTICAL);bubble.setClickable(true);bubble.setContentDescription("消息："+m.text);messageViews.put(messageKey(m),bubble);bubble.setBackground(new BubbleDrawable(m.outgoing?OUTGOING:SURFACE,bubbleShadow(),density,m.outgoing,groupFirst,groupLast));
             bubble.setPadding(dp(m.outgoing?14:21),dp(8),dp(m.outgoing?21:14),0);
             LinearLayout.LayoutParams bp=new LinearLayout.LayoutParams(-2,-2); bp.gravity=m.outgoing?Gravity.END:Gravity.START; bp.bottomMargin=dp(groupLast?10:3); messages.addView(bubble,bp);
             if(!m.text.isEmpty()) {
@@ -367,13 +408,16 @@ public final class MainActivity extends Activity implements ChatService.Observer
             }
             // 时间行保留整行点击高度并延伸到气泡底边，文字在行内垂直居中，气泡底部不再空出一截。
             TextView stamp=text(new SimpleDateFormat("HH:mm",Locale.CHINA).format(new Date(m.time))+(m.outgoing?"  "+m.state:""),10,m.outgoing?outgoingMeta():MUTED); stamp.setMaxWidth(maxWidth-dp(35)); stamp.setGravity(Gravity.END|Gravity.CENTER_VERTICAL); bubble.addView(stamp,new LinearLayout.LayoutParams(-1,-2));
+            menuStamp[0]=stamp;
             final LanNode.Peer source=conversation==null?null:conversation.peer;
-            bubble.setOnLongClickListener(v->{ if(source!=null) forward(m,source); return true; });
-            stamp.append("  ···"); stamp.setContentDescription("消息操作：复制、转发"); stamp.setMinHeight(dp(m.files.isEmpty()?40:32));
+            bubble.setOnLongClickListener(v->{if(cardPeer.equals(selected)&&cardGeneration==editorGeneration){if(selectingMessages)toggleMessage(m);else beginMessageSelection(m);}return true;});
+            stamp.append("  ···"); stamp.setContentDescription("消息操作：复制、转发、删除、多选"); stamp.setMinHeight(dp(m.files.isEmpty()?40:32));
+            stamp.setOnTouchListener((v,event)->{if(event.getX()<Math.max(0,stamp.getWidth()-dp(48))){if(event.getActionMasked()==MotionEvent.ACTION_UP)bubble.performClick();return true;}return false;});
             stamp.setOnClickListener(v->{if(source!=null) messageActions(m,source);});
         }
+        updateMessageSelection();
         boolean latest=first||bottom||newOutgoing||forceLatest; forceLatest=false;
-        positionBeforeDraw(latest,previousY);
+        if(themeScrollPosition!=null){previousY=themeScrollPosition;latest=false;themeScrollPosition=null;}positionBeforeDraw(latest,previousY);
     }
     private void scrollToLatest() {
         positionBeforeDraw(true,0);
@@ -442,7 +486,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         for(ChatStore.Conversation c:service.conversations()) {
             if(!c.peer.online)continue;
             LinearLayout item=row();item.setMinimumHeight(dp(72));item.setPadding(dp(4),dp(6),dp(10),dp(6));item.setBackground(shape(SURFACE,CONTROL_RADIUS));
-            TextView avatar=text("",19,Color.WHITE);avatar.setGravity(Gravity.CENTER);bindAvatar(avatar,c.peer.id(),c.displayName(),true);item.addView(avatar,new LinearLayout.LayoutParams(dp(56),dp(56)));
+            TextView avatar=text("",19,Color.WHITE);avatar.setGravity(Gravity.CENTER);bindAvatar(avatar,c.peer.id(),c.displayName(),true,c.peer.avatar);item.addView(avatar,new LinearLayout.LayoutParams(dp(56),dp(56)));
             LinearLayout identity=column();LinearLayout.LayoutParams ip=weight();ip.leftMargin=dp(10);item.addView(identity,ip);
             TextView name=text(c.displayName(),16,INK);name.setSingleLine();name.setEllipsize(c.duplicateName?TextUtils.TruncateAt.MIDDLE:TextUtils.TruncateAt.END);identity.addView(name);
             TextView address=text(c.peer.endpoint.getAddress().getHostAddress()+":"+c.peer.endpoint.getPort(),12,MUTED);address.setSingleLine();address.setEllipsize(TextUtils.TruncateAt.END);address.setPadding(0,dp(4),0,0);identity.addView(address);
@@ -473,10 +517,31 @@ public final class MainActivity extends Activity implements ChatService.Observer
         sheet("消息全文（长按选择复制）",content,"关闭",Dialog::dismiss);
     }
     private void messageActions(LanNode.Message message,LanNode.Peer source){
+        int generation=editorGeneration;
         LinearLayout options=column();Dialog dialog=sheet("消息",options,null,null);
         if(!message.text.isEmpty())fileAction(options,dialog,"复制消息",()->copyText("消息",message.text));
         if(!message.text.isEmpty())fileAction(options,dialog,"查看全文 / 选段复制",()->showFullText(message.text));
         fileAction(options,dialog,"转发…",()->forward(message,source));
+        fileAction(options,dialog,"选择多条消息",()->{if(selected.equals(source.id())&&generation==editorGeneration)beginMessageSelection(message);});
+        fileAction(options,dialog,"删除这条消息",()->{if(selected.equals(source.id())&&generation==editorGeneration)requestDeleteMessages(Collections.singletonList(message));});
+    }
+    private static String messageKey(LanNode.Message message) {return message.number+":"+message.outgoing;}
+    private void beginMessageSelection(LanNode.Message message) {finishSelection();selectingMessages=true;messageMarks.clear();messageMarks.add(messageKey(message));updateMessageSelection();}
+    private void toggleMessage(LanNode.Message message) {String key=messageKey(message);if(!messageMarks.add(key))messageMarks.remove(key);updateMessageSelection();}
+    private void endMessageSelection() {selectingMessages=false;messageMarks.clear();updateMessageSelection();}
+    private void updateMessageSelection() {
+        if(messageSelectionBar!=null){messageSelectionBar.setVisibility(selectingMessages?View.VISIBLE:View.GONE);messageSelectionCount.setText("已选 "+messageMarks.size()+" 条");deleteSelectedMessages.setEnabled(!messageMarks.isEmpty());}
+        for(Map.Entry<String,View> entry:messageViews.entrySet()) {
+            if(selectingMessages&&messageMarks.contains(entry.getKey())){GradientDrawable border=shape(Color.TRANSPARENT,CONTROL_RADIUS);border.setStroke(dp(2),BLUE);entry.getValue().setForeground(border);}
+            else entry.getValue().setForeground(null);
+        }
+    }
+    private void requestDeleteMessages(List<LanNode.Message> messages) {
+        if(messages.isEmpty()||service==null)return;ChatService source=service;String peer=selected;int generation=editorGeneration;
+        confirm(messages.size()==1?"删除这条消息？":"删除选中的 "+messages.size()+" 条消息？","仅删除这台设备上的记录，对方记录和附件文件会保留。","删除",()->{
+            if(service!=source||!peer.equals(selected)||generation!=editorGeneration)return;
+            source.deleteMessages(peer,messages,success->{if(success&&!isDestroyed()&&!isFinishing()&&service==source&&peer.equals(selected)&&generation==editorGeneration){endMessageSelection();changed();}});
+        });
     }
     private void send() {
         ChatStore.Conversation current=conversation(selected); if(sending)return;
@@ -654,6 +719,10 @@ public final class MainActivity extends Activity implements ChatService.Observer
     private void settings() {
         SharedPreferences prefs=getSharedPreferences("settings",MODE_PRIVATE); LinearLayout box=column();
         settingHeading(box,"个人资料与连接");
+        String normalizedAvatar=Protocol.normalizeAvatar(prefs.getString("avatar","default"));final String[] avatarValue={normalizedAvatar==null?"default":normalizedAvatar};
+        String self="device:"+prefs.getString("device_id","");LinearLayout avatarRow=row();TextView portrait=text("",18,INK);portrait.setContentDescription("个人头像");bindAvatar(portrait,self,"个人头像",false,avatarValue[0]);avatarRow.addView(portrait,new LinearLayout.LayoutParams(dp(72),dp(72)));
+        Button changeAvatar=button("更换头像",false);LinearLayout.LayoutParams avatarButton=weight();avatarButton.leftMargin=dp(12);avatarRow.addView(changeAvatar,avatarButton);box.addView(avatarRow,settingSpacing(0,12));
+        changeAvatar.setOnClickListener(v->showAvatarPicker(avatarValue[0],value->{avatarValue[0]=value;bindAvatar(portrait,self,"个人头像",false,value);}));
         EditText name=formField(box,"昵称",prefs.getString("name",Build.MODEL)), group=formField(box,"部门",prefs.getString("group","我的局域网")), port=formField(box,"端口",String.format(Locale.ROOT,"%d",prefs.getInt("port",2425)));
         port.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
         Switch autoConnect=settingSwitch("打开应用时恢复连接",prefs.getBoolean("auto_connect",true)); box.addView(autoConnect,new LinearLayout.LayoutParams(-1,-2));
@@ -665,7 +734,8 @@ public final class MainActivity extends Activity implements ChatService.Observer
         Button choose=button("选择保存文件夹",false); box.addView(choose,new LinearLayout.LayoutParams(-1,-2)); choose.setOnClickListener(v->chooseFolder());
         Button reset=button("恢复应用内保存",false); LinearLayout.LayoutParams rp=new LinearLayout.LayoutParams(-1,-2); rp.topMargin=dp(12); box.addView(reset,rp); reset.setOnClickListener(v->{ receivedStorage.useInternal(); folderLabel.setText(receivedStorage.folderLabel()); if(service!=null) service.receiveSettingsChanged(); });
         settingHeading(box,"外观");
-        Switch dark=settingSwitch("夜间模式",prefs.getBoolean("dark_mode",false));box.addView(dark,new LinearLayout.LayoutParams(-1,-2));
+        Switch follow=settingSwitch("跟随系统切换",prefs.getBoolean("follow_system_theme",false));box.addView(follow,settingSpacing(0,8));
+        Switch dark=settingSwitch("夜间模式",follow.isChecked()?systemDark():prefs.getBoolean("dark_mode",false));dark.setEnabled(!follow.isChecked());box.addView(dark,new LinearLayout.LayoutParams(-1,-2));
         RadioGroup accent=settingChoices(3);accent.setContentDescription("主题颜色");
         String selectedAccent=prefs.getString("accent","blue");String[] keys={"blue","green","purple"},names={"经典蓝","青绿色","紫罗兰"};
         for(int i=0;i<keys.length;i++){RadioButton choice=new RadioButton(this);choice.setId(View.generateViewId());choice.setTag(keys[i]);choice.setText(names[i]);choice.setTextSize(15);choice.setTextColor(INK);choice.setButtonTintList(new android.content.res.ColorStateList(new int[][]{new int[]{android.R.attr.state_checked},new int[]{}},new int[]{BLUE,MUTED}));choice.setMinHeight(dp(48));choice.setButtonDrawable(null);choice.setGravity(Gravity.CENTER);choice.setPadding(dp(4),0,dp(4),0);accent.addView(choice,choiceSpacing(i,3));if(keys[i].equals(selectedAccent))accent.check(choice.getId());}
@@ -679,6 +749,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         // 预览与 applyTheme 同表取色：底色为聊天背景，收到/发出样例分别取表面色与发出气泡色。
         Runnable updatePreview=()->{View selectedColor=accent.findViewById(accent.getCheckedRadioButtonId());int[] p=palette(selectedColor==null?"blue":selectedColor.getTag().toString(),dark.isChecked());preview.setBackground(shape(wall(p),CONTROL_RADIUS));sampleIn.setBackground(shape(p[1],CONTROL_RADIUS));sampleOut.setBackground(shape(blend(p[0],p[1],dark.isChecked()?.42f:.15f),CONTROL_RADIUS));sampleIn.setTextColor(p[2]);sampleOut.setTextColor(p[2]);};
         dark.setOnCheckedChangeListener((buttonView,checked)->updatePreview.run());
+        follow.setOnCheckedChangeListener((buttonView,checked)->{dark.setEnabled(!checked);if(checked)dark.setChecked(systemDark());updatePreview.run();});
         for(int i=0;i<accent.getChildCount();i++)accent.getChildAt(i).setOnClickListener(v->updatePreview.run());updatePreview.run();
         TextView sizeCaption=text("聊天字号 · "+messageSize()+" sp",14,INK);sizeCaption.setPadding(0,dp(14),0,0);box.addView(sizeCaption);
         SeekBar fontSize=new SeekBar(this);fontSize.setContentDescription("聊天字号");fontSize.setThumbTintList(android.content.res.ColorStateList.valueOf(BLUE));fontSize.setProgressTintList(android.content.res.ColorStateList.valueOf(BLUE));fontSize.setProgressBackgroundTintList(android.content.res.ColorStateList.valueOf(blend(INK,SURFACE,.18f)));fontSize.setMax(10);fontSize.setProgress(messageSize()-14);box.addView(fontSize,new LinearLayout.LayoutParams(-1,dp(48)));
@@ -689,7 +760,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         backgrounds.setOnCheckedChangeListener((groupView,checked)->{for(int i=0;i<groupView.getChildCount();i++){View choice=groupView.getChildAt(i);choice.setBackground(shape(choice.getId()==checked?BUBBLE:PALE,CONTROL_RADIUS));}});
         for(int i=0;i<backgrounds.getChildCount();i++){View choice=backgrounds.getChildAt(i);choice.setBackground(shape(choice.getId()==backgrounds.getCheckedRadioButtonId()?BUBBLE:PALE,CONTROL_RADIUS));}
         String[] presetNames={"晴空 · 经典","薄荷 · 日间","深海 · 夜间","暮紫 · 夜间"};
-        for(int lineIndex=0;lineIndex<2;lineIndex++){LinearLayout presetRow=row();presetRow.setBaselineAligned(false);presetRow.setGravity(Gravity.TOP);box.addView(presetRow,box.indexOfChild(preview)+1+lineIndex,new LinearLayout.LayoutParams(-1,-2));for(int columnIndex=0;columnIndex<2;columnIndex++){int preset=lineIndex*2+columnIndex;Button pick=button(presetNames[preset],false);LinearLayout.LayoutParams pp=weight();pp.setMargins(columnIndex==0?0:dp(6),0,columnIndex==0?dp(6):0,dp(12));presetRow.addView(pick,pp);pick.setOnClickListener(v->{dark.setChecked(preset>=2);accent.check(accent.getChildAt(preset==1?1:preset==3?2:0).getId());backgrounds.check(backgrounds.getChildAt(preset==1?2:1).getId());updatePreview.run();});}}
+        for(int lineIndex=0;lineIndex<2;lineIndex++){LinearLayout presetRow=row();presetRow.setBaselineAligned(false);presetRow.setGravity(Gravity.TOP);box.addView(presetRow,box.indexOfChild(preview)+1+lineIndex,new LinearLayout.LayoutParams(-1,-2));for(int columnIndex=0;columnIndex<2;columnIndex++){int preset=lineIndex*2+columnIndex;Button pick=button(presetNames[preset],false);LinearLayout.LayoutParams pp=weight();pp.setMargins(columnIndex==0?0:dp(6),0,columnIndex==0?dp(6):0,dp(12));presetRow.addView(pick,pp);pick.setOnClickListener(v->{follow.setChecked(false);dark.setChecked(preset>=2);accent.check(accent.getChildAt(preset==1?1:preset==3?2:0).getId());backgrounds.check(backgrounds.getChildAt(preset==1?2:1).getId());updatePreview.run();});}}
         Button chooseBackground=button("选择背景图片…",false);box.addView(chooseBackground,settingSpacing(0,4));chooseBackground.setOnClickListener(v->{try{startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("image/*").addCategory(Intent.CATEGORY_OPENABLE).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION),23);}catch(ActivityNotFoundException e){error("系统没有可用的图片选择器");}});
         TextView backgroundHint=text("图片授权立即保存；其他外观选项点击保存后生效。支持最长边抽样至 1920 像素，不影响原图。",12,MUTED);backgroundHint.setPadding(0,dp(8),0,0);box.addView(backgroundHint);
         settingHeading(box,"存储管理");
@@ -715,8 +786,34 @@ public final class MainActivity extends Activity implements ChatService.Observer
             View color=accent.findViewById(accent.getCheckedRadioButtonId());
             View backdrop=backgrounds.findViewById(backgrounds.getCheckedRadioButtonId());String backdropKey=backdrop==null?"orbits":backdrop.getTag().toString();
             if(backdropKey.equals("image")&&prefs.getString("background_image","").isEmpty()){dialog.getWindow().getDecorView().findViewWithTag("settings-tab:1").performClick();error("请先选择背景图片");return;}
-            prefs.edit().putString("name",n).putString("group",g).putInt("port",p).putBoolean("auto_connect",autoConnect.isChecked()).putBoolean("diagnostics",diagnosticSwitch.isChecked()).putBoolean(ReceivedStorage.AUTO,automatic.isChecked()).putBoolean("dark_mode",dark.isChecked()).putString("accent",color==null?"blue":color.getTag().toString()).putInt("chat_font_size",fontSize.getProgress()+14).putString("chat_background",backdropKey).apply(); if(service!=null) service.receiveSettingsChanged(); dialog.dismiss(); saveDraft(); renderPage(); error("已保存；主题和接收选项立即生效，昵称和端口下次连接生效");
+            boolean saved=prefs.edit().putString("avatar",avatarValue[0]).putString("name",n).putString("group",g).putInt("port",p).putBoolean("auto_connect",autoConnect.isChecked()).putBoolean("diagnostics",diagnosticSwitch.isChecked()).putBoolean(ReceivedStorage.AUTO,automatic.isChecked()).putBoolean("follow_system_theme",follow.isChecked()).putBoolean("dark_mode",dark.isChecked()).putString("accent",color==null?"blue":color.getTag().toString()).putInt("chat_font_size",fontSize.getProgress()+14).putString("chat_background",backdropKey).commit();
+            if(!saved){error("设置未保存，请检查设备存储空间");return;}if(service!=null){service.receiveSettingsChanged();service.avatarSettingsChanged();}dialog.dismiss();saveDraft();renderPage();error("已保存；头像、主题和接收选项立即生效，昵称和端口下次连接生效");
         });
+    }
+    private void showAvatarPicker(String value,java.util.function.Consumer<String> use) {
+        AvatarSelection state=new AvatarSelection();state.value=Protocol.normalizeAvatar(value);if(state.value==null)state.value="default";avatarSelection=state;
+        LinearLayout box=column();String identity="device:"+getSharedPreferences("settings",MODE_PRIVATE).getString("device_id","");
+        state.preview=text("",18,INK);state.preview.setContentDescription("所选头像预览");box.addView(state.preview,new LinearLayout.LayoutParams(-1,dp(80)));
+        GridLayout grid=new GridLayout(this);grid.setColumnCount(6);grid.setContentDescription("内置头像列表");box.addView(grid,new LinearLayout.LayoutParams(-1,-2));EmojiAvatars avatars=EmojiAvatars.get(this);
+        for(int i=0;i<avatars.count();i++) {
+            String selected="builtin:"+i;ImageButton choice=new ImageButton(this);choice.setTag(selected);choice.setContentDescription("内置头像："+avatars.description(i));choice.setPadding(dp(4),dp(4),dp(4),dp(4));choice.setImageDrawable(new AvatarDrawable(this,"",false,dp(3),SURFACE,ONLINE,selected));
+            GridLayout.LayoutParams spacing=new GridLayout.LayoutParams(GridLayout.spec(i/6),GridLayout.spec(i%6,1f));spacing.width=0;spacing.height=dp(56);spacing.setMargins(dp(2),dp(2),dp(2),dp(2));grid.addView(choice,spacing);state.choices.add(choice);
+            choice.setOnClickListener(v->{state.value=selected;updateAvatarPicker(state,identity);});
+        }
+        LinearLayout actions=row();Button local=button("本地图片",false),reset=button("默认头像",false);actions.addView(local,weight());LinearLayout.LayoutParams resetSpacing=weight();resetSpacing.leftMargin=dp(12);actions.addView(reset,resetSpacing);box.addView(actions,settingSpacing(12,8));
+        reset.setOnClickListener(v->{state.value="default";updateAvatarPicker(state,identity);});
+        local.setOnClickListener(v->{
+            avatarImageRequest=state;
+            try{startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("image/*").addCategory(Intent.CATEGORY_OPENABLE).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),25);}
+            catch(ActivityNotFoundException e){avatarImageRequest=null;error("系统没有可用的图片选择器");}
+        });
+        box.addView(text("选择后回到设置页点击保存。原图移动不影响头像。",12,MUTED));
+        state.dialog=sheet("更换头像",box,"使用此头像",dialog->{use.accept(state.value);dialog.dismiss();});
+        state.dialog.setOnDismissListener(d->{if(avatarSelection==state)avatarSelection=null;});updateAvatarPicker(state,identity);
+    }
+    private void updateAvatarPicker(AvatarSelection state,String identity) {
+        bindAvatar(state.preview,identity,"所选头像",false,state.value);
+        for(ImageButton choice:state.choices){boolean checked=choice.getTag().equals(state.value);choice.setSelected(checked);choice.setBackground(shape(checked?BUBBLE:PALE,CONTROL_RADIUS));}
     }
     private Button button(String label,boolean primary) {
         Button button=new Button(this); button.setText(label); button.setTextSize(15); button.setAllCaps(false); button.setTextColor(primary?Color.WHITE:INK); button.setBackground(new android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(blend(INK,primary?BLUE:PALE,.08f)),shape(primary?BLUE:PALE,CONTROL_RADIUS),null)); button.setStateListAnimator(null); button.setMinHeight(dp(48)); button.setPadding(dp(16),dp(10),dp(16),dp(10)); return button;
@@ -970,6 +1067,14 @@ public final class MainActivity extends Activity implements ChatService.Observer
     @Override protected void onActivityResult(int request,int result,Intent data) {
         super.onActivityResult(request,result,data); if(result!=RESULT_OK||data==null) return;
         if(request!=20&&data.getData()==null) return;
+        if(request==25) {
+            AvatarSelection expected=avatarImageRequest;avatarImageRequest=null;if(expected==null||avatarSelection!=expected||!expected.dialog.isShowing())return;
+            Uri uri=data.getData();String identity="device:"+getSharedPreferences("settings",MODE_PRIVATE).getString("device_id","");
+            avatarLoader.execute(()->{
+                try{String value=UserAvatar.read(this,uri);runOnUiThread(()->{if(!isDestroyed()&&!isFinishing()&&avatarSelection==expected&&expected.dialog.isShowing()){expected.value=value;updateAvatarPicker(expected,identity);}});}
+                catch(Exception e){runOnUiThread(()->{if(!isDestroyed()&&!isFinishing()&&avatarSelection==expected)error("头像未更改："+e.getMessage());});}
+            });return;
+        }
         if(request==24) {
             ChatService expected=service;
             if(expected==null){error("连接服务未就绪，请重新选择");return;}
@@ -1011,15 +1116,16 @@ public final class MainActivity extends Activity implements ChatService.Observer
     }
     // Android 13+ 已在 onCreate 注册原生 OnBackInvokedCallback，此覆盖仅兼容旧系统。
     @android.annotation.SuppressLint("GestureBackNavigation")
-    @Override public void onBackPressed() { if(!selected.isEmpty()) open(""); else super.onBackPressed(); }
+    @Override public void onBackPressed() { if(selectingMessages)endMessageSelection();else if(!selected.isEmpty()) open(""); else super.onBackPressed(); }
     @Override public void error(String text) { if(!isFinishing()) Toast.makeText(this,text,Toast.LENGTH_LONG).show(); }
     private static String size(long value) { if(value>=1048576) return String.format(Locale.CHINA,"%.1f MB",value/1048576.0); if(value>=1024) return String.format(Locale.CHINA,"%.1f KB",value/1024.0); return value+" B"; }
-    private void bindAvatar(TextView avatar,String id,String name,boolean online) {
-        EmojiAvatars avatars=EmojiAvatars.get(this);int index=avatars.index(id);
+    private void bindAvatar(TextView avatar,String id,String name,boolean online,String value) {
+        String selectedAvatar=Protocol.normalizeAvatar(value);
+        EmojiAvatars avatars=EmojiAvatars.get(this);int index=selectedAvatar!=null && selectedAvatar.startsWith("builtin:")?Integer.parseInt(selectedAvatar.substring(8)):avatars.index(id);
         avatar.setText("");
-        avatar.setContentDescription(name+"，"+avatars.description(index)+"，"+(online?"在线":"离线"));
-        if(avatar.getBackground() instanceof AvatarDrawable && ((AvatarDrawable)avatar.getBackground()).avatarIndex()==index) ((AvatarDrawable)avatar.getBackground()).setOnline(online);
-        else avatar.setBackground(new AvatarDrawable(this,id,online,dp(6),SURFACE,ONLINE));
+        avatar.setContentDescription(name+"，"+(selectedAvatar!=null && selectedAvatar.startsWith("image:")?"自选图片":avatars.description(index))+"，"+(online?"在线":"离线"));
+        if(avatar.getBackground() instanceof AvatarDrawable && ((AvatarDrawable)avatar.getBackground()).avatarIndex()==index && java.util.Objects.equals(((AvatarDrawable)avatar.getBackground()).avatarValue(),selectedAvatar)) ((AvatarDrawable)avatar.getBackground()).setOnline(online);
+        else avatar.setBackground(new AvatarDrawable(this,id,online,dp(6),SURFACE,ONLINE,selectedAvatar));
     }
     private final class ConversationAdapter extends BaseAdapter {
         private final List<ChatStore.Conversation> items=new ArrayList<>();
@@ -1030,7 +1136,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         @Override public View getView(int position,View convert,ViewGroup parent) {
             ChatStore.Conversation c=items.get(position); LinearLayout row=row(); row.setPadding(dp(10),dp(5),dp(16),dp(5)); row.setMinimumHeight(dp(82));
             TextView avatar=text("",21,Color.WHITE); avatar.setGravity(Gravity.CENTER);
-            bindAvatar(avatar,c.peer.id(),c.displayName(),c.peer.online); row.addView(avatar,new LinearLayout.LayoutParams(dp(68),dp(68)));
+            bindAvatar(avatar,c.peer.id(),c.displayName(),c.peer.online,c.peer.avatar); row.addView(avatar,new LinearLayout.LayoutParams(dp(68),dp(68)));
             LinearLayout center=column(); LinearLayout.LayoutParams cp=weight(); cp.leftMargin=dp(8); row.addView(center,cp);
             TextView name=text((c.pinned?"↑ ":"")+c.displayName(),16,INK); name.setTypeface(null,Typeface.BOLD); name.setSingleLine();
             // 中间省略保留末尾编号，短名称时编号紧跟昵称，不挤到消息时间旁。

@@ -25,6 +25,16 @@ namespace FeiqLight
         public static Color Online = Color.FromArgb(60, 179, 79);
         public static Color[] WallpaperColors = { Color.FromArgb(214, 233, 250), Color.FromArgb(198, 214, 246), Color.FromArgb(203, 229, 238), Color.FromArgb(219, 214, 245) };
         public static bool Dark { get; private set; }
+        public static bool SystemDark {
+            get {
+                try { using(Microsoft.Win32.RegistryKey key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")) {
+                    object value = key == null ? null : key.GetValue("AppsUseLightTheme"); if(value is int) return (int)value == 0;
+                } }
+                catch(System.Security.SecurityException) { }
+                catch(UnauthorizedAccessException) { }
+                return SystemColors.Window.GetBrightness() < .5F;
+            }
+        }
         public static string AccentKey { get; private set; }
         // 主题版本号：缓存（壁纸、头像）比对它即可得知配色已变化。
         public static int Version { get; private set; }
@@ -371,14 +381,14 @@ namespace FeiqLight
             return image;
         }
         public static int AvatarHalo(int size) { return (int)Math.Ceiling(size * .1F); }
-        public static Bitmap ContactAvatar(int size, string identity, bool online)
+        public static Bitmap ContactAvatar(int size, string identity, bool online, string avatar = null)
         {
             int halo=AvatarHalo(size), extent=size+halo*2;
             Bitmap image=new Bitmap(extent,extent);
             using(Graphics g=Graphics.FromImage(image))
             {
                 g.SmoothingMode=SmoothingMode.AntiAlias;
-                EmojiAvatars.Draw(g,new Rectangle(halo,halo,size,size),identity);
+                EmojiAvatars.Draw(g,new Rectangle(halo,halo,size,size),identity,avatar);
                 // 在线：右下角绿点，外圈取界面底色与头像分隔；离线不加任何标记，头像主体像素保持一致。
                 if(online)
                 {
@@ -392,12 +402,12 @@ namespace FeiqLight
         }
         // 列表与选择器反复绘制同一头像：按尺寸、身份和在线状态复用位图，调用方不得释放返回值。
         private static readonly Dictionary<string, Bitmap> avatars = new Dictionary<string, Bitmap>();
-        internal static Bitmap CachedAvatar(int size, string identity, bool online)
+        internal static Bitmap CachedAvatar(int size, string identity, bool online, string avatar = null)
         {
-            string key = size + "|" + (online ? "1" : "0") + "|" + identity; Bitmap image;
+            string key = size + "|" + (online ? "1" : "0") + "|" + identity + "|" + avatar; Bitmap image;
             if (avatars.TryGetValue(key, out image)) return image;
             if (avatars.Count >= 192) { foreach (Bitmap stale in avatars.Values) stale.Dispose(); avatars.Clear(); }
-            image = ContactAvatar(size, identity, online); avatars[key] = image; return image;
+            image = ContactAvatar(size, identity, online, avatar); avatars[key] = image; return image;
         }
         public static Color AvatarColor(string name)
         {

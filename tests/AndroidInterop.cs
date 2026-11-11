@@ -13,15 +13,21 @@ public static class AndroidInteropHost
         Console.OutputEncoding = Encoding.UTF8;
         long size = Int64.Parse(args[2]); byte[] bytes = new byte[65536]; for (int i = 0; i < bytes.Length; i++) bytes[i] = (byte)(i * 17 + 3);
         string source = Path.Combine(args[1], "Windows资料😀.bin");
+        string avatarImage;
+        using(var image = new System.Drawing.Bitmap(64,64)) using(var graphics = System.Drawing.Graphics.FromImage(image)) using(var encoded = new MemoryStream()) {
+            graphics.Clear(System.Drawing.Color.Coral);image.Save(encoded,System.Drawing.Imaging.ImageFormat.Jpeg);File.WriteAllBytes(Path.Combine(args[1],"avatar.jpg"),encoded.ToArray());avatarImage="image:"+Convert.ToBase64String(encoded.ToArray());
+        }
         using (FileStream output = File.Create(source)) { for (long left = size; left > 0;) { int count = (int)Math.Min(left, bytes.Length); output.Write(bytes, 0, count); left -= count; } }
         Exception error = null; bool received = false; ManualResetEvent complete = new ManualResetEvent(false);
-        using (LanService node = new LanService(new AppSettings { Nickname = "Windows 测试👩🏽‍💻", Group = "互通验证" }, Int32.Parse(args[0]), true, "windows-test"))
+        using (LanService node = new LanService(new AppSettings { Avatar = "builtin:15", Nickname = "Windows 测试👩🏽‍💻", Group = "互通验证" }, Int32.Parse(args[0]), true, "windows-test"))
         {
             node.MessageReceived += async message =>
             {
                 try
                 {
-                    if (message.Record.Text == "0") { node.SendMessage(message.Peer, "IDLE_ECHO:0", null); return; }
+                    if (message.Record.Text == "0") { if(message.Peer.Avatar!="builtin:5")throw new Exception("Android 内置头像未同步");node.SendMessage(message.Peer, "IDLE_ECHO:0", null); return; }
+                    if (message.Record.Text == "REQUEST_AVATAR_IMAGE") { node.Settings.Avatar=avatarImage;node.Refresh();node.SendMessage(message.Peer,"AVATAR_IMAGE_READY",null);return; }
+                    if (message.Record.Text == "VERIFY_AVATAR_IMAGE") { if(message.Peer.Avatar!=avatarImage)throw new Exception("Android 图片头像未同步");node.SendMessage(message.Peer,"AVATAR_IMAGE_OK",null);return; }
                     if (message.Record.Text == "REQUEST_TEXT_FILE") { node.SendContent(message.Peer, "Windows 自动 TXT："+UnicodeText, null, args[1]); return; }
                     if (message.Record.Text == "ANDROID_TXT") {
                         if(message.Files.Count!=1)throw new Exception("缺少 Android TXT 附件");

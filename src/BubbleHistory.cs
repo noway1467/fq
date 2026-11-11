@@ -35,6 +35,9 @@ namespace FeiqLight
         internal int CharacterLimit = 200000;
         public string HighlightText { get { return highlightText; } set { highlightText = value ?? ""; Arrange(); Invalidate(); } }
         private int selected = -1;
+        private readonly HashSet<ChatRecord> marked = new HashSet<ChatRecord>();
+        private int selectionAnchor = -1;
+        private bool multiSelectMode;
         private string wallpaperPattern="none";
         private ChatWallpaper.Asset wallpaperImage;
         // 新消息入场：整列内容从旧位置平滑上移；跳到最新按钮的显隐；离开底部后新到消息计数。
@@ -67,6 +70,10 @@ namespace FeiqLight
         public event Action<ChatRecord> RetryRequested;
         public event Action<ChatRecord> ForwardRequested;
         public event Action<ChatRecord,int> FileRequested;
+        public event Action<ChatRecord[]> DeleteRequested;
+        public event Action SelectionChanged;
+        public bool SelectionMode { get { return multiSelectMode; } }
+        public int SelectionCount { get { return marked.Count; } }
         public int TextLength { get { return Text.Length; } }
         public BubbleHistory()
         {
@@ -79,6 +86,12 @@ namespace FeiqLight
             ((ToolStripMenuItem)copy).ShortcutKeyDisplayString = "Ctrl+C";
             ToolStripItem full = menu.Items.Add("查看全文 / 选段复制", null, delegate { ShowFullText(); });
             ToolStripItem forward = menu.Items.Add("转发…", null, delegate { if (SelectedRecord != null && ForwardRequested != null) ForwardRequested(SelectedRecord); });
+            ToolStripMenuItem selectMode = new ToolStripMenuItem("选择多条消息");
+            selectMode.Click += delegate { if (multiSelectMode) EndSelection(); else BeginSelection(); };
+            menu.Items.Add(selectMode);
+            ToolStripMenuItem delete = new ToolStripMenuItem("删除这条消息");
+            delete.Click += delegate { DeleteMarkedOrSelected(); };
+            menu.Items.Add(delete);
             ToolStripSeparator fileGroup = new ToolStripSeparator(), retryGroup = new ToolStripSeparator();
             menu.Items.Add(fileGroup);
             ToolStripMenuItem open=new ToolStripMenuItem("打开文件"),openWith=new ToolStripMenuItem("打开方式…");
@@ -98,6 +111,10 @@ namespace FeiqLight
                 if (record == null) { e.Cancel = true; return; }
                 forward.Enabled = ForwardRequested != null;
                 full.Enabled = !String.IsNullOrEmpty(record.DisplayText());
+                selectMode.Text = multiSelectMode ? "退出多选" : "选择多条消息";
+                selectMode.Visible = delete.Visible = DeleteRequested != null;
+                delete.Text = multiSelectMode ? "删除选中的 " + marked.Count + " 条消息" : "删除这条消息";
+                delete.Enabled = !multiSelectMode || marked.Count > 0;
                 retry.Visible=retryGroup.Visible=RetryRequested!=null&&record.Outgoing&&(record.State??"").Contains("未确认"); copy.Enabled = !String.IsNullOrEmpty(record.Text);
                 string[] paths = record.GetLocalFiles();
                 fileGroup.Visible = folder.Visible = path.Visible = open.Visible = openWith.Visible = paths.Length > 0; folder.Tag = null;
@@ -115,6 +132,21 @@ namespace FeiqLight
             ContextMenuStrip = menu;
         }
         private ChatRecord SelectedRecord { get { return selected >= 0 && selected < records.Count ? records[selected] : null; } }
+        internal int MarkedCount { get { return marked.Count; } }
+        private void ClearMarked() { marked.Clear(); selectionAnchor = -1; }
+        private void NotifySelection() { Invalidate(); if (SelectionChanged != null) SelectionChanged(); }
+        public void BeginSelection()
+        {
+            multiSelectMode = true; ClearMarked(); selectionAnchor = selected;
+            if (SelectedRecord != null) marked.Add(SelectedRecord); NotifySelection();
+        }
+        public void EndSelection() { multiSelectMode = false; ClearMarked(); NotifySelection(); }
+        public void SelectAllMessages() { multiSelectMode = true; marked.Clear(); marked.UnionWith(records); NotifySelection(); }
+        public void DeleteMarkedOrSelected()
+        {
+            ChatRecord[] values = multiSelectMode ? records.Where(marked.Contains).ToArray() : (SelectedRecord == null ? new ChatRecord[0] : new[] { SelectedRecord });
+            if (values.Length > 0 && DeleteRequested != null) DeleteRequested(values);
+        }
         public static void RevealFile(Control owner, string path)
         {
             try
@@ -125,7 +157,7 @@ namespace FeiqLight
             }
             catch (Exception e) { using (NoticeDialog dialog = new NoticeDialog("无法定位文件", e.Message)) dialog.ShowDialog(owner.FindForm()); }
         }
-        public void Clear() { records.Clear(); bounds.Clear(); textLayouts.Clear(); items.Clear(); measures.Clear(); linkHits.Clear(); mediaHits.Clear(); fileHits.Clear(); stampHits.Clear(); retryHits.Clear(); pressedAction=null; dragFilePath=null; Text = ""; AutoScrollMinSize = Size.Empty; selected = -1; unseen = 0; appearFrom = 0; Invalidate(); }
+        public void Clear() { records.Clear(); bounds.Clear(); textLayouts.Clear(); items.Clear(); measures.Clear(); linkHits.Clear(); mediaHits.Clear(); fileHits.Clear(); stampHits.Clear(); retryHits.Clear(); pressedAction=null; dragFilePath=null; Text = ""; AutoScrollMinSize = Size.Empty; selected = -1; EndSelection(); unseen = 0; appearFrom = 0; Invalidate(); }
         public bool HasDelivery(string state) { return records.Any(r => r.State == state); }
         // 自己发送后回到最新：近处平滑滚动，远处先贴近再滑行；逻辑位置立即落到底部。
         public void ScrollToLatest() { unseen = 0; SmoothTo(AutoScrollMinSize.Height); }
@@ -134,13 +166,15 @@ namespace FeiqLight
         public void SetRecords(IEnumerable<ChatRecord> values, string highlight)
         {
             records.Clear(); records.AddRange(values); highlightText = highlight ?? "";
-            Trim(); selected = -1; unseen = 0; appearFrom = 0; pressedAction = null; dragFilePath = null;
+            Trim(); selected = -1; EndSelection(); unseen = 0; appearFrom = 0; pressedAction = null; dragFilePath = null;
             UpdateText(); Arrange(); JumpTo(AutoScrollMinSize.Height); Invalidate();
         }
         private void Trim()
         {
             int characters = records.Sum(r => (r.Text ?? "").Length);
-            while (records.Count > RecordLimit || (records.Count > 1 && characters > CharacterLimit)) { characters -= (records[0].Text ?? "").Length; records.RemoveAt(0); selected--; }
+            bool changed = false;
+            while (records.Count > RecordLimit || (records.Count > 1 && characters > CharacterLimit)) { characters -= (records[0].Text ?? "").Length; changed |= marked.Remove(records[0]); records.RemoveAt(0); selected--; selectionAnchor--; }
+            if(changed) NotifySelection();
         }
         private void UpdateText() { Text = String.Join("\n", records.Select(r => r.Sender + "  " + r.Text)); }
         private bool AtBottom(int tolerance) { return -AutoScrollPosition.Y + ClientSize.Height >= AutoScrollMinSize.Height - tolerance; }
@@ -186,6 +220,19 @@ namespace FeiqLight
             current.State = record.State; current.LocalFiles = record.LocalFiles; current.Transfers = record.Transfers;
             bool bottom = AtBottom(Dp(55)); Tuple<ChatRecord,int> anchor = bottom ? null : TopAnchor();
             Arrange(); if (bottom) JumpTo(AutoScrollMinSize.Height); else Restore(anchor); Invalidate();
+        }
+        public void RemoveRecords(IEnumerable<ChatRecord> values)
+        {
+            ChatRecord[] remove = values.ToArray();
+            Func<ChatRecord, bool> deleting = r => remove.Any(v => v.PeerId == r.PeerId && v.Packet == r.Packet && v.Outgoing == r.Outgoing);
+            if (!records.Any(deleting)) return;
+            bool bottom = AtBottom(Dp(55)); Tuple<ChatRecord, int> anchor = bottom ? null : TopAnchor();
+            if(anchor != null && deleting(anchor.Item1)) {
+                int next = records.FindIndex(records.IndexOf(anchor.Item1), r => !deleting(r));
+                anchor = next < 0 ? null : Tuple.Create(records[next], bounds[next].Y + AutoScrollPosition.Y);
+            }
+            records.RemoveAll(r => deleting(r)); selected = -1; appearFrom = 0; pressedAction = null; dragFilePath = null; UpdateText(); Arrange(); EndSelection();
+            if (bottom) JumpTo(AutoScrollMinSize.Height); else Restore(anchor); Invalidate();
         }
         protected override void OnResize(EventArgs e)
         {
@@ -400,12 +447,14 @@ namespace FeiqLight
         private void DrawMessage(Graphics g, int i, Rectangle r, Item item)
         {
             ChatRecord record = records[i]; Measure m = item.M; bool outgoing = record.Outgoing;
-            if (i == selected && Focused) using (SolidBrush band = new SolidBrush(Color.FromArgb(Theme.Dark ? 52 : 34, Theme.Blue))) g.FillRectangle(band, 0, r.Top - Dp(2), ClientSize.Width, r.Height + Dp(4));
+            bool checkedMessage = marked.Contains(record);
+            if ((!multiSelectMode && i == selected && Focused) || checkedMessage) using (SolidBrush band = new SolidBrush(Color.FromArgb(Theme.Dark ? 58 : 38, Theme.Blue))) g.FillRectangle(band, 0, r.Top - Dp(2), ClientSize.Width, r.Height + Dp(4));
             using (GraphicsPath path = Shape(i, r))
             {
                 using (GraphicsPath shadow = (GraphicsPath)path.Clone()) using (Matrix down = new Matrix(1, 0, 0, 1, 0, Math.Max(1, Dp(1))))
                 { shadow.Transform(down); using (SolidBrush b = new SolidBrush(Color.FromArgb(Theme.Dark ? 70 : 26, Theme.Dark ? Color.Black : Theme.Blend(Color.Black, Theme.Blue, .7F)))) g.FillPath(b, shadow); }
                 using (SolidBrush b = new SolidBrush(outgoing ? Theme.Outgoing : Theme.Surface)) g.FillPath(b, path);
+                if (checkedMessage) using (Pen border = new Pen(Theme.Blue, Dp(2))) g.DrawPath(border, path);
             }
             Point origin = new Point(r.X + PadX, r.Y + PadTop);
             if (m.Layout != null) m.Layout.Draw(g, origin, Font, linkHits);
@@ -573,6 +622,27 @@ namespace FeiqLight
             }
             return -1;
         }
+        private void SelectMessage(int hit, MouseButtons button, Keys modifiers)
+        {
+            if (hit < 0) { if (!multiSelectMode) selected = -1; return; }
+            int previous = selected; selected = hit;
+            if (button == MouseButtons.Right) { if (multiSelectMode && !marked.Contains(records[hit])) { marked.Clear(); marked.Add(records[hit]); selectionAnchor = hit; } NotifySelection(); return; }
+            if (button != MouseButtons.Left) return;
+            if ((modifiers & (Keys.Control | Keys.Shift)) != 0 && !multiSelectMode)
+            {
+                multiSelectMode = true;
+                if (previous >= 0) { marked.Add(records[previous]); selectionAnchor = previous; }
+            }
+            if (multiSelectMode)
+            {
+                if ((modifiers & Keys.Shift) != 0 && selectionAnchor >= 0) {
+                    marked.Clear(); for(int i = Math.Min(selectionAnchor, hit); i <= Math.Max(selectionAnchor, hit); i++) marked.Add(records[i]);
+                }
+                else { if(!marked.Add(records[hit])) marked.Remove(records[hit]); selectionAnchor = hit; }
+            }
+            else selectionAnchor = hit;
+            NotifySelection();
+        }
         protected override void OnMouseDown(MouseEventArgs e)
         {
             base.OnMouseDown(e); Focus();
@@ -580,10 +650,11 @@ namespace FeiqLight
             pressedAction=null;dragFilePath=null;fileDragStarted=false;
             if (JumpVisible && JumpBounds().Contains(e.Location)) { if (e.Button == MouseButtons.Left) ScrollToLatest(); return; }
             var retry = retryHits.FirstOrDefault(item => item.Item1.Contains(e.Location));
-            if (retry != null) { selected = retry.Item2; Invalidate(); ContextMenuStrip.Show(this, e.Location); return; }
-            selected = HitBubble(e.Location);
+            if (retry != null && !multiSelectMode && ModifierKeys == Keys.None) { selected = retry.Item2; Invalidate(); ContextMenuStrip.Show(this, e.Location); return; }
+            int hit = HitBubble(e.Location);
+            SelectMessage(hit, e.Button, ModifierKeys);
             Invalidate();
-            if(e.Button!=MouseButtons.Left)return;
+            if(e.Button!=MouseButtons.Left || multiSelectMode)return;
             dragStart=e.Location;
             var link=linkHits.FirstOrDefault(item=>item.Item1.Contains(e.Location));
             if(link!=null){pressedAction=delegate{MessageLinks.Open(this,link.Item2);};return;}
@@ -626,7 +697,7 @@ namespace FeiqLight
         protected override void OnMouseDoubleClick(MouseEventArgs e)
         {
             base.OnMouseDoubleClick(e);
-            if (e.Button == MouseButtons.Left && !InScrollbar(e.Location) && !(JumpVisible && JumpBounds().Contains(e.Location)) && !mediaHits.Any(h => h.Item1.Contains(e.Location)) && !fileHits.Any(h => h.Item1.Contains(e.Location))) ShowFullText();
+            if (!multiSelectMode && e.Button == MouseButtons.Left && !InScrollbar(e.Location) && !(JumpVisible && JumpBounds().Contains(e.Location)) && !mediaHits.Any(h => h.Item1.Contains(e.Location)) && !fileHits.Any(h => h.Item1.Contains(e.Location))) ShowFullText();
         }
         protected override void OnMouseMove(MouseEventArgs e) {
             base.OnMouseMove(e);
@@ -647,6 +718,9 @@ namespace FeiqLight
         protected override void OnFontChanged(EventArgs e) { base.OnFontChanged(e);if(records!=null&&bounds!=null&&textLayouts!=null){spacerWidth=0;Arrange();Invalidate();} }
         protected override void OnKeyDown(KeyEventArgs e)
         {
+            if(e.KeyCode == Keys.Escape && multiSelectMode) { EndSelection(); e.Handled = e.SuppressKeyPress = true; return; }
+            if(e.Control && e.KeyCode == Keys.A && DeleteRequested != null) { SelectAllMessages(); e.Handled = e.SuppressKeyPress = true; return; }
+            if(e.KeyCode == Keys.Delete && DeleteRequested != null) { DeleteMarkedOrSelected(); e.Handled = e.SuppressKeyPress = true; return; }
             if (e.Control && e.KeyCode == Keys.C) { CopySelected(); e.Handled = true; }
             if (e.KeyCode == Keys.Enter) { ShowFullText(); e.Handled = true; }
             if (e.KeyCode == Keys.End) { ScrollToLatest(); e.Handled = true; }
@@ -657,7 +731,8 @@ namespace FeiqLight
         }
         private void CopySelected()
         {
-            ChatRecord record = SelectedRecord; if (record != null) CopyText(record.Text);
+            if(multiSelectMode) CopyText(String.Join(Environment.NewLine, records.Where(marked.Contains).Select(r => r.Text)));
+            else { ChatRecord record = SelectedRecord; if (record != null) CopyText(record.Text); }
         }
         private static void CopyText(string text)
         {

@@ -41,7 +41,7 @@ namespace FeiqLight
                         LocalStore store = new LocalStore(root); AppSettings settings = store.LoadSettings();
                         // 身份先落盘再广播，异常退出也不会在下次启动变成新设备。
                         store.SaveSettings(settings);
-                        Theme.Configure(settings.DarkMode,settings.Accent);
+                        Theme.Configure(settings.FollowSystemTheme ? Theme.SystemDark : settings.DarkMode,settings.Accent);
                         if (!String.IsNullOrWhiteSpace(name)) settings.Nickname = name;
                         string startupFolder = Environment.GetFolderPath(Environment.SpecialFolder.Startup);
                         WindowsStartup startup = loopback || String.IsNullOrWhiteSpace(startupFolder) ? null : new WindowsStartup(startupFolder, Application.ExecutablePath, store.Root, port, false);

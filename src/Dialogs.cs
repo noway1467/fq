@@ -163,7 +163,7 @@ namespace FeiqLight
             list.DrawItem += delegate(object sender, DrawItemEventArgs e) {
                 if (e.Index < 0) return; Peer peer = peers[e.Index]; e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
                 using (SolidBrush brush = new SolidBrush((e.State & DrawItemState.Selected) != 0 ? Theme.Sky : Theme.Surface)) e.Graphics.FillRectangle(brush, e.Bounds);
-                Bitmap avatar = Theme.CachedAvatar(42, peer.Id, false); e.Graphics.DrawImageUnscaled(avatar, e.Bounds.Left + 10 - Theme.AvatarHalo(42), e.Bounds.Top + 12 - Theme.AvatarHalo(42));
+                Bitmap avatar = Theme.CachedAvatar(42, peer.Id, false, peer.Avatar); e.Graphics.DrawImageUnscaled(avatar, e.Bounds.Left + 10 - Theme.AvatarHalo(42), e.Bounds.Top + 12 - Theme.AvatarHalo(42));
                 TextRenderer.DrawText(e.Graphics, peer.DisplayName, Theme.Section, new Rectangle(e.Bounds.Left + 62, e.Bounds.Top + 12, e.Bounds.Width - 72, 24), Theme.Ink, TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
                 TextRenderer.DrawText(e.Graphics, (peer.DuplicateName?"#"+peer.ConversationNumber+" · ":"")+peer.Endpoint, Theme.Small, new Rectangle(e.Bounds.Left + 62, e.Bounds.Top + 36, e.Bounds.Width - 72, 22), Theme.Muted, TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
                 if ((e.State & DrawItemState.Focus) != 0) e.DrawFocusRectangle();
@@ -174,6 +174,67 @@ namespace FeiqLight
             Panel frame = new Panel { Dock = DockStyle.Fill, Padding = new Padding(18, 0, 18, 0) }; frame.Controls.Add(list);
             Surface.Controls.Add(frame); Surface.Controls.Add(hint); Surface.Controls.Add(footer); AcceptButton = send;
         }
+    }
+    internal sealed class AvatarPickerDialog : ModernWindow
+    {
+        private sealed class AvatarChoice : Button
+        {
+            internal bool Active;
+            private readonly Bitmap picture;
+            internal AvatarChoice(int index) {
+                picture = Theme.ContactAvatar(44, "", false, "builtin:" + index);
+                FlatStyle = FlatStyle.Flat; FlatAppearance.BorderSize = 0; Cursor = Cursors.Hand;
+                AccessibleName = "内置头像：" + EmojiAvatars.DescriptionAt(index);
+                SetStyle(ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint, true);
+            }
+            protected override void OnPaint(PaintEventArgs e) {
+                e.Graphics.Clear(Theme.Surface); e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                Rectangle area = new Rectangle(1, 1, Width - 3, Height - 3);
+                using(GraphicsPath path = Theme.Rounded(area, Theme.ControlRadius)) {
+                    using(SolidBrush brush = new SolidBrush(Active ? Theme.Sky : Theme.Ice)) e.Graphics.FillPath(brush, path);
+                    if(Active || Focused) using(Pen border = new Pen(Theme.Blue, 2)) e.Graphics.DrawPath(border, path);
+                }
+                int size = Math.Min(Width - 8, Height - 8); e.Graphics.DrawImage(picture, new Rectangle((Width - size) / 2, (Height - size) / 2, size, size));
+            }
+            protected override void Dispose(bool disposing) { if(disposing) picture.Dispose(); base.Dispose(disposing); }
+        }
+        private readonly PictureBox preview = new PictureBox { Dock = DockStyle.Fill, SizeMode = PictureBoxSizeMode.Zoom, AccessibleName = "所选头像预览" };
+        private readonly AvatarChoice[] choices = new AvatarChoice[24];
+        private readonly string identity;
+        public string SelectedValue { get; private set; }
+        internal AvatarPickerDialog(string value, string identity)
+        {
+            this.identity = identity; Text = "更换头像"; ResizeWindow = false; ClientSize = new Size(520, 560); MinimumSize = new Size(480, 560); StartPosition = FormStartPosition.CenterParent;
+            TableLayoutPanel content = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, Margin = Padding.Empty };
+            content.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); foreach(int height in new[] { 76, 248, 44, 28 }) content.RowStyles.Add(new RowStyle(SizeType.Absolute, height));
+            TableLayoutPanel top = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty };
+            top.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 76)); top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); top.Controls.Add(preview, 0, 0);
+            Label title = Theme.Label("选一个喜欢的头像\n也可以使用自己的图片", Theme.Body, Theme.Ink); title.Dock = DockStyle.Fill; title.Padding = new Padding(12, 0, 0, 0); top.Controls.Add(title, 1, 0); content.Controls.Add(top, 0, 0);
+            TableLayoutPanel grid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 6, RowCount = 4, Margin = new Padding(0, 4, 0, 8), AccessibleName = "内置头像列表" };
+            for(int i = 0; i < 6; i++) grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F / 6));
+            for(int i = 0; i < 4; i++) grid.RowStyles.Add(new RowStyle(SizeType.Percent, 25));
+            for(int i = 0; i < choices.Length; i++) { int index = i; AvatarChoice choice = new AvatarChoice(i) { Dock = DockStyle.Fill, Margin = new Padding(4) }; choice.Click += delegate { SetAvatar("builtin:" + index); }; choices[i] = choice; grid.Controls.Add(choice, i % 6, i / 6); }
+            content.Controls.Add(grid, 0, 1);
+            TableLayoutPanel actions = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty };
+            actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50)); actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            Button local = Theme.Button("选择本地图片…", delegate {
+                using(OpenFileDialog picker = new OpenFileDialog { Title = "选择头像图片", Filter = "图片|*.jpg;*.jpeg;*.png;*.bmp;*.gif", CheckFileExists = true }) if(picker.ShowDialog(this) == DialogResult.OK) {
+                    try { ImportImage(picker.FileName); }
+                    catch(Exception error) { using(NoticeDialog notice = new NoticeDialog("无法使用图片", error.Message)) notice.ShowDialog(this); }
+                }
+            }, false); local.Dock = DockStyle.Fill; local.Margin = new Padding(0, 0, 6, 4); actions.Controls.Add(local, 0, 0);
+            Button reset = Theme.Button("使用默认头像", delegate { SetAvatar("default"); }, false); reset.Dock = DockStyle.Fill; reset.Margin = new Padding(6, 0, 0, 4); actions.Controls.Add(reset, 1, 0); content.Controls.Add(actions, 0, 2);
+            Label hint = Theme.Label("回到设置页点击保存后生效。", Theme.Small, Theme.Muted); hint.Dock = DockStyle.Fill; content.Controls.Add(hint, 0, 3);
+            Panel body = DialogLayout.Body(this); body.Controls.Add(content);
+            DialogLayout.Actions(this, Theme.Button("使用此头像", delegate { DialogResult = DialogResult.OK; }, true), Theme.Button("取消", delegate { DialogResult = DialogResult.Cancel; }, false));
+            SetAvatar(Protocol.NormalizeAvatar(value) ?? "default");
+        }
+        private void SetAvatar(string value) {
+            SelectedValue = value; Image old = preview.Image; preview.Image = Theme.ContactAvatar(64, identity, false, value); if(old != null) old.Dispose();
+            for(int i = 0; i < choices.Length; i++) { choices[i].Active = value == "builtin:" + i; choices[i].Invalidate(); }
+        }
+        internal void ImportImage(string path) { SetAvatar(EmojiAvatars.FromLocalImage(path)); }
+        protected override void Dispose(bool disposing) { if(disposing && preview.Image != null) { preview.Image.Dispose(); preview.Image = null; } base.Dispose(disposing); }
     }
     public sealed class SettingsDialog : ModernWindow
     {
@@ -212,13 +273,13 @@ namespace FeiqLight
                 if(Focused&&ShowFocusCues)ControlPaint.DrawFocusRectangle(g,Rectangle.Inflate(area,-3,-3),Theme.Blue,fill);
             }
         }
-        private readonly Panel body = new Panel { Dock = DockStyle.Fill, AutoScroll = true, BackColor = Theme.Surface };
+        private readonly Panel body = new Panel { Dock = DockStyle.Fill, AutoScroll = true, BackColor = Theme.Surface, Padding = new Padding(0, 0, 0, 8) };
         private Label pageTitle;
         public AppSettings Value { get; private set; }
         public SettingsDialog(AppSettings current, string dataPath, int port, bool startupAvailable = false, bool startupEnabled = false)
         {
             Text = "设置"; ClientSize = new Size(720, 720); ResizeWindow = false; MinimumSize = new Size(560, 500); StartPosition = FormStartPosition.CenterParent;
-            Panel footer = new Panel { Dock = DockStyle.Bottom, Height = 78, BackColor = Theme.Surface };
+            Panel footer = new Panel { Dock = DockStyle.Bottom, Height = 72, Padding = new Padding(24, 12, 24, 16), BackColor = Theme.Surface, AccessibleName = "设置操作栏" };
             footer.Paint += delegate(object sender, PaintEventArgs e) { using (Pen pen = new Pen(Theme.Line)) e.Graphics.DrawLine(pen, 0, 0, footer.Width, 0); };
             Panel nav = new Panel { Dock = DockStyle.Left, Width = 186, BackColor = Theme.Surface };
             nav.Paint += delegate(object sender, PaintEventArgs e) { using (Pen line = new Pen(Theme.Line)) e.Graphics.DrawLine(line, nav.Width - 1, 16, nav.Width - 1, nav.Height - 16); };
@@ -226,6 +287,17 @@ namespace FeiqLight
             Panel header = new Panel { Dock = DockStyle.Top, Height = 58, BackColor = Theme.Surface };
             pageTitle.Dock = DockStyle.Fill; pageTitle.Padding = new Padding(28, 12, 0, 0); header.Controls.Add(pageTitle);
             Surface.Controls.Add(body); Surface.Controls.Add(header); Surface.Controls.Add(footer); Surface.Controls.Add(nav);
+            string avatarValue = Protocol.NormalizeAvatar(current.Avatar) ?? "default";
+            string avatarIdentity = "device:" + current.DeviceId;
+            PictureBox avatarPreview = new PictureBox { Dock = DockStyle.Fill, SizeMode = PictureBoxSizeMode.Zoom, Image = Theme.ContactAvatar(64, avatarIdentity, false, avatarValue), AccessibleName = "个人头像" };
+            avatarPreview.Disposed += delegate { if(avatarPreview.Image != null) avatarPreview.Image.Dispose(); };
+            TableLayoutPanel avatarRow = new TableLayoutPanel { Top = -1, Height = 76, ColumnCount = 2, RowCount = 1, AccessibleName = "个人头像设置" };
+            avatarRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 88)); avatarRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); avatarRow.Controls.Add(avatarPreview, 0, 0);
+            Button avatarButton = Theme.Button("更换头像…", delegate {
+                using(AvatarPickerDialog picker = new AvatarPickerDialog(avatarValue, avatarIdentity)) if(picker.ShowDialog(this) == DialogResult.OK) {
+                    avatarValue = picker.SelectedValue; Image old = avatarPreview.Image; avatarPreview.Image = Theme.ContactAvatar(64, avatarIdentity, false, avatarValue); old.Dispose();
+                }
+            }, false); avatarButton.Width = 128; avatarButton.Anchor = AnchorStyles.Left; avatarRow.Controls.Add(avatarButton, 1, 0); body.Controls.Add(avatarRow);
             TextBox name = Input("昵称", current.Nickname, 8, 32), group = Input("部门", current.Group, 80, 32), signature = Input("个性签名", current.Signature, 152, 80);
             ToggleSwitch close = new ToggleSwitch { Text = "关闭时收起到托盘", Description = "关闭窗口后仍在后台接收消息，可从托盘图标恢复。", Checked = current.CloseToTray, BackColor = Theme.Surface }; close.SetBounds(26, 232, 458, 54); body.Controls.Add(close);
             ToggleSwitch notifications = new ToggleSwitch { Text = "消息通知", Description = "窗口不在前台时用系统气泡提示新消息。", Checked = current.Notifications, BackColor = Theme.Surface }; notifications.SetBounds(26, 274, 458, 54); body.Controls.Add(notifications);
@@ -244,6 +316,8 @@ namespace FeiqLight
             Button reset = Theme.Button("恢复默认目录", delegate { folder.Text = AppSettings.DefaultReceiveFolder; }, false); reset.SetBounds(26, 486, 146, 36); body.Controls.Add(reset);
             Label info = Theme.Label("端口 " + port + " · 启动后自动连接并查找历史联系人\n资料目录  " + dataPath, Theme.Small, Theme.Muted); info.SetBounds(26, 532, 458, 46); info.AutoEllipsis = true; body.Controls.Add(info);
             ToggleSwitch dark=new ToggleSwitch { Text="夜间模式",AccessibleName="夜间模式",Description="界面与聊天背景切换为深色，阅读更省眼。",Checked=current.DarkMode,BackColor=Theme.Surface }; dark.SetBounds(26,590,458,54);body.Controls.Add(dark);
+            ToggleSwitch follow=new ToggleSwitch { Text="跟随系统切换",AccessibleName="跟随系统切换",Description="自动跟随 Windows 的日间和夜间设置；关闭后可手动选择。",Checked=current.FollowSystemTheme,BackColor=Theme.Surface };follow.Top=290;body.Controls.Add(follow);
+            Action followTheme=delegate {dark.Enabled=!follow.Checked;if(follow.Checked)dark.Checked=Theme.SystemDark;};follow.CheckedChanged+=delegate {followTheme();};followTheme();
             int accentIndex = current.Accent == "green" ? 1 : current.Accent == "purple" ? 2 : 0;
             ToggleSwitch diagnostics=new ToggleSwitch {Text="记录故障诊断",AccessibleName="记录故障诊断",Description="保存后生效；仅记录时间与事件码，不含聊天内容、身份、IP 或路径。",Checked=current.DiagnosticsEnabled,BackColor=Theme.Surface};diagnostics.SetBounds(26,700,458,64);body.Controls.Add(diagnostics);
             Label privacy=Theme.Label("最多 128 KiB，自动轮转；关闭后保留，可随时清除。",Theme.Small,Theme.Muted);privacy.SetBounds(26,742,458,28);body.Controls.Add(privacy);
@@ -280,7 +354,7 @@ namespace FeiqLight
             };
             TableLayoutPanel presets=new TableLayoutPanel {Dock=DockStyle.Fill,ColumnCount=2,RowCount=2,Margin=Padding.Empty};for(int i=0;i<2;i++){presets.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,50));presets.RowStyles.Add(new RowStyle(SizeType.Percent,50));}
             string[] presetNames={"晴空 · 经典","薄荷 · 日间","深海 · 夜间","暮紫 · 夜间"};
-            for(int i=0;i<4;i++){int choice=i;Button pick=Theme.Button(presetNames[i],delegate {dark.Checked=choice>=2;accentIndex=choice==1?1:choice==3?2:0;backgroundMode=choice==1?"lines":"orbits";refreshAccent();refreshPattern();preview.Invalidate();},false);pick.Dock=DockStyle.Fill;pick.Margin=new Padding(i%2==0?0:6,0,i%2==0?6:0,12);presets.Controls.Add(pick,i%2,i/2);}appearance.Controls.Add(presets,0,1);
+            for(int i=0;i<4;i++){int choice=i;Button pick=Theme.Button(presetNames[i],delegate {follow.Checked=false;dark.Checked=choice>=2;accentIndex=choice==1?1:choice==3?2:0;backgroundMode=choice==1?"lines":"orbits";refreshAccent();refreshPattern();preview.Invalidate();},false);pick.Dock=DockStyle.Fill;pick.Margin=new Padding(i%2==0?0:6,0,i%2==0?6:0,12);presets.Controls.Add(pick,i%2,i/2);}appearance.Controls.Add(presets,0,1);
             Label sizeLabel=Theme.Label("聊天字号 · "+messageSize+" pt",Theme.Body,Theme.Ink);sizeLabel.Dock=DockStyle.Fill;sizeLabel.Margin=new Padding(0,4,0,0);appearance.Controls.Add(sizeLabel,0,2);
             ThemedSlider sizeSlider=new ThemedSlider {Minimum=9,Maximum=18,Value=messageSize,Dock=DockStyle.Fill,AccessibleName="聊天字号",BackColor=Theme.Surface};sizeSlider.ValueChanged+=delegate {messageSize=sizeSlider.Value;sizeLabel.Text="聊天字号 · "+messageSize+" pt";preview.Invalidate();};appearance.Controls.Add(sizeSlider,0,3);
             TableLayoutPanel patterns=new TableLayoutPanel {Dock=DockStyle.Fill,ColumnCount=3,RowCount=1,Margin=new Padding(0,2,0,10)};string[] patternNames={"纯色","星环","流线"},patternKeys={"none","orbits","lines"};Button[] patternButtons=new Button[3];
@@ -293,20 +367,28 @@ namespace FeiqLight
                 }
             },false);image.AutoEllipsis=true;image.Dock=DockStyle.Fill;image.Margin=new Padding(0,0,0,10);refreshPattern();appearance.Controls.Add(image,0,5);body.Controls.Add(appearance);
             dark.CheckedChanged+=delegate {preview.Invalidate();};foreach(Button choice in choices)choice.Click+=delegate{preview.Invalidate();};
-            Label error = Theme.Label("", Theme.Small, Theme.Danger); error.SetBounds(26, 2, 472, 36); error.AccessibleName = "设置错误"; footer.Controls.Add(error);
-            Button cancel = Theme.Button("取消", delegate { DialogResult = DialogResult.Cancel; }, false); cancel.SetBounds(470, 26, 92, 38); footer.Controls.Add(cancel); CancelButton = cancel;
+            // 错误提示独占一行；空 Label 也会遮住兄弟控件，不能与按钮使用重叠坐标。
+            Label error = Theme.Label("", Theme.Small, Theme.Danger); error.Dock = DockStyle.Fill; error.AutoEllipsis = true; error.Visible = false; error.AccessibleName = "设置错误"; footer.Controls.Add(error);
+            FlowLayoutPanel actionRow = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 40, FlowDirection = FlowDirection.RightToLeft, WrapContents = false, Margin = Padding.Empty };
+            footer.Controls.Add(actionRow);
+            error.TextChanged += delegate {
+                error.Visible = error.Text.Length > 0;
+                float scale = actionRow.Height / 40F;
+                int detail = TextRenderer.MeasureText(error.Text, error.Font, new Size(Math.Max(1, footer.Width - footer.Padding.Horizontal), 0), TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix).Height;
+                footer.Height = actionRow.Height + footer.Padding.Vertical + (error.Visible ? Math.Max((int)(32 * scale), detail + (int)(8 * scale)) : (int)(4 * scale));
+            };
+            Button cancel = Theme.Button("取消", delegate { DialogResult = DialogResult.Cancel; }, false); cancel.Size = new Size(92, 40); CancelButton = cancel;
             Button save = Theme.Button("保存", delegate
             {
                 if (String.IsNullOrWhiteSpace(name.Text)) { error.Text = "昵称不能为空"; SelectTab(0); name.Focus(); return; }
                 try
                 {
                     string path = ReceiveStorage.Folder(folder.Text); ReceiveStorage.ValidateWritable(path);
-                    Value = new AppSettings { Nickname = Protocol.Field(name.Text.Trim()), Group = String.IsNullOrWhiteSpace(group.Text) ? "我的局域网" : Protocol.Field(group.Text.Trim()), Signature = signature.Text.Trim(), CloseToTray = close.Checked, StartWithWindows = startup.Checked, Notifications = notifications.Checked,DiagnosticsEnabled = diagnostics.Checked, AutoSendDroppedFiles=autoDrop.Checked, AutoReceiveFiles = auto.Checked, ReceiveFolder = path, ChatFontSize=messageSize,ChatBackground=backgroundMode,BackgroundImage=backgroundPath,DarkMode=dark.Checked, Accent=accentIndex==1?"green":accentIndex==2?"purple":"blue" };
+                    Value = new AppSettings { Avatar = avatarValue, Nickname = Protocol.Field(name.Text.Trim()), Group = String.IsNullOrWhiteSpace(group.Text) ? "我的局域网" : Protocol.Field(group.Text.Trim()), Signature = signature.Text.Trim(), CloseToTray = close.Checked, StartWithWindows = startup.Checked, Notifications = notifications.Checked,DiagnosticsEnabled = diagnostics.Checked, AutoSendDroppedFiles=autoDrop.Checked, AutoReceiveFiles = auto.Checked, ReceiveFolder = path, ChatFontSize=messageSize,ChatBackground=backgroundMode,BackgroundImage=backgroundPath,DarkMode=dark.Checked, FollowSystemTheme=follow.Checked, Accent=accentIndex==1?"green":accentIndex==2?"purple":"blue" };
                     DialogResult = DialogResult.OK;
                 }
                 catch (Exception e) { error.Text = "保存目录不可用：" + e.Message; SelectTab(2); folder.Focus(); }
-            }, true); save.SetBounds(574, 26, 96, 38); footer.Controls.Add(save); AcceptButton = save;
-            Action fitFooter=delegate{save.Left=footer.ClientSize.Width-26-save.Width;cancel.Left=save.Left-12-cancel.Width;error.Width=Math.Max(80,footer.ClientSize.Width-64);};footer.SizeChanged+=delegate{fitFooter();};fitFooter();
+            }, true); save.Size = new Size(96, 40); save.Margin = Padding.Empty; cancel.Margin = new Padding(0, 0, 12, 0); actionRow.Controls.Add(save); actionRow.Controls.Add(cancel); AcceptButton = save;
             // 页面只创建一次，切换仅改变可见性，尚未保存的控件状态不会丢失。
             dark.Top = 290; accent.Top = 291; info.Top = 900;
             Control[] fields = body.Controls.Cast<Control>().OrderBy(c => c.Top).ToArray();
@@ -330,12 +412,12 @@ namespace FeiqLight
                 }
                 string section = field == fields[0] ? "个人资料" : field == close ? "消息与窗口" : field == auto ? "文件接收" : field == autoDrop ? "文件发送" : field == dark ? "聊天外观" : field == diagnostics ? "故障诊断" : field == info ? "本机信息" : null;
                 if (section != null) {
-                    if(layout.Controls.Count>0) { Panel divider=new Panel { Height=1, BackColor=Theme.Line, Margin=new Padding(0,18,0,18) };layout.Controls.Add(divider); }
-                    Label heading = Theme.Label(section, Theme.Section, Theme.Ink); heading.Height = 26; heading.Margin = new Padding(0, 0, 0, 8); layout.Controls.Add(heading);
+                    if(layout.Controls.Count>0) { Panel divider=new Panel { Height=1, BackColor=Theme.Line, Margin=new Padding(0,12,0,12) };layout.Controls.Add(divider); }
+                    Label heading = Theme.Label(section, Theme.Section, Theme.Ink); heading.Height = 26; heading.Margin = new Padding(0, 0, 0, 6); layout.Controls.Add(heading);
                 }
                 if(field is Label && field != hint && field != info && field != startupHint && field != privacy && field != dropHint) field.Height=22;
                 if(field is ToggleSwitch) field.Height=((ToggleSwitch)field).PreferredHeightFor(458);
-                field.Margin = new Padding(0, 0, 0, field is Label ? 6 : 12); layout.Controls.Add(field);
+                field.Margin = new Padding(0, 0, 0, field is Label ? 4 : 8); layout.Controls.Add(field);
             }
             // 侧栏：4 个分类自上而下排列，与内容区之间用细线分隔。
             for(int i=0;i<tabs.Length;i++) {
@@ -347,7 +429,20 @@ namespace FeiqLight
                 nav.Controls.Add(tabs[i]);
             }
             Label navFooter=Theme.Label("飞Q 设置",Theme.Small,Theme.Muted); navFooter.SetBounds(20, nav.Height-34, nav.Width-30, 22); navFooter.Anchor=AnchorStyles.Left|AnchorStyles.Bottom; nav.Controls.Add(navFooter);
-            Action fit = delegate { int width = Math.Max(260, body.ClientSize.Width - 56 - SystemInformation.VerticalScrollBarWidth); foreach(FlowLayoutPanel layout in pages)foreach (Control field in layout.Controls) field.Width = width; };
+            Action fit = delegate {
+                int width = Math.Max(160, body.Width - (int)(56 * DeviceDpi / 96F) - SystemInformation.VerticalScrollBarWidth);
+                foreach(FlowLayoutPanel layout in pages) {
+                    layout.SuspendLayout();
+                    foreach (Control field in layout.Controls) {
+                        field.Width = width;
+                        ToggleSwitch toggle = field as ToggleSwitch;
+                        if(toggle != null) field.Height = toggle.PreferredHeightFor(width);
+                        else if(field == startupHint || field == hint || field == dropHint || field == privacy || field == info)
+                            field.Height = TextRenderer.MeasureText(field.Text, field.Font, new Size(width, Int32.MaxValue), TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl | TextFormatFlags.NoPrefix).Height + 4;
+                    }
+                    layout.ResumeLayout(true);
+                }
+            };
             body.SizeChanged += delegate { fit(); }; fit();SelectTab(0);
             Theme.ThemeScrollbars(body);
         }
@@ -360,7 +455,7 @@ namespace FeiqLight
     }
     public sealed class HistoryDialog : ModernWindow
     {
-        public HistoryDialog(LocalStore store, Peer peer)
+        public HistoryDialog(LocalStore store, Peer peer, MainForm main = null)
         {
             Text = "聊天记录 · " + peer.DisplayName; UseSecondaryChrome();ShowInTaskbar=false; ClientSize = new Size(760, 720); MinimumSize = new Size(520, 460); StartPosition = FormStartPosition.CenterParent;
             Surface.BackColor = Theme.Wallpaper;
@@ -375,7 +470,11 @@ namespace FeiqLight
                 // 批量排版一次，逐条追加会在每次输入时重排整个记录。
                 body.SetRecords(matches, query);
                 summary.Text=query.Length==0?"最近 "+records.Count+" 条记录":"找到 "+matches.Length+" 条匹配记录 · 关键词已高亮";
-            }; input.Input.TextChanged += delegate { render(); }; render(); }
+            }; input.Input.TextChanged += delegate { render(); };
+                if(main != null) body.DeleteRequested += delegate(ChatRecord[] selected) {
+                    if(main.DeleteMessages(peer, selected)) { records.RemoveAll(r => selected.Any(s => s.Packet == r.Packet && s.Outgoing == r.Outgoing)); render(); }
+                };
+                render(); }
             catch (Exception e) { using (NoticeDialog error = new NoticeDialog("读取失败", e.Message)) error.ShowDialog(this); }
         }
     }
