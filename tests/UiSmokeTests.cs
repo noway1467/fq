@@ -324,6 +324,24 @@ namespace FeiqLight.Tests
         }
         internal static void RunSettingsMessageTests(string directory, Action<string, Action> test)
         {
+            test("联系人资料：放大头像、最小窗口滚动与固定操作区", () => {
+                Peer peer = new Peer { Endpoint = new IPEndPoint(IPAddress.Loopback, 2425), Login = "layout", Nickname = "长昵称 English 中文", Group = "研发部门 Engineering " + new string('长', 80), Avatar = "builtin:15" };
+                foreach(bool dark in new[] { false, true }) {
+                    Theme.Change(dark, "blue");
+                    using(ContactProfileDialog dialog = new ContactProfileDialog(peer, value => true)) {
+                    dialog.Show(); dialog.Size = dialog.MinimumSize; Application.DoEvents();
+                    PictureBox portrait = Find<PictureBox>(dialog, "联系人资料头像");
+                    Check(portrait.Width >= 108 && portrait.Height >= 108, "资料头像仍偏小");
+                    Label address = Find<Label>(dialog, "联系人资料地址"); Panel scroll = (Panel)address.Parent.Parent;
+                    scroll.ScrollControlIntoView(address); Application.DoEvents();
+                    Rectangle visible = scroll.RectangleToScreen(scroll.ClientRectangle), bounds = address.RectangleToScreen(address.ClientRectangle);
+                    Check(visible.Contains(bounds), "最小窗口无法滚动查看完整 IP");
+                    Button save = Button(dialog, "保存"); Check(bounds.Bottom <= save.PointToScreen(Point.Empty).Y, "资料内容覆盖保存按钮");
+                    Render(dialog, "preview-contact-profile-minimum-" + (dark ? "dark" : "light")); dialog.Close();
+                    }
+                }
+                Theme.Change(false, "blue");
+            });
             test("长按消息：空白处触发多选、松手不取消、移动和换会话取消长按", () => {
                 using(Form form = new Form { ClientSize = new Size(600, 440) }) using(BubbleHistory history = new BubbleHistory { Dock = DockStyle.Fill }) {
                     form.Controls.Add(history); form.Show(); history.DeleteRequested += delegate { };
@@ -351,8 +369,19 @@ namespace FeiqLight.Tests
                         }
                     };
                     foreach(bool dark in new[] { false, true }) {
-                        Theme.Change(dark, "blue"); open(dialog => { Check(Find<Label>(dialog, "联系人资料部门").Text == peer.Group, "部门未显示"); Render(dialog, "preview-contact-profile-" + (dark ? "dark" : "light")); Find<TextBox>(dialog, "联系人资料昵称").Text = "昵称 English 😀"; Button(dialog, "保存").PerformClick(); });
+                        Theme.Change(dark, "blue"); open(dialog => {
+                            Check(Find<Label>(dialog, "联系人资料部门").Text == peer.Group, "部门未显示");
+                            Check(Find<Label>(dialog, "联系人资料地址").Text == peer.Endpoint.ToString(), "IP 地址或端口未显示");
+                            PictureBox portrait=Find<PictureBox>(dialog,"联系人资料头像");Check(Math.Abs(portrait.Left+portrait.Width/2-portrait.Parent.ClientSize.Width/2)<=1,"资料头像未居中");
+                            Render(dialog, "preview-contact-profile-" + (dark ? "dark" : "light"));
+                            using(System.Windows.Forms.Timer previewTimer = new System.Windows.Forms.Timer { Interval = 30 }) {
+                                previewTimer.Tick += delegate { AvatarPreviewDialog preview=Application.OpenForms.OfType<AvatarPreviewDialog>().FirstOrDefault();if(preview==null)return;previewTimer.Stop();try{Check(Find<PictureBox>(preview,"头像大图").Image!=null,"大图未加载");Render(preview,"preview-avatar-full-"+(dark?"dark":"light"));}finally{preview.Close();} };
+                                previewTimer.Start();typeof(Control).GetMethod("OnClick",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(portrait,new object[]{EventArgs.Empty});
+                            }
+                            Find<TextBox>(dialog, "联系人资料昵称").Text = "昵称 English 😀"; Button(dialog, "保存").PerformClick();
+                        });
                     }
+                    Panel dot=Find<Panel>(main,"连接状态指示");Check(dot.Left>=dot.Parent.Padding.Left&&dot.Width>=12,"在线小点贴住窗口左边缘");Render(main,"preview-presence-aligned");
                     Check(peer.Note == "昵称 English 😀" && Find<Label>(main.ActiveChat, "聊天联系人昵称").Text == peer.Note, "昵称没有更新聊天标题");
                     Check(store.LoadSettings().Conversations.Single().Note == peer.Note, "昵称未持久保存");
                     open(dialog => { Find<TextBox>(dialog, "联系人资料昵称").Text = "取消的修改"; Button(dialog, "取消").PerformClick(); }); Check(peer.Note == "昵称 English 😀", "取消仍保存昵称");
@@ -392,6 +421,12 @@ namespace FeiqLight.Tests
                 string folder = Path.Combine(directory, "avatar-ui"); Directory.CreateDirectory(folder); string source = Path.Combine(folder, "原头像.png");
                 using(Bitmap bitmap = new Bitmap(120, 80)) using(Graphics g = Graphics.FromImage(bitmap)) { g.Clear(Color.FromArgb(30, 130, 170)); g.FillEllipse(Brushes.White, 40, 15, 40, 40); bitmap.Save(source, ImageFormat.Png); }
                 string image = EmojiAvatars.FromLocalImage(source); Check(Protocol.NormalizeAvatar(image) == image, "本地头像格式不合法");
+                using(var bytes=new MemoryStream(Convert.FromBase64String(image.Substring(6))))using(Bitmap avatar=new Bitmap(bytes))Check(avatar.Size==new Size(128,128),"导入头像未生成128像素副本");
+                foreach(int size in new[]{64,128}) {
+                    string value;using(Bitmap avatarSource=new Bitmap(size,size))using(Graphics g=Graphics.FromImage(avatarSource))using(var bytes=new MemoryStream()){g.Clear(Color.Coral);avatarSource.Save(bytes,ImageFormat.Jpeg);value="image:"+Convert.ToBase64String(bytes.ToArray());}
+                    Check(Protocol.NormalizeAvatar(value)==value,"不兼容已有或新版头像");
+                    using(AvatarPreviewDialog preview=new AvatarPreviewDialog("peer",value)){preview.Show();Application.DoEvents();PictureBox picture=Find<PictureBox>(preview,"头像大图");Check(picture.Image.Size==new Size(size,size),"大图改变了保存图像的尺寸");Check(((Bitmap)picture.Image).GetPixel(0,0).R>200,"大图仍被圆形裁剪");preview.Close();}
+                }
                 File.Move(source, Path.Combine(folder, "移动后的原图.png"));
                 LocalStore store = new LocalStore(folder); AppSettings original = new AppSettings { Nickname = "头像测试", Avatar = "default", ReceiveFolder = Path.Combine(folder, "received") };
                 foreach(bool night in new[] { false, true }) {
@@ -1386,21 +1421,23 @@ namespace FeiqLight.Tests
                         mainA.Activate();input.Focus();Application.DoEvents();
                         Find<Button>(chatA,"表情").PerformClick();Application.DoEvents();
                         ToolStripDropDown menu=OpenMenu();Control panel=((ToolStripControlHost)menu.Items[0]).Control;
-                        ComboBox category=Find<ComboBox>(panel,"表情分类");FlowLayoutPanel grid=Find<FlowLayoutPanel>(panel,"表情网格");
-                        Check(category.Items.Count==7&&grid.Controls.Count==24,"表情面板不完整");
-                        Check(grid.Controls.Cast<Control>().Select(c=>c.Left).Distinct().Count()>=6,"表情仍然排成长竖条");
-                        foreach(Control cell in grid.Controls)Check(grid.ClientRectangle.Contains(cell.Bounds),"默认网格超出容器");
-                        int count=0;for(int i=0;i<category.Items.Count;i++){category.SelectedIndex=i;count+=grid.Controls.Count;}Check(count==152,"表情数量不符");category.SelectedIndex=0;
+                        FlowLayoutPanel grid=Find<FlowLayoutPanel>(panel,"表情网格");
+                        Check(!All(panel).OfType<ComboBox>().Any(),"表情仍使用下拉选择");
+                        Check(grid.Controls.OfType<Label>().Count()==7&&grid.Controls.OfType<Button>().Count()==152,"连续表情列表不完整");
+                        Check(grid.Controls.OfType<Button>().Take(24).Select(c=>c.Left).Distinct().Count()>=6,"表情仍然排成长竖条");
+                        Check(grid.Controls.Cast<Control>().All(c=>c.Right<=grid.ClientSize.Width),"表情列表横向溢出");
                         input.Text="👩🏽‍💻 👨‍👩‍👧‍👦 🇨🇳 1️⃣ (๑•̀ㅂ•́)و✧";Render(mainA,"preview-emoji-chat");
                         using(Bitmap preview=new Bitmap(menu.Width,menu.Height)) {menu.DrawToBitmap(preview,new Rectangle(Point.Empty,preview.Size));preview.Save(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"preview-emoji-grid.png"),ImageFormat.Png);}
+                        Button last=grid.Controls.OfType<Button>().Last();grid.ScrollControlIntoView(last);Application.DoEvents();Check(grid.AutoScrollPosition.Y<0&&grid.ClientRectangle.Contains(last.Bounds),"不能向下滚动至末尾表情");
+                        input.Clear();last.PerformClick();Check(input.Text==last.Text,"滚动后选择颜文字失败");
                         menu.Close();input.Clear();
                     });
                     test("表情网格：缩放尺寸约束、屏幕边缘与颜文字",()=>{
                         Type pickerType=typeof(ChatForm).Assembly.GetType("FeiqLight.EmojiPicker",true);
                         using(ToolStripDropDown picker=(ToolStripDropDown)Activator.CreateInstance(pickerType,new object[]{(Action<string>)delegate(string value){}})) {
-                            Control panel=((ToolStripControlHost)picker.Items[0]).Control;ComboBox category=Find<ComboBox>(panel,"表情分类");FlowLayoutPanel grid=Find<FlowLayoutPanel>(panel,"表情网格");
-                            foreach(int dpi in new[]{96,144,192})foreach(int index in new[]{0,6}) {
-                                category.SelectedIndex=index;pickerType.GetMethod("Prepare",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(picker,new object[]{new Size(320,220),dpi});picker.PerformLayout();grid.PerformLayout();
+                            Control panel=((ToolStripControlHost)picker.Items[0]).Control;FlowLayoutPanel grid=Find<FlowLayoutPanel>(panel,"表情网格");
+                            foreach(int dpi in new[]{96,144,192}) {
+                                pickerType.GetMethod("Prepare",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(picker,new object[]{new Size(320,220),dpi});picker.PerformLayout();grid.PerformLayout();
                                 Check(picker.Width<=320&&picker.Height<=220,"小工作区弹层越界");Check(grid.Controls.Cast<Control>().All(c=>c.Right<=grid.ClientSize.Width),"网格产生横向溢出");
                                 Rectangle work=new Rectangle(-320,20,320,220);Point location=(Point)pickerType.GetMethod("Fit",BindingFlags.Static|BindingFlags.NonPublic).Invoke(null,new object[]{new Rectangle(-8,230,8,8),picker.Size,work});Check(work.Contains(new Rectangle(location,picker.Size)),"负坐标屏幕边缘弹层出界");
                             }

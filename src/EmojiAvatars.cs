@@ -37,16 +37,16 @@ namespace FeiqLight
             if(new FileInfo(path).Length > 20 * 1024 * 1024) throw new IOException("请选择不超过 20 MiB 的头像图片。");
             using(Image source = Image.FromFile(path)) {
                 if((long)source.Width * source.Height > 40000000) throw new IOException("头像图片不能超过 4000 万像素。");
-                using(Bitmap image = new Bitmap(64, 64)) {
+                using(Bitmap image = new Bitmap(128, 128)) {
                     using(Graphics g = Graphics.FromImage(image)) {
                         g.Clear(Color.White); g.InterpolationMode = InterpolationMode.HighQualityBicubic; g.PixelOffsetMode = PixelOffsetMode.HighQuality;
                         int side = Math.Min(source.Width, source.Height);
-                        g.DrawImage(source, new Rectangle(0, 0, 64, 64), new Rectangle((source.Width - side) / 2, (source.Height - side) / 2, side, side), GraphicsUnit.Pixel);
+                        g.DrawImage(source, new Rectangle(0, 0, 128, 128), new Rectangle((source.Width - side) / 2, (source.Height - side) / 2, side, side), GraphicsUnit.Pixel);
                     }
                     ImageCodecInfo jpeg = ImageCodecInfo.GetImageEncoders().Single(c => c.FormatID == ImageFormat.Jpeg.Guid);
                     foreach(long quality in new long[] { 85, 70, 55, 40 }) using(MemoryStream bytes = new MemoryStream()) using(EncoderParameters parameters = new EncoderParameters(1)) {
                         parameters.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, quality); image.Save(bytes, jpeg, parameters);
-                        if(bytes.Length <= 4096) return "image:" + Convert.ToBase64String(bytes.ToArray());
+                        if(bytes.Length <= 16384) return "image:" + Convert.ToBase64String(bytes.ToArray());
                     }
                     throw new IOException("图片无法缩成头像，请换一张图片。");
                 }
@@ -59,7 +59,7 @@ namespace FeiqLight
             if(avatar != null && avatar.StartsWith("image:", StringComparison.Ordinal)) {
                 try {
                     using(MemoryStream bytes = new MemoryStream(Convert.FromBase64String(avatar.Substring(6)))) using(Image image = Image.FromStream(bytes)) {
-                        if(image.Width == 64 && image.Height == 64) {
+                        if((image.Width == 64 || image.Width == 128) && image.Height == image.Width) {
                             GraphicsState imageState = graphics.Save();
                             try { using(GraphicsPath circle = new GraphicsPath()) { circle.AddEllipse(bounds); graphics.SetClip(circle, CombineMode.Intersect); graphics.InterpolationMode = InterpolationMode.HighQualityBicubic; graphics.DrawImage(image, bounds); } }
                             finally { graphics.Restore(imageState); }

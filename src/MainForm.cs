@@ -73,10 +73,15 @@ public sealed class MainForm : ModernWindow
             footer.Paint += delegate(object sender, PaintEventArgs e)
             {
                 using (Pen line = new Pen(Theme.Line)) e.Graphics.DrawLine(line, 0, 0, footer.Width, 0);
-                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-                using (SolidBrush dot = new SolidBrush(started ? Theme.Online : Theme.Muted)) e.Graphics.FillEllipse(dot, 2, footer.Height / 2 - 3, 6, 6);
             };
-            status.Dock = DockStyle.Fill; status.AutoEllipsis = true; status.Padding = new Padding(12, 0, 0, 0); footer.Controls.Add(status);
+            status.Dock = DockStyle.Fill; status.AutoEllipsis = true; status.Padding = Padding.Empty; footer.Controls.Add(status);
+            Panel connectionDot = new Panel { Dock = DockStyle.Left, Width = 16, AccessibleName = "连接状态指示" };
+            connectionDot.Paint += delegate(object sender, PaintEventArgs e) {
+                float scale = e.Graphics.DpiX / 96F; float diameter = 6 * scale;
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                using(SolidBrush dot = new SolidBrush(started ? Theme.Online : Theme.Muted)) e.Graphics.FillEllipse(dot, 0, (connectionDot.Height - diameter) / 2, diameter, diameter);
+            }; footer.Controls.Add(connectionDot);
+            status.TextChanged += delegate { connectionDot.Invalidate(); };
             Button refresh = Theme.IconButton("refresh", "刷新", delegate { RefreshNetwork(); }, false); refresh.Dock = DockStyle.Right; refresh.Size = new Size(40, 40); refresh.Margin = Padding.Empty; footer.Controls.Add(refresh);
             Button settings = Theme.IconButton("settings", "设置", delegate { OpenSettings(); }, false); settings.Dock = DockStyle.Right; settings.Size = new Size(40, 40); settings.Margin = new Padding(0, 0, 4, 0); footer.Controls.Add(settings);
             sidebar.Controls.Add(footer, 0, 3);

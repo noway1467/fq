@@ -187,6 +187,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
             ChatStore.Conversation current=conversation(selected); String name=current==null?"?":current.displayName();
             TextView avatar=text("",18,Color.WHITE); avatar.setGravity(Gravity.CENTER); bindAvatar(avatar,selected,name,current!=null&&current.peer.online,current==null?null:current.peer.avatar);
             chatAvatar=avatar;
+            avatar.setOnClickListener(v->{ChatStore.Conversation contact=conversation(selected);if(contact!=null)showContactProfile(contact);});
             LinearLayout.LayoutParams ap=new LinearLayout.LayoutParams(dp(54),dp(54)); ap.leftMargin=-dp(6); ap.rightMargin=dp(4); toolbar.addView(avatar,ap);
         }
         LinearLayout headings=column(); title=text("飞Q",20,INK); title.setTypeface(null,Typeface.BOLD); subtitle=text("",12,MUTED);
@@ -276,24 +277,23 @@ public final class MainActivity extends Activity implements ChatService.Observer
         if(editor==null)return;
         EditText input=editor;String peer=selected;int generation=editorGeneration;
         int start=Math.max(0,Math.min(input.getSelectionStart(),input.getSelectionEnd())),end=Math.max(start,Math.max(input.getSelectionStart(),input.getSelectionEnd()));
-        LinearLayout content=column();Spinner category=new Spinner(this);category.setContentDescription("表情分类");
-        ArrayAdapter<String> choices=new ArrayAdapter<String>(this,android.R.layout.simple_spinner_item,new String[]{"笑脸与心情","手势与人物","爱心与庆祝","动物与自然","食物与饮料","活动与物品"}) {
-            @Override public View getView(int position,View convert,ViewGroup parent){TextView view=(TextView)super.getView(position,convert,parent);view.setTextColor(INK);return view;}
-            @Override public View getDropDownView(int position,View convert,ViewGroup parent){TextView view=(TextView)super.getDropDownView(position,convert,parent);view.setTextColor(INK);view.setBackgroundColor(SURFACE);return view;}
-        };choices.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);category.setAdapter(choices);content.addView(category,new LinearLayout.LayoutParams(-1,dp(48)));
-        GridLayout grid=new GridLayout(this);grid.setContentDescription("表情网格");int columns=Math.max(4,Math.min(8,(getResources().getDisplayMetrics().widthPixels-dp(52))/dp(48)));grid.setColumnCount(columns);content.addView(grid,new LinearLayout.LayoutParams(-1,-2));
-        Dialog dialog=sheet("表情",content,null,null);
-        category.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener(){
-            public void onNothingSelected(AdapterView<?> parent){}
-            public void onItemSelected(AdapterView<?> parent,View view,int position,long id){
-                grid.removeAllViews();int index=0;
-                for(String emoji:EMOJI_GROUPS[position].split(" ")) {
-                    Button pick=button(emoji,false);pick.setTextSize(24);pick.setContentDescription(emoji);pick.setMinWidth(0);pick.setMinimumWidth(0);pick.setPadding(0,dp(4),0,dp(4));
-                    GridLayout.LayoutParams p=new GridLayout.LayoutParams(GridLayout.spec(index/columns),GridLayout.spec(index%columns,1f));p.width=0;p.height=dp(48);grid.addView(pick,p);index++;
-                    pick.setOnClickListener(v->{dialog.dismiss();if(editor!=input||editorGeneration!=generation||!selected.equals(peer))return;if(insertEmoji(input,emoji,start,end))input.requestFocus();else error("输入已满，未插入表情");});
-                }
+        LinearLayout content=column();content.setContentDescription("表情网格");List<Button> picks=new ArrayList<>();
+        String[] categories={"笑脸与心情","手势与人物","爱心与庆祝","动物与自然","食物与饮料","活动与物品"};
+        int cell=Math.max(dp(48),(int)Math.ceil(android.util.TypedValue.applyDimension(android.util.TypedValue.COMPLEX_UNIT_SP,24,getResources().getDisplayMetrics()))+dp(16));
+        int columns=Math.max(1,Math.min(8,(getResources().getDisplayMetrics().widthPixels-dp(52))/cell));
+        for(int group=0;group<EMOJI_GROUPS.length;group++) {
+            TextView heading=text(categories[group],12,MUTED);heading.setPadding(dp(4),dp(group==0?0:12),0,dp(8));content.addView(heading);
+            GridLayout grid=new GridLayout(this);grid.setColumnCount(columns);content.addView(grid,new LinearLayout.LayoutParams(-1,-2));int index=0;
+            for(String emoji:EMOJI_GROUPS[group].split(" ")) {
+                Button pick=button(emoji,false);pick.setTextSize(24);pick.setContentDescription(emoji);pick.setMinWidth(0);pick.setMinimumWidth(0);pick.setPadding(0,dp(4),0,dp(4));
+                pick.setBackground(new android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(BUBBLE),null,shape(Color.WHITE,CONTROL_RADIUS)));
+                // 系统大字号时按文字实际高度展开，保留最小触摸高度。
+                pick.setMinHeight(dp(48));pick.setMinimumHeight(dp(48));
+                GridLayout.LayoutParams p=new GridLayout.LayoutParams(GridLayout.spec(index/columns),GridLayout.spec(index%columns,1f));p.width=0;p.height=ViewGroup.LayoutParams.WRAP_CONTENT;grid.addView(pick,p);index++;picks.add(pick);
             }
-        });
+        }
+        Dialog dialog=sheet("表情",content,null,null);
+        for(Button pick:picks) pick.setOnClickListener(v->{String emoji=pick.getText().toString();dialog.dismiss();if(editor!=input||editorGeneration!=generation||!selected.equals(peer))return;if(insertEmoji(input,emoji,start,end))input.requestFocus();else error("输入已满，未插入表情");});
     }
     static boolean insertEmoji(EditText input,String emoji,int start,int end) {
         int length=input.length();start=Math.max(0,Math.min(start,length));end=Math.max(start,Math.min(end,length));
@@ -601,6 +601,34 @@ public final class MainActivity extends Activity implements ChatService.Observer
         if(service==null)return;
         if(service.hiddenConversations().isEmpty())box.addView(text("没有已移除的联系人",14,MUTED));
         for(ChatStore.Conversation c:service.hiddenConversations())fileAction(box,dialog,"恢复 · "+c.displayName(),()->{if(service!=null)service.removeConversation(c.peer.id(),false,false,success->{});});
+    }
+    private void showContactProfile(ChatStore.Conversation c) {
+        String peer=selected;int generation=editorGeneration;ChatService source=service;
+        LinearLayout content=column();TextView avatar=text("",18,INK);bindAvatar(avatar,c.peer.id(),c.displayName(),c.peer.online,c.peer.avatar);avatar.setContentDescription("联系人资料头像，点击查看大图");
+        LinearLayout.LayoutParams portrait=new LinearLayout.LayoutParams(dp(80),dp(80));portrait.gravity=Gravity.CENTER_HORIZONTAL;portrait.bottomMargin=dp(8);content.addView(avatar,portrait);avatar.setOnClickListener(v->showAvatarPreview(c.peer));
+        EditText nickname=formField(content,"昵称",c.note==null||c.note.isEmpty()?c.peer.name:c.note);nickname.setContentDescription("联系人资料昵称");nickname.setFilters(new InputFilter[]{new InputFilter.LengthFilter(64)});
+        TextView hint=text("修改仅在本机显示；留空恢复对方昵称。",12,MUTED);hint.setPadding(0,dp(8),0,dp(4));content.addView(hint);
+        if(c.peer.group!=null&&!c.peer.group.trim().isEmpty())profileField(content,"部门",c.peer.group,"联系人资料部门");
+        profileField(content,"IP 地址",c.peer.endpoint.getAddress().getHostAddress()+":"+c.peer.endpoint.getPort(),"联系人资料地址");
+        Dialog dialog=sheet("联系人资料",content,"保存",d->{
+            if(service!=source||source==null||!selected.equals(peer)||editorGeneration!=generation){d.dismiss();return;}
+            String value=nickname.getText().toString().trim();source.editConversation(c.peer.id(),value.equals(c.peer.name)?"":value,c.pinned);d.dismiss();
+        });
+        dialog.getWindow().setGravity(Gravity.CENTER);dialog.getWindow().setLayout(Math.min(getResources().getDisplayMetrics().widthPixels-dp(24),dp(420)),ViewGroup.LayoutParams.WRAP_CONTENT);
+    }
+    private void profileField(LinearLayout content,String name,String value,String description) {
+        TextView label=text(name,12,MUTED);label.setPadding(0,dp(12),0,dp(4));content.addView(label);
+        TextView field=text(value,14,INK);field.setContentDescription(description);selectable(field);content.addView(field);
+    }
+    private void showAvatarPreview(LanNode.Peer peer) {
+        String value=Protocol.normalizeAvatar(peer.avatar);Bitmap bitmap;
+        if(value!=null&&value.startsWith("image:")) {byte[] data=java.util.Base64.getDecoder().decode(value.substring(6));bitmap=BitmapFactory.decodeByteArray(data,0,data.length);}
+        else {bitmap=Bitmap.createBitmap(320,320,Bitmap.Config.ARGB_8888);AvatarDrawable face=new AvatarDrawable(this,peer.id(),false,0,SURFACE,ONLINE,value);face.setBounds(0,0,320,320);face.draw(new Canvas(bitmap));}
+        if(bitmap==null){error("头像图片无法解码");return;}
+        Dialog dialog=new Dialog(this);dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);LinearLayout content=column();content.setBackgroundColor(SURFACE);
+        Button close=button("关闭头像",false);content.addView(close,new LinearLayout.LayoutParams(-1,-2));
+        MediaPreview.ZoomImage image=new MediaPreview.ZoomImage(this);image.setContentDescription("头像大图");image.setBackgroundColor(SURFACE);image.setImageBitmap(bitmap);content.addView(image,new LinearLayout.LayoutParams(-1,0,1));
+        dialog.setContentView(content);close.setOnClickListener(v->dialog.dismiss());dialog.setOnDismissListener(d->{image.setImageDrawable(null);bitmap.recycle();});dialog.show();dialog.getWindow().setLayout(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.MATCH_PARENT);
     }
     private void conversationMenu(ChatStore.Conversation c) {
         LinearLayout options=column();Dialog menu=sheet(c.displayName(),options,null,null);

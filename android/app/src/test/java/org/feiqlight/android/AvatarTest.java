@@ -44,4 +44,12 @@ public final class AvatarTest {
             try(Cursor cursor=db.rawQuery("SELECT id,device_id,avatar FROM peers",null)) {assertTrue(cursor.moveToFirst());assertEquals("old-peer",cursor.getString(0));assertEquals("0123456789abcdef0123456789abcdef",cursor.getString(1));assertTrue(cursor.isNull(2));}
         }
     }
+    @Test public void accepts128AndLegacy64ButRejectsOtherDimensionsAndOversizedData() throws Exception {
+        for(int size:new int[]{64,128,256}) {
+            Bitmap picture=Bitmap.createBitmap(size,size,Bitmap.Config.ARGB_8888);picture.eraseColor(Color.MAGENTA);ByteArrayOutputStream bytes=new ByteArrayOutputStream();assertTrue(picture.compress(Bitmap.CompressFormat.JPEG,85,bytes));picture.recycle();String value="image:"+Base64.getEncoder().encodeToString(bytes.toByteArray());
+            if(size<=128) {assertEquals(value,Protocol.normalizeAvatar(value));assertEquals(value,Protocol.parse(Protocol.encode(1,"a","host",Protocol.ANSWER|Protocol.UTF8,"昵称","部门",null,value)).avatar);}
+            else assertNull(Protocol.normalizeAvatar(value));
+        }
+        assertNull(Protocol.normalizeAvatar("image:"+Base64.getEncoder().encodeToString(new byte[16385])));
+    }
 }

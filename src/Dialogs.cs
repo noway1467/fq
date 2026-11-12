@@ -117,12 +117,17 @@ namespace FeiqLight
         internal ContactProfileDialog(Peer peer, Func<string, bool> save)
         {
             bool department = !String.IsNullOrWhiteSpace(peer.Group);
-            Text = "联系人资料"; ResizeWindow = false; ClientSize = new Size(420, department ? 414 : 350); MinimumSize = new Size(360, 320); StartPosition = FormStartPosition.CenterParent;
-            Panel body = DialogLayout.Body(this);
-            TableLayoutPanel fields = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = department ? 6 : 4, Margin = Padding.Empty };
+            Text = "联系人资料"; ResizeWindow = false; ClientSize = new Size(420, department ? 526 : 462); MinimumSize = new Size(360, 384); StartPosition = FormStartPosition.CenterParent;
+            Panel body = DialogLayout.Body(this); body.AutoScroll = true;
+            // 内容独立滚动，较小工作区也能查看 IP，底部保存区始终可见。
+            TableLayoutPanel fields = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 1, RowCount = department ? 8 : 6, Margin = Padding.Empty };
             fields.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            foreach (int height in department ? new[] { 86, 28, 44, 36, 24, 40 } : new[] { 86, 28, 44, 36 }) fields.RowStyles.Add(new RowStyle(SizeType.Absolute, height));
-            avatar = new PictureBox { Image = Theme.ContactAvatar(64, peer.Id, peer.Online, peer.Avatar), SizeMode = PictureBoxSizeMode.Zoom, Size = new Size(76, 76), Anchor = AnchorStyles.Left, Margin = Padding.Empty, AccessibleName = "联系人资料头像" }; fields.Controls.Add(avatar, 0, 0);
+            foreach (int height in department ? new[] { 128, 28, 44, 36, 24, 40, 24, 40 } : new[] { 128, 28, 44, 36, 24, 40 }) fields.RowStyles.Add(new RowStyle(SizeType.Absolute, height));
+            avatar = new PictureBox { Image = Theme.ContactAvatar(96, peer.Id, peer.Online, peer.Avatar), SizeMode = PictureBoxSizeMode.Zoom, Size = new Size(116, 116), Anchor = AnchorStyles.None, Margin = Padding.Empty, Cursor = Cursors.Hand, AccessibleName = "联系人资料头像", AccessibleDescription = "点击查看大图" }; fields.Controls.Add(avatar, 0, 0);
+            avatar.Click += delegate {
+                try { using(AvatarPreviewDialog preview = new AvatarPreviewDialog(peer.Id, peer.Avatar)) preview.ShowDialog(this); }
+                catch(Exception error) { using(NoticeDialog notice = new NoticeDialog("无法查看头像", error.Message)) notice.ShowDialog(this); }
+            };
             Label name = Theme.Label("昵称", Theme.Small, Theme.Muted); name.Dock = DockStyle.Fill; fields.Controls.Add(name, 0, 1);
             RoundedInput input = new RoundedInput { Dock = DockStyle.Fill, Margin = Padding.Empty }; input.Input.MaxLength = 64; input.Input.Text = String.IsNullOrEmpty(peer.Note) ? peer.Nickname : peer.Note; input.Input.AccessibleName = "联系人资料昵称"; fields.Controls.Add(input, 0, 2);
             Label hint = Theme.Label("修改仅在本机显示；留空恢复对方昵称。", Theme.Small, Theme.Muted); hint.Dock = DockStyle.Fill; fields.Controls.Add(hint, 0, 3);
@@ -130,11 +135,31 @@ namespace FeiqLight
                 Label title = Theme.Label("部门", Theme.Small, Theme.Muted); title.Dock = DockStyle.Fill; fields.Controls.Add(title, 0, 4);
                 Label group = Theme.Label(peer.Group, Theme.Body, Theme.Ink); group.Dock = DockStyle.Fill; group.AutoEllipsis = true; group.AccessibleName = "联系人资料部门"; fields.Controls.Add(group, 0, 5);
             }
+            int addressRow = department ? 6 : 4;
+            Label addressTitle = Theme.Label("IP 地址", Theme.Small, Theme.Muted); addressTitle.Dock = DockStyle.Fill; fields.Controls.Add(addressTitle, 0, addressRow);
+            Label address = Theme.Label(peer.Endpoint.ToString(), Theme.Body, Theme.Ink); address.Dock = DockStyle.Fill; address.AccessibleName = "联系人资料地址"; fields.Controls.Add(address, 0, addressRow + 1);
             body.Controls.Add(fields);
             Button done = Theme.Button("保存", delegate { string value = input.Input.Text.Trim(); if (save(value == peer.Nickname ? "" : value)) DialogResult = DialogResult.OK; }, true);
             DialogLayout.Actions(this, done, Theme.Button("取消", delegate { DialogResult = DialogResult.Cancel; }, false));
         }
         protected override void Dispose(bool disposing) { if (disposing && avatar.Image != null) { avatar.Image.Dispose(); avatar.Image = null; } base.Dispose(disposing); }
+    }
+    internal sealed class AvatarPreviewDialog : ModernWindow
+    {
+        private readonly PictureBox picture;
+        internal AvatarPreviewDialog(string identity, string avatar)
+        {
+            Text = "头像"; ClientSize = new Size(480, 540); MinimumSize = new Size(280, 320); StartPosition = FormStartPosition.CenterParent;
+            Bitmap image;
+            string value = Protocol.NormalizeAvatar(avatar);
+            if(value != null && value.StartsWith("image:", StringComparison.Ordinal)) {
+                using(var bytes = new System.IO.MemoryStream(Convert.FromBase64String(value.Substring(6)))) using(Image source = Image.FromStream(bytes)) image = new Bitmap(source);
+            } else image = Theme.ContactAvatar(320, identity, false, value);
+            picture = new PictureBox { Dock = DockStyle.Fill, Image = image, SizeMode = PictureBoxSizeMode.Zoom, AccessibleName = "头像大图" };
+            Panel body = DialogLayout.Body(this); body.Controls.Add(picture);
+            DialogLayout.Actions(this, Theme.Button("关闭", delegate { DialogResult = DialogResult.OK; }, false));
+        }
+        protected override void Dispose(bool disposing) { if(disposing && picture.Image != null) { picture.Image.Dispose(); picture.Image = null; } base.Dispose(disposing); }
     }
     public sealed class ConversationDialog : ModernWindow
     {

@@ -19,7 +19,7 @@ public static class AndroidInteropHost
         long size = Int64.Parse(args[2]); byte[] bytes = new byte[65536]; for (int i = 0; i < bytes.Length; i++) bytes[i] = (byte)(i * 17 + 3);
         string source = Path.Combine(args[1], "Windows资料😀.bin");
         string avatarImage;
-        using(var image = new System.Drawing.Bitmap(64,64)) using(var graphics = System.Drawing.Graphics.FromImage(image)) using(var encoded = new MemoryStream()) {
+        using(var image = new System.Drawing.Bitmap(128,128)) using(var graphics = System.Drawing.Graphics.FromImage(image)) using(var encoded = new MemoryStream()) {
             graphics.Clear(System.Drawing.Color.Coral);image.Save(encoded,System.Drawing.Imaging.ImageFormat.Jpeg);File.WriteAllBytes(Path.Combine(args[1],"avatar.jpg"),encoded.ToArray());avatarImage="image:"+Convert.ToBase64String(encoded.ToArray());
         }
         using (FileStream output = File.Create(source)) { for (long left = size; left > 0;) { int count = (int)Math.Min(left, bytes.Length); output.Write(bytes, 0, count); left -= count; } }

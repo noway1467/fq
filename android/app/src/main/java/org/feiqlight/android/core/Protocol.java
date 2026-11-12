@@ -47,10 +47,10 @@ public final class Protocol {
     public static String normalizeAvatar(String value) {
         if("default".equals(value)) return value;
         if(value!=null && value.matches("builtin:([0-9]|1[0-9]|2[0-3])")) return value;
-        if(value==null || !value.startsWith("image:") || value.length()>5470) return null;
+        if(value==null || !value.startsWith("image:") || value.length()>21854) return null;
         try {
             byte[] bytes=Base64.getDecoder().decode(value.substring(6));
-            if(bytes.length<12 || bytes.length>4096 || (bytes[0]&255)!=255 || (bytes[1]&255)!=216 || (bytes[bytes.length-2]&255)!=255 || (bytes[bytes.length-1]&255)!=217) return null;
+            if(bytes.length<12 || bytes.length>16384 || (bytes[0]&255)!=255 || (bytes[1]&255)!=216 || (bytes[bytes.length-2]&255)!=255 || (bytes[bytes.length-1]&255)!=217) return null;
             for(int offset=2;offset+8<bytes.length;) {
                 if((bytes[offset++]&255)!=255) return null;
                 while(offset<bytes.length && (bytes[offset]&255)==255) offset++;
@@ -60,7 +60,7 @@ public final class Protocol {
                 if(marker==192) {
                     if(length<8 || bytes[offset+2]!=8) return null;
                     int height=((bytes[offset+3]&255)<<8)|(bytes[offset+4]&255), width=((bytes[offset+5]&255)<<8)|(bytes[offset+6]&255);
-                    return width==64 && height==64 ? "image:"+Base64.getEncoder().encodeToString(bytes) : null;
+                    return (width==64 || width==128) && height==width ? "image:"+Base64.getEncoder().encodeToString(bytes) : null;
                 }
                 if(marker==218 || marker==217) return null;
                 offset+=length;

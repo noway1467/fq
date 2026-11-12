@@ -21,14 +21,14 @@ final class UserAvatar {
         if(options.outWidth<=0||options.outHeight<=0||(long)options.outWidth*options.outHeight>40000000)throw new IOException("请选择有效且不超过 4000 万像素的图片");
         options.inJustDecodeBounds=false;options.inSampleSize=1;while(Math.max(options.outWidth,options.outHeight)/options.inSampleSize>512)options.inSampleSize*=2;
         Bitmap source=BitmapFactory.decodeByteArray(data,0,data.length,options);if(source==null)throw new IOException("无法解码头像图片");
-        Bitmap target=Bitmap.createBitmap(64,64,Bitmap.Config.ARGB_8888);
+        Bitmap target=Bitmap.createBitmap(128,128,Bitmap.Config.ARGB_8888);
         try {
             Canvas canvas=new Canvas(target);canvas.drawColor(Color.WHITE);int side=Math.min(source.getWidth(),source.getHeight());
             Rect crop=new Rect((source.getWidth()-side)/2,(source.getHeight()-side)/2,(source.getWidth()+side)/2,(source.getHeight()+side)/2);
-            canvas.drawBitmap(source,crop,new Rect(0,0,64,64),new Paint(Paint.ANTI_ALIAS_FLAG|Paint.FILTER_BITMAP_FLAG));
+            canvas.drawBitmap(source,crop,new Rect(0,0,128,128),new Paint(Paint.ANTI_ALIAS_FLAG|Paint.FILTER_BITMAP_FLAG));
             for(int quality:new int[]{85,70,55,40}) {
                 ByteArrayOutputStream bytes=new ByteArrayOutputStream();if(!target.compress(Bitmap.CompressFormat.JPEG,quality,bytes))throw new IOException("无法生成头像副本");
-                if(bytes.size()<=4096){String value="image:"+Base64.getEncoder().encodeToString(bytes.toByteArray());if(Protocol.normalizeAvatar(value)!=null)return value;}
+                if(bytes.size()<=16384){String value="image:"+Base64.getEncoder().encodeToString(bytes.toByteArray());if(Protocol.normalizeAvatar(value)!=null)return value;}
             }
             throw new IOException("图片无法缩成头像，请换一张图片");
         } finally {source.recycle();target.recycle();}
