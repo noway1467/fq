@@ -175,6 +175,26 @@ namespace FeiqLight
         internal TimeSpan Seen, Probed; internal int Misses;
         public override string ToString() { return Nickname; }
     }
+    public sealed class TransferProgress
+    {
+        public readonly int Percent;
+        public readonly double BytesPerSecond;
+        public TransferProgress(int percent, double bytesPerSecond) { Percent = percent; BytesPerSecond = bytesPerSecond; }
+    }
+    internal sealed class TransferRate
+    {
+        private long previousBytes;
+        private double previousTime;
+        public double BytesPerSecond { get; private set; }
+        internal TransferRate(long offset) { previousBytes = offset; }
+        internal bool Update(long bytes, double milliseconds)
+        {
+            double elapsed = milliseconds - previousTime;
+            if (elapsed < 250) return false;
+            BytesPerSecond = (bytes - previousBytes) * 1000.0 / elapsed;
+            previousBytes = bytes; previousTime = milliseconds; return true;
+        }
+    }
     public sealed class FileTransferState
     {
         private static readonly string currentSession = Guid.NewGuid().ToString("N");
@@ -186,6 +206,7 @@ namespace FeiqLight
         public int Percent { get; set; }
         public string Status { get; set; }
         public string LocalPath { get; set; }
+        [ScriptIgnore] public double BytesPerSecond { get; set; }
         public string DisplayStatus() {
             if (Session != currentSession && (Status == "等待对方接收" || (Status ?? "").Contains("中") || (Status ?? "").StartsWith("待接收"))) return "历史邀请 · 无活动传输";
             return Status;

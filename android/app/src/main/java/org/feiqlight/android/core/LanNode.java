@@ -44,6 +44,7 @@ public final class LanNode implements AutoCloseable {
         void error(String text);
         default void networkStateChanged(boolean available,String reason) { }
         default void fileProgress(Peer peer,long packet,long file,int percent,String state) { }
+        default void fileProgress(Peer peer,long packet,long file,int percent,String state,double bytesPerSecond) { fileProgress(peer,packet,file,percent,state); }
     }
     public interface SocketBinding {
         void bind(DatagramSocket socket) throws IOException;
@@ -72,7 +73,7 @@ public final class LanNode implements AutoCloseable {
         long now=System.nanoTime();verifyFrom=now;
         synchronized(gate){for(Peer peer:peers.values())if(peer.online && peer.misses==0)peer.probed=now-heartbeatRetry;}
     }
-    public interface Progress { void update(int percent); }
+    public interface Progress { void update(int percent); default void update(int percent,double bytesPerSecond) { update(percent); } }
     public static final class Transfer implements AutoCloseable {
         private volatile boolean cancelled;
         private volatile Socket socket;
@@ -394,10 +395,12 @@ public final class LanNode implements AutoCloseable {
             ScheduledFuture<?> deadline=timer.scheduleWithFixedDelay(()->{ if(System.nanoTime()-lastWrite.get()>TimeUnit.SECONDS.toNanos(30)) try { socket.close(); } catch (IOException ignored) { } },5,5,TimeUnit.SECONDS);
             try (RandomAccessFile input=new RandomAccessFile(offer.file,"r")) {
                 input.seek(offset); byte[] buffer=new byte[65536]; int read; long left=offer.size-offset;
+                TransferRate rate=new TransferRate(offset);long started=System.nanoTime();
                 while (left>0 && (read=input.read(buffer,0,(int)Math.min(buffer.length,left)))!=-1) {
                     socket.getOutputStream().write(buffer,0,read); left-=read; lastWrite.set(System.nanoTime());
                     synchronized(gate) { offer.expires=System.nanoTime()+TimeUnit.MINUTES.toNanos(30); }
-                    int next=(int)((offer.size-left)*100.0/offer.size); if(next!=percent) {percent=next;progress(offer,version,percent,"发送中");}
+                    boolean sampled=rate.update(offer.size-left,(System.nanoTime()-started)/1000000.0);
+                    int next=(int)((offer.size-left)*100.0/offer.size); if(next!=percent||sampled) {percent=next;progress(offer,version,percent,"发送中",rate.bytesPerSecond());}
                 }
                 if(left!=0) throw new IOException("发送中断");
                 progress(offer,version,100,"已发送（非保存确认）"); active=null;
@@ -406,7 +409,10 @@ public final class LanNode implements AutoCloseable {
         finally { if(active!=null) progress(active,version,percent,"发送中断，等待对方重试"); synchronized (gate) { connections.remove(client); } }
     }
     private void progress(Offer offer,long version,int percent,String state) {
-        synchronized(gate) {if(version!=offer.progressVersion)return;offer.percent=percent;offer.state=state;if(!closed)listener.fileProgress(offer.peer,offer.packet,offer.id,percent,state);}
+        progress(offer,version,percent,state,0);
+    }
+    private void progress(Offer offer,long version,int percent,String state,double bytesPerSecond) {
+        synchronized(gate) {if(version!=offer.progressVersion)return;offer.percent=percent;offer.state=state;if(!closed)listener.fileProgress(offer.peer,offer.packet,offer.id,percent,state,bytesPerSecond);}
     }
     private void endOffer(Offer offer,String state) {if(!"已发送（非保存确认）".equals(offer.state))progress(offer,++offer.progressVersion,offer.percent,state);}
     public void reject(Peer peer,long packet) throws IOException { send(encode(Protocol.RELEASE,Long.toString(packet),null),peer.endpoint); }
@@ -454,6 +460,7 @@ public final class LanNode implements AutoCloseable {
             OutputStream out=new BufferedOutputStream(java.nio.channels.Channels.newOutputStream(output),65536);
             try {
                 byte[] buffer=new byte[65536]; long count=offset; int last=-1;
+                TransferRate rate=new TransferRate(offset);long started=System.nanoTime();
                 if(progress!=null) progress.update(file.size==0?0:(int)(count*100.0/file.size));
                 while (count<file.size) {
                     if (transfer.isCancelled()) throw new IOException("已取消传输");
@@ -461,7 +468,8 @@ public final class LanNode implements AutoCloseable {
                     if (read<0) throw new IOException("文件中断或邀请失效；已保留断点，请在发送方在线且邀请有效时重试");
                     out.write(buffer,0,read);
                     count+=read; int percent=(int)(count*100.0/file.size);
-                    if (percent!=last) { last=percent; if (progress!=null) progress.update(percent); }
+                    boolean sampled=rate.update(count,(System.nanoTime()-started)/1000000.0);
+                    if (percent!=last||sampled) { last=percent; if (progress!=null) progress.update(percent,rate.bytesPerSecond()); }
                 }
             } finally { out.flush(); }
             if (transfer.isCancelled()) throw new IOException("已取消传输");

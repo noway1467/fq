@@ -38,6 +38,8 @@ namespace FeiqLight
         private readonly HashSet<ChatRecord> marked = new HashSet<ChatRecord>();
         private int selectionAnchor = -1;
         private bool multiSelectMode;
+        private readonly Timer longPress = new Timer { Interval = 500 };
+        private ChatRecord pressedRecord;
         private string wallpaperPattern="none";
         private ChatWallpaper.Asset wallpaperImage;
         // 新消息入场：整列内容从旧位置平滑上移；跳到最新按钮的显隐；离开底部后新到消息计数。
@@ -81,6 +83,13 @@ namespace FeiqLight
             Font=Theme.Body; AccessibleRole = AccessibleRole.List; AccessibleName = "聊天记录";
             jump = new Tween(this, 180, 0);
             appearStep = delegate { if (IsDisposed) return false; Invalidate(); return Motion.Now - appearStart < 280; };
+            longPress.Tick += delegate {
+                ChatRecord record = pressedRecord; CancelLongPress();
+                if (record == null || !Capture || multiSelectMode || DeleteRequested == null) return;
+                int index = records.IndexOf(record); if (index < 0) return;
+                selected = index; pressedAction = null; dragFilePath = null;
+                BeginSelection();
+            };
             ContextMenuStrip menu = Theme.Menu();
             ToolStripItem copy = menu.Items.Add("复制消息", null, delegate { CopySelected(); });
             ((ToolStripMenuItem)copy).ShortcutKeyDisplayString = "Ctrl+C";
@@ -157,7 +166,7 @@ namespace FeiqLight
             }
             catch (Exception e) { using (NoticeDialog dialog = new NoticeDialog("无法定位文件", e.Message)) dialog.ShowDialog(owner.FindForm()); }
         }
-        public void Clear() { records.Clear(); bounds.Clear(); textLayouts.Clear(); items.Clear(); measures.Clear(); linkHits.Clear(); mediaHits.Clear(); fileHits.Clear(); stampHits.Clear(); retryHits.Clear(); pressedAction=null; dragFilePath=null; Text = ""; AutoScrollMinSize = Size.Empty; selected = -1; EndSelection(); unseen = 0; appearFrom = 0; Invalidate(); }
+        public void Clear() { CancelLongPress(); records.Clear(); bounds.Clear(); textLayouts.Clear(); items.Clear(); measures.Clear(); linkHits.Clear(); mediaHits.Clear(); fileHits.Clear(); stampHits.Clear(); retryHits.Clear(); pressedAction=null; dragFilePath=null; Text = ""; AutoScrollMinSize = Size.Empty; selected = -1; EndSelection(); unseen = 0; appearFrom = 0; Invalidate(); }
         public bool HasDelivery(string state) { return records.Any(r => r.State == state); }
         // 自己发送后回到最新：近处平滑滚动，远处先贴近再滑行；逻辑位置立即落到底部。
         public void ScrollToLatest() { unseen = 0; SmoothTo(AutoScrollMinSize.Height); }
@@ -165,6 +174,7 @@ namespace FeiqLight
         public void SetRecords(IEnumerable<ChatRecord> values) { SetRecords(values, highlightText); }
         public void SetRecords(IEnumerable<ChatRecord> values, string highlight)
         {
+            CancelLongPress();
             records.Clear(); records.AddRange(values); highlightText = highlight ?? "";
             Trim(); selected = -1; EndSelection(); unseen = 0; appearFrom = 0; pressedAction = null; dragFilePath = null;
             UpdateText(); Arrange(); JumpTo(AutoScrollMinSize.Height); Invalidate();
@@ -526,16 +536,17 @@ namespace FeiqLight
                 new MessageLayout(file.Name, Theme.Section, Int32.MaxValue / 2, highlightText).Draw(g, name.Location, Theme.Section, new List<Tuple<Rectangle,string>>()); g.Restore(clip);
             }
             else TextRenderer.DrawText(g, file.Name, Theme.Section, name, Theme.Ink, TextFormatFlags.EndEllipsis | Tight | TextFormatFlags.VerticalCenter);
-            string label = Theme.SizeText(file.Size) + (active ? " · " + file.Percent + "%" : "") + " · " + file.DisplayStatus();
+            string label = active ? file.Percent + "% · " + Theme.SizeText((long)file.BytesPerSecond) + "/s" : Theme.SizeText(file.Size) + " · " + file.DisplayStatus();
             TextRenderer.DrawText(g, label, Theme.Small, new Rectangle(left, area.Y + Dp(28), width, Dp(18)), meta, TextFormatFlags.EndEllipsis | Tight | TextFormatFlags.VerticalCenter);
         }
         private void DrawMediaCard(Graphics g, Rectangle area, ChatRecord record, FileTransferState file, Color meta)
         {
             Rectangle preview = new Rectangle(area.X, area.Y, area.Width, MediaHeight);
             DrawPreview(g, preview, file.LocalPath, Active(file) ? file : null);
-            string label = Theme.SizeText(file.Size) + " · " + file.DisplayStatus();
+            bool active = Active(file);
+            string label = active ? file.Percent + "% · " + Theme.SizeText((long)file.BytesPerSecond) + "/s" : Theme.SizeText(file.Size) + " · " + file.DisplayStatus();
             Size labelSize = TextRenderer.MeasureText(label, Theme.Small, Size.Empty, Tight);
-            int labelWidth = Math.Min(labelSize.Width, area.Width / 2);
+            int labelWidth = Math.Min(labelSize.Width, active ? area.Width : area.Width / 2);
             Rectangle caption = new Rectangle(area.X, preview.Bottom + Dp(4), area.Width, Caption);
             TextRenderer.DrawText(g, file.Name, Theme.Small, new Rectangle(caption.X, caption.Y, Math.Max(1, caption.Width - labelWidth - Dp(8)), caption.Height), Theme.Ink, TextFormatFlags.EndEllipsis | Tight | TextFormatFlags.VerticalCenter);
             TextRenderer.DrawText(g, label, Theme.Small, new Rectangle(caption.Right - labelWidth, caption.Y, labelWidth, caption.Height), meta, TextFormatFlags.EndEllipsis | Tight | TextFormatFlags.VerticalCenter | TextFormatFlags.Right);
@@ -598,6 +609,7 @@ namespace FeiqLight
         private bool JumpVisible { get { return jump.Target > 0; } }
         protected override void OnScrollChanged()
         {
+            CancelLongPress();
             scrolledAt = Motion.Now; if (MaxScroll - ScrollOffset < Dp(24)) unseen = 0;
             UpdateJump(); Invalidate();
         }
@@ -645,6 +657,7 @@ namespace FeiqLight
         }
         protected override void OnMouseDown(MouseEventArgs e)
         {
+            CancelLongPress();
             base.OnMouseDown(e); Focus();
             if (ScrollbarMouseDown(e)) return;
             pressedAction=null;dragFilePath=null;fileDragStarted=false;
@@ -656,6 +669,7 @@ namespace FeiqLight
             Invalidate();
             if(e.Button!=MouseButtons.Left || multiSelectMode)return;
             dragStart=e.Location;
+            if (hit >= 0 && DeleteRequested != null) { pressedRecord = records[hit]; Capture = true; longPress.Start(); }
             var link=linkHits.FirstOrDefault(item=>item.Item1.Contains(e.Location));
             if(link!=null){pressedAction=delegate{MessageLinks.Open(this,link.Item2);};return;}
             var fileHit=fileHits.FirstOrDefault(item=>item.Item1.Contains(e.Location));
@@ -675,14 +689,17 @@ namespace FeiqLight
         }
         protected override void OnMouseUp(MouseEventArgs e)
         {
+            CancelLongPress();
             base.OnMouseUp(e);
             if (ScrollbarMouseUp(e)) return;
             if (e.Button != MouseButtons.Left) return;
             Action action=pressedAction;
             bool click=!fileDragStarted&&!MovedPastDragThreshold(e.Location);
             pressedAction=null;dragFilePath=null;fileDragStarted=false;Capture=false;
-            if(click&&action!=null)action();
+            if(click&&!multiSelectMode&&action!=null)action();
         }
+        private void CancelLongPress() { longPress.Stop(); pressedRecord = null; }
+        protected override void OnMouseCaptureChanged(EventArgs e) { base.OnMouseCaptureChanged(e); if (!Capture) { CancelLongPress(); pressedAction = null; } }
         private static string ValidDragPath(string path) { return !String.IsNullOrEmpty(path)&&Path.IsPathRooted(path)&&File.Exists(path)?Path.GetFullPath(path):null; }
         private bool MovedPastDragThreshold(Point point) { Size size=SystemInformation.DragSize;return !new Rectangle(dragStart.X-size.Width/2,dragStart.Y-size.Height/2,size.Width,size.Height).Contains(point); }
         internal static DataObject FileDragData(string path) {
@@ -701,6 +718,7 @@ namespace FeiqLight
         }
         protected override void OnMouseMove(MouseEventArgs e) {
             base.OnMouseMove(e);
+            if (pressedRecord != null && MovedPastDragThreshold(e.Location)) CancelLongPress();
             if (ScrollbarMouseMove(e) && e.Button == MouseButtons.Left && dragFilePath == null) { Cursor = Cursors.Default; return; }
             bool hand = linkHits.Any(h=>h.Item1.Contains(e.Location))||fileHits.Any(h=>h.Item1.Contains(e.Location))||mediaHits.Any(h=>h.Item1.Contains(e.Location))||retryHits.Any(h=>h.Item1.Contains(e.Location))||(JumpVisible&&JumpBounds().Contains(e.Location));
             Cursor=hand?Cursors.Hand:Cursors.Default;
@@ -714,7 +732,7 @@ namespace FeiqLight
             }
         }
         protected override void OnGotFocus(EventArgs e) { base.OnGotFocus(e); Invalidate(); }
-        protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); Invalidate(); }
+        protected override void OnLostFocus(EventArgs e) { CancelLongPress(); base.OnLostFocus(e); Invalidate(); }
         protected override void OnFontChanged(EventArgs e) { base.OnFontChanged(e);if(records!=null&&bounds!=null&&textLayouts!=null){spacerWidth=0;Arrange();Invalidate();} }
         protected override void OnKeyDown(KeyEventArgs e)
         {
@@ -739,6 +757,6 @@ namespace FeiqLight
             if (String.IsNullOrEmpty(text)) return;
             try { Clipboard.SetText(text); } catch (System.Runtime.InteropServices.ExternalException) { System.Media.SystemSounds.Beep.Play(); }
         }
-        protected override void Dispose(bool disposing) { if(disposing) {ChatWallpaper.Release(wallpaperImage);wallpaperImage=null;foreach(Bitmap bitmap in previews.Values) if(bitmap!=null)bitmap.Dispose();previews.Clear();tips.Dispose();} if (disposing && ContextMenuStrip != null) ContextMenuStrip.Dispose(); base.Dispose(disposing); }
+        protected override void Dispose(bool disposing) { if(disposing) {longPress.Dispose();ChatWallpaper.Release(wallpaperImage);wallpaperImage=null;foreach(Bitmap bitmap in previews.Values) if(bitmap!=null)bitmap.Dispose();previews.Clear();tips.Dispose();} if (disposing && ContextMenuStrip != null) ContextMenuStrip.Dispose(); base.Dispose(disposing); }
     }
 }

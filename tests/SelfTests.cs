@@ -424,6 +424,11 @@ namespace FeiqLight.Tests
             public readonly List<int> Values = new List<int>();
             public void Report(int value) { Values.Add(value); }
         }
+        private sealed class RateProgress : IProgress<TransferProgress>
+        {
+            public readonly List<TransferProgress> Values = new List<TransferProgress>();
+            public void Report(TransferProgress value) { Values.Add(value); }
+        }
         private static long ReadOffset(TcpClient connection)
         {
             connection.ReceiveTimeout = 5000; List<byte> bytes = new List<byte>(); int b;
@@ -521,7 +526,8 @@ namespace FeiqLight.Tests
                     string first=Path.Combine(root,"progress-large.bin"),empty=Path.Combine(root,"progress-empty.bin");
                     File.WriteAllBytes(first,new byte[8*1024*1024+17]);File.WriteAllBytes(empty,new byte[0]);
                     List<Tuple<long,int,int,string>> progress=new List<Tuple<long,int,int,string>>();
-                    Action<ChatRecord,int,int,string> handler=(r,id,p,s)=>{lock(progress)progress.Add(Tuple.Create(r.Packet,id,p,s));};
+                    List<double> rates=new List<double>();
+                    Action<ChatRecord,int,int,string,double> handler=(r,id,p,s,rate)=>{lock(progress){progress.Add(Tuple.Create(r.Packet,id,p,s));rates.Add(rate);}if(s=="发送中")Thread.Sleep(10);};
                     a.TransferChanged+=handler;
                     try {
                         ChatRecord sent=a.SendMessage(bob,"",new[]{first,empty});
@@ -533,6 +539,7 @@ namespace FeiqLight.Tests
                         lock(progress) {
                             Assert(progress.All(p=>p.Item1==sent.Packet&&p.Item3>=0&&p.Item3<=100),"进度关联错消息或越界");
                             Assert(progress.Any(p=>p.Item2==0&&p.Item3>0&&p.Item3<100),"大文件没有中间进度");
+                            Assert(rates.Any(rate=>rate>0)&&rates.Last()==0,"发送速率缺失或完成后未清除");
                             foreach(int id in new[]{0,1}) {int previous=-1;foreach(var p in progress.Where(p=>p.Item2==id)){Assert(p.Item3>=previous,"进度倒退");previous=p.Item3;}Assert(previous==100,"完成未到100%");}
                         }
                     } finally {a.TransferChanged-=handler;}
@@ -581,7 +588,7 @@ namespace FeiqLight.Tests
                     Task sender = Task.Run(() =>
                     {
                         using (TcpClient first = server.AcceptTcpClient()) { Assert(ReadOffset(first) == 0, "首次偏移非零"); first.GetStream().Write(payload, 0, 80000); }
-                        using (TcpClient second = server.AcceptTcpClient()) { long offset = ReadOffset(second); Assert(offset == 80000, "重试没有从断点开始"); second.GetStream().Write(payload, (int)offset, payload.Length - (int)offset); }
+                        using (TcpClient second = server.AcceptTcpClient()) { long offset = ReadOffset(second); Assert(offset == 80000, "重试没有从断点开始"); for(int at=(int)offset;at<payload.Length;at+=65536){Thread.Sleep(40);second.GetStream().Write(payload,at,Math.Min(65536,payload.Length-at));} }
                     });
                     try
                     {
@@ -590,8 +597,10 @@ namespace FeiqLight.Tests
                         Assert(!File.Exists(target) && new FileInfo(part).Length == 80000, "断点未保留或提前发布了半成品");
                         Assert(part != LanService.PartialPath(remote, 100, file, target), "不同邀请混用了断点");
                         DirectProgress progress = new DirectProgress();
-                        b.ReceiveFileAsync(remote, 99, file, target, progress, CancellationToken.None).GetAwaiter().GetResult();
+                        RateProgress rates = new RateProgress();
+                        b.ReceiveFileAsync(remote, 99, file, target, progress, CancellationToken.None, false, rates).GetAwaiter().GetResult();
                         Assert(sender.Wait(8000), "发送测试未完成"); Assert(progress.Values[0] > 0, "进度没有恢复");
+                        Assert(rates.Values.First().BytesPerSecond==0&&rates.Values.Any(p=>p.BytesPerSecond>0&&p.BytesPerSecond<4*1024*1024),"续传没有按实际新增字节报告速率");
                         Assert(File.ReadAllBytes(target).SequenceEqual(payload) && !File.Exists(part), "续传结果损坏或未清理断点");
                     }
                     finally { server.Stop(); }

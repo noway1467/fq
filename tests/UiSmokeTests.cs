@@ -324,6 +324,55 @@ namespace FeiqLight.Tests
         }
         internal static void RunSettingsMessageTests(string directory, Action<string, Action> test)
         {
+            test("长按消息：空白处触发多选、松手不取消、移动和换会话取消长按", () => {
+                using(Form form = new Form { ClientSize = new Size(600, 440) }) using(BubbleHistory history = new BubbleHistory { Dock = DockStyle.Fill }) {
+                    form.Controls.Add(history); form.Show(); history.DeleteRequested += delegate { };
+                    ChatRecord record = new ChatRecord { PeerId = "hold", Packet = 1, Text = "长按空白 English", Time = DateTime.Now };
+                    history.SetRecords(new[] { record }); history.Refresh();
+                    var bounds = (List<Rectangle>)typeof(BubbleHistory).GetField("bounds", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(history);
+                    Point point = new Point(bounds[0].Left + 18, bounds[0].Bottom - 8);
+                    Action<string,Point> mouse = (method, at) => typeof(BubbleHistory).GetMethod(method, BindingFlags.Instance | BindingFlags.NonPublic).Invoke(history, new object[] { new MouseEventArgs(MouseButtons.Left, 1, at.X, at.Y, 0) });
+                    Action wait = () => { Stopwatch clock = Stopwatch.StartNew(); while(clock.ElapsedMilliseconds < 650) { Application.DoEvents(); Thread.Sleep(10); } };
+                    mouse("OnMouseDown", point); mouse("OnMouseUp", point); wait(); Check(!history.SelectionMode, "短按进入了多选");
+                    mouse("OnMouseDown", point); Pump(() => history.SelectionMode, "长按空白没有进入多选"); mouse("OnMouseUp", point); Check(history.SelectionCount == 1, "长按松手取消了选中"); Render(form, "preview-long-press-selection");
+                    history.EndSelection(); mouse("OnMouseDown", point); mouse("OnMouseMove", new Point(point.X + 40, point.Y)); wait(); mouse("OnMouseUp", point); Check(!history.SelectionMode, "移动后仍触发长按");
+                    mouse("OnMouseDown", point); history.SetRecords(new[] { new ChatRecord { PeerId = "other", Packet = 2, Text = "新会话", Time = DateTime.Now } }); wait(); Check(!history.SelectionMode, "旧长按影响了新会话"); mouse("OnMouseUp", point); form.Close();
+                }
+            });
+            test("顶部头像资料：保存昵称、取消、清空恢复、部门可选与重启保留", () => {
+                LocalStore store = new LocalStore(Path.Combine(directory, "contact-profile"));
+                AppSettings settings = new AppSettings { Notifications = false, CloseToTray = false, Conversations = new[] { new SavedConversation { Endpoint = "127.0.0.1:" + Port(), Login = "profile", Nickname = "原昵称", Group = "研发部门 Engineering", Avatar = "builtin:15" } } };
+                using(LanService node = new LanService(settings, Port(), true, "profile-local")) using(MainForm main = new MainForm(node, store)) {
+                    main.Show(); Peer peer = node.Peers.Single(); main.OpenChat(peer); Application.DoEvents();
+                    Action<Action<ContactProfileDialog>> open = inspect => {
+                        using(System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 30 }) {
+                            timer.Tick += delegate { ContactProfileDialog dialog = Application.OpenForms.OfType<ContactProfileDialog>().FirstOrDefault(); if(dialog == null) return; timer.Stop(); try { inspect(dialog); } finally { if(!dialog.IsDisposed) dialog.Close(); } };
+                            timer.Start(); typeof(Control).GetMethod("OnClick", BindingFlags.Instance | BindingFlags.NonPublic).Invoke(Find<PictureBox>(main.ActiveChat, "聊天联系人头像"), new object[] { EventArgs.Empty });
+                        }
+                    };
+                    foreach(bool dark in new[] { false, true }) {
+                        Theme.Change(dark, "blue"); open(dialog => { Check(Find<Label>(dialog, "联系人资料部门").Text == peer.Group, "部门未显示"); Render(dialog, "preview-contact-profile-" + (dark ? "dark" : "light")); Find<TextBox>(dialog, "联系人资料昵称").Text = "昵称 English 😀"; Button(dialog, "保存").PerformClick(); });
+                    }
+                    Check(peer.Note == "昵称 English 😀" && Find<Label>(main.ActiveChat, "聊天联系人昵称").Text == peer.Note, "昵称没有更新聊天标题");
+                    Check(store.LoadSettings().Conversations.Single().Note == peer.Note, "昵称未持久保存");
+                    open(dialog => { Find<TextBox>(dialog, "联系人资料昵称").Text = "取消的修改"; Button(dialog, "取消").PerformClick(); }); Check(peer.Note == "昵称 English 😀", "取消仍保存昵称");
+                    peer.Group = ""; open(dialog => { Check(!All(dialog).Any(c => c.AccessibleName == "联系人资料部门"), "空部门仍占位"); Find<TextBox>(dialog, "联系人资料昵称").Text = ""; Button(dialog, "保存").PerformClick(); }); Check(peer.DisplayName == "原昵称", "清空没有恢复原昵称");
+                    main.ExitApplication(); Theme.Change(false, "blue");
+                }
+            });
+            test("速率：续传只计新字节、按时间刷新、历史不保留瞬时速率", () => {
+                TransferRate rate = new TransferRate(5L * 1024 * 1024 * 1024);
+                Check(!rate.Update(5L * 1024 * 1024 * 1024 + 1000, 100), "不足采样间隔仍刷新");
+                Check(rate.Update(5L * 1024 * 1024 * 1024 + 262144, 250) && rate.BytesPerSecond == 1048576, "续传旧字节计入速率");
+                Check(rate.Update(5L * 1024 * 1024 * 1024 + 393216, 500) && rate.BytesPerSecond == 524288, "速率没有反映最近时间段");
+                Check(rate.Update(5L * 1024 * 1024 * 1024 + 393216, 1000) && rate.BytesPerSecond == 0, "停滞采样速率非零");
+                var json = new System.Web.Script.Serialization.JavaScriptSerializer(); string saved = json.Serialize(new FileTransferState { BytesPerSecond = 12345, Status = "接收中", Percent = 42 });
+                Check(!saved.Contains("BytesPerSecond"), "瞬时速率写入历史");
+                foreach(bool dark in new[] { false, true }) using(Form form = new Form { ClientSize = new Size(600, 400) }) using(BubbleHistory history = new BubbleHistory { Dock = DockStyle.Fill }) {
+                    Theme.Change(dark, "blue"); form.Controls.Add(history); form.Show(); history.SetRecords(new[] { new ChatRecord { PeerId = "rate", Packet = 1, Text = "实时文件速率", Time = DateTime.Now, Transfers = new[] { new FileTransferState { Name = "中文长文件名 English.zip", Size = 104857600, Percent = 42, Status = "接收中 · 点击取消", BytesPerSecond = 1572864 } } } }); history.Refresh(); Render(form, "preview-transfer-rate-" + (dark ? "dark" : "light")); form.Close();
+                }
+                Theme.Change(false, "blue");
+            });
             test("跟随系统主题：旧配置兼容、保存取消、系统通知与手动覆盖", () => {
                 LocalStore store=new LocalStore(Path.Combine(directory,"system-theme"));File.WriteAllText(Path.Combine(store.Root,"settings.json"),"{\"Nickname\":\"旧夜间设置\",\"DarkMode\":true}");AppSettings saved=store.LoadSettings();saved.ReceiveFolder=Path.Combine(store.Root,"received");
                 Check(saved.DarkMode&&!saved.FollowSystemTheme,"旧配置被改为跟随系统");

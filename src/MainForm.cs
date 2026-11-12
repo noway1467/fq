@@ -174,11 +174,11 @@ public sealed class MainForm : ModernWindow
             });
         }
         private void OnDelivery(ChatRecord record) { diagnostics.Record(DiagnosticEvent.DeliveryChanged); Ui(() => { TrySave(record); ChatForm chat; if (chats.TryGetValue(record.PeerId, out chat) && !chat.IsDisposed) chat.Delivery(record); }); }
-        private void OnTransfer(ChatRecord record, int id, int percent, string status)
+        private void OnTransfer(ChatRecord record, int id, int percent, string status, double bytesPerSecond)
         {
             Ui(() => {
                 FileTransferState file = record.Transfers == null ? null : record.Transfers.FirstOrDefault(f => f.Id == id);
-                if (file == null) return; file.Percent = percent; file.Status = status;
+                if (file == null) return; file.Percent = percent; file.Status = status; file.BytesPerSecond = bytesPerSecond;
                 if (status != "发送中") TrySave(record);
                 ChatForm chat; if (chats.TryGetValue(record.PeerId, out chat) && !chat.IsDisposed) chat.Delivery(record);
             });
@@ -293,10 +293,14 @@ public sealed class MainForm : ModernWindow
         }
         private void EditConversation(Peer peer)
         {
-            using(ConversationDialog dialog=new ConversationDialog(peer,false))if(dialog.ShowDialog(this)==DialogResult.OK){
-                string old=peer.Note;peer.Note=dialog.Note;if(!RememberPeerAddresses())peer.Note=old;
-                foreach(ChatForm chat in chats.Values)chat.RefreshPeer();fingerprint=null;RefreshPeers();
-            }
+            using(ConversationDialog dialog=new ConversationDialog(peer,false))if(dialog.ShowDialog(this)==DialogResult.OK) SaveConversationNote(peer, dialog.Note);
+        }
+        internal void ShowContactProfile(Peer peer) { using(ContactProfileDialog dialog = new ContactProfileDialog(peer, note => SaveConversationNote(peer, note))) dialog.ShowDialog(this); }
+        private bool SaveConversationNote(Peer peer, string note)
+        {
+            string old = peer.Note; peer.Note = note; bool saved = RememberPeerAddresses(); if (!saved) peer.Note = old;
+            foreach(ChatForm chat in chats.Values)chat.RefreshPeer();fingerprint=null;RefreshPeers();
+            return saved;
         }
         private void DeleteConversation(Peer peer,bool clearOnly)
         {

@@ -634,10 +634,13 @@ namespace FeiqLight
         protected override void OnEnabledChanged(EventArgs e) { base.OnEnabledChanged(e); Invalidate(); }
         public int PreferredHeightFor(int width)
         {
-            float scale = DeviceDpi / 96F; int textWidth = Math.Max(40, width - (int)(60 * scale));
-            int title = TextRenderer.MeasureText(Text, Font, new Size(textWidth, 0), TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix).Height;
-            int detail = String.IsNullOrEmpty(Description) ? 0 : TextRenderer.MeasureText(Description, Theme.Small, new Size(textWidth, 0), TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix).Height + (int)(3 * scale);
-            return Math.Max((int)(40 * scale), title + detail + (int)(18 * scale));
+            // 系统 DPI 感知窗口的 DeviceDpi 可能仍为 96；测量必须与实际绘制使用同一个 DC。
+            using (Graphics g = CreateGraphics()) {
+                float scale = g.DpiX / 96F; int textWidth = Math.Max(10, width - (int)(38 * scale) - (int)(22 * scale));
+                int title = TextRenderer.MeasureText(g, Text, Font, new Size(textWidth, 0), TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix).Height;
+                int detail = String.IsNullOrEmpty(Description) ? 0 : TextRenderer.MeasureText(g, Description, Theme.Small, new Size(textWidth, 0), TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix).Height + (int)(3 * scale);
+                return Math.Max((int)(40 * scale), Math.Max(title, (int)(22 * scale)) + detail + (int)(18 * scale));
+            }
         }
         protected override void OnPaint(PaintEventArgs e)
         {
@@ -652,6 +655,7 @@ namespace FeiqLight
             if (detail.Height > 0) TextRenderer.DrawText(g, Description, Theme.Small, new Rectangle(0, top + title.Height + (int)(3 * scale), textWidth, detail.Height), Enabled ? Theme.Muted : Theme.Blend(Theme.Muted, BackColor, .5F), TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix);
             RectangleF track = new RectangleF(Width - w - 2 * scale, top + Math.Min(title.Height, block) / 2F - h / 2F, w, h);
             if (detail.Height == 0) track.Y = (Height - h) / 2F;
+            track.Y = Math.Max(3 * scale, Math.Min(Height - h - 3 * scale, track.Y));
             Color off = Theme.Blend(Theme.Muted, BackColor, Theme.Dark ? .45F : .38F), on = Theme.Blue;
             Color fill = Motion.Mix(off, on, k); if (!Enabled) fill = Theme.Blend(fill, BackColor, .5F); else if (hover.Value > 0) fill = Motion.Mix(fill, Theme.Blend(Theme.Ink, fill, .12F), hover.Value * .6);
             using (GraphicsPath path = Theme.RoundedF(track, h / 2F)) using (SolidBrush b = new SolidBrush(fill)) g.FillPath(b, path);

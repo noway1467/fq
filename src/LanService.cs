@@ -55,7 +55,7 @@ namespace FeiqLight
         public event Action<ChatRecord> DeliveryChanged;
         public event Action<string> Error;
         public event Action<string> TransferNotice;
-        public event Action<ChatRecord, int, int, string> TransferChanged;
+        public event Action<ChatRecord, int, int, string, double> TransferChanged;
 
         public LanService(AppSettings settings, int port, bool loopbackOnly, string login)
         {
@@ -418,9 +418,11 @@ namespace FeiqLight
                     using (FileStream file = new FileStream(offer.Path, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, FileOptions.SequentialScan))
                     {
                         file.Position = offset; byte[] buffer = new byte[65536]; int count; long sent = offset;
+                        TransferRate rate = new TransferRate(offset); var timing = System.Diagnostics.Stopwatch.StartNew();
                         while (!disposed && sent < offer.Size && (count = file.Read(buffer, 0, (int)Math.Min(buffer.Length, offer.Size - sent))) > 0) {
                             stream.Write(buffer, 0, count); sent += count; lock (gate) offer.Expires = DateTime.UtcNow.AddMinutes(30);
-                            int next = (int)(sent * 100.0 / offer.Size); if (next != percent) { percent = next; Transfer(offer, version, percent, "发送中"); }
+                            bool sampled = rate.Update(sent, timing.Elapsed.TotalMilliseconds);
+                            int next = (int)(sent * 100.0 / offer.Size); if (next != percent || sampled) { percent = next; Transfer(offer, version, percent, "发送中", rate.BytesPerSecond); }
                         }
                         if (disposed || sent != offer.Size) throw new IOException("发送中断");
                     }
@@ -434,11 +436,11 @@ namespace FeiqLight
             catch (UnauthorizedAccessException e) { Report("无法读取发送文件：" + e.Message); }
             finally { if (active != null) Transfer(active, version, percent, "发送中断，等待对方重试"); lock (gate) connections.Remove(client); client.Close(); }
         }
-        private void Transfer(Offer offer, long version, int percent, string status)
+        private void Transfer(Offer offer, long version, int percent, string status, double bytesPerSecond = 0)
         {
             lock(gate) {
                 if(version != offer.ProgressVersion) return; offer.Percent=percent; offer.TransferState=status;
-                var handler = TransferChanged; if (!disposed && handler != null) handler(offer.Record, offer.FileId, percent, status);
+                var handler = TransferChanged; if (!disposed && handler != null) handler(offer.Record, offer.FileId, percent, status, bytesPerSecond);
             }
         }
         private void EndOffer(Offer offer, string state) { if(offer.TransferState != "已发送（非保存确认）") Transfer(offer, ++offer.ProgressVersion, offer.Percent, state); }
@@ -446,7 +448,7 @@ namespace FeiqLight
         {
             Send(Encode(Protocol.ReleaseFiles, packet.ToString(CultureInfo.InvariantCulture), null), peer.Endpoint);
         }
-        public Task<string> ReceiveFileAsync(Peer peer, long packet, Attachment file, string destination, IProgress<int> progress, CancellationToken cancel, bool renameOnCollision = false)
+        public Task<string> ReceiveFileAsync(Peer peer, long packet, Attachment file, string destination, IProgress<int> progress, CancellationToken cancel, bool renameOnCollision = false, IProgress<TransferProgress> details = null)
         {
             if (!Protocol.SafeFileName(file.Name) || file.Size < 0) throw new IOException("不安全的文件名或长度。");
             if (LoopbackOnly && !IPAddress.IsLoopback(peer.Endpoint.Address)) throw new InvalidOperationException("回环测试模式不能连接局域网。");
@@ -482,7 +484,9 @@ namespace FeiqLight
                                     byte[] request = Encode(Protocol.GetFile, packet.ToString("x") + ":" + file.Id.ToString("x") + ":" + offset.ToString("x") + ":", null);
                                     stream.Write(request, 0, request.Length);
                                     byte[] buffer = new byte[65536]; long received = offset; int last = -1;
+                                    TransferRate rate = new TransferRate(offset); var timing = System.Diagnostics.Stopwatch.StartNew();
                                     if (progress != null) progress.Report(file.Size == 0 ? 0 : (int)(received * 100.0 / file.Size));
+                                    if (details != null) details.Report(new TransferProgress(file.Size == 0 ? 0 : (int)(received * 100.0 / file.Size), 0));
                                     while (received < file.Size)
                                     {
                                         cancel.ThrowIfCancellationRequested();
@@ -490,6 +494,8 @@ namespace FeiqLight
                                         if (count == 0) throw new IOException("传输中断或文件邀请失效；已保留断点，请在发送方在线且邀请有效时重试。");
                                         output.Write(buffer, 0, count); received += count;
                                         int percent = (int)(received * 100.0 / file.Size);
+                                        bool sampled = rate.Update(received, timing.Elapsed.TotalMilliseconds);
+                                        if (details != null && (percent != last || sampled)) details.Report(new TransferProgress(percent, rate.BytesPerSecond));
                                         if (percent != last) { last = percent; if (progress != null) progress.Report(percent); }
                                     }
                                     output.Flush(true);

@@ -62,7 +62,9 @@ public final class ChatService extends Service {
     private volatile String transferOutcome="";
     static final class FileProgress {
         final int percent; final String state; final LanNode.Transfer task;
-        FileProgress(int percent,String state,LanNode.Transfer task) {this.percent=percent;this.state=state;this.task=task;}
+        final double bytesPerSecond;
+        FileProgress(int percent,String state,LanNode.Transfer task) {this(percent,state,0,task);}
+        FileProgress(int percent,String state,double bytesPerSecond,LanNode.Transfer task) {this.percent=percent;this.state=state;this.bytesPerSecond=bytesPerSecond;this.task=task;}
     }
     private final LinkedHashMap<String,FileProgress> fileProgress=new LinkedHashMap<>();
     private boolean transferNotificationQueued;
@@ -70,8 +72,11 @@ public final class ChatService extends Service {
     static String fileKey(String peer,long packet,long file,boolean outgoing) {return peer+"/"+packet+"/"+file+"/"+outgoing;}
     FileProgress progress(String peer,long packet,long file,boolean outgoing) {return fileProgress.get(fileKey(peer,packet,file,outgoing));}
     private void fileProgress(String peer,long packet,long file,boolean outgoing,int percent,String state,LanNode.Transfer task) {
+        fileProgress(peer,packet,file,outgoing,percent,state,0,task);
+    }
+    private void fileProgress(String peer,long packet,long file,boolean outgoing,int percent,String state,double bytesPerSecond,LanNode.Transfer task) {
         String key=fileKey(peer,packet,file,outgoing);
-        fileProgress.remove(key);fileProgress.put(key,new FileProgress(Math.max(0,Math.min(100,percent)),state,task));
+        fileProgress.remove(key);fileProgress.put(key,new FileProgress(Math.max(0,Math.min(100,percent)),state,bytesPerSecond,task));
         while(fileProgress.size()>2000)fileProgress.remove(fileProgress.keySet().iterator().next());
         // 限频而非反复延后：连续的大文件进度也必须在传输途中画出来。
         if(!transferNotificationQueued){transferNotificationQueued=true;main.postDelayed(notifyTransfers,60);}
@@ -136,8 +141,8 @@ public final class ChatService extends Service {
                         main.post(()->{if(currentConnection(epoch))updateNetworkStatus();});
                     }
                     @Override public void message(LanNode.Peer peer,LanNode.Message message,boolean update) { if(currentConnection(epoch)||update) incoming(peer,message,update,epoch); }
-                    @Override public void fileProgress(LanNode.Peer peer,long packet,long file,int percent,String state) {
-                        main.post(()->{if(currentConnection(epoch))ChatService.this.fileProgress(peer.id(),packet,file,true,percent,state,null);});
+                    @Override public void fileProgress(LanNode.Peer peer,long packet,long file,int percent,String state,double bytesPerSecond) {
+                        main.post(()->{if(currentConnection(epoch))ChatService.this.fileProgress(peer.id(),packet,file,true,percent,state,bytesPerSecond,null);});
                     }
                 });
                 next.setDeviceId(deviceId);
@@ -562,7 +567,13 @@ public final class ChatService extends Service {
             if(!target.isFile()) {
                 long partial=LanNode.partialFile(peer,packet,file,target).length();
                 quota(dir,file.size-(partial<=file.size?partial:0));
-                requireNode().receiveFile(peer,packet,file,target,task,percent->{last[0]=percent;progress.accept(percent,"接收中 · 点击取消");});
+                requireNode().receiveFile(peer,packet,file,target,task,new LanNode.Progress() {
+                    @Override public void update(int percent) { update(percent,0); }
+                    @Override public void update(int percent,double bytesPerSecond) {
+                        last[0]=percent;
+                        main.post(()->{if(!stopped&&transferEpoch.get()==epoch)fileProgress(peer.id(),packet,file.id,false,percent,"接收中 · 点击取消",bytesPerSecond,task);});
+                    }
+                });
             }
             progress.accept(100,"保存中 · 点击取消");
             storage.save(target,file.name,task);

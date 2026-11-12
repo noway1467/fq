@@ -9,10 +9,12 @@ public final class AndroidInterop {
     public static void main(String[] args) throws Exception {
         int port=Integer.parseInt(args[0]), windows=Integer.parseInt(args[1]); Path root=Paths.get(args[2]);
         BlockingQueue<LanNode.Message> incoming=new LinkedBlockingQueue<>(), updates=new LinkedBlockingQueue<>();
+        java.util.concurrent.atomic.AtomicBoolean outgoingRate=new java.util.concurrent.atomic.AtomicBoolean(),incomingRate=new java.util.concurrent.atomic.AtomicBoolean();
         LanNode.Listener listener=new LanNode.Listener() {
             public void peersChanged() { }
             public void error(String text) { System.out.println("NOTICE "+text); }
             public void message(LanNode.Peer peer,LanNode.Message message,boolean update) { if(!message.outgoing) incoming.add(message); if(update) updates.add(message); }
+            public void fileProgress(LanNode.Peer peer,long packet,long file,int percent,String state,double rate) { if(rate>0)outgoingRate.set(true); }
         };
         try(LanNode node=new LanNode(port,true,"android-test","JVM-Android-Core","安卓测试😀","互通验证",listener)) {
             node.setDeviceId("0123456789abcdef0123456789abcdef");
@@ -48,8 +50,15 @@ public final class AndroidInterop {
             File destination=root.resolve("android-received.bin").toFile();
             long prefix=Math.min(8L*1024*1024,size/2);
             try(OutputStream out=new FileOutputStream(LanNode.partialFile(peer,reply.number,reply.files.get(0),destination))) { for(long left=prefix;left>0;) {int count=(int)Math.min(left,bytes.length);out.write(bytes,0,count);left-=count;} }
-            node.receiveFile(peer,reply.number,reply.files.get(0),destination,new LanNode.Transfer(),null);
+            node.receiveFile(peer,reply.number,reply.files.get(0),destination,new LanNode.Transfer(),new LanNode.Progress() {
+                public void update(int percent) { update(percent,0); }
+                public void update(int percent,double rate) {
+                    if(rate>0)incomingRate.set(true);
+                    if(size>64L*1024*1024)try {Thread.sleep(8);}catch(InterruptedException error){Thread.currentThread().interrupt();throw new IllegalStateException(error);}
+                }
+            });
             if(destination.length()!=size||!Arrays.equals(hash(source),hash(destination))) throw new AssertionError("Windows→Android 文件不一致");
+            if(size>64L*1024*1024) {if(!outgoingRate.get()||!incomingRate.get())throw new AssertionError("Android 双向传输缺少实际速率");System.out.println("ANDROID_RATE PASS: 收发两端均报告正速率，非零断点续传");}
             node.sendMessage(peer,"REQUEST_TEXT_FILE",Collections.emptyList());
             LanNode.Message textFile=incoming.poll(10,TimeUnit.SECONDS);
             if(textFile==null||textFile.files.size()!=1||!textFile.files.get(0).name.endsWith(".txt"))throw new AssertionError("Windows 自动 TXT 邀请失败");

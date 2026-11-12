@@ -358,10 +358,15 @@ public final class MainActivity extends Activity implements ChatService.Observer
             boolean groupFirst=newDay||!continues(rows.get(index-1),m), groupLast=next==null||!continues(m,next)||!dayKey(next.time).equals(date);
             final TextView[] menuStamp={null};
             LinearLayout bubble=new LinearLayout(this) {
+                private boolean cardTouch;
                 @Override public boolean dispatchTouchEvent(MotionEvent event) {
-                    // 多选接管卡片内容的点击，右下角菜单保留自己的点击入口。
+                    // 整个手势固定路由，空白时间行交给卡片处理长按；滚动取消仍走原生触摸语义。
                     Rect menu=new Rect();if(menuStamp[0]!=null){menuStamp[0].getHitRect(menu);menu.left=Math.max(menu.left,menu.right-dp(48));}
-                    if(selectingMessages&&!menu.contains((int)event.getX(),(int)event.getY()))return onTouchEvent(event);
+                    if(event.getActionMasked()==MotionEvent.ACTION_DOWN) {
+                        boolean stampBlank=menuStamp[0]!=null&&event.getY()>=menuStamp[0].getTop()&&!menu.contains((int)event.getX(),(int)event.getY());
+                        cardTouch=(selectingMessages||stampBlank)&&!menu.contains((int)event.getX(),(int)event.getY());
+                    }
+                    if(cardTouch) {boolean handled=onTouchEvent(event);if(event.getActionMasked()==MotionEvent.ACTION_UP||event.getActionMasked()==MotionEvent.ACTION_CANCEL)cardTouch=false;return handled;}
                     return super.dispatchTouchEvent(event);
                 }
                 @Override public boolean performClick() {boolean handled=super.performClick();if(!cardPeer.equals(selected)||cardGeneration!=editorGeneration)return handled;if(selectingMessages){toggleMessage(m);return true;}return handled;}
@@ -412,7 +417,6 @@ public final class MainActivity extends Activity implements ChatService.Observer
             final LanNode.Peer source=conversation==null?null:conversation.peer;
             bubble.setOnLongClickListener(v->{if(cardPeer.equals(selected)&&cardGeneration==editorGeneration){if(selectingMessages)toggleMessage(m);else beginMessageSelection(m);}return true;});
             stamp.append("  ···"); stamp.setContentDescription("消息操作：复制、转发、删除、多选"); stamp.setMinHeight(dp(m.files.isEmpty()?40:32));
-            stamp.setOnTouchListener((v,event)->{if(event.getX()<Math.max(0,stamp.getWidth()-dp(48))){if(event.getActionMasked()==MotionEvent.ACTION_UP)bubble.performClick();return true;}return false;});
             stamp.setOnClickListener(v->{if(source!=null) messageActions(m,source);});
         }
         updateMessageSelection();
@@ -450,8 +454,9 @@ public final class MainActivity extends Activity implements ChatService.Observer
             if(!message.outgoing&&conversation!=null) {File local=source.receivedFile(conversation.peer,message.number,file);saved=local.isFile()||receivedStorage.saved(local)!=null;}
             int percent=progress!=null?progress.percent:saved?100:0;
             String state=progress!=null?progress.state:message.outgoing?(source.offering(peer,message.number,file.id)?"等待对方接收":"历史邀请 · 无活动传输"):saved?"已保存":"待接收 · 点击接收";
-            label.setText(percent+"% · "+state);bar.setProgress(percent);
-            bar.setContentDescription(file.name+"，"+percent+"%，"+state);
+            String rate=progress!=null&&(state.equals("发送中")||state.startsWith("接收中"))?" · "+size((long)progress.bytesPerSecond)+"/s":"";
+            label.setText(percent+"%"+rate+" · "+state);bar.setProgress(percent);
+            bar.setContentDescription(file.name+"，"+label.getText());
         };
         label.setOnClickListener(v->{if(service!=source||source==null||!selected.equals(peer))return;ChatService.FileProgress p=source.progress(peer,message.number,file.id,false);if(!message.outgoing&&p!=null&&p.task!=null)source.cancelFile(peer,message.number,file.id);else attachment.performClick();});
         fileProgressViews.add(update);update.run();

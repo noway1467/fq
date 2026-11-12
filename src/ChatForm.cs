@@ -65,6 +65,9 @@ namespace FeiqLight
             peerName.Dock = DockStyle.Fill; peerName.AutoEllipsis = true; peerName.AccessibleName = "聊天联系人昵称"; identity.Controls.Add(peerName, 0, 0);
             peerStatus.Dock = DockStyle.Fill; peerStatus.AccessibleName = "聊天联系人状态"; identity.Controls.Add(peerStatus, 0, 1); head.Controls.Add(identity, 1, 0);
             avatarIdentity = peer.Id; avatarValue = peer.Avatar; avatarOnline = peer.Online; RefreshPeer();
+            avatar.Cursor = peerName.Cursor = Cursors.Hand;
+            avatar.Click += delegate { main.ShowContactProfile(peer); };
+            peerName.Click += delegate { main.ShowContactProfile(peer); };
             Button search = Theme.IconButton("search", "聊天记录", ShowHistory, false); search.Dock = DockStyle.Fill; search.Margin = Padding.Empty; head.Controls.Add(search, 2, 0);
             fileButton = Theme.IconButton("inbox", "收到的文件", delegate { SetDrawer(!drawerOpen); }, false); fileButton.Dock = DockStyle.Fill; fileButton.Margin = Padding.Empty; head.Controls.Add(fileButton, 3, 0);
             Button menu = Theme.IconButton("more", "会话菜单", ShowMenu, false); menu.Dock = DockStyle.Fill; menu.Margin = Padding.Empty; head.Controls.Add(menu, 4, 0);
@@ -362,7 +365,13 @@ namespace FeiqLight
                 string destination = ReceiveStorage.Destination(network.Settings.ReceiveFolder, selected.File.Name);
                 selected.PartialPaths.Add(LanService.PartialPath(peer, selected.Packet, selected.File, destination));
                 fileStatus.Text = "连接中";
-                string saved = await network.ReceiveFileAsync(peer, selected.Packet, selected.File, destination, new Progress<int>(p => { if (!IsDisposed && receiving == cancel && activeFile == selected) FileState(selected, p, "接收中 · 点击取消"); }), cancel.Token, true);
+                string saved = await network.ReceiveFileAsync(peer, selected.Packet, selected.File, destination, null, cancel.Token, true, new Progress<TransferProgress>(p => {
+                    if (!IsDisposed && receiving == cancel && activeFile == selected) {
+                        FileState(selected, p.Percent, "接收中 · 点击取消", null, p.BytesPerSecond);
+                        selected.Status = p.Percent + "% · " + Theme.SizeText((long)p.BytesPerSecond) + "/s";
+                        fileStatus.Text = selected.Status; files.Invalidate();
+                    }
+                }));
                 if (IsDisposed) return;
                 selected.Record.LocalFiles = selected.Record.GetLocalFiles().Concat(new[] { saved }).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
                 FileState(selected, 100, "已保存", saved);
@@ -405,11 +414,11 @@ namespace FeiqLight
             catch (Exception error) { Error("拒绝失败", error.Message); }
         }
         protected override void OnFormClosing(FormClosingEventArgs e) { if (e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; main.CloseChat(this); return; } if (receiving != null) receiving.Cancel(); base.OnFormClosing(e); }
-        private void FileState(ReceivedFile item, int? percent, string status, string path = null)
+        private void FileState(ReceivedFile item, int? percent, string status, string path = null, double bytesPerSecond = 0)
         {
             FileTransferState state = item.Record.Transfers == null ? null : item.Record.Transfers.FirstOrDefault(f => f.Id == item.File.Id);
             if (state == null) return;
-            if (percent.HasValue) state.Percent = percent.Value; state.Status = status; if (path != null) state.LocalPath = path;
+            if (percent.HasValue) state.Percent = percent.Value; state.Status = status; state.BytesPerSecond = bytesPerSecond; if (path != null) state.LocalPath = path;
             history.Delivery(item.Record);
         }
         protected override void Dispose(bool disposing) { if (disposing && !IsDisposed) { ClearPastedImages(); SaveDraft(); draftTimer.Dispose(); if (emojiPicker != null) emojiPicker.Dispose(); if (chatMenu != null) chatMenu.Dispose(); if (fileMenu != null) fileMenu.Dispose(); if (receiving != null) receiving.Cancel(); if (avatar != null && avatar.Image != null) avatar.Image.Dispose(); } base.Dispose(disposing); if(disposing&&chatFont!=null){chatFont.Dispose();chatFont=null;} }

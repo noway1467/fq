@@ -111,6 +111,31 @@ namespace FeiqLight
             CancelButton = close; Shown += delegate { content.Focus(); content.Select(0, 0); };
         }
     }
+    internal sealed class ContactProfileDialog : ModernWindow
+    {
+        private readonly PictureBox avatar;
+        internal ContactProfileDialog(Peer peer, Func<string, bool> save)
+        {
+            bool department = !String.IsNullOrWhiteSpace(peer.Group);
+            Text = "联系人资料"; ResizeWindow = false; ClientSize = new Size(420, department ? 414 : 350); MinimumSize = new Size(360, 320); StartPosition = FormStartPosition.CenterParent;
+            Panel body = DialogLayout.Body(this);
+            TableLayoutPanel fields = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = department ? 6 : 4, Margin = Padding.Empty };
+            fields.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            foreach (int height in department ? new[] { 86, 28, 44, 36, 24, 40 } : new[] { 86, 28, 44, 36 }) fields.RowStyles.Add(new RowStyle(SizeType.Absolute, height));
+            avatar = new PictureBox { Image = Theme.ContactAvatar(64, peer.Id, peer.Online, peer.Avatar), SizeMode = PictureBoxSizeMode.Zoom, Size = new Size(76, 76), Anchor = AnchorStyles.Left, Margin = Padding.Empty, AccessibleName = "联系人资料头像" }; fields.Controls.Add(avatar, 0, 0);
+            Label name = Theme.Label("昵称", Theme.Small, Theme.Muted); name.Dock = DockStyle.Fill; fields.Controls.Add(name, 0, 1);
+            RoundedInput input = new RoundedInput { Dock = DockStyle.Fill, Margin = Padding.Empty }; input.Input.MaxLength = 64; input.Input.Text = String.IsNullOrEmpty(peer.Note) ? peer.Nickname : peer.Note; input.Input.AccessibleName = "联系人资料昵称"; fields.Controls.Add(input, 0, 2);
+            Label hint = Theme.Label("修改仅在本机显示；留空恢复对方昵称。", Theme.Small, Theme.Muted); hint.Dock = DockStyle.Fill; fields.Controls.Add(hint, 0, 3);
+            if (department) {
+                Label title = Theme.Label("部门", Theme.Small, Theme.Muted); title.Dock = DockStyle.Fill; fields.Controls.Add(title, 0, 4);
+                Label group = Theme.Label(peer.Group, Theme.Body, Theme.Ink); group.Dock = DockStyle.Fill; group.AutoEllipsis = true; group.AccessibleName = "联系人资料部门"; fields.Controls.Add(group, 0, 5);
+            }
+            body.Controls.Add(fields);
+            Button done = Theme.Button("保存", delegate { string value = input.Input.Text.Trim(); if (save(value == peer.Nickname ? "" : value)) DialogResult = DialogResult.OK; }, true);
+            DialogLayout.Actions(this, done, Theme.Button("取消", delegate { DialogResult = DialogResult.Cancel; }, false));
+        }
+        protected override void Dispose(bool disposing) { if (disposing && avatar.Image != null) { avatar.Image.Dispose(); avatar.Image = null; } base.Dispose(disposing); }
+    }
     public sealed class ConversationDialog : ModernWindow
     {
         public string Note { get { return note.Text.Trim(); } }
