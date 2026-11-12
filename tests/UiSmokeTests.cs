@@ -1459,9 +1459,31 @@ namespace FeiqLight.Tests
                         try {foreach(int size in new[]{9,10,14,18,10}) {setSize.Invoke(mainA,new object[]{size});Font font=input.Font;for(int i=0;i<6;i++){appearance.Invoke(chatA,null);Check(Object.ReferenceEquals(font,input.Font),"相同字号仍更换字体");Check(input.Font.Height>0,"当前字体已失效");input.Text="重复应用 "+i+"\n继续输入 😀";Application.DoEvents();input.Select(input.TextLength,0);input.ScrollToCaret();using(Bitmap bitmap=new Bitmap(chatA.Width,chatA.Height))chatA.DrawToBitmap(bitmap,new Rectangle(Point.Empty,bitmap.Size));}}}
                         finally {input.Clear();setSize.Invoke(mainA,new object[]{original});}
                     });
-                    test("输入区：短文本无滚动箭头、长文本可滚到末尾",()=>{
-                        RichTextBox input=Find<RichTextBox>(chatA,"消息输入框");input.Text="短消息";Application.DoEvents();int first=input.Height;Check(input.ScrollBars==RichTextBoxScrollBars.None,"短输入仍有原生滚动箭头");
-                        input.Text=String.Join("\n",Enumerable.Range(0,40).Select(i=>"第 "+i+" 行输入"));Application.DoEvents();Check(input.Height>first,"多行输入区未增高");input.SelectionStart=input.TextLength;input.ScrollToCaret();Point end=input.GetPositionFromCharIndex(input.TextLength-1);Check(end.Y>=0&&end.Y<input.ClientSize.Height,"长输入不能到达末尾");input.Text="😀 发送消息";Render(mainA,"preview-compose-clean");input.Clear();
+                    test("输入区：短文本无滚动箭头、长文本滚轮直滚、多行首行可见与按钮不变形",()=>{
+                        RichTextBox input=Find<RichTextBox>(chatA,"消息输入框");
+                        Button emoji=Find<Button>(chatA,"表情"),attach=Find<Button>(chatA,"发送文件"),send=Find<Button>(chatA,"发送消息");
+                        input.Text="短消息";Application.DoEvents();int first=input.Height,buttonHeight=send.Height,emojiHeight=emoji.Height,attachHeight=attach.Height;
+                        Check(input.ScrollBars==RichTextBoxScrollBars.None,"短输入仍有原生滚动箭头");
+                        input.Text="第一行内容保留可见\n第二行测试\n安卓和win长按消息卡片空白没有进入选中状态";Application.DoEvents();
+                        Check((int)SendMessage(input.Handle,0x00CE,IntPtr.Zero,IntPtr.Zero)==0&&input.GetPositionFromCharIndex(0).Y>=0,"多行增高后首行被滚出顶部");
+                        Check(send.Height==buttonHeight&&emoji.Height==emojiHeight&&attach.Height==attachHeight&&send.Width>=send.Height,"多行输入拉伸了两侧按钮");
+                        input.Text=String.Join("\n",Enumerable.Range(0,25).Select(i=>"第 "+i+" 行输入"));Application.DoEvents();
+                        Check(input.Height>first&&send.Height==buttonHeight&&emoji.Height==emojiHeight,"长文本输入区未增高或按钮变形");
+                        SendMessage(input.Handle,0x020A,new IntPtr(unchecked((int)(0xFF880000))),IntPtr.Zero);
+                        SendMessage(input.Handle,0x020A,new IntPtr(unchecked((int)(0xFF880000))),IntPtr.Zero);Application.DoEvents();
+                        int wheeled=(int)SendMessage(input.Handle,0x00CE,IntPtr.Zero,IntPtr.Zero);
+                        Check(wheeled>0,"输入框鼠标滚轮无法直接向下滚动");
+                        for(int i=0;i<10;i++)SendMessage(input.Handle,0x020A,new IntPtr(120<<16),IntPtr.Zero);
+                        Application.DoEvents();Check((int)SendMessage(input.Handle,0x00CE,IntPtr.Zero,IntPtr.Zero)==0,"输入框鼠标滚轮无法直接滚回首行");
+                        input.SelectionStart=input.TextLength;input.ScrollToCaret();Point end=input.GetPositionFromCharIndex(input.TextLength-1);Check(end.Y>=0&&end.Y<input.ClientSize.Height,"长输入不能到达末尾");
+                        BubbleHistory history=Find<BubbleHistory>(chatA,"聊天记录");
+                        history.Append(new ChatRecord{Packet=900001,Text="https://coarena.ai/",Sender="对端",State="已收到",Time=DateTime.Today.AddHours(21).AddMinutes(28)});
+                        history.AutoScrollPosition=new Point(0,history.AutoScrollMinSize.Height);history.Refresh();Application.DoEvents();
+                        var links=(List<Tuple<Rectangle,string>>)typeof(BubbleHistory).GetField("linkHits",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(history);
+                        var stamps=(List<Tuple<Rectangle,ChatRecord>>)typeof(BubbleHistory).GetField("stampHits",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(history);
+                        Rectangle linkRect=links.Last(l=>l.Item2.Contains("coarena.ai")).Item1,stampRect=stamps.Last(s=>s.Item2.Packet==900001).Item1;
+                        Check(!linkRect.IntersectsWith(stampRect)&&stampRect.Left>=linkRect.Right+4,"链接气泡文字与时间重叠：link="+linkRect+" stamp="+stampRect);
+                        input.Text="😀 发送消息";Render(mainA,"preview-compose-clean");input.Clear();
                     });
                     test("长提示可滚动、只读且确认按钮不被挤走",()=>{
                         string text=String.Concat(Enumerable.Repeat("文件路径很长，需要完整展示错误原因 👩🏽‍💻\r\n",80));

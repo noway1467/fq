@@ -22,7 +22,7 @@ namespace FeiqLight
         private readonly ListBox files = new ListBox();
         private readonly Label queued = Theme.Label("", Theme.Small, Theme.Muted);
         private readonly Label fileStatus = Theme.Label("", Theme.Small, Theme.Muted);
-        private readonly Button receive, reject, fileButton;
+        private readonly Button receive, reject, fileButton, emojiButton, attachButton, sendButton;
         private readonly PictureBox avatar;
         private readonly Label peerName = Theme.Label("", Theme.Title, Theme.Ink);
         private readonly Label peerStatus = Theme.Label("", Theme.Small, Theme.Muted);
@@ -112,9 +112,11 @@ namespace FeiqLight
             queue = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Padding = new Padding(18, 1, 10, 1), Margin = Padding.Empty, Visible = false }; queue.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); queue.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 38)); queue.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             queued.Dock = DockStyle.Fill; queued.AutoEllipsis = true; queue.Controls.Add(queued, 0, 0); Button remove = Theme.IconButton("close", "移除附件", delegate { ClearPastedImages(); attachments.Clear(); UpdateQueued(); }, false); remove.Dock = DockStyle.Fill; remove.Margin = Padding.Empty; queue.Controls.Add(remove, 1, 0); root.Controls.Add(queue, 0, 2);
             compose = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, RowCount = 1, Padding = new Padding(10, 9, 14, 9), Margin = Padding.Empty, BackColor = Theme.Surface };
-            compose.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 42)); compose.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); compose.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 42)); compose.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 58)); compose.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            Button emoji = Theme.IconButton("smile", "表情", ShowEmoji, false); emoji.Dock = DockStyle.Fill; emoji.Margin = Padding.Empty; compose.Controls.Add(emoji, 0, 0);
-            inputShell.Dock = DockStyle.Fill; inputShell.Margin = new Padding(2, 1, 4, 1);
+            compose.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 44)); compose.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); compose.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 44)); compose.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 58)); compose.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            emojiButton = Theme.IconButton("smile", "表情", ShowEmoji, false); emojiButton.Anchor = AnchorStyles.None; emojiButton.Size = new Size(40, 40); emojiButton.Margin = Padding.Empty; compose.Controls.Add(emojiButton, 0, 0);
+            inputShell.Dock = DockStyle.Fill; inputShell.Margin = new Padding(2, 1, 4, 1); inputShell.Cursor = Cursors.IBeam;
+            inputShell.MouseDown += delegate { editor.Focus(); };
+            inputShell.MouseWheel += delegate(object sender, MouseEventArgs e) { editor.ScrollByWheel(e.Delta); };
             editor.BorderStyle = BorderStyle.None; editor.Dock = DockStyle.Fill; editor.BackColor = Theme.Ice; editor.Font = new Font(Theme.Body.FontFamily, 10F); editor.MaxLength = MessageText.InputLimit; editor.AccessibleName = "消息输入框"; editor.DetectUrls = false; editor.ScrollBars = RichTextBoxScrollBars.None; editor.Placeholder = "输入消息…";
             Theme.AttachEditMenu(editor, PasteClipboard);
             editor.KeyDown += delegate(object sender, KeyEventArgs e)
@@ -123,10 +125,11 @@ namespace FeiqLight
                 else if (e.KeyCode == Keys.Enter && !e.Shift) { e.SuppressKeyPress = true; SendMessage(); }
             }; inputShell.Controls.Add(editor); compose.Controls.Add(inputShell, 1, 0);
             draftTimer.Tick += delegate { draftTimer.Stop(); SaveDraft(); };
+            editor.HandleCreated += delegate { ResizeComposer(); };
             editor.TextChanged += delegate { draftTimer.Stop(); draftTimer.Start(); ResizeComposer(); UpdateQueued(); };
             editor.Resize += delegate { ResizeComposer(); };
-            Button file = Theme.IconButton("clip", "发送文件", SelectFiles, false); file.Dock = DockStyle.Fill; file.Margin = Padding.Empty; compose.Controls.Add(file, 2, 0);
-            Button send = Theme.IconButton("send", "发送消息", delegate { SendMessage(); }, true); send.Dock = DockStyle.Fill; send.Margin = new Padding(4, 3, 0, 3); compose.Controls.Add(send, 3, 0); root.Controls.Add(compose, 0, 3);
+            attachButton = Theme.IconButton("clip", "发送文件", SelectFiles, false); attachButton.Anchor = AnchorStyles.None; attachButton.Size = new Size(40, 40); attachButton.Margin = Padding.Empty; compose.Controls.Add(attachButton, 2, 0);
+            sendButton = Theme.IconButton("send", "发送消息", delegate { SendMessage(); }, true); sendButton.Anchor = AnchorStyles.None; sendButton.Size = new Size(52, 40); sendButton.Margin = Padding.Empty; compose.Controls.Add(sendButton, 3, 0); root.Controls.Add(compose, 0, 3);
             compose.Paint += delegate(object sender, PaintEventArgs e) { using (Pen line = new Pen(Theme.Line)) e.Graphics.DrawLine(line, 0, 0, compose.Width, 0); };
             editor.EnableAutoDragDrop = false;
             RegisterFileDrop(this);
@@ -136,15 +139,31 @@ namespace FeiqLight
             middle.SizeChanged += delegate { drawer.Width = Math.Min(drawer.Width, Math.Max(200, middle.ClientSize.Width / 2)); };
         }
         private bool resizingComposer;
+        private float composeScale;
         private void ResizeComposer()
         {
             if(resizingComposer || IsDisposed || Disposing || editor.IsDisposed || editor.Disposing || root==null || root.RowStyles.Count<4 || !editor.IsHandleCreated)return;
             resizingComposer=true;
             try {
-                float scale=DeviceDpi/96F; int lines=Math.Max(1,editor.GetLineFromCharIndex(editor.TextLength)+1);
+                float scale; using (Graphics g = editor.CreateGraphics()) scale = Math.Max(DeviceDpi, g.DpiX) / 96F;
+                if (Math.Abs(composeScale - scale) > .01F)
+                {
+                    composeScale = scale;
+                    int iconButton = (int)Math.Round(40 * scale), sendWidth = (int)Math.Round(52 * scale), sendHeight = (int)Math.Round(40 * scale);
+                    compose.Padding = new Padding((int)Math.Round(10 * scale), (int)Math.Round(9 * scale), (int)Math.Round(14 * scale), (int)Math.Round(9 * scale));
+                    compose.ColumnStyles[0].Width = (int)Math.Round(44 * scale);
+                    compose.ColumnStyles[2].Width = (int)Math.Round(44 * scale);
+                    compose.ColumnStyles[3].Width = (int)Math.Round(58 * scale);
+                    inputShell.Padding = new Padding((int)Math.Round(16 * scale), (int)Math.Round(12 * scale), (int)Math.Round(16 * scale), (int)Math.Round(12 * scale));
+                    emojiButton.Size = new Size(iconButton, iconButton);
+                    attachButton.Size = new Size(iconButton, iconButton);
+                    sendButton.Size = new Size(sendWidth, sendHeight);
+                }
+                int lines=Math.Max(1,editor.GetLineFromCharIndex(editor.TextLength)+1);
                 // 短消息不显示原生滚动箭头；输入区随内容增长，长文本仍能用光标和滚轮滚动。
-                int height=Math.Max((int)(82*scale),Math.Min(5,lines)*editor.Font.Height+(int)(40*scale));
-                root.RowStyles[3].Height=Math.Min(height,Math.Max((int)(82*scale),ClientSize.Height/3));
+                int height=Math.Max((int)Math.Round(82*scale),Math.Min(5,lines)*editor.Font.Height+(int)Math.Round(40*scale));
+                float nextHeight=Math.Min(height,Math.Max((int)Math.Round(82*scale),ClientSize.Height/3));
+                if(Math.Abs(root.RowStyles[3].Height-nextHeight)>.5F) root.RowStyles[3].Height=nextHeight;
             } finally {resizingComposer=false;}
         }
         public void SaveDraft() { draftTimer.Stop(); main.SaveDraft(peer.Id, editor.Text); }

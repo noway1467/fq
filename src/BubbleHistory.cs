@@ -331,6 +331,7 @@ namespace FeiqLight
                 }
             }
             int content = m.TextSize.Width;
+            if (m.InlineStamp && m.Layout != null) content = Math.Max(content, m.Layout.LastLineRight + Dp(8) + stamp);
             if (!m.InlineStamp) content = Math.Max(content, stamp);
             if (cards) content = Math.Max(content, r.Transfers.Any(CardMedia) ? Dp(288) : Dp(240));
             if (media.Length > 0) content = Math.Max(content, Dp(288));

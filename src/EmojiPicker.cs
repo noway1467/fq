@@ -9,8 +9,39 @@ namespace FeiqLight
     // 所有表情在同一滚动区，分类仅作标题；网格按工作区和 DPI 排布。
     internal sealed class EmojiPicker : ToolStripDropDown
     {
+        private sealed class EmojiGrid : FlowLayoutPanel
+        {
+            [System.Runtime.InteropServices.DllImport("user32.dll")]
+            private static extern bool RedrawWindow(IntPtr window, IntPtr rect, IntPtr region, uint flags);
+            private Point lastDisplayOffset;
+            public EmojiGrid()
+            {
+                DoubleBuffered = true;
+                ResizeRedraw = true;
+            }
+            internal void FlushScrollRepaint()
+            {
+                if (!IsHandleCreated || IsDisposed) return;
+                // ScrollWindowEx 在裁剪边界移动子窗口句柄时会把边缘旧像素搬移进子控件内部；
+                // 每次滚动后立即使子控件失效并同步完成重绘，消除快速滚动残影。
+                RedrawWindow(Handle, IntPtr.Zero, IntPtr.Zero, 0x0185);
+            }
+            protected override void OnLayout(LayoutEventArgs levent)
+            {
+                base.OnLayout(levent);
+                Point current = DisplayRectangle.Location;
+                if (current != lastDisplayOffset) { lastDisplayOffset = current; FlushScrollRepaint(); }
+            }
+            protected override void OnScroll(ScrollEventArgs se) { base.OnScroll(se); FlushScrollRepaint(); }
+            protected override void OnMouseWheel(MouseEventArgs e) { base.OnMouseWheel(e); FlushScrollRepaint(); }
+            protected override void WndProc(ref Message m)
+            {
+                base.WndProc(ref m);
+                if (m.Msg == 0x0115 || m.Msg == 0x0114 || m.Msg == 0x020A) FlushScrollRepaint();
+            }
+        }
         private readonly Panel surface = new Panel();
-        private readonly FlowLayoutPanel grid = new FlowLayoutPanel();
+        private readonly EmojiGrid grid = new EmojiGrid();
         private readonly List<Button> buttons = new List<Button>();
         private readonly ToolStripControlHost host;
         private readonly Font emojiFont = new Font("Segoe UI Emoji", 16F);
@@ -32,7 +63,7 @@ namespace FeiqLight
             this.picked = picked; AutoSize = false; Padding = new Padding(1); Margin = Padding.Empty;
             AccessibleName = "表情选择面板";
             grid.AutoScroll = true; grid.WrapContents = true; grid.Margin = Padding.Empty;
-            grid.AccessibleName = "表情网格"; surface.Controls.Add(grid);
+            grid.AccessibleName = "表情网格"; Theme.ThemeScrollbars(grid); surface.Controls.Add(grid);
             host = new ToolStripControlHost(surface) { AutoSize = false, Margin = Padding.Empty, Padding = Padding.Empty };
             Items.Add(host); ArrangeGrid();
         }
@@ -61,6 +92,7 @@ namespace FeiqLight
                     int columns = Math.Max(1, usable / D(faces ? 40 : 160));
                     int cellWidth = usable / columns, cellHeight = D(44);
                     Label heading = Theme.Label(Categories[group], Theme.Small, Theme.Muted);
+                    heading.BackColor = Theme.Surface;
                     heading.Size = new Size(usable, D(28)); heading.Margin = new Padding(0, group == 0 ? 0 : D(8), 0, 0); grid.Controls.Add(heading); grid.SetFlowBreak(heading, true);
                     for(int i = 0; i < entries.Length; i++) {
                         string text = entries[i]; int index = buttons.Count;
@@ -74,7 +106,7 @@ namespace FeiqLight
                             int next = index;
                             if(e.KeyCode == Keys.Right) next++; else if(e.KeyCode == Keys.Left) next--;
                             else if(e.KeyCode == Keys.Down) next += columns; else if(e.KeyCode == Keys.Up) next -= columns; else return;
-                            next = Math.Max(0, Math.Min(buttons.Count - 1, next)); buttons[next].Focus(); grid.ScrollControlIntoView(buttons[next]); e.Handled = e.SuppressKeyPress = true;
+                            next = Math.Max(0, Math.Min(buttons.Count - 1, next)); buttons[next].Focus(); grid.ScrollControlIntoView(buttons[next]); grid.FlushScrollRepaint(); e.Handled = e.SuppressKeyPress = true;
                         };
                         buttons.Add(button); grid.Controls.Add(button);
                         if(i == entries.Length - 1) grid.SetFlowBreak(button, true);
@@ -94,7 +126,9 @@ namespace FeiqLight
         public void ShowFor(Control source)
         {
             Rectangle work = Screen.FromControl(source).WorkingArea;
-            Prepare(new Size(Math.Max(1, work.Width - 16), Math.Max(1, work.Height - 16)), source.DeviceDpi);
+            int targetDpi = source.DeviceDpi;
+            using (Graphics g = source.CreateGraphics()) targetDpi = Math.Max(targetDpi, (int)Math.Round(g.DpiX));
+            Prepare(new Size(Math.Max(1, work.Width - 16), Math.Max(1, work.Height - 16)), targetDpi);
             Show(Fit(source.RectangleToScreen(source.ClientRectangle), Size, work));
             if(buttons.Count > 0) buttons[0].Focus();
         }

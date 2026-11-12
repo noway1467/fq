@@ -41,13 +41,22 @@ namespace FeiqLight
         internal sealed class EmojiButton : Button
         {
             private bool hovering;
+            public EmojiButton()
+            {
+                SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.Opaque, true);
+            }
             protected override void OnMouseEnter(EventArgs e){hovering=true;Invalidate();base.OnMouseEnter(e);}
             protected override void OnMouseLeave(EventArgs e){hovering=false;Invalidate();base.OnMouseLeave(e);}
+            protected override void OnPaintBackground(PaintEventArgs pevent) { }
             protected override void OnPaint(PaintEventArgs e)
             {
-                if(!indices.ContainsKey(Text)){base.OnPaint(e);return;}
-                e.Graphics.Clear(hovering?Theme.Sky:Theme.Surface);int size=Math.Min(Width,Height)-8;
-                Draw(e.Graphics,Text,new Rectangle((Width-size)/2,(Height-size)/2,size,size));
+                e.Graphics.Clear(hovering?Theme.Sky:Theme.Surface);
+                if(!indices.ContainsKey(Text))
+                    TextRenderer.DrawText(e.Graphics,Text,Font,ClientRectangle,ForeColor,TextFormatFlags.HorizontalCenter|TextFormatFlags.VerticalCenter|TextFormatFlags.NoPrefix|TextFormatFlags.SingleLine);
+                else {
+                    int size=Math.Min(Width,Height)-8;
+                    Draw(e.Graphics,Text,new Rectangle((Width-size)/2,(Height-size)/2,size,size));
+                }
                 if(Focused&&ShowFocusCues)ControlPaint.DrawFocusRectangle(e.Graphics,ClientRectangle);
             }
         }

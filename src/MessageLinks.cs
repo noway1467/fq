@@ -67,7 +67,9 @@ namespace FeiqLight
                 if(run==null||run.Url!=url||run.Highlight!=highlight){run=new Run {Text="",Url=url,Highlight=highlight,Bounds=new Rectangle(x,y,0,line)};Runs.Add(run);}
                 int w=TextRenderer.MeasureText(run.Text+part,font,Size.Empty,Flags).Width;
                 if(run.Bounds.X+w>maxWidth&&x>0){
-                    x=0;y+=line;run=new Run {Text="",Url=url,Highlight=highlight,Bounds=new Rectangle(0,y,0,line)};Runs.Add(run);
+                    x=0;y+=line;
+                    if(run.Text.Length>0){run=new Run {Text="",Url=url,Highlight=highlight,Bounds=new Rectangle(0,y,0,line)};Runs.Add(run);}
+                    else run.Bounds=new Rectangle(0,y,0,line);
                     w=TextRenderer.MeasureText(part,font,Size.Empty,Flags).Width;
                 }
                 run.Text+=part;run.Bounds=new Rectangle(run.Bounds.X,y,w,line);x=run.Bounds.Right;Width=Math.Max(Width,x);

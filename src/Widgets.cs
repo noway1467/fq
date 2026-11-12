@@ -141,17 +141,65 @@ namespace FeiqLight
         [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
         private struct TextArea { internal int Left, Top, Right, Bottom; }
         [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr handle, int message, IntPtr wparam, ref TextArea area);
+        [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr handle, int message, IntPtr wparam, IntPtr lparam);
         private Rectangle textArea;
+        internal int FirstVisibleLine { get { return IsHandleCreated ? (int)SendMessage(Handle, 0x00CE, IntPtr.Zero, IntPtr.Zero) : 0; } }
+        private int LastLineTop()
+        {
+            if (TextLength == 0) return 0;
+            int top = GetPositionFromCharIndex(TextLength - 1).Y;
+            if (Text[TextLength - 1] == '\n') top += Font.Height;
+            return top;
+        }
         private void AlignText()
         {
             if (!IsHandleCreated || IsDisposed || Disposing || ClientSize.Width < 4) return;
             // RichEdit 的正文和提示语共用排版框；单行居中，多行从顶部开始，避免输入后文字跳位。
             int top = GetLineFromCharIndex(TextLength) == 0 ? Math.Max(0, (ClientSize.Height - Font.Height) / 2) : 0;
             Rectangle next = Rectangle.FromLTRB(1, top, ClientSize.Width - 1, ClientSize.Height);
-            if (next == textArea) return;
-            textArea = next;
-            TextArea area = new TextArea { Left = next.Left, Top = next.Top, Right = next.Right, Bottom = next.Bottom };
-            SendMessage(Handle, 0x00B3, IntPtr.Zero, ref area); Invalidate();
+            if (next != textArea)
+            {
+                textArea = next;
+                TextArea area = new TextArea { Left = next.Left, Top = next.Top, Right = next.Right, Bottom = next.Bottom };
+                SendMessage(Handle, 0x00B3, IntPtr.Zero, ref area); Invalidate();
+            }
+            // 输入框增高或删字后若底部仍有余量，自动把被滚出顶部的首行拉回可视区。
+            while (TextLength > 0 && FirstVisibleLine > 0 && LastLineTop() + Font.Height * 2 <= ClientSize.Height)
+            {
+                int before = FirstVisibleLine;
+                SendMessage(Handle, 0x0115, new IntPtr(0), IntPtr.Zero);
+                if (FirstVisibleLine >= before) break;
+            }
+        }
+        internal void ScrollByWheel(int delta)
+        {
+            if (!IsHandleCreated || IsDisposed || Disposing || delta == 0 || TextLength == 0) return;
+            int wheelLines = SystemInformation.MouseWheelScrollLines;
+            int stepLines = wheelLines > 0 ? Math.Min(6, wheelLines) : 3;
+            int steps = Math.Max(1, Math.Abs(delta) / 120) * stepLines;
+            for (int i = 0; i < steps; i++)
+            {
+                if (delta > 0)
+                {
+                    if (FirstVisibleLine <= 0 && GetPositionFromCharIndex(0).Y >= textArea.Top) break;
+                    int before = FirstVisibleLine;
+                    SendMessage(Handle, 0x0115, new IntPtr(0), IntPtr.Zero);
+                    if (FirstVisibleLine >= before && GetPositionFromCharIndex(0).Y >= textArea.Top) break;
+                }
+                else
+                {
+                    if (LastLineTop() + Font.Height <= ClientSize.Height) break;
+                    int before = FirstVisibleLine;
+                    SendMessage(Handle, 0x0115, new IntPtr(1), IntPtr.Zero);
+                    if (FirstVisibleLine <= before) break;
+                }
+            }
+            Invalidate();
+        }
+        protected override void OnMouseWheel(MouseEventArgs e)
+        {
+            ScrollByWheel(e.Delta);
+            base.OnMouseWheel(e);
         }
         protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); textArea = Rectangle.Empty; AlignText(); }
         protected override void OnResize(EventArgs e) { base.OnResize(e); AlignText(); }
@@ -161,6 +209,13 @@ namespace FeiqLight
         protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); Invalidate(); }
         protected override void WndProc(ref Message m)
         {
+            if (m.Msg == 0x020A)
+            {
+                int delta = (short)((m.WParam.ToInt64() >> 16) & 0xFFFF);
+                OnMouseWheel(new MouseEventArgs(MouseButtons.None, 0, MousePosition.X, MousePosition.Y, delta));
+                m.Result = IntPtr.Zero;
+                return;
+            }
             base.WndProc(ref m);
             if (m.Msg == 0x000F && TextLength == 0 && !String.IsNullOrEmpty(Placeholder) && IsHandleCreated)
                 using (Graphics g = CreateGraphics())
