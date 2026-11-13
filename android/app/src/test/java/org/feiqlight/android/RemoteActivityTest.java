@@ -75,6 +75,25 @@ public final class RemoteActivityTest {
             assertTrue(shadowOf(web).getLastEvaluatedJavascript().contains("feiqCheck"));
         }
     }
+    @Test public void darkThemeClearsLightSystemBarsAndLightThemeSetsThem() {
+        int lightMask=WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS|WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
+        Context context=RuntimeEnvironment.getApplication();
+        context.getSharedPreferences("settings",Context.MODE_PRIVATE).edit().putBoolean("follow_system_theme",false).putBoolean("dark_mode",false).commit();
+        Intent intent=new Intent(context,RemoteActivity.class).setData(Uri.parse("http://127.0.0.1:2427/#remote"));
+        try(ActivityController<RemoteActivity> controller=Robolectric.buildActivity(RemoteActivity.class,intent).setup()){
+            RemoteActivity activity=controller.get();
+            assertEquals(android.graphics.Color.WHITE,((android.graphics.drawable.ColorDrawable)activity.getWindow().getDecorView().getBackground()).getColor());
+            assertEquals(lightMask,activity.getWindow().getInsetsController().getSystemBarsAppearance()&lightMask);
+            if(android.os.Build.VERSION.SDK_INT<35)assertEquals(android.graphics.Color.WHITE,activity.getWindow().getStatusBarColor());
+        }
+        context.getSharedPreferences("settings",Context.MODE_PRIVATE).edit().putBoolean("follow_system_theme",false).putBoolean("dark_mode",true).commit();
+        try(ActivityController<RemoteActivity> controller=Robolectric.buildActivity(RemoteActivity.class,intent).setup()){
+            RemoteActivity activity=controller.get();
+            assertEquals(0xff17212b,((android.graphics.drawable.ColorDrawable)activity.getWindow().getDecorView().getBackground()).getColor());
+            assertEquals(0,activity.getWindow().getInsetsController().getSystemBarsAppearance()&lightMask);
+            if(android.os.Build.VERSION.SDK_INT<35){assertEquals(0xff17212b,activity.getWindow().getStatusBarColor());assertEquals(0xff17212b,activity.getWindow().getNavigationBarColor());}
+        }
+    }
     private static WebResourceRequest request(String address){return new WebResourceRequest(){public Uri getUrl(){return Uri.parse(address);}public boolean isForMainFrame(){return true;}public boolean isRedirect(){return false;}public boolean hasGesture(){return true;}public String getMethod(){return "GET";}public java.util.Map<String,String> getRequestHeaders(){return java.util.Collections.emptyMap();}};}
     private static <T extends View> T find(View view,Class<T> type){if(type.isInstance(view))return type.cast(view);if(view instanceof ViewGroup)for(int i=0;i<((ViewGroup)view).getChildCount();i++){T match=find(((ViewGroup)view).getChildAt(i),type);if(match!=null)return match;}return null;}
 }

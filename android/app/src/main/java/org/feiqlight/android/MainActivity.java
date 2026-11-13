@@ -40,14 +40,14 @@ public final class MainActivity extends Activity implements ChatService.Observer
         {0xff4b647d,0xfffafbfd,0xff1e252d,0xff64707d,0xffedf1f5,0xffdfe5ec,0xffdfe6ee,0xffd2dce7,0xffe5eaef,0xffd8dfe8},
         {0xff5f7e9e,0xff181c21,0xffeaeef2,0xff939fab,0xff222830,0xff2f3742,0xff12161b,0xff1b222c,0xff161b22,0xff1f2530}};
     private void applyTheme() {
-        SharedPreferences prefs=getSharedPreferences("settings",MODE_PRIVATE); DARK=prefs.getBoolean("follow_system_theme",false)?systemDark():prefs.getBoolean("dark_mode",false);
+        SharedPreferences prefs=getSharedPreferences("settings",MODE_PRIVATE); DARK=SystemBars.isDark(this);
         int[] p=palette(prefs.getString("accent","blue"),DARK);
         BLUE=p[0];SURFACE=p[1];INK=p[2];MUTED=p[3];PALE=p[4];LINE=p[5];WALLS=new int[]{p[6],p[7],p[8],p[9]};WALL=wall(p);
         // BUBBLE 用于选中与按压底色（Windows Sky），OUTGOING 为发出气泡（Windows Outgoing）。
         BUBBLE=blend(BLUE,SURFACE,DARK?.30f:.17f);OUTGOING=blend(BLUE,SURFACE,DARK?.42f:.15f);ONLINE=DARK?0xff58c468:0xff3cb34f;
-        getWindow().setStatusBarColor(SURFACE);getWindow().setNavigationBarColor(SURFACE);
+        SystemBars.apply(getWindow(),SURFACE,DARK);
     }
-    private boolean systemDark() {return (getResources().getConfiguration().uiMode & android.content.res.Configuration.UI_MODE_NIGHT_MASK)==android.content.res.Configuration.UI_MODE_NIGHT_YES;}
+    private boolean systemDark() {return SystemBars.systemDark(this);}
     private static int[] palette(String accent,boolean dark) { int group="green".equals(accent)?2:"purple".equals(accent)?4:"amber".equals(accent)?6:"rose".equals(accent)?8:"slate".equals(accent)?10:0; return PALETTES[group+(dark?1:0)]; }
     // 纯色背景与日期胶囊取壁纸四色的平均值。
     private static int wall(int[] p) { return Color.rgb((Color.red(p[6])+Color.red(p[7])+Color.red(p[8])+Color.red(p[9]))/4,(Color.green(p[6])+Color.green(p[7])+Color.green(p[8])+Color.green(p[9]))/4,(Color.blue(p[6])+Color.blue(p[7])+Color.blue(p[8])+Color.blue(p[9]))/4); }
@@ -127,13 +127,17 @@ public final class MainActivity extends Activity implements ChatService.Observer
         renderPage(); bound=bindService(new Intent(this,ChatService.class),connection,BIND_AUTO_CREATE);
     }
     // 熄屏期间对端可能已切网离开，亮屏回到页面时立即复核头像在线光晕。
-    @Override protected void onStart() { super.onStart(); visible=true; if(service!=null) { service.observe(this); service.active(selected); service.verifyPresence(); } restoreConnection(); }
+    @Override protected void onStart() { super.onStart(); visible=true; if(SystemBars.isDark(this)!=DARK)rerenderPreservingState(); if(service!=null) { service.observe(this); service.active(selected); service.verifyPresence(); } restoreConnection(); }
+    @Override public void onWindowFocusChanged(boolean hasFocus) { super.onWindowFocusChanged(hasFocus); if(hasFocus) SystemBars.appearance(getWindow(),DARK); }
     @Override protected void onStop() { historyAppliedVersion=++historyRequestVersion; closeHistory(); finishSelection(); saveDraft(); visible=false; if(service!=null) { service.remove(this); service.active(""); } super.onStop(); }
     @Override protected void onDestroy() { avatarLoader.shutdownNow();avatarImageRequest=null;if(avatarSelection!=null&&avatarSelection.dialog!=null)avatarSelection.dialog.dismiss();if(media!=null) media.close(); if(backgroundBitmap!=null){backgroundBitmap.recycle();backgroundBitmap=null;} if(service!=null) service.remove(this); if(bound) unbindService(connection); if(Build.VERSION.SDK_INT>=33&&backCallback!=null) getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(backCallback); super.onDestroy(); }
     @Override protected void onSaveInstanceState(Bundle state) { saveDraft(); state.putString("peer",selected); state.putString("picker",pickerPeer); state.putString("export",exportPath); super.onSaveInstanceState(state); }
     @Override public void onConfigurationChanged(android.content.res.Configuration configuration) {
         super.onConfigurationChanged(configuration);
         if(!getSharedPreferences("settings",MODE_PRIVATE).getBoolean("follow_system_theme",false))return;
+        rerenderPreservingState();
+    }
+    private void rerenderPreservingState() {
         saveDraft();themeScrollPosition=scroll==null?null:scroll.getScrollY();boolean choosing=selectingMessages;Set<String> marks=new LinkedHashSet<>(messageMarks);
         renderPage();selectingMessages=choosing;messageMarks.addAll(marks);updateMessageSelection();
     }
@@ -184,6 +188,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         finishSelection();
         applyTheme(); historySignature=""; displayedOutgoing.clear(); forceLatest=false; editor=null; search=null; messages=null; list=null; chatAvatar=null;sendStatus=null;sendButton=null;
         root=column(); root.setBackgroundColor(SURFACE); setContentView(root);
+        SystemBars.apply(getWindow(),SURFACE,DARK);
         root.setOnApplyWindowInsetsListener((view,insets)->{
             if(Build.VERSION.SDK_INT>=30) { Insets i=insets.getInsets(WindowInsets.Type.systemBars()|WindowInsets.Type.displayCutout()|WindowInsets.Type.ime()); view.setPadding(i.left,i.top,i.right,i.bottom); }
             else view.setPadding(insets.getSystemWindowInsetLeft(),insets.getSystemWindowInsetTop(),insets.getSystemWindowInsetRight(),insets.getSystemWindowInsetBottom());
@@ -662,10 +667,11 @@ public final class MainActivity extends Activity implements ChatService.Observer
         if(value!=null&&value.startsWith("image:")) {byte[] data=java.util.Base64.getDecoder().decode(value.substring(6));bitmap=BitmapFactory.decodeByteArray(data,0,data.length);}
         else {bitmap=Bitmap.createBitmap(320,320,Bitmap.Config.ARGB_8888);AvatarDrawable face=new AvatarDrawable(this,peer.id(),false,0,SURFACE,ONLINE,value);face.setBounds(0,0,320,320);face.draw(new Canvas(bitmap));}
         if(bitmap==null){error("头像图片无法解码");return;}
-        Dialog dialog=new Dialog(this);dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);LinearLayout content=column();content.setBackgroundColor(SURFACE);
+        Dialog dialog=new Dialog(this,DARK?android.R.style.Theme_Material_NoActionBar:android.R.style.Theme_Material_Light_NoActionBar);dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);LinearLayout content=column();content.setBackgroundColor(SURFACE);
+        if(Build.VERSION.SDK_INT>=30){content.setOnApplyWindowInsetsListener((v,insets)->{Insets b=insets.getInsets(WindowInsets.Type.systemBars()|WindowInsets.Type.displayCutout());v.setPadding(b.left,b.top,b.right,b.bottom);return insets;});}else content.setFitsSystemWindows(true);
         Button close=button("关闭头像",false);content.addView(close,new LinearLayout.LayoutParams(-1,-2));
         MediaPreview.ZoomImage image=new MediaPreview.ZoomImage(this);image.setContentDescription("头像大图");image.setBackgroundColor(SURFACE);image.setImageBitmap(bitmap);content.addView(image,new LinearLayout.LayoutParams(-1,0,1));
-        dialog.setContentView(content);close.setOnClickListener(v->dialog.dismiss());dialog.setOnDismissListener(d->{image.setImageDrawable(null);bitmap.recycle();});dialog.show();dialog.getWindow().setLayout(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.MATCH_PARENT);
+        dialog.setContentView(content);close.setOnClickListener(v->dialog.dismiss());dialog.setOnDismissListener(d->{image.setImageDrawable(null);bitmap.recycle();});SystemBars.apply(dialog.getWindow(),SURFACE,DARK);dialog.show();if(dialog.getWindow()!=null){dialog.getWindow().setLayout(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.MATCH_PARENT);SystemBars.apply(dialog.getWindow(),SURFACE,DARK);}
     }
     private void conversationMenu(ChatStore.Conversation c) {
         LinearLayout options=column();Dialog menu=sheet(c.displayName(),options,null,null);
@@ -768,8 +774,8 @@ public final class MainActivity extends Activity implements ChatService.Observer
         };
         input.addTextChangedListener(new TextWatcher(){public void beforeTextChanged(CharSequence s,int start,int count,int after){}public void onTextChanged(CharSequence s,int start,int before,int count){filter.run();}public void afterTextChanged(Editable value){}});
         dialog.setOnDismissListener(d->{finishSelection();if(historyDialog==dialog)historyDialog=null;});
-        dialog.setContentView(frame);Window window=dialog.getWindow();if(window!=null){window.setBackgroundDrawableResource(android.R.color.transparent);window.setGravity(Gravity.BOTTOM);window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);}
-        dialog.show();if(window!=null)window.setLayout(-1,Math.max(dp(240),(int)(getResources().getDisplayMetrics().heightPixels*.85f)));
+        dialog.setContentView(frame);Window window=dialog.getWindow();if(window!=null){window.setBackgroundDrawableResource(android.R.color.transparent);window.setGravity(Gravity.BOTTOM);window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);SystemBars.applyOverlay(window,DARK);}
+        dialog.show();if(window!=null){window.setLayout(-1,Math.max(dp(240),(int)(getResources().getDisplayMetrics().heightPixels*.85f)));SystemBars.applyOverlay(window,DARK);}
         // 固定联系人快照；离开页面或关闭窗口后，旧查询不能写入后来打开的搜索窗口。
         source.history(conversation.peer.id(),loaded->{if(historyDialog!=dialog||!dialog.isShowing()||!visible||isDestroyed()||isFinishing()||service!=source||generation!=editorGeneration||!page.equals(selected))return;rows.addAll(loaded);filter.run();});
     }
@@ -866,9 +872,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
             if(!saved){error("设置未保存，请检查设备存储空间");return;}if(service!=null){service.receiveSettingsChanged();service.profileSettingsChanged();}dialog.dismiss();
             boolean visualChanged=nextDark!=initialDark||!accentKey.equals(initialAccent)||nextSize!=initialFontSize||!backdropKey.equals(initialBackground)||!nextBgImage.equals(initialBackgroundImage);
             if(visualChanged) {
-                themeScrollPosition=scroll==null?null:scroll.getScrollY();
-                boolean choosing=selectingMessages;Set<String> marks=new LinkedHashSet<>(messageMarks);
-                saveDraft();renderPage();selectingMessages=choosing;messageMarks.addAll(marks);updateMessageSelection();
+                rerenderPreservingState();
             } else {
                 if(!selected.isEmpty()&&messages!=null&&!messageRows.isEmpty()) renderMessages(messageRows);
                 changed();
@@ -998,8 +1002,8 @@ public final class MainActivity extends Activity implements ChatService.Observer
         }
         frame.addView(navigation);frame.addView(scroller,new LinearLayout.LayoutParams(-1,0,1));
         LinearLayout footer=row();footer.setPadding(dp(22),dp(10),dp(22),dp(14));TextView note=text("切换分类会保留未保存的修改",12,MUTED);footer.addView(note,weight());Button done=button("保存",true);footer.addView(done,new LinearLayout.LayoutParams(-2,-2));done.setOnClickListener(v->handler.accept(dialog));frame.addView(footer);
-        dialog.setContentView(frame);Window window=dialog.getWindow();if(window!=null){window.setBackgroundDrawableResource(android.R.color.transparent);window.setGravity(Gravity.BOTTOM);window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);window.setDimAmount(.32f);window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);}
-        select.accept(0);dialog.show();if(window!=null)window.setLayout(-1,-2);return dialog;
+        dialog.setContentView(frame);Window window=dialog.getWindow();if(window!=null){window.setBackgroundDrawableResource(android.R.color.transparent);window.setGravity(Gravity.BOTTOM);window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);window.setDimAmount(.32f);window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);SystemBars.applyOverlay(window,DARK);}
+        select.accept(0);dialog.show();if(window!=null){window.setLayout(-1,-2);SystemBars.applyOverlay(window,DARK);}return dialog;
     }
     private Dialog sheet(String name,View content,String action,java.util.function.Consumer<Dialog> handler) {
         if(name.equals("设置"))return settingsPanel(content,handler);
@@ -1019,8 +1023,8 @@ public final class MainActivity extends Activity implements ChatService.Observer
             if(View.MeasureSpec.getMode(height)!=View.MeasureSpec.UNSPECIFIED) cap=Math.min(cap,View.MeasureSpec.getSize(height));
             super.onMeasure(width,View.MeasureSpec.makeMeasureSpec(cap,View.MeasureSpec.AT_MOST));
         } }; scroller.setFillViewport(false); scroller.addView(box);
-        dialog.setContentView(scroller); Window window=dialog.getWindow(); if(window!=null) { window.setBackgroundDrawableResource(android.R.color.transparent); window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND); window.setDimAmount(.32f); window.setGravity(Gravity.BOTTOM); window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE); }
-        dialog.show(); if(window!=null) window.setLayout(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.WRAP_CONTENT); return dialog;
+        dialog.setContentView(scroller); Window window=dialog.getWindow(); if(window!=null) { window.setBackgroundDrawableResource(android.R.color.transparent); window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND); window.setDimAmount(.32f); window.setGravity(Gravity.BOTTOM); window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE); SystemBars.applyOverlay(window,DARK); }
+        dialog.show(); if(window!=null) { window.setLayout(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.WRAP_CONTENT); SystemBars.applyOverlay(window,DARK); } return dialog;
     }
     private void confirm(String title,String body,String action,Runnable confirm) { TextView content=text(body,15,INK); content.setPadding(0,dp(14),0,dp(4)); sheet(title,content,action,dialog->{ dialog.dismiss(); confirm.run(); }); }
     private void copyText(String label,String value) { getSystemService(ClipboardManager.class).setPrimaryClip(ClipData.newPlainText(label,value)); error("已复制"+label); }

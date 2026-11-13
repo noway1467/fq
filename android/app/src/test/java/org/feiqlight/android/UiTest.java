@@ -900,4 +900,59 @@ public final class UiTest {
             assertEquals("主列表改名2",activity.getSharedPreferences("settings",0).getString("name",""));
         }finally{if(picker!=null)picker.dismiss();if(dialog!=null)dialog.dismiss();ac.pause().stop().destroy();sc.destroy();}
     }
+    @Test public void darkThemeAndSystemNightSyncStatusAndNavigationBars() throws Exception {
+        ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();
+        shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));
+        ActivityController<MainActivity> ac=Robolectric.buildActivity(MainActivity.class).create().start().resume().visible();android.app.Dialog dialog=null;
+        String qualifiers=RuntimeEnvironment.getQualifiers();
+        try {
+            MainActivity activity=ac.get();
+            int lightMask=WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS|WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
+            int legacyMask=View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR|View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+            WindowInsetsController controller=activity.getWindow().getInsetsController();
+            assertNotNull(controller);
+            assertEquals(0xffffffff,((android.graphics.drawable.ColorDrawable)activity.getWindow().getDecorView().getBackground()).getColor());
+            assertEquals(lightMask,controller.getSystemBarsAppearance()&lightMask);
+            if(android.os.Build.VERSION.SDK_INT<35)assertEquals(0xffffffff,activity.getWindow().getStatusBarColor());
+            Method render=MainActivity.class.getDeclaredMethod("renderPage");render.setAccessible(true);
+            for(String accent:new String[]{"blue","green","purple","amber","rose","slate"}) {
+                activity.getSharedPreferences("settings",Context.MODE_PRIVATE).edit().putBoolean("follow_system_theme",false).putBoolean("dark_mode",true).putString("accent",accent).commit();
+                render.invoke(activity);
+                int surface=(Integer)field(activity,"SURFACE");
+                if(android.os.Build.VERSION.SDK_INT<35){
+                    assertEquals("深色主题状态栏颜色未跟随主题表面色："+accent,surface,activity.getWindow().getStatusBarColor());
+                    assertEquals("深色主题导航栏颜色未跟随主题表面色："+accent,surface,activity.getWindow().getNavigationBarColor());
+                }
+                assertEquals("深色主题未清除浅色系统栏图标标记："+accent,0,activity.getWindow().getInsetsController().getSystemBarsAppearance()&lightMask);
+                assertEquals("深色主题未清除旧版浅色系统栏标记："+accent,0,activity.getWindow().getDecorView().getSystemUiVisibility()&legacyMask);
+                assertTrue(activity.getWindow().getDecorView().getBackground() instanceof android.graphics.drawable.ColorDrawable);
+                assertEquals(surface,((android.graphics.drawable.ColorDrawable)activity.getWindow().getDecorView().getBackground()).getColor());
+                assertEquals(surface,((android.graphics.drawable.ColorDrawable)((View)field(activity,"root")).getBackground()).getColor());
+            }
+            Method settings=MainActivity.class.getDeclaredMethod("settings");settings.setAccessible(true);settings.invoke(activity);
+            dialog=org.robolectric.shadows.ShadowDialog.getLatestDialog();assertNotNull(dialog);
+            assertEquals("深色主题设置弹窗未清除浅色状态栏图标标记",0,dialog.getWindow().getInsetsController().getSystemBarsAppearance()&lightMask);
+            dialog.dismiss();dialog=null;
+            activity.getSharedPreferences("settings",Context.MODE_PRIVATE).edit().putBoolean("follow_system_theme",true).putBoolean("dark_mode",false).putString("accent","blue").commit();
+            RuntimeEnvironment.setQualifiers("+night");
+            android.content.res.Configuration nightConfig=new android.content.res.Configuration(activity.getResources().getConfiguration());
+            nightConfig.uiMode=(nightConfig.uiMode&~android.content.res.Configuration.UI_MODE_NIGHT_MASK)|android.content.res.Configuration.UI_MODE_NIGHT_YES;
+            activity.getResources().updateConfiguration(nightConfig,activity.getResources().getDisplayMetrics());
+            activity.onConfigurationChanged(nightConfig);
+            assertTrue((Boolean)field(activity,"DARK"));
+            assertEquals(0xff17212b,((android.graphics.drawable.ColorDrawable)activity.getWindow().getDecorView().getBackground()).getColor());
+            assertEquals(0,activity.getWindow().getInsetsController().getSystemBarsAppearance()&lightMask);
+        }finally{RuntimeEnvironment.setQualifiers(qualifiers);if(dialog!=null)dialog.dismiss();ac.pause().stop().destroy();sc.destroy();}
+    }
+    @Test public void legacySystemBarsClearAndSetLightFlagsAcrossApiLevels() {
+        int light26=View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+        int light27=View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR|View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+        assertEquals(light26,SystemBars.legacySystemUiVisibility(0,false,26)&light27);
+        assertEquals(light27,SystemBars.legacySystemUiVisibility(0,false,28)&light27);
+        assertEquals(0,SystemBars.legacySystemUiVisibility(light27,true,26)&light27);
+        assertEquals(0,SystemBars.legacySystemUiVisibility(light27,true,28)&light27);
+        assertEquals(0xff17212b,SystemBars.navigationBarColor(false,0xffffffff,26));
+        assertEquals(0xffffffff,SystemBars.navigationBarColor(false,0xffffffff,27));
+        assertEquals(0xff17212b,SystemBars.navigationBarColor(true,0xff17212b,26));
+    }
 }

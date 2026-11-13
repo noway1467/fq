@@ -19,6 +19,7 @@ public final class RemoteActivity extends Activity {
     private WebView web;
     private Uri target;
     private boolean landscape=true;
+    private boolean dark;
     private final Handler main=new Handler(Looper.getMainLooper());
     private final Runnable loadTimeout=this::unavailable;
     private void unavailable(){if(!isFinishing()){Toast.makeText(this,"设备未连接或尚未开启远控",Toast.LENGTH_SHORT).show();finish();}}
@@ -38,7 +39,7 @@ public final class RemoteActivity extends Activity {
         super.onCreate(state);target=getIntent().getData();if(!validTarget(target)){Toast.makeText(this,"远控地址无效，请从联系人菜单打开",Toast.LENGTH_LONG).show();finish();return;}
         landscape=state==null?getSharedPreferences("settings",MODE_PRIVATE).getBoolean(getIntent().getBooleanExtra("phone",false)?"phone_remote_landscape":"remote_landscape",!getIntent().getBooleanExtra("phone",false)):state.getBoolean("landscape",true);setRequestedOrientation(landscape?ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE:ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
-        boolean dark=getSharedPreferences("settings",MODE_PRIVATE).getBoolean("dark_mode",false);int surface=dark?0xff17212b:Color.WHITE;
+        dark=SystemBars.isDark(this);int surface=dark?0xff17212b:Color.WHITE;
         LinearLayout root=new LinearLayout(this);root.setOrientation(LinearLayout.VERTICAL);root.setBackgroundColor(surface);
         web=new WebView(this){@Override public InputConnection onCreateInputConnection(EditorInfo attributes){InputConnection connection=super.onCreateInputConnection(attributes);attributes.imeOptions|=EditorInfo.IME_FLAG_NO_EXTRACT_UI|EditorInfo.IME_FLAG_NO_FULLSCREEN;return connection;}};web.setBackgroundColor(surface);WebSettings settings=web.getSettings();settings.setJavaScriptEnabled(true);settings.setAllowFileAccess(false);settings.setAllowContentAccess(false);settings.setDomStorageEnabled(true);settings.setSupportMultipleWindows(false);settings.setJavaScriptCanOpenWindowsAutomatically(false);settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);settings.setMediaPlaybackRequiresUserGesture(true);
         CookieManager.getInstance().setAcceptThirdPartyCookies(web,false);
@@ -61,6 +62,7 @@ public final class RemoteActivity extends Activity {
             @Override public void onPageFinished(WebView view,String url){if(samePage(Uri.parse(url))){main.removeCallbacks(loadTimeout);view.evaluateJavascript("document.documentElement.dataset.native='true';document.documentElement.dataset.nativePairing='true';document.documentElement.dataset.theme='"+(dark?"dark":"light")+"';window.feiqCheck && window.feiqCheck();",null);updateRotation();}}
         });
         root.addView(web,new LinearLayout.LayoutParams(-1,0,1));setContentView(root);
+        SystemBars.apply(getWindow(),surface,dark);
         if(Build.VERSION.SDK_INT>=30){getWindow().setDecorFitsSystemWindows(false);root.setOnApplyWindowInsetsListener((v,insets)->{android.graphics.Insets bars=insets.getInsets(WindowInsets.Type.systemBars()|WindowInsets.Type.displayCutout());android.graphics.Insets ime=insets.getInsets(WindowInsets.Type.ime());v.setPadding(bars.left,bars.top,bars.right,Math.max(bars.bottom,ime.bottom));return insets;});}
         else root.setFitsSystemWindows(true);
         hideSystemBars();
@@ -69,11 +71,13 @@ public final class RemoteActivity extends Activity {
     private void rotate(){landscape=!landscape;getSharedPreferences("settings",MODE_PRIVATE).edit().putBoolean(getIntent().getBooleanExtra("phone",false)?"phone_remote_landscape":"remote_landscape",landscape).apply();setRequestedOrientation(landscape?ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE:ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT);updateRotation();}
     private void updateRotation(){web.evaluateJavascript("document.getElementById('rotate').textContent='"+(landscape?"竖屏":"横屏")+"';",null);}
     @SuppressWarnings("deprecation") private void hideSystemBars(){
+        SystemBars.appearance(getWindow(),dark);
         if(Build.VERSION.SDK_INT>=30){WindowInsetsController controller=getWindow().getInsetsController();if(controller!=null){controller.hide(WindowInsets.Type.systemBars());controller.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);}}
-        else getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_FULLSCREEN|View.SYSTEM_UI_FLAG_HIDE_NAVIGATION|View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+        else getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_FULLSCREEN|View.SYSTEM_UI_FLAG_HIDE_NAVIGATION|View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY|SystemBars.lightBarFlags(dark));
     }
     @Override protected void onSaveInstanceState(Bundle state){state.putBoolean("landscape",landscape);super.onSaveInstanceState(state);}
     @Override protected void onPause(){if(web!=null){web.evaluateJavascript("window.feiqStop && window.feiqStop();",null);CookieManager.getInstance().flush();web.onPause();}super.onPause();}
+    @Override public void onWindowFocusChanged(boolean hasFocus){super.onWindowFocusChanged(hasFocus);if(hasFocus)hideSystemBars();}
     @Override protected void onResume(){super.onResume();if(web!=null){web.onResume();hideSystemBars();web.evaluateJavascript("window.feiqCheck && window.feiqCheck();",null);}}
     @Override protected void onDestroy(){main.removeCallbacksAndMessages(null);if(web!=null){web.stopLoading();((android.view.ViewGroup)web.getParent()).removeView(web);web.destroy();web=null;}super.onDestroy();}
 }

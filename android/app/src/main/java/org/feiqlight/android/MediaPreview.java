@@ -60,15 +60,22 @@ final class MediaPreview {
     }
     void open(Uri uri,String name) {
         if(video(name)) {
-            Dialog dialog=new Dialog(activity,android.R.style.Theme_Material_Light_NoActionBar_Fullscreen); LinearLayout layout=new LinearLayout(activity);layout.setOrientation(LinearLayout.VERTICAL);
-            Button close=new Button(activity);close.setText("关闭视频");layout.addView(close); VideoView video=new VideoView(activity);layout.addView(video,new LinearLayout.LayoutParams(-1,0,1));
+            LinearLayout layout=new LinearLayout(activity); Dialog dialog=fullscreenViewer("关闭视频",layout);
+            VideoView video=new VideoView(activity);layout.addView(video,new LinearLayout.LayoutParams(-1,0,1));
             MediaController controls=new MediaController(activity);controls.setAnchorView(video);video.setMediaController(controls);
             video.setOnErrorListener((player,what,extra)->{Toast.makeText(activity,"格式不支持或文件已失效，请使用文件菜单打开",Toast.LENGTH_LONG).show();dialog.dismiss();return true;});
-            close.setOnClickListener(v->dialog.dismiss());dialog.setOnDismissListener(d->video.stopPlayback());dialog.setContentView(layout);dialog.show();video.setVideoURI(uri);video.setOnPreparedListener(player->{video.start();controls.show();});return;
+            dialog.setOnDismissListener(d->video.stopPlayback());dialog.show();SystemBars.apply(dialog.getWindow(),Color.BLACK,true);video.setVideoURI(uri);video.setOnPreparedListener(player->{video.start();controls.show();});return;
         }
-        Dialog dialog=new Dialog(activity,android.R.style.Theme_Material_Light_NoActionBar_Fullscreen); LinearLayout layout=new LinearLayout(activity);layout.setOrientation(LinearLayout.VERTICAL);
-        Button close=new Button(activity);close.setText("关闭图片 · 双指缩放 / 拖动");layout.addView(close); ZoomImage image=new ZoomImage(activity);layout.addView(image,new LinearLayout.LayoutParams(-1,0,1));dialog.setContentView(layout);close.setOnClickListener(v->dialog.dismiss());dialog.show();
+        LinearLayout layout=new LinearLayout(activity); Dialog dialog=fullscreenViewer("关闭图片 · 双指缩放 / 拖动",layout);
+        ZoomImage image=new ZoomImage(activity);layout.addView(image,new LinearLayout.LayoutParams(-1,0,1));dialog.show();SystemBars.apply(dialog.getWindow(),Color.BLACK,true);
         try {worker.execute(()->{Bitmap bitmap=null;try{bitmap=image(activity,uri,2048);}catch(Exception|OutOfMemoryError ignored){} Bitmap result=bitmap;main.post(()->{if(closed||!dialog.isShowing()){if(result!=null)result.recycle();return;}if(result==null){Toast.makeText(activity,"图片无法预览",Toast.LENGTH_LONG).show();dialog.dismiss();}else{image.setImageBitmap(result);dialog.setOnDismissListener(d->{image.setImageDrawable(null);result.recycle();});}});});}catch(RejectedExecutionException e){dialog.dismiss();Toast.makeText(activity,"预览繁忙，请稍后重试",Toast.LENGTH_SHORT).show();}
+    }
+    private Dialog fullscreenViewer(String closeLabel,LinearLayout layout) {
+        Dialog dialog=new Dialog(activity,android.R.style.Theme_Material_NoActionBar_Fullscreen);
+        layout.setOrientation(LinearLayout.VERTICAL);layout.setBackgroundColor(Color.BLACK);
+        if(Build.VERSION.SDK_INT>=30){layout.setOnApplyWindowInsetsListener((v,insets)->{Insets b=insets.getInsets(WindowInsets.Type.systemBars()|WindowInsets.Type.displayCutout());v.setPadding(b.left,b.top,b.right,b.bottom);return insets;});}else layout.setFitsSystemWindows(true);
+        Button close=new Button(activity);close.setText(closeLabel);close.setAllCaps(false);close.setTextColor(0xffe9eef3);close.setBackgroundColor(0xff22303d);layout.addView(close);
+        dialog.setContentView(layout);close.setOnClickListener(v->dialog.dismiss());SystemBars.apply(dialog.getWindow(),Color.BLACK,true);return dialog;
     }
     void close() {closed=true;worker.shutdownNow();}
     static final class ZoomImage extends ImageView {

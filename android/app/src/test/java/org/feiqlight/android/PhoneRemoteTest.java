@@ -141,4 +141,33 @@ public final class PhoneRemoteTest {
             assertEquals(204,call(server.port(),"/native/unavailable","",null,false).code);
         }
     }
+    @Test public void systemBarsFollowDarkModeAndSystemNight(){
+        int lightMask=android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS|android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
+        String qualifiers=RuntimeEnvironment.getQualifiers();
+        try{
+            context.getSharedPreferences("settings",Context.MODE_PRIVATE).edit().putBoolean("follow_system_theme",false).putBoolean("dark_mode",false).commit();
+            try(org.robolectric.android.controller.ActivityController<PhoneRemoteActivity> controller=Robolectric.buildActivity(PhoneRemoteActivity.class).setup()){
+                PhoneRemoteActivity activity=controller.get();
+                assertEquals(0xffffffff,((android.graphics.drawable.ColorDrawable)activity.getWindow().getDecorView().getBackground()).getColor());
+                assertEquals(lightMask,activity.getWindow().getInsetsController().getSystemBarsAppearance()&lightMask);
+                if(android.os.Build.VERSION.SDK_INT<35)assertEquals(0xffffffff,activity.getWindow().getStatusBarColor());
+            }
+            context.getSharedPreferences("settings",Context.MODE_PRIVATE).edit().putBoolean("follow_system_theme",false).putBoolean("dark_mode",true).commit();
+            try(org.robolectric.android.controller.ActivityController<PhoneRemoteActivity> controller=Robolectric.buildActivity(PhoneRemoteActivity.class).setup()){
+                PhoneRemoteActivity activity=controller.get();
+                assertEquals(0xff17212b,((android.graphics.drawable.ColorDrawable)activity.getWindow().getDecorView().getBackground()).getColor());
+                assertEquals(0,activity.getWindow().getInsetsController().getSystemBarsAppearance()&lightMask);
+                if(android.os.Build.VERSION.SDK_INT<35){assertEquals(0xff17212b,activity.getWindow().getStatusBarColor());assertEquals(0xff17212b,activity.getWindow().getNavigationBarColor());}
+                android.view.View root=((android.view.ViewGroup)activity.findViewById(android.R.id.content)).getChildAt(0);
+                assertEquals(0xff17212b,((android.graphics.drawable.ColorDrawable)root.getBackground()).getColor());
+            }
+            context.getSharedPreferences("settings",Context.MODE_PRIVATE).edit().putBoolean("follow_system_theme",true).putBoolean("dark_mode",false).commit();
+            RuntimeEnvironment.setQualifiers("+night");
+            try(org.robolectric.android.controller.ActivityController<PhoneRemoteActivity> controller=Robolectric.buildActivity(PhoneRemoteActivity.class).setup()){
+                PhoneRemoteActivity activity=controller.get();
+                assertEquals(0xff17212b,((android.graphics.drawable.ColorDrawable)activity.getWindow().getDecorView().getBackground()).getColor());
+                assertEquals(0,activity.getWindow().getInsetsController().getSystemBarsAppearance()&lightMask);
+            }
+        }finally{RuntimeEnvironment.setQualifiers(qualifiers);}
+    }
 }
