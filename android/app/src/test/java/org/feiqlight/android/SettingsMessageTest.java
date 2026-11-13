@@ -179,4 +179,44 @@ public final class SettingsMessageTest {
             Bitmap image=Bitmap.createBitmap(decor.getWidth(),decor.getHeight(),Bitmap.Config.ARGB_8888);decor.draw(new Canvas(image));try(OutputStream output=new FileOutputStream(new File(System.getProperty("feiq.previewDir"),"android-emoji-large-font-small-screen.png"))){assertTrue(image.compress(Bitmap.CompressFormat.PNG,100,output));}finally{image.recycle();}
         } finally {if(dialog!=null)dialog.dismiss();ac.pause().stop().destroy();sc.destroy();RuntimeEnvironment.setFontScale(1f);}
     }
+    @Test public void messageBubblesClearOppositeAvatarColumnAndNicknameUpdatesLive() throws Exception {
+        ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();
+        shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));
+        ActivityController<MainActivity> ac=Robolectric.buildActivity(MainActivity.class).create().start().resume().visible();MainActivity activity=ac.get();
+        Dialog settings=null;
+        int remotePort,localPort;
+        try(java.net.ServerSocket a=new java.net.ServerSocket(0,1,java.net.InetAddress.getLoopbackAddress());java.net.ServerSocket b=new java.net.ServerSocket(0,1,java.net.InetAddress.getLoopbackAddress())){remotePort=a.getLocalPort();localPort=b.getLocalPort();}
+        try(LanNode remote=new LanNode(remotePort,true,"remote","test","远端","",new LanNode.Listener(){public void peersChanged(){}public void message(LanNode.Peer p,LanNode.Message m,boolean u){}public void error(String t){}})) {
+            remote.start();settle(service);
+            service.getSharedPreferences("settings",0).edit().putInt("port",localPort).putString("name","旧手机昵称").commit();
+            service.connectionFactory=(prefs,listener)->new LanNode(localPort,true,"local-test","test",prefs.getString("name","Android"),prefs.getString("group","我的局域网"),listener);
+            service.onStartCommand(new Intent(),0,1);settle(service);
+            LanNode local=(LanNode)field(service,"node");assertNotNull(local);
+            local.probe(LanNode.endpoint("127.0.0.1:"+remotePort));
+            long wait=System.nanoTime()+TimeUnit.SECONDS.toNanos(3);
+            while(System.nanoTime()<wait&&(remote.peers().isEmpty()||local.peers().isEmpty()))Thread.sleep(20);
+            assertEquals("旧手机昵称",remote.peers().get(0).name);
+            LanNode.Peer peer=local.peers().get(0);
+            LanNode.Message incoming=new LanNode.Message();incoming.number=1;incoming.time=1;incoming.state="已收到";incoming.text="这是一条很长的接收消息用于检查气泡不会越过右侧对方头像所在区域并且保持合适边距";
+            LanNode.Message outgoing=new LanNode.Message();outgoing.number=2;outgoing.time=2;outgoing.outgoing=true;outgoing.state="已送达";outgoing.text="这是一条很长的发送消息用于检查气泡不会越过左侧对方头像所在区域并且保持合适边距";
+            service.incoming(peer,incoming,false);service.incoming(peer,outgoing,false);settle(service);
+            invoke(activity,"open",new Class<?>[]{String.class},peer.id());settle(service);
+            View decor=activity.getWindow().getDecorView();decor.measure(View.MeasureSpec.makeMeasureSpec(720,View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(1280,View.MeasureSpec.EXACTLY));decor.layout(0,0,720,1280);
+            LinearLayout messages=(LinearLayout)field(activity,"messages");
+            assertTrue("两侧头像应更贴边",messages.getPaddingLeft()<=Math.round(6*activity.getResources().getDisplayMetrics().density));
+            View inRow=views(messages).stream().filter(v->"消息：这是一条很长的接收消息用于检查气泡不会越过右侧对方头像所在区域并且保持合适边距".contentEquals(v.getContentDescription()==null?"":v.getContentDescription())).findFirst().orElseThrow();
+            View outRow=views(messages).stream().filter(v->"消息：这是一条很长的发送消息用于检查气泡不会越过左侧对方头像所在区域并且保持合适边距".contentEquals(v.getContentDescription()==null?"":v.getContentDescription())).findFirst().orElseThrow();
+            ViewGroup inParent=(ViewGroup)inRow.getParent(),outParent=(ViewGroup)outRow.getParent();
+            View inAvatar=inParent.getChildAt(0),outAvatar=outParent.getChildAt(1);
+            assertTrue("接收气泡右缘不应超过对方头像左缘: "+inRow.getRight()+" vs "+outAvatar.getLeft(),inRow.getRight()<=outAvatar.getLeft());
+            assertTrue("发出气泡左缘不应超过对方头像右缘: "+outRow.getLeft()+" vs "+inAvatar.getRight(),outRow.getLeft()>=inAvatar.getRight());
+            snapshot(decor,"android-bubble-width-and-avatar");
+            invoke(activity,"settings",new Class<?>[0]);settings=ShadowDialog.getLatestDialog();
+            EditText nameField=views(settings.getWindow().getDecorView()).stream().filter(v->v instanceof EditText&&"昵称".contentEquals(v.getContentDescription()==null?"":v.getContentDescription())).map(v->(EditText)v).findFirst().orElseThrow();
+            nameField.setText("实时新昵称");click(settings,"保存");settle(service);
+            long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(3);
+            while(System.nanoTime()<deadline&&!"实时新昵称".equals(remote.peers().get(0).name))Thread.sleep(20);
+            assertEquals("实时新昵称",remote.peers().get(0).name);
+        } finally {if(settings!=null)settings.dismiss();ac.pause().stop().destroy();sc.destroy();}
+    }
 }

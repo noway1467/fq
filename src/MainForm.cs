@@ -69,7 +69,7 @@ public sealed class MainForm : ModernWindow
             string[] names = { "全部", "未读", "在线" };
             for (int i = 0; i < names.Length; i++) { int value = i; RoundedButton button = (RoundedButton)Theme.Button(names[i], delegate { filter = value; RefreshFilters(); RefreshPeers(); }, false); button.Size = new Size(88, 44); button.Margin = Padding.Empty; filters.Add(button); tabs.Add(button); }
             sidebar.Controls.Add(tabs, 0, 1); contacts.Dock = DockStyle.Fill; contacts.Margin = Padding.Empty; contacts.PeerActivated += OpenChat; contacts.PeerMenuRequested += ShowConversationMenu; sidebar.Controls.Add(contacts, 0, 2);
-            Panel footer = new Panel { Dock = DockStyle.Fill, Padding = new Padding(14, 0, 10, 0), Margin = Padding.Empty, BackColor = Theme.Surface };
+            Panel footer = new Panel { Dock = DockStyle.Fill, Padding = new Padding(14, 1, 10, 0), Margin = Padding.Empty, BackColor = Theme.Surface };
             footer.Paint += delegate(object sender, PaintEventArgs e)
             {
                 using (Pen line = new Pen(Theme.Line)) e.Graphics.DrawLine(line, 0, 0, footer.Width, 0);
@@ -82,8 +82,8 @@ public sealed class MainForm : ModernWindow
                 using(SolidBrush dot = new SolidBrush(started ? Theme.Online : Theme.Muted)) e.Graphics.FillEllipse(dot, 0, (connectionDot.Height - diameter) / 2, diameter, diameter);
             }; footer.Controls.Add(connectionDot);
             status.TextChanged += delegate { connectionDot.Invalidate(); };
-            Button refresh = Theme.IconButton("refresh", "刷新", delegate { RefreshNetwork(); }, false); refresh.Dock = DockStyle.Right; refresh.Size = new Size(40, 40); refresh.Margin = Padding.Empty; footer.Controls.Add(refresh);
-            Button settings = Theme.IconButton("settings", "设置", delegate { OpenSettings(); }, false); settings.Dock = DockStyle.Right; settings.Size = new Size(40, 40); settings.Margin = new Padding(0, 0, 4, 0); footer.Controls.Add(settings);
+            RoundedButton refresh = (RoundedButton)Theme.IconButton("refresh", "刷新", delegate { RefreshNetwork(); }, false); refresh.PlainHover = true; refresh.Dock = DockStyle.Right; refresh.Size = new Size(40, 40); refresh.Margin = Padding.Empty; footer.Controls.Add(refresh);
+            RoundedButton settings = (RoundedButton)Theme.IconButton("settings", "设置", delegate { OpenSettings(); }, false); settings.PlainHover = true; settings.Dock = DockStyle.Right; settings.Size = new Size(40, 40); settings.Margin = new Padding(0, 0, 4, 0); footer.Controls.Add(settings);
             sidebar.Controls.Add(footer, 0, 3);
             chatHost.Hint = "选择联系人开始聊天";
             tray = new NotifyIcon { Icon = Theme.TrayIcon, Text = "飞Q", Visible = true };

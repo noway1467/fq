@@ -503,8 +503,8 @@ namespace FeiqLight
     {
         public string Glyph = "";
         public int Radius = Theme.ControlRadius;
-        // 标签样式：无底色，激活时强调色文字与指示条由容器绘制；Badge 为未读计数。
-        public bool Tab, Active;
+        // 标签样式：无底色，激活时强调色文字与指示条由容器绘制；Badge 为未读计数；PlainHover 仅调整前景色不画悬停底色。
+        public bool Tab, Active, PlainHover;
         public int Badge;
         // 窗口关闭键等特殊悬停色；为空时按底色自动加深。
         public Color HoverBack = Color.Empty, HoverFore = Color.Empty;
@@ -537,14 +537,14 @@ namespace FeiqLight
             Color fill = Tab ? back : BackColor;
             Color hovered = !HoverBack.IsEmpty ? HoverBack : primary ? Theme.Blend(Color.Black, fill, .12F) : Theme.Blend(Theme.Ink, fill, Theme.Dark ? .10F : .06F);
             // 禁用态与容器底色混合而不是统一刷成灰块，按钮轮廓仍可辨认。
-            if (Enabled) fill = Motion.Mix(fill, hovered, Tab ? 0 : h); else if (!Tab) fill = Theme.Blend(fill, back, primary ? .45F : .6F);
+            if (Enabled) fill = Motion.Mix(fill, hovered, (Tab || PlainHover) ? 0 : h); else if (!Tab) fill = Theme.Blend(fill, back, primary ? .45F : .6F);
             RectangleF area = new RectangleF(.5F, .5F, Width - 1, Height - 1);
             float radius = Math.Min(Radius * scale, Math.Min(area.Width, area.Height) / 2);
             using (GraphicsPath path = Theme.RoundedF(area, radius))
             {
                 if (fill.ToArgb() != back.ToArgb()) using (SolidBrush b = new SolidBrush(fill)) g.FillPath(b, path);
                 double since = Motion.Now - rippleStart;
-                if (since >= 0 && since < 100000 && (pressed || Motion.Now - rippleEnd < 420))
+                if (!PlainHover && since >= 0 && since < 100000 && (pressed || Motion.Now - rippleEnd < 420))
                 {
                     double grow = Motion.EaseOut(Math.Min(1, since / 380)), fade = pressed ? 1 : Math.Max(0, 1 - (Motion.Now - rippleEnd) / 420);
                     float reach = (float)(Math.Sqrt(Width * Width + Height * Height) * (.25 + .85 * grow));
@@ -558,6 +558,7 @@ namespace FeiqLight
             Color color = Enabled ? ForeColor : Theme.Blend(ForeColor, fill, .45F);
             if (Tab) color = Active ? Theme.Blue : Motion.Mix(Theme.Muted, Theme.Ink, h);
             else if (!HoverFore.IsEmpty && Enabled) color = Motion.Mix(ForeColor, HoverFore, h);
+            else if (PlainHover && Enabled) color = Motion.Mix(ForeColor, Theme.Ink, h);
             if (Glyph.Length > 0)
             {
                 float icon = Math.Min(22 * scale, Math.Min(Width, Height) - 10 * scale);

@@ -894,7 +894,7 @@ namespace FeiqLight.Tests
                     Form saved=form;
                     using(Bitmap image=new Bitmap(saved.Width,saved.Height)) saved.DrawToBitmap(image,new Rectangle(Point.Empty,image.Size));
                     var hits=(List<Tuple<Rectangle,bool>>)typeof(BubbleHistory).GetField("avatarHits",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(history);
-                    int expected=(int)Math.Round(44*history.DeviceDpi/96F);
+                    int expected=(int)Math.Round(54*history.DeviceDpi/96F);
                     Check(hits.Count==2&&hits.All(hit=>hit.Item1.Width==expected&&hit.Item1.Height==expected),"消息头像不是固定圆形尺寸");
                     Check(hits[0].Item2==false&&hits[0].Item1.Left<hits[0].Item1.Right/2,"对方头像不在最左侧");
                     Check(hits[1].Item2&&hits[1].Item1.Right>history.Width/2,"我方头像不在最右侧");
@@ -1581,6 +1581,17 @@ namespace FeiqLight.Tests
                         b.Dispose(); Pump(() => !peer.Online && Find<Label>(chatA, "聊天联系人状态").Text == "离线", "离线未刷新聊天抬头");
                         chatA.Close(); mainA.OpenChat(peer);
                         Check(Find<Label>(chatA, "聊天联系人状态").Text == "离线" && Find<Label>(chatA, "聊天联系人昵称").Text == peer.Nickname, "恢复会话显示旧资料");
+                    });
+                    test("视觉布局：聊天气泡头像放大与底栏边线按钮无悬停底色", () =>
+                    {
+                        Button refreshBtn = Find<Button>(mainA, "刷新"), settingsBtn = Find<Button>(mainA, "设置");
+                        Control footer = refreshBtn.Parent;
+                        Check(footer.Padding.Top >= 1, "底栏顶部未留出边线空间，子控件会遮住边线");
+                        Check(refreshBtn.Top >= 1 && settingsBtn.Top >= 1, "刷新/设置按钮遮住了底栏边线");
+                        Check(((RoundedButton)refreshBtn).PlainHover && ((RoundedButton)settingsBtn).PlainHover, "刷新/设置按钮仍带有悬停底色");
+                        BubbleHistory history = Find<BubbleHistory>(chatA, "聊天记录");
+                        int avatarSize = (int)typeof(BubbleHistory).GetProperty("AvatarSize", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(history, null);
+                        Check(avatarSize >= (int)Math.Round(54 * history.DeviceDpi / 96F), "Windows 聊天头像未调大");
                     });
                     test("菜单回归：退出释放菜单并保存未确认消息终态", () =>
                     {

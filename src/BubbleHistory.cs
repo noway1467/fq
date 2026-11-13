@@ -270,7 +270,7 @@ namespace FeiqLight
         private int PadX { get { return Dp(11); } }
         private int PadTop { get { return Dp(7); } }
         private int PadBottom { get { return Dp(7); } }
-        private int AvatarSize { get { return Dp(44); } }
+        private int AvatarSize { get { return Dp(54); } }
         private int FileRow { get { return Dp(52); } }
         private int MediaHeight { get { return Dp(172); } }
         private int Caption { get { return Dp(20); } }
@@ -432,7 +432,7 @@ namespace FeiqLight
             ChatWallpaper.Draw(g, ClientRectangle, wallpaperPattern, wallpaperImage, DpiScale);
             mediaHits.Clear(); linkHits.Clear(); fileHits.Clear(); stampHits.Clear(); retryHits.Clear(); avatarHits.Clear();
             g.SmoothingMode = SmoothingMode.AntiAlias; g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
-            int dy = -ScrollOffset + Shift, first = FirstVisible(-dy - Dp(48));
+            int dy = -ScrollOffset + Shift, first = FirstVisible(-dy - Math.Max(Dp(48), AvatarSize));
             for (int i = first; i < records.Count && i < bounds.Count; i++)
             {
                 Item item = items[i];

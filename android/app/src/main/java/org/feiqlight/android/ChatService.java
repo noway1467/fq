@@ -147,6 +147,8 @@ public final class ChatService extends Service {
                 });
                 next.setDeviceId(deviceId);
                 String avatar=Protocol.normalizeAvatar(prefs.getString("avatar","default"));next.setAvatar(avatar==null?"default":avatar);
+                next.nickname=prefs.getString("name",Build.MODEL);
+                next.group=prefs.getString("group","我的局域网");
                 next.rememberPeers(store.conversations().stream().map(c->c.peer).collect(java.util.stream.Collectors.toList()));
                 next.rememberEndpoints(store.conversations().stream().map(c->c.peer.endpoint).collect(java.util.stream.Collectors.toList()));
                 next.setSocketBinding(new LanNetwork(getSystemService(ConnectivityManager.class)));
@@ -208,10 +210,18 @@ public final class ChatService extends Service {
         });
     }
     void receiveSettingsChanged() { drainReceives(); changed(); }
-    void avatarSettingsChanged() {
-        LanNode current=node;String avatar=Protocol.normalizeAvatar(getSharedPreferences("settings",MODE_PRIVATE).getString("avatar","default"));
-        if(current!=null){current.setAvatar(avatar==null?"default":avatar);refresh();}
+    void profileSettingsChanged() {
+        LanNode current=node;
+        SharedPreferences prefs=getSharedPreferences("settings",MODE_PRIVATE);
+        String avatar=Protocol.normalizeAvatar(prefs.getString("avatar","default"));
+        if(current!=null){
+            current.setAvatar(avatar==null?"default":avatar);
+            current.nickname=prefs.getString("name",Build.MODEL);
+            current.group=prefs.getString("group","我的局域网");
+            refresh();
+        }
     }
+    void avatarSettingsChanged() { profileSettingsChanged(); }
     void deleteMessages(String peer,List<LanNode.Message> messages,Consumer<Boolean> done) {
         boolean pending=messages.stream().anyMatch(message->waiting.values().stream().anyMatch(r->!message.outgoing&&r.peer.id().equals(peer)&&r.packet==message.number)||message.files.stream().anyMatch(file->{
             FileProgress progress=progress(peer,message.number,file.id,message.outgoing);

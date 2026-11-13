@@ -232,7 +232,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
     private int editorGeneration;
     private void renderChat() {
         body.setBackground(chatWallpaper()); scroll=new ScrollView(this); scroll.setFillViewport(true); scroll.setClipToPadding(false);
-        messages=column(); messages.setPadding(dp(12),dp(18),dp(12),dp(18)); scroll.addView(messages,new ScrollView.LayoutParams(-1,-2)); body.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
+        messages=column(); messages.setPadding(dp(4),dp(18),dp(4),dp(18)); scroll.addView(messages,new ScrollView.LayoutParams(-1,-2)); body.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
         transferStatus=text("",12,BLUE); transferStatus.setMaxLines(2); transferStatus.setEllipsize(TextUtils.TruncateAt.END); transferStatus.setPadding(dp(16),dp(8),dp(16),dp(8)); transferStatus.setBackgroundColor(SURFACE); transferStatus.setOnClickListener(v->{ if(service!=null&&service.busy()) confirm("文件传输","取消当前任务？","取消任务",()->service.cancelTransfer()); }); body.addView(transferStatus);
         sendStatus=text("正在发送…",12,MUTED);sendStatus.setPadding(dp(16),dp(4),dp(16),dp(4));sendStatus.setBackgroundColor(SURFACE);sendStatus.setVisibility(View.GONE);sendStatus.setContentDescription("消息发送状态");body.addView(sendStatus);
         LinearLayout composer=new LinearLayout(this) {
@@ -360,7 +360,9 @@ public final class MainActivity extends Activity implements ChatService.Observer
         int previousY=scroll.getScrollY();
         boolean bottom=scroll.getChildAt(0).getHeight()-previousY-scroll.getHeight()<dp(100); boolean first=historySignature.isEmpty(); historySignature=fingerprint.toString(); messages.removeAllViews();messageViews.clear();messageAvatarViews.clear();
         int viewport=scroll.getWidth()>0?scroll.getWidth():getResources().getDisplayMetrics().widthPixels;
-        int maxWidth=Math.min((int)(viewport*.79f),viewport-messages.getPaddingLeft()-messages.getPaddingRight()-dp(56));
+        int avatarGap=dp(6), avatarSlot=dp(48)+avatarGap;
+        int rowWidth=viewport-messages.getPaddingLeft()-messages.getPaddingRight();
+        int maxWidth=Math.max(dp(120),Math.min(dp(540),rowWidth-avatarSlot*2));
         String lastDate=""; int previewCount=0; float density=getResources().getDisplayMetrics().density;
         final String cardPeer=selected;final int cardGeneration=editorGeneration;
         for(int index=0;index<rows.size();index++) {
@@ -384,7 +386,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
                 if(m.outgoing)settings();else {ChatStore.Conversation contact=conversation(cardPeer);if(contact!=null)showContactProfile(contact);}
             });messageAvatarViews.add(portrait);
             LinearLayout.LayoutParams ap=new LinearLayout.LayoutParams(dp(48),dp(48));ap.bottomMargin=-dp(2);
-            if(!m.outgoing){ap.rightMargin=dp(8);messageRow.addView(portrait,ap);}else ap.leftMargin=dp(8);
+            if(!m.outgoing){ap.rightMargin=avatarGap;messageRow.addView(portrait,ap);}else ap.leftMargin=avatarGap;
             final TextView[] menuStamp={null};
             LinearLayout bubble=new LinearLayout(this) {
                 private boolean cardTouch;
@@ -849,7 +851,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
             View backdrop=backgrounds.findViewById(backgrounds.getCheckedRadioButtonId());String backdropKey=backdrop==null?"orbits":backdrop.getTag().toString();
             if(backdropKey.equals("image")&&prefs.getString("background_image","").isEmpty()){dialog.getWindow().getDecorView().findViewWithTag("settings-tab:1").performClick();error("请先选择背景图片");return;}
             boolean saved=prefs.edit().putString("avatar",avatarValue[0]).putString("name",n).putString("group",g).putInt("port",p).putBoolean("auto_connect",autoConnect.isChecked()).putBoolean("diagnostics",diagnosticSwitch.isChecked()).putBoolean(ReceivedStorage.AUTO,automatic.isChecked()).putBoolean("follow_system_theme",follow.isChecked()).putBoolean("dark_mode",dark.isChecked()).putString("accent",color==null?"blue":color.getTag().toString()).putInt("chat_font_size",fontSize.getProgress()+14).putString("chat_background",backdropKey).commit();
-            if(!saved){error("设置未保存，请检查设备存储空间");return;}if(service!=null){service.receiveSettingsChanged();service.avatarSettingsChanged();}dialog.dismiss();saveDraft();renderPage();error("已保存；头像、主题和接收选项立即生效，昵称和端口下次连接生效");
+            if(!saved){error("设置未保存，请检查设备存储空间");return;}if(service!=null){service.receiveSettingsChanged();service.profileSettingsChanged();}dialog.dismiss();saveDraft();renderPage();error("已保存；昵称、头像、主题和接收选项立即生效，端口下次连接生效");
         });
     }
     private void showAvatarPicker(String value,java.util.function.Consumer<String> use) {
