@@ -16,6 +16,8 @@
 !/package.ps1
 /docs/*
 !/docs/Twemoji-LICENSE-GRAPHICS.txt
+!/docs/preview.png
+!/docs/preview-dark.png
 
 # 代理指令、私密配置、用户数据、密钥和生成物永不提交。
 **/[Aa][Gg][Ee][Nn][Tt].md

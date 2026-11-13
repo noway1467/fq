@@ -2,6 +2,10 @@
 
 Windows 和 Android 局域网聊天工具，无需注册账号或服务器。
 
+![飞Q 双端界面预览（经典浅色）](docs/preview.png)
+
+![飞Q 双端界面预览（暮紫深色）](docs/preview-dark.png)
+
 ## 主要功能
 
 - **聊天**：自动发现设备，发送文字和图片，查看历史消息。
@@ -13,7 +17,7 @@ Windows 和 Android 局域网聊天工具，无需注册账号或服务器。
 
 1. 从 [GitHub Releases](https://github.com/noway1467/fq/releases) 下载对应版本。
 2. Windows 运行 EXE，Android 安装 APK 后点击连接。
-3. 两台设备连接同一个 Wi-Fi 或局域网，选择对方即可聊天。
+3. 两台设备连接同一个 Wi-Fi、以太网或手机热点（也可使用 USB 网络共享），选择对方即可聊天。
 
 Windows 需要 .NET Framework 4.8，Android 需要 8.0 或更高版本。
 

@@ -120,7 +120,7 @@ public final class LanNode implements AutoCloseable {
     private volatile DatagramSocket udp;
     private ServerSocket tcp;
     private volatile boolean closed,started,networkAvailable;
-    private volatile String networkStatus="网络已断开，等待 Wi-Fi/以太网恢复";
+    private volatile String networkStatus="网络已断开，等待 Wi-Fi、热点或以太网恢复";
     private Object networkKey;
     private volatile long refreshAt;
     public boolean networkAvailable() { return !closed && networkAvailable; }
@@ -158,7 +158,7 @@ public final class LanNode implements AutoCloseable {
                 for(Offer offer:offers.values())endOffer(offer,"网络已切换，请重新发送邀请");offers.clear();
                 for(Socket socket:connections)try{socket.close();}catch(IOException ignored){ }
                 listener.peersChanged();
-                networkState(false,"网络已断开，等待 Wi-Fi/以太网恢复");
+                networkState(false,"网络已断开，等待 Wi-Fi、热点或以太网恢复");
                 if(key==null)return;
                 DatagramSocket next=new DatagramSocket(null);
                 try {
@@ -219,7 +219,7 @@ public final class LanNode implements AutoCloseable {
             catch(IOException e){switchNetwork(null);networkState(false,e.getMessage());return;}
         }
         switchNetwork(key);
-        if(key==null){networkState(false,"网络已断开，等待 Wi-Fi/以太网恢复");return;}
+        if(key==null){networkState(false,"网络已断开，等待 Wi-Fi、热点或以太网恢复");return;}
         if(udp==null)return;
         Set<InetAddress> addresses=new HashSet<>();
         if (!loopback) {

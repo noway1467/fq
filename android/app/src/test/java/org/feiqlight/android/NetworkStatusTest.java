@@ -66,4 +66,25 @@ public final class NetworkStatusTest {
             assertFalse(service.online());assertFalse(service.canDisconnect());assertFalse(ChatService.shouldRestoreConnection(service));assertEquals("已断开",service.status());
         } finally {if(ac!=null)ac.pause().stop().destroy();sc.destroy();}
     }
+    @Test public void hotspotBroadcastTriggersRecoveryAndDisconnectUnregisters()throws Exception {
+        ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();
+        try(ServerSocket probe=new ServerSocket(0,1,InetAddress.getLoopbackAddress())) {
+            int port=probe.getLocalPort();probe.close();settle(service);
+            service.connectionFactory=(prefs,listener)->new LanNode(port,true,"hotspot-ui","host","测试","组",listener);
+            service.onStartCommand(new Intent(),0,1);settle(service);
+            LanNode node=(LanNode)field(service,"node");assertTrue(service.online());
+            Method switchNetwork=LanNode.class.getDeclaredMethod("switchNetwork",Object.class);switchNetwork.setAccessible(true);switchNetwork.invoke(node,new Object[]{null});settle(service);
+            assertFalse(service.online());
+            BroadcastReceiver receiver=(BroadcastReceiver)field(service,"tetherReceiver");
+            assertNotNull(receiver);
+            receiver.onReceive(service,new Intent("android.net.wifi.WIFI_AP_STATE_CHANGED"));
+            long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(3);
+            while(!service.online() && System.nanoTime()<deadline) { settle(service); Thread.sleep(10); }
+            assertTrue("收到热点广播应触发节点重检与恢复",service.online());
+            service.disconnect();settle(service);
+            assertNull(field(service,"tetherReceiver"));
+            receiver.onReceive(service,new Intent("android.net.conn.TETHER_STATE_CHANGED"));settle(service);
+            assertFalse(service.online());assertFalse(service.canDisconnect());assertEquals("已断开",service.status());
+        } finally {sc.destroy();}
+    }
 }

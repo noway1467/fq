@@ -57,6 +57,7 @@ public final class ChatService extends Service {
     private WifiManager.MulticastLock multicast;
     private ConnectivityManager connectivity;
     private ConnectivityManager.NetworkCallback callback;
+    private BroadcastReceiver tetherReceiver;
     private List<ChatStore.Conversation> conversations=new ArrayList<>();
     private String status="未连接", transferStatus="";
     private volatile String transferOutcome="";
@@ -175,6 +176,16 @@ public final class ChatService extends Service {
                         connectivity.registerNetworkCallback(new NetworkRequest.Builder()
                             .addTransportType(NetworkCapabilities.TRANSPORT_WIFI).addTransportType(NetworkCapabilities.TRANSPORT_ETHERNET)
                             .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN).build(),callback);
+                        IntentFilter tetherFilter=new IntentFilter();
+                        tetherFilter.addAction("android.net.wifi.WIFI_AP_STATE_CHANGED");
+                        tetherFilter.addAction("android.net.conn.TETHER_STATE_CHANGED");
+                        tetherReceiver=new BroadcastReceiver() {
+                            @Override public void onReceive(Context context,Intent intent) {
+                                if(currentConnection(epoch)&&node==connected)connected.networkChanged();
+                            }
+                        };
+                        if(Build.VERSION.SDK_INT>=33) registerReceiver(tetherReceiver,tetherFilter,Context.RECEIVER_EXPORTED);
+                        else registerReceiver(tetherReceiver,tetherFilter);
                     } catch (RuntimeException e) { showError("自动发现可能受限，可尝试手动 IP："+e.getMessage()); }
                     diagnostics.record(Diagnostics.Event.Connected);connecting=false;
                     connectedPort=prefs.getInt("port",2425);
@@ -436,6 +447,7 @@ public final class ChatService extends Service {
     private void releaseNetwork() {
         if (multicast!=null && multicast.isHeld()) multicast.release(); multicast=null;
         if (callback!=null && connectivity!=null) { try { connectivity.unregisterNetworkCallback(callback); } catch (RuntimeException ignored) { } } callback=null;
+        if (tetherReceiver!=null) { try { unregisterReceiver(tetherReceiver); } catch (RuntimeException ignored) { } } tetherReceiver=null;
     }
     void cancelTransfer() { LanNode.Transfer task=transfer; if (task!=null) task.close(); }
     private void transferJob(Throwing job) {

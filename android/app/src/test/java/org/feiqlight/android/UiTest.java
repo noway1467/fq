@@ -618,6 +618,29 @@ public final class UiTest {
             Method settings=MainActivity.class.getDeclaredMethod("settings");settings.setAccessible(true);settings.invoke(activity);android.app.Dialog dialog=org.robolectric.shadows.ShadowDialog.getLatestDialog();dialogScreenshot(dialog,"android-night-settings");dialog.dismiss();
         }finally{ac.pause().stop().destroy();sc.destroy();}
     }
+    @Test public void darkPreviewScreenshots() throws Exception {
+        ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();
+        shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));
+        service.getSharedPreferences("settings",0).edit().putBoolean("dark_mode",true).putString("accent","purple").apply();
+        ActivityController<MainActivity> ac=Robolectric.buildActivity(MainActivity.class).create().start().resume().visible();MainActivity activity=ac.get();
+        try {
+            settle(service);
+            LanNode.Peer a=new LanNode.Peer(LanNode.endpoint("127.0.0.1:32425"),"test-windows","Windows","设计讨论","界面测试");
+            LanNode.Peer b=new LanNode.Peer(LanNode.endpoint("127.0.0.1:32426"),"test-android","Android","开发联调","界面测试");
+            ExecutorService io=(ExecutorService)field(service,"io"); ChatStore store=(ChatStore)field(service,"store");
+            io.submit(()->{
+                LanNode.Message incoming=new LanNode.Message(); incoming.number=1; incoming.time=1791285000000L; incoming.text="深色主题下气泡与对比度也很清晰。\n晚上传输文件不刺眼。"; incoming.state="已收到"; store.message(a,incoming,false,false);
+                LanNode.Message outgoing=new LanNode.Message(); outgoing.number=2; outgoing.time=incoming.time+60000; outgoing.outgoing=true; outgoing.text="暮紫夜间配色与桌面端保持同步。"; outgoing.state="已送达"; store.message(a,outgoing,false,true);
+                LanNode.Message file=new LanNode.Message(); file.number=3; file.time=outgoing.time+60000; file.text="夜间模式预览资料。"; file.state="已收到"; file.files=Collections.singletonList(new Protocol.Attachment(0,"界面说明.pdf",24000,0)); store.message(a,file,false,false);
+                LanNode.Message second=new LanNode.Message(); second.number=4; second.time=incoming.time-60000; second.text="手机热点与 Wi-Fi 均可直接发现。"; second.state="已收到"; store.message(b,second,false,false);
+            }).get(5,TimeUnit.SECONDS);
+            service.active(a.id()); settle(service); service.active(""); settle(service);
+            assertEquals(2,service.conversations().size());
+            screenshot(activity,"android-conversations-dark");
+            invoke(activity,"open",String.class,a.id()); settle(service);
+            screenshot(activity,"android-chat-dark");
+        } finally { ac.pause().stop().destroy(); sc.destroy(); }
+    }
     private static void clickDialogButton(String label) {
         android.app.Dialog dialog=org.robolectric.shadows.ShadowDialog.getLatestDialog();Button button=(Button)descendants(dialog.getWindow().getDecorView()).stream().filter(v->v instanceof Button&&((Button)v).getText().toString().equals(label)).findFirst().get();button.performClick();
     }
