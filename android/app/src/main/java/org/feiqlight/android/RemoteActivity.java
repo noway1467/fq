@@ -27,7 +27,7 @@ public final class RemoteActivity extends Activity {
         String[] parts=uri.getHost().split("\\.",-1);if(parts.length!=4)return false;
         for(String part:parts){if(!part.matches("[0-9]{1,3}")||Integer.parseInt(part)>255)return false;}return true;
     }
-    private boolean samePage(Uri uri){return uri!=null&&target.getScheme().equals(uri.getScheme())&&target.getHost().equals(uri.getHost())&&target.getPort()==uri.getPort()&&uri.getUserInfo()==null&&("/".equals(uri.getPath())||"/index.html".equals(uri.getPath()));}
+    private boolean samePage(Uri uri){return uri!=null&&target.getScheme().equals(uri.getScheme())&&target.getHost().equals(uri.getHost())&&target.getPort()==uri.getPort()&&uri.getUserInfo()==null&&(uri.getPath()==null||uri.getPath().isEmpty()||"/".equals(uri.getPath())||"/index.html".equals(uri.getPath()));}
     static Intent lastConnection(Context context){
         android.content.SharedPreferences prefs=context.getSharedPreferences("settings",MODE_PRIVATE);
         Uri uri=Uri.parse(prefs.getString("last_remote_target",""));
@@ -74,6 +74,6 @@ public final class RemoteActivity extends Activity {
     }
     @Override protected void onSaveInstanceState(Bundle state){state.putBoolean("landscape",landscape);super.onSaveInstanceState(state);}
     @Override protected void onPause(){if(web!=null){web.evaluateJavascript("window.feiqStop && window.feiqStop();",null);CookieManager.getInstance().flush();web.onPause();}super.onPause();}
-    @Override protected void onResume(){super.onResume();if(web!=null){web.onResume();hideSystemBars();}}
+    @Override protected void onResume(){super.onResume();if(web!=null){web.onResume();hideSystemBars();web.evaluateJavascript("window.feiqCheck && window.feiqCheck();",null);}}
     @Override protected void onDestroy(){main.removeCallbacksAndMessages(null);if(web!=null){web.stopLoading();((android.view.ViewGroup)web.getParent()).removeView(web);web.destroy();web=null;}super.onDestroy();}
 }

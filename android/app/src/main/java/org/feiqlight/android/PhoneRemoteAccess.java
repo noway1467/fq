@@ -79,7 +79,13 @@ final class PhoneRemoteAccess implements AutoCloseable {
     }
     private void handle(ToolsHttp.Request request,ToolsHttp.Response response)throws Exception{
         if(!request.method.equals("GET")&&!request.method.equals("HEAD")&&!request.method.equals("POST"))throw new ToolsHttp.Failure(405,"不支持此操作");
-        if(request.method.equals("GET")&&request.path.equals("/api/status")){synchronized(gate){response.json(new JSONObject().put("remote",!closed).put("platform","android").toString(),"");}return;}
+        if(request.method.equals("GET")&&request.path.equals("/api/status")){
+            synchronized(gate){
+                String remembered=cookie(request,pairName());boolean paired=!closed&&pairings.contains(remembered,"phone-remote");
+                response.json(new JSONObject().put("remote",!closed).put("paired",paired).put("trusted",paired&&pairings.alwaysAllows(remembered,"phone-remote")).put("platform","android").toString(),"");
+            }
+            return;
+        }
         if(request.method.equals("POST")){
             if(request.path.equals("/api/login")||request.path.equals("/api/reconnect")){login(request,response,request.path.equals("/api/reconnect"));return;}
             int version=authorize(request);
@@ -90,7 +96,7 @@ final class PhoneRemoteAccess implements AutoCloseable {
         if(request.path.equals("/api/displays")){authorize(request);response.json(backend.displays().toString(),"");return;}
         if(request.path.equals("/api/screen")){int version=authorize(request);byte[] frame=backend.capture();if(!current(version))throw new ToolsHttp.Failure(401,"控制已停止");response.bytes(200,"image/jpeg",frame,"");return;}
         if(request.path.startsWith("/api/")||request.path.equals("/file"))throw new ToolsHttp.Failure(404,"没有此操作");
-        if(request.path.equals("/favicon.ico")){response.bytes(204,"image/x-icon",new byte[0],"");return;}
+        if(request.path.equals("/favicon.ico")||request.path.startsWith("/native/")){response.bytes(204,"image/x-icon",new byte[0],"");return;}
         String asset=request.path.equals("/")?"index.html":request.path.substring(1);
         if(!asset.equals("index.html")&&!asset.equals("app.css")&&!asset.equals("app.js"))throw new ToolsHttp.Failure(404,"没有此页面");
         try(InputStream stream=context.getAssets().open(asset);ByteArrayOutputStream output=new ByteArrayOutputStream()){

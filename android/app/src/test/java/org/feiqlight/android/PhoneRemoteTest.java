@@ -129,4 +129,16 @@ public final class PhoneRemoteTest {
             }
         }
     }
+    @Test public void statusReportsPairingAndTrustedAndNativeEndpointsReturnNoContent()throws Exception{
+        Backend backend=new Backend();backend.allows=2;
+        try(PhoneRemoteAccess server=new PhoneRemoteAccess(context,0,true,backend)){
+            Reply anonymous=call(server.port(),"/api/status","",null,false);
+            assertEquals(200,anonymous.code);assertTrue(anonymous.json().getBoolean("remote"));assertFalse(anonymous.json().getBoolean("paired"));assertFalse(anonymous.json().getBoolean("trusted"));
+            Reply first=login(server);assertEquals(200,first.code);
+            Reply paired=call(server.port(),"/api/status",first.pair,null,false);
+            assertEquals(200,paired.code);assertTrue(paired.json().getBoolean("paired"));assertTrue(paired.json().getBoolean("trusted"));
+            assertEquals(204,call(server.port(),"/native/paired","",null,false).code);
+            assertEquals(204,call(server.port(),"/native/unavailable","",null,false).code);
+        }
+    }
 }

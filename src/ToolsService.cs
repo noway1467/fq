@@ -185,7 +185,17 @@ namespace FeiqLight
         private void Handle(ToolsHttp.Request request, ToolsHttp.Response response)
         {
             if (request.Method != "GET" && request.Method != "HEAD" && request.Method != "POST") throw new ToolsHttp.HttpError(405, "不支持此操作");
-            if (request.Method == "GET" && request.Path == "/api/status") { lock (gate) response.Json(new { remote = remoteEnabled, share = folders.Length > 0, platform = "windows" }); return; }
+            if (request.Method == "GET" && request.Path == "/api/status")
+            {
+                lock (gate)
+                {
+                    string sharePair = Cookie(request, PairCookie("share")), remotePair = Cookie(request, PairCookie("remote"));
+                    bool sharePaired = !closed && folders.Length > 0 && pairings.Contains(sharePair, Scope("share"));
+                    bool remotePaired = !closed && remoteEnabled && pairings.Contains(remotePair, Scope("remote"));
+                    response.Json(new { remote = remoteEnabled, share = folders.Length > 0, paired = sharePaired, remotePaired = remotePaired, trusted = remotePaired && pairings.AlwaysAllows(remotePair, Scope("remote")), platform = "windows" });
+                }
+                return;
+            }
             if (request.Method == "POST" && (request.Path == "/api/login" || request.Path == "/api/reconnect")) { Login(request, response, request.Path == "/api/reconnect"); return; }
             if (request.Method == "POST" && request.Path == "/api/logout")
             {
@@ -245,7 +255,7 @@ namespace FeiqLight
                 return;
             }
             if (request.Path == "/file") { FileResponse(request, response, Authorize(request, "share")); return; }
-            if (request.Path == "/favicon.ico") { response.Bytes(new byte[0], "image/x-icon", 204); return; }
+            if (request.Path == "/favicon.ico" || request.Path.StartsWith("/native/", StringComparison.Ordinal)) { response.Bytes(new byte[0], "image/x-icon", 204); return; }
             string asset = request.Path == "/" ? "index.html" : request.Path.TrimStart('/');
             if (asset != "index.html" && asset != "app.js" && asset != "app.css") throw new ToolsHttp.HttpError(404, "没有此页面");
             using (Stream resource = typeof(ToolsService).Assembly.GetManifestResourceStream("FeiqLight.Tools." + asset))

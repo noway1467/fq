@@ -68,10 +68,11 @@ public final class LanNode implements AutoCloseable {
     long heartbeatIdle=TimeUnit.SECONDS.toNanos(6), heartbeatRetry=TimeUnit.SECONDS.toNanos(3);
     int idleMisses=3, verifyMisses=2;
     private volatile long verifyFrom=System.nanoTime();
-    /** 网络切换、用户刷新或回到前台时立即复核：仍能回应的联系人保持在线，失联者约 6 秒内离线。 */
+    /** 网络切换、用户刷新或回到前台时立即复核：仍能回应的联系人保持在线，失联者约 6 秒内离线，离线联系人立即探测恢复。 */
     public void revalidate() {
         long now=System.nanoTime();verifyFrom=now;
-        synchronized(gate){for(Peer peer:peers.values())if(peer.online && peer.misses==0)peer.probed=now-heartbeatRetry;}
+        synchronized(gate){for(Peer peer:peers.values())if(peer.misses==0)peer.probed=now-heartbeatRetry;}
+        if(networkDirty.compareAndSet(false,true))try {timer.execute(this::tick);}catch(RejectedExecutionException ignored) { }
     }
     public interface Progress { void update(int percent); default void update(int percent,double bytesPerSecond) { update(percent); } }
     public static final class Transfer implements AutoCloseable {
@@ -120,6 +121,7 @@ public final class LanNode implements AutoCloseable {
     private volatile DatagramSocket udp;
     private ServerSocket tcp;
     private volatile boolean closed,started,networkAvailable;
+    private boolean initialRefresh=true;
     private volatile String networkStatus="网络已断开，等待 Wi-Fi、热点或以太网恢复";
     private Object networkKey;
     private volatile long refreshAt;
@@ -138,6 +140,7 @@ public final class LanNode implements AutoCloseable {
             InetAddress address=InetAddress.getByName(loopback?"127.0.0.1":"0.0.0.0");
             tcp=new ServerSocket(); tcp.setReuseAddress(false); tcp.bind(new InetSocketAddress(address,port),4);
             refresh();
+            initialRefresh=false;
             Thread accept=new Thread(this::acceptLoop,"feiq-files");accept.setDaemon(true);accept.start();
             timer.scheduleWithFixedDelay(this::tick,1,1,TimeUnit.SECONDS);
         } catch (IOException | RuntimeException e) { close(); throw e; }
@@ -218,7 +221,14 @@ public final class LanNode implements AutoCloseable {
             try {key=socketBinding.networkKey();}
             catch(IOException e){switchNetwork(null);networkState(false,e.getMessage());return;}
         }
-        switchNetwork(key);
+        try { switchNetwork(key); }
+        catch(IOException e) {
+            if(initialRefresh) throw e;
+            switchNetwork(null);
+            fastRefreshUntil=System.nanoTime()+TimeUnit.SECONDS.toNanos(10);
+            networkState(false,"局域网暂不可用，正在重试："+e.getMessage());
+            return;
+        }
         if(key==null){networkState(false,"网络已断开，等待 Wi-Fi、热点或以太网恢复");return;}
         if(udp==null)return;
         Set<InetAddress> addresses=new HashSet<>();
@@ -256,7 +266,7 @@ public final class LanNode implements AutoCloseable {
             if (packet==null || !(datagram.getAddress() instanceof Inet4Address)) continue;
             if (packet.login.equals(login) && packet.host.equals(host) && datagram.getPort()==port) continue;
             synchronized(gate) {if(source==udp)handle(packet,new InetSocketAddress(datagram.getAddress(),datagram.getPort()));}
-        } catch (IOException e) { if (!closed && source==udp) { listener.error("网络接收失败："+e.getMessage()); try { Thread.sleep(100); } catch (InterruptedException stop) { return; } } }
+        } catch (IOException e) { if (!closed && source==udp) { networkChanged(); try { Thread.sleep(100); } catch (InterruptedException stop) { return; } } }
           catch (RuntimeException e) { if (!closed) listener.error("消息处理失败："+e.getMessage()); }
     }
     private void handle(Protocol.Packet p,InetSocketAddress from) throws IOException {
@@ -292,9 +302,9 @@ public final class LanNode implements AutoCloseable {
             }
             peer.utf8|=(p.command&(Protocol.UTF8|Protocol.CAP_UTF8))!=0; peer.online=p.mode()!=Protocol.EXIT; peer.lastSeen=System.nanoTime(); peer.misses=0;
             listener.peersChanged();
-            if (p.mode()==Protocol.ENTRY) send(encode(Protocol.ANSWER|Protocol.FILE|Protocol.CAP_UTF8|(peer.utf8?Protocol.UTF8:0),Protocol.field(nickname),Protocol.field(group)),from);
+            if (p.mode()==Protocol.ENTRY) try { send(encode(Protocol.ANSWER|Protocol.FILE|Protocol.CAP_UTF8|(peer.utf8?Protocol.UTF8:0),Protocol.field(nickname),Protocol.field(group)),from); } catch (IOException ignored) { }
             if (p.mode()!=Protocol.MESSAGE) return;
-            if ((p.command&Protocol.CHECK)!=0) send(encode(Protocol.ACK,Long.toString(p.number),null),from);
+            if ((p.command&Protocol.CHECK)!=0) try { send(encode(Protocol.ACK,Long.toString(p.number),null),from); } catch (IOException ignored) { }
             String key=peer.id()+":"+p.number;
             if (seen.containsKey(key)) return;
             if (seen.size()>=8192) seen.remove(seen.keySet().iterator().next());
@@ -359,7 +369,10 @@ public final class LanNode implements AutoCloseable {
                 // 切网不会发送退出通知；只按实际发出且未获回应的探测判离线，休眠或计时器延后不会误判。
                 long verify=verifyFrom;
                 for (Peer p:peers.values()) {
-                    if (!p.online) continue;
+                    if (!p.online) {
+                        if (networkAvailable && now-p.probed>=heartbeatRetry) { p.probed=now; probes.add(p.endpoint); }
+                        continue;
+                    }
                     boolean verifying=p.lastSeen-verify<0;
                     if ((!verifying && now-p.lastSeen<heartbeatIdle) || now-p.probed<heartbeatRetry) continue;
                     if (p.misses>=(verifying?verifyMisses:idleMisses)) { p.online=false; changed=true; }

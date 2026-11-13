@@ -864,4 +864,40 @@ public final class UiTest {
             assertEquals("未发送草稿",((EditText)field(activity,"editor")).getText().toString());
         }finally{if(dialog!=null)dialog.dismiss();ac.pause().stop().destroy();sc.destroy();}
     }
+    @Test public void savingAvatarOrNicknameOnConversationListDoesNotDuplicateList() throws Exception {
+        ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();
+        shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));
+        ActivityController<MainActivity> ac=Robolectric.buildActivity(MainActivity.class).create().start().resume().visible();android.app.Dialog dialog=null,picker=null;
+        try {
+            MainActivity activity=ac.get();settle(service);
+            ChatStore.Conversation row=new ChatStore.Conversation();row.peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:32425"),"dupcheck","host","列表不重复","");row.peer.online=true;row.preview="初始预览";
+            Field conversations=ChatService.class.getDeclaredField("conversations");conversations.setAccessible(true);conversations.set(service,Arrays.asList(row));
+            invoke(activity,"open",String.class,"");settle(service);
+            ViewGroup body=(ViewGroup)field(activity,"body");int initialChildren=body.getChildCount();assertEquals(3,initialChildren);
+            ListView initialList=(ListView)field(activity,"list");assertNotNull(initialList);
+            Method settings=MainActivity.class.getDeclaredMethod("settings");settings.setAccessible(true);
+            for(int i=0;i<3;i++) {
+                settings.invoke(activity);dialog=org.robolectric.shadows.ShadowDialog.getLatestDialog();
+                java.util.List<View> views=descendants(dialog.getWindow().getDecorView());
+                if(i==0) {
+                    views.stream().filter(v->v instanceof TextView&&v.isClickable()&&"更换头像".equals(((TextView)v).getText().toString())).findFirst().get().performClick();
+                    picker=org.robolectric.shadows.ShadowDialog.getLatestDialog();
+                    java.util.List<View> pickerViews=descendants(picker.getWindow().getDecorView());
+                    pickerViews.stream().filter(v->"内置头像：熬夜猫头鹰".contentEquals(v.getContentDescription()==null?"":v.getContentDescription())).findFirst().get().performClick();
+                    pickerViews.stream().filter(v->v instanceof Button&&"使用此头像".equals(((Button)v).getText().toString())).findFirst().get().performClick();
+                    picker=null;
+                }
+                EditText nickname=(EditText)views.stream().filter(v->v instanceof EditText&&"昵称".contentEquals(v.getContentDescription())).findFirst().get();
+                nickname.setText("主列表改名"+i);
+                Button save=(Button)views.stream().filter(v->v instanceof Button&&"保存".equals(((Button)v).getText().toString())).findFirst().get();save.performClick();
+                settle(service);
+                assertEquals("",field(activity,"selected"));
+                assertEquals("保存资料不应向主体容器重复堆叠列表",initialChildren,body.getChildCount());
+                assertSame("保存头像/昵称后不应重建并叠加列表视图",initialList,field(activity,"list"));
+                assertEquals("主界面不应出现多个列表视图",1L,descendants(body).stream().filter(v->v instanceof ListView).count());
+            }
+            assertEquals("builtin:15",activity.getSharedPreferences("settings",0).getString("avatar",""));
+            assertEquals("主列表改名2",activity.getSharedPreferences("settings",0).getString("name",""));
+        }finally{if(picker!=null)picker.dismiss();if(dialog!=null)dialog.dismiss();ac.pause().stop().destroy();sc.destroy();}
+    }
 }

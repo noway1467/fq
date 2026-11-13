@@ -683,6 +683,39 @@ namespace FeiqLight.Tests
                 {
                     b.Dispose(); Wait(() => !bob.Online, "未收到退出通知", 4000);
                 });
+                Run("离线设备恢复可达时心跳单播自动重新上线", () =>
+                {
+                    var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+                    var idleField = typeof(LanService).GetField("HeartbeatIdle", flags);
+                    var retryField = typeof(LanService).GetField("HeartbeatRetry", flags);
+                    var missesField = typeof(LanService).GetField("IdleMisses", flags);
+                    object idle = idleField.GetValue(a), retry = retryField.GetValue(a), misses = missesField.GetValue(a);
+                    try
+                    {
+                        using (UdpClient ghost = new UdpClient(Endpoint(0)))
+                        {
+                            byte[] entry = Protocol.Encode(1, "ghost", "test", Protocol.Entry | Protocol.Utf8, Protocol.Field("掉线重连"), null, null);
+                            ghost.Send(entry, entry.Length, Endpoint(portA));
+                            Wait(() => a.Peers.Any(p => p.Login == "ghost" && p.Online), "恢复测试节点未上线", 3000);
+                            idleField.SetValue(a, TimeSpan.FromMilliseconds(80)); retryField.SetValue(a, TimeSpan.FromMilliseconds(50)); missesField.SetValue(a, 1);
+                            Wait(() => !a.Peers.Single(p => p.Login == "ghost").Online, "节点未先进入离线状态", 5000);
+                            ghost.Client.ReceiveTimeout = 50;
+                            while (true) { try { IPEndPoint stale = Endpoint(0); ghost.Receive(ref stale); } catch (SocketException) { break; } }
+                            ghost.Client.ReceiveTimeout = 2000;
+                            bool probed = false; DateTime deadline = DateTime.UtcNow.AddSeconds(3);
+                            while (DateTime.UtcNow < deadline)
+                            {
+                                IPEndPoint from = Endpoint(0); byte[] raw = ghost.Receive(ref from); Packet pkt;
+                                if (Protocol.TryParse(raw, out pkt) && pkt.Mode == Protocol.Entry) { probed = true; break; }
+                            }
+                            Assert(probed, "离线设备未在心跳周期内收到单播探测");
+                            byte[] answer = Protocol.Encode(2, "ghost", "test", Protocol.AnswerEntry | Protocol.Utf8, Protocol.Field("掉线重连"), null, null);
+                            ghost.Send(answer, answer.Length, Endpoint(portA));
+                            Wait(() => a.Peers.Single(p => p.Login == "ghost").Online, "离线设备回复探测后未自动重连", 3000);
+                        }
+                    }
+                    finally { idleField.SetValue(a, idle); retryField.SetValue(a, retry); missesField.SetValue(a, misses); }
+                });
             }
         }
     }

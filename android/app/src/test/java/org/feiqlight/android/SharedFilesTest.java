@@ -209,4 +209,17 @@ public final class SharedFilesTest {
             }finally{controller.destroy();java.lang.reflect.Field executor=ChatService.class.getDeclaredField("io");executor.setAccessible(true);assertTrue(((java.util.concurrent.ExecutorService)executor.get(service)).awaitTermination(5,java.util.concurrent.TimeUnit.SECONDS));}
         }
     }
+    @Test public void statusReportsPairingAndNativeEndpointsReturnNoContent()throws Exception{
+        try(SharedFiles server=new SharedFiles(context,TREE,0,true)){
+            Reply anonymous=get(server,"/api/status","");
+            assertEquals(200,anonymous.code);assertTrue(anonymous.json().getBoolean("share"));assertFalse(anonymous.json().getBoolean("paired"));
+            Reply loginReply=request(server.port(),"/api/login","",new JSONObject().put("mode","share").put("code",server.code()).toString(),"","POST");
+            assertEquals(200,loginReply.code);
+            String pair=Arrays.stream(loginReply.headers.split("\r\n")).filter(s->s.startsWith("Set-Cookie: fq_pair_")).findFirst().get().substring(12).split(";")[0];
+            Reply paired=get(server,"/api/status",pair);
+            assertEquals(200,paired.code);assertTrue(paired.json().getBoolean("paired"));
+            assertEquals(204,get(server,"/native/paired","").code);
+            assertEquals(204,get(server,"/native/unavailable","").code);
+        }
+    }
 }

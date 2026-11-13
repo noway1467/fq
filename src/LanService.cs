@@ -238,11 +238,11 @@ namespace FeiqLight
             if (packet.Mode == Protocol.Entry)
             {
                 uint flags = Protocol.AnswerEntry | Protocol.CapUtf8 | Protocol.FileAttach | (peer.Utf8 ? Protocol.Utf8 : 0);
-                Send(Encode(flags, Protocol.Field(Settings.Nickname), Protocol.Field(Settings.Group)), remote);
+                try { Send(Encode(flags, Protocol.Field(Settings.Nickname), Protocol.Field(Settings.Group)), remote); } catch (SocketException) { }
             }
             if (packet.Mode != Protocol.SendMessage) return;
             if ((packet.Command & Protocol.SendCheck) != 0)
-                Send(Encode(Protocol.ReceiveMessage, packet.Number.ToString(CultureInfo.InvariantCulture), null), remote);
+                try { Send(Encode(Protocol.ReceiveMessage, packet.Number.ToString(CultureInfo.InvariantCulture), null), remote); } catch (SocketException) { }
             lock (gate)
             {
                 string key = peer.Id + ":" + packet.Number;
@@ -362,7 +362,11 @@ namespace FeiqLight
                     // 切网不会发送退出通知；只按实际发出且未获回应的探测判离线，计时器延后不会误判。
                     foreach (Peer peer in peers.Values)
                     {
-                        if (!peer.Online) continue;
+                        if (!peer.Online)
+                        {
+                            if (elapsed - peer.Probed >= HeartbeatRetry) { peer.Probed = elapsed; probes.Add(peer.Endpoint); }
+                            continue;
+                        }
                         bool verify = peer.Seen < verifyFrom;
                         if ((!verify && elapsed - peer.Seen < HeartbeatIdle) || elapsed - peer.Probed < HeartbeatRetry) continue;
                         if (peer.Misses >= (verify ? VerifyMisses : IdleMisses)) { peer.Online = false; changed = true; }

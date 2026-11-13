@@ -90,4 +90,23 @@ public final class NetworkRecoveryTest {
             node.refresh();assertTrue(node.networkAvailable());assertFalse("重连不能复活旧地址的文件授权",node.offering(peer.id(),message.number,0));
         } finally {Files.deleteIfExists(source);}
     }
+    @Test public void offlinePeerAutoRecoversWhenReachableWithoutManualRefresh()throws Exception {
+        Events events=new Events();int port=port();
+        try(LanNode node=new LanNode(port,true,"local","host","local","组",events);DatagramSocket raw=new DatagramSocket(0,InetAddress.getLoopbackAddress())) {
+            node.start();announce(raw,port);await(()->!node.peers().isEmpty());LanNode.Peer peer=node.peers().get(0);
+            node.heartbeatIdle=TimeUnit.MILLISECONDS.toNanos(80);node.heartbeatRetry=TimeUnit.MILLISECONDS.toNanos(80);node.idleMisses=1;
+            await(()->!peer.online);
+            raw.setSoTimeout(40);byte[] buf=new byte[2048];
+            while(true){try{raw.receive(new DatagramPacket(buf,buf.length));}catch(SocketTimeoutException ignored){break;}}
+            raw.setSoTimeout(2500);boolean probed=false;long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(4);
+            while(System.nanoTime()<deadline){
+                DatagramPacket pkt=new DatagramPacket(buf,buf.length);raw.receive(pkt);
+                Protocol.Packet parsed=Protocol.parse(Arrays.copyOf(pkt.getData(),pkt.getLength()));
+                if(parsed!=null&&parsed.mode()==Protocol.ENTRY){probed=true;break;}
+            }
+            assertTrue("离线联系人未在后台心跳周期内自动重探",probed);
+            announce(raw,port);await(()->peer.online);
+            assertTrue(events.errors.toString(),events.errors.isEmpty());
+        }
+    }
 }

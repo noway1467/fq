@@ -180,4 +180,19 @@ public final class LanNetworkTest {
         try {route.networkKey();fail("仅有 VPN 与蜂窝接口不能放行");}
         catch(IOException expected){assertTrue(expected.getMessage().contains("VPN"));}
     }
+    @Test public void transientPhysicalWifiWithoutIpv4DoesNotLeakToHotspotFallback() throws Exception {
+        ConnectivityManager cm=(ConnectivityManager)RuntimeEnvironment.getApplication().getSystemService(Context.CONNECTIVITY_SERVICE);shadowOf(cm).clearAllNetworks();
+        Network wifi=ShadowNetwork.newInstance(940);NetworkCapabilities caps=ShadowNetworkCapabilities.newInstance();
+        shadowOf(caps).addTransportType(NetworkCapabilities.TRANSPORT_WIFI);
+        shadowOf(caps).addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN);
+        LinkProperties links=new LinkProperties();
+        LinkProperties.class.getDeclaredMethod("setInterfaceName",String.class).invoke(links,"wlan0");
+        shadowOf(cm).addNetwork(wifi,null);shadowOf(cm).setNetworkCapabilities(wifi,caps);shadowOf(cm).setLinkProperties(wifi,links);
+        AtomicReference<List<LanNetwork.LocalInterface>> local=new AtomicReference<>(Collections.singletonList(
+            iface("wlan0",true,false,false,false,"192.168.1.99",24)
+        ));
+        LanNetwork route=new LanNetwork(cm,local::get);
+        assertNull("无 IPv4 的托管 Wi-Fi 接口不应漏进热点回退",route.networkKey());
+        assertTrue(route.broadcasts().isEmpty());
+    }
 }

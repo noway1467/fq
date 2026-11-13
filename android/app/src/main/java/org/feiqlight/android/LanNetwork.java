@@ -106,7 +106,10 @@ final class LanNetwork implements LanNode.SocketBinding {
                     if(links!=null && links.getInterfaceName()!=null) nonLanInterfaces.add(links.getInterfaceName().trim().toLowerCase(Locale.ROOT));
                     continue;
                 }
-                if(links==null || links.getLinkAddresses().stream().noneMatch(a->a.getAddress() instanceof Inet4Address)) continue;
+                if(links==null || links.getLinkAddresses().stream().noneMatch(a->a.getAddress() instanceof Inet4Address)) {
+                    if(links!=null && links.getInterfaceName()!=null) nonLanInterfaces.add(links.getInterfaceName().trim().toLowerCase(Locale.ROOT));
+                    continue;
+                }
                 // 无互联网的局域网也能通信，不要求 INTERNET / VALIDATED 能力。
                 int score=capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)?2:1;
                 if(score>best) {chosen=network;chosenLinks=links;best=score;}

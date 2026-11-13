@@ -354,6 +354,24 @@ namespace FeiqLight.Tests
                 }
                 ToolsPreferences.State saved=new ToolsPreferences(profile).Value;Assert(saved.ShareEnabled&&saved.RemoteEnabled,"退出时清空开关");
             });
+            run("status 接口如实反映配对状态且原生跳转端点返回 204", () => {
+                string profile=Path.Combine(root,"status-tools-"+Guid.NewGuid().ToString("N"));
+                using(ToolsService server=new ToolsService(0,true,profile))
+                {
+                    server.Share(folder);server.ConfirmRemoteDevice=address=>2;server.AllowRemote();
+                    Reply anonymous=Request(server.Port,"/api/status");
+                    Assert(anonymous.Code==200&&!(bool)anonymous.Json()["paired"]&&!(bool)anonymous.Json()["remotePaired"]&&!(bool)anonymous.Json()["trusted"],"匿名请求不应报告已配对");
+                    Reply shareLogin=Request(server.Port,"/api/login","","{\"mode\":\"share\",\"code\":\""+server.ShareCode+"\"}");
+                    string sharePair=PairCookie(shareLogin);
+                    Reply shareOnly=Request(server.Port,"/api/status",sharePair);
+                    Assert(shareOnly.Code==200&&(bool)shareOnly.Json()["paired"]&&!(bool)shareOnly.Json()["remotePaired"],"共享配对后 paired 应为 true");
+                    Reply remoteLogin=Request(server.Port,"/api/login","","{\"mode\":\"remote\",\"code\":\""+server.RemoteCode+"\"}");
+                    string remotePair=PairCookie(remoteLogin);
+                    Reply both=Request(server.Port,"/api/status",sharePair+"; "+remotePair);
+                    Assert(both.Code==200&&(bool)both.Json()["paired"]&&(bool)both.Json()["remotePaired"]&&(bool)both.Json()["trusted"],"远控配对后 remotePaired 与 trusted 应为 true");
+                    Assert(Request(server.Port,"/native/paired").Code==204&&Request(server.Port,"/native/unavailable").Code==204,"原生状态通知端点应返回 204");
+                }
+            });
             Console.WriteLine("RESULT " + passed + " passed, " + failed + " failed"); return failed == 0 ? 0 : 1;
         }
         private static void Serve(string root)

@@ -33,7 +33,7 @@
   function unavailable() { end('设备未连接或尚未开启远控', true); if (document.documentElement.dataset.native === 'true') location.href='/native/unavailable'; }
   window.feiqCheck = async () => {
     if(mode!=='remote')return;
-    try { const data=await request('/api/status',undefined,4000);if(!data.remote)unavailable(); }
+    try { const data=await request('/api/status',undefined,4000);if(!data.remote)unavailable();else if((data.remotePaired||data.paired)&&!token&&!$('connect').disabled)connect(true); }
     catch (error) { if(error.status!==404)unavailable(); }
   };
   function closePlayer() { $('player').pause(); $('player').removeAttribute('src'); $('player').load(); $('player-panel').hidden = true; }
@@ -72,13 +72,13 @@
         phone=screens.platform==='android'; document.body.classList.toggle('phone-target',phone);$('phone-controls').hidden=!phone;$('phone-enter').hidden=!phone||!screens.imeEnter;
         $('display').replaceChildren(); screens.items.forEach((item,index) => { const option = document.createElement('option'); option.value = item.id; option.textContent = '屏幕 ' + (index+1); $('display').append(option); });
         $('display').hidden = screens.items.length < 2;
-        display = Number($('display').value); viewport(); frames(version);
         if(document.documentElement.dataset.nativePairing==='true')location.href='/native/paired';
+        display = Number($('display').value); viewport(); frames(version);
       } else { trail = [{id: '', name: '共享文件夹'}]; await loadDirectory(); }
     } catch (error) { if (version === generation) { if(mode==='remote'&&!error.status)unavailable();else end(error.message, true); } }
     finally { $('connect').disabled = $('reconnect').disabled = false; }
   }
-  $('connect-form').onsubmit = event => { event.preventDefault(); connect(false); };
+  $('connect-form').onsubmit = event => { event.preventDefault(); connect(!$('code').value.trim()); };
   $('reconnect').onclick = () => connect(true);
   const size = value => value < 0 ? '大小未知' : value >= 1073741824 ? (value / 1073741824).toFixed(1) + ' GB' : value >= 1048576 ? (value / 1048576).toFixed(1) + ' MB' : value >= 1024 ? Math.ceil(value / 1024) + ' KB' : value + ' B';
   async function loadDirectory() {

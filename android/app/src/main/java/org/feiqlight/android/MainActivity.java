@@ -117,7 +117,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
             service=((ChatService.LocalBinder)binder).service(); if(visible) service.observe(MainActivity.this);
             service.active(visible?selected:""); saveDraft(); renderPage(); restoreConnection();
         }
-        @Override public void onServiceDisconnected(ComponentName name) { service=null; renderPage(); }
+        @Override public void onServiceDisconnected(ComponentName name) { service=null; restoreAttempted=false; renderPage(); }
     };
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -871,7 +871,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
                 saveDraft();renderPage();selectingMessages=choosing;messageMarks.addAll(marks);updateMessageSelection();
             } else {
                 if(!selected.isEmpty()&&messages!=null&&!messageRows.isEmpty()) renderMessages(messageRows);
-                else if(selected.isEmpty()&&list!=null) renderList();
+                changed();
             }
             error("已保存；昵称、头像、主题和接收选项立即生效，端口下次连接生效");
         });
@@ -1173,7 +1173,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
                 Bitmap validated=ChatWallpaper.load(this,uri);validated.recycle();
                 getContentResolver().takePersistableUriPermission(uri,Intent.FLAG_GRANT_READ_URI_PERMISSION);
                 getSharedPreferences("settings",MODE_PRIVATE).edit().putString("background_image",uri.toString()).putString("chat_background","image").apply();
-                if(wallpaperChoices!=null&&wallpaperChoices.getChildCount()==4)wallpaperChoices.check(wallpaperChoices.getChildAt(3).getId());
+                if(wallpaperChoices!=null&&wallpaperChoices.getChildCount()>0)wallpaperChoices.check(wallpaperChoices.getChildAt(wallpaperChoices.getChildCount()-1).getId());
                 error("背景图片已保存；请保存外观设置以应用");
             }catch(Exception e){error("背景图片未保存："+e.getMessage());}return;
         }

@@ -62,6 +62,19 @@ public final class RemoteActivityTest {
             assertEquals(intent.getData().toString(),shadowOf(find(controller.get().getWindow().getDecorView(),WebView.class)).getLastLoadedUrl());
         }
     }
+    @Test public void samePageAcceptsRootEmptyPathAndResumeChecksStatus() {
+        android.content.Context context=RuntimeEnvironment.getApplication();
+        Intent intent=new Intent(context,RemoteActivity.class).setData(Uri.parse("http://127.0.0.1:2427/#remote"));
+        try(ActivityController<RemoteActivity> controller=Robolectric.buildActivity(RemoteActivity.class,intent).setup()){
+            RemoteActivity activity=controller.get();
+            WebView web=find(activity.getWindow().getDecorView(),WebView.class);
+            assertFalse(web.getWebViewClient().shouldOverrideUrlLoading(web,request("http://127.0.0.1:2427")));
+            assertTrue(web.getWebViewClient().shouldOverrideUrlLoading(web,request("http://127.0.0.1:2427/native/paired")));
+            assertEquals("http://127.0.0.1:2427/#remote",RemoteActivity.lastConnection(context).getDataString());
+            controller.pause();controller.resume();
+            assertTrue(shadowOf(web).getLastEvaluatedJavascript().contains("feiqCheck"));
+        }
+    }
     private static WebResourceRequest request(String address){return new WebResourceRequest(){public Uri getUrl(){return Uri.parse(address);}public boolean isForMainFrame(){return true;}public boolean isRedirect(){return false;}public boolean hasGesture(){return true;}public String getMethod(){return "GET";}public java.util.Map<String,String> getRequestHeaders(){return java.util.Collections.emptyMap();}};}
     private static <T extends View> T find(View view,Class<T> type){if(type.isInstance(view))return type.cast(view);if(view instanceof ViewGroup)for(int i=0;i<((ViewGroup)view).getChildCount();i++){T match=find(((ViewGroup)view).getChildAt(i),type);if(match!=null)return match;}return null;}
 }
