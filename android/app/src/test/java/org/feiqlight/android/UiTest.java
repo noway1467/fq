@@ -811,10 +811,12 @@ public final class UiTest {
         try {
             MainActivity activity=ac.get();Method apply=MainActivity.class.getDeclaredMethod("applyTheme");apply.setAccessible(true);
             Method blend=MainActivity.class.getDeclaredMethod("blend",int.class,int.class,float.class);blend.setAccessible(true);
-            // 六套配色与 Windows Theme.Configure 同值：逐套核对强调色与表面色，选中底与发出气泡按 Windows Sky / Outgoing 公式换算。
+            // 十二套配色与 Windows Theme.Configure 同值：逐套核对强调色与表面色，选中底与发出气泡按 Windows Sky / Outgoing 公式换算。
             Map<String,int[]> windows=new HashMap<>();windows.put("blue-false",new int[]{0xff3390ec,0xffffffff});windows.put("blue-true",new int[]{0xff3390ec,0xff17212b});windows.put("green-false",new int[]{0xff229974,0xfff7fbf8});
             windows.put("green-true",new int[]{0xff2cb385,0xff14221d});windows.put("purple-false",new int[]{0xff8b67d7,0xfffcf9fd});windows.put("purple-true",new int[]{0xff9a78e6,0xff211b2e});
-            for(boolean dark:new boolean[]{false,true})for(String accent:new String[]{"blue","green","purple"}){
+            windows.put("amber-false",new int[]{0xffd97706,0xfffffdf9});windows.put("amber-true",new int[]{0xffdd8014,0xff221b15});windows.put("rose-false",new int[]{0xffe0537c,0xfffff9fb});
+            windows.put("rose-true",new int[]{0xffe25b84,0xff24181e});windows.put("slate-false",new int[]{0xff4b647d,0xfffafbfd});windows.put("slate-true",new int[]{0xff5f7e9e,0xff181c21});
+            for(boolean dark:new boolean[]{false,true})for(String accent:new String[]{"blue","green","purple","amber","rose","slate"}){
                 activity.getSharedPreferences("settings",0).edit().putBoolean("dark_mode",dark).putString("accent",accent).apply();apply.invoke(activity);
                 assertEquals(windows.get(accent+"-"+dark)[0],field(activity,"BLUE"));assertEquals(windows.get(accent+"-"+dark)[1],field(activity,"SURFACE"));
                 assertEquals(blend.invoke(null,(Integer)field(activity,"BLUE"),(Integer)field(activity,"SURFACE"),dark?.30f:.17f),field(activity,"BUBBLE"));
@@ -838,5 +840,28 @@ public final class UiTest {
             old.execSQL("INSERT INTO peers(id,endpoint,login,host,name,grp) VALUES('127.0.0.1:32425/peer','127.0.0.1:32425','peer','host','旧联系人','部门')"); old.setVersion(1);
         }
         try(ChatStore store=new ChatStore(context)) { assertEquals(1,store.conversations().size()); LanNode.Peer peer=store.conversations().get(0).peer; assertFalse(peer.utf8); peer.utf8=true; store.peer(peer); assertTrue(store.conversations().get(0).peer.utf8); assertEquals("旧消息",store.history("legacy").get(0).text);assertTrue(store.history("legacy").get(0).localPaths.isEmpty()); }
+    }
+    @Test public void expandedThemesWallpapersAndSmoothProfileSave() throws Exception {
+        ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();
+        shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));
+        ActivityController<MainActivity> ac=Robolectric.buildActivity(MainActivity.class).create().start().resume().visible();android.app.Dialog dialog=null;
+        try {
+            MainActivity activity=ac.get();
+            for(String pattern:new String[]{"grid","aurora"}){
+                ChatWallpaper wallpaper=new ChatWallpaper(activity,new int[]{0xffd6e9fa,0xffc6d6f6,0xffcbe5ee,0xffdbd6f5},0xffcfdff3,0xff3390ec,false,pattern,null);
+                wallpaper.setBounds(0,0,180,120);Bitmap rendered=Bitmap.createBitmap(180,120,Bitmap.Config.ARGB_8888);wallpaper.draw(new android.graphics.Canvas(rendered));
+                java.util.Set<Integer> colors=new java.util.HashSet<>();for(int y=0;y<120;y+=6)for(int x=0;x<180;x+=6)colors.add(rendered.getPixel(x,y));
+                assertTrue("Android 新增壁纸图案未绘制纹理："+pattern,colors.size()>4);rendered.recycle();
+            }
+            invoke(activity,"open",String.class,"smooth-save-peer");
+            EditText editor=(EditText)field(activity,"editor");editor.setText("未发送草稿");
+            Method settings=MainActivity.class.getDeclaredMethod("settings");settings.setAccessible(true);settings.invoke(activity);dialog=org.robolectric.shadows.ShadowDialog.getLatestDialog();
+            java.util.List<View> views=descendants(dialog.getWindow().getDecorView());
+            EditText nickname=(EditText)views.stream().filter(v->v instanceof EditText&&"昵称".contentEquals(v.getContentDescription())).findFirst().get();
+            nickname.setText("本地改名不重绘");
+            Button save=(Button)views.stream().filter(v->v instanceof Button&&"保存".equals(((Button)v).getText().toString())).findFirst().get();save.performClick();
+            assertSame("仅修改资料不应销毁并重建输入框实例",editor,field(activity,"editor"));
+            assertEquals("未发送草稿",((EditText)field(activity,"editor")).getText().toString());
+        }finally{if(dialog!=null)dialog.dismiss();ac.pause().stop().destroy();sc.destroy();}
     }
 }

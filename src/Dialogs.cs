@@ -267,11 +267,26 @@ namespace FeiqLight
             content.Controls.Add(grid, 0, 1);
             TableLayoutPanel actions = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty };
             actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50)); actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-            Button local = Theme.Button("选择本地图片…", delegate {
+            Button local = null;
+            local = Theme.Button("选择本地图片…", delegate {
                 using(OpenFileDialog picker = new OpenFileDialog { Title = "选择头像图片", Filter = "图片|*.jpg;*.jpeg;*.png;*.bmp;*.gif", CheckFileExists = true }) if(picker.ShowDialog(this) == DialogResult.OK) {
-                    try { ImportImage(picker.FileName); }
-                    catch(Exception error) { using(NoticeDialog notice = new NoticeDialog("无法使用图片", error.Message)) notice.ShowDialog(this); }
-                }
+                    Activate();
+                    string chosen = picker.FileName;
+                    local.Enabled = false; local.Text = "处理图片中…";
+                    System.Threading.Tasks.Task.Run(() => EmojiAvatars.FromLocalImage(chosen)).ContinueWith(done => {
+                        if(IsDisposed || !IsHandleCreated) return;
+                        BeginInvoke((MethodInvoker)delegate {
+                            if(IsDisposed) return;
+                            local.Enabled = true; local.Text = "选择本地图片…";
+                            if(done.IsFaulted) {
+                                Exception error = done.Exception != null && done.Exception.InnerException != null ? done.Exception.InnerException : done.Exception;
+                                using(NoticeDialog notice = new NoticeDialog("无法使用图片", error != null ? error.Message : "图片处理失败")) notice.ShowDialog(this);
+                                return;
+                            }
+                            SetAvatar(done.Result);
+                        });
+                    });
+                } else Activate();
             }, false); local.Dock = DockStyle.Fill; local.Margin = new Padding(0, 0, 6, 4); actions.Controls.Add(local, 0, 0);
             Button reset = Theme.Button("使用默认头像", delegate { SetAvatar("default"); }, false); reset.Dock = DockStyle.Fill; reset.Margin = new Padding(6, 0, 0, 4); actions.Controls.Add(reset, 1, 0); content.Controls.Add(actions, 0, 2);
             Label hint = Theme.Label("回到设置页点击保存后生效。", Theme.Small, Theme.Muted); hint.Dock = DockStyle.Fill; content.Controls.Add(hint, 0, 3);
@@ -368,53 +383,80 @@ namespace FeiqLight
             ToggleSwitch dark=new ToggleSwitch { Text="夜间模式",AccessibleName="夜间模式",Description="界面与聊天背景切换为深色，阅读更省眼。",Checked=current.DarkMode,BackColor=Theme.Surface }; dark.SetBounds(26,590,458,54);body.Controls.Add(dark);
             ToggleSwitch follow=new ToggleSwitch { Text="跟随系统切换",AccessibleName="跟随系统切换",Description="自动跟随 Windows 的日间和夜间设置；关闭后可手动选择。",Checked=current.FollowSystemTheme,BackColor=Theme.Surface };follow.Top=290;body.Controls.Add(follow);
             Action followTheme=delegate {dark.Enabled=!follow.Checked;if(follow.Checked)dark.Checked=Theme.SystemDark;};follow.CheckedChanged+=delegate {followTheme();};followTheme();
-            int accentIndex = current.Accent == "green" ? 1 : current.Accent == "purple" ? 2 : 0;
+            string[] accentKeys = { "blue", "green", "purple", "amber", "rose", "slate" };
+            string[] accentNames = { "经典蓝", "青绿色", "紫罗兰", "琥珀金", "绯樱粉", "墨韵灰" };
+            int accentIndex = Math.Max(0, Array.IndexOf(accentKeys, Theme.NormalizeAccent(current.Accent)));
             ToggleSwitch diagnostics=new ToggleSwitch {Text="记录故障诊断",AccessibleName="记录故障诊断",Description="保存后生效；仅记录时间与事件码，不含聊天内容、身份、IP 或路径。",Checked=current.DiagnosticsEnabled,BackColor=Theme.Surface};diagnostics.SetBounds(26,700,458,64);body.Controls.Add(diagnostics);
             Label privacy=Theme.Label("最多 128 KiB，自动轮转；关闭后保留，可随时清除。",Theme.Small,Theme.Muted);privacy.SetBounds(26,742,458,28);body.Controls.Add(privacy);
             Diagnostics journal=new Diagnostics(dataPath,()=>current.DiagnosticsEnabled);
             Button viewLog=Theme.Button("查看诊断记录",delegate {try {using(NoticeDialog dialog=new NoticeDialog("诊断记录（可选择复制）",journal.Read()))dialog.ShowDialog(this);}catch(Exception e){using(NoticeDialog dialog=new NoticeDialog("读取失败",e.Message))dialog.ShowDialog(this);}},false);viewLog.SetBounds(26,798,168,36);body.Controls.Add(viewLog);
             Button clearLog=Theme.Button("清除诊断记录",delegate {try {journal.Clear();}catch(Exception e){using(NoticeDialog dialog=new NoticeDialog("清除失败",e.Message))dialog.ShowDialog(this);}},false);clearLog.SetBounds(204,798,168,36);body.Controls.Add(clearLog);
-            TableLayoutPanel accent = new TableLayoutPanel { ColumnCount = 3, RowCount = 1, Height = 44, AccessibleName = "主题颜色", Margin = new Padding(0, 4, 0, 10) };
-            string[] accentNames = { "经典蓝", "青绿色", "紫罗兰" };
-            Button[] choices = new Button[3];
+            TableLayoutPanel accent = new TableLayoutPanel { ColumnCount = 3, RowCount = 2, Height = 104, AccessibleName = "主题颜色", Margin = new Padding(0, 4, 0, 10) };
+            for (int r = 0; r < 2; r++) accent.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+            Button[] choices = new Button[accentKeys.Length];
             Action refreshAccent = delegate { for (int i = 0; i < choices.Length; i++) { choices[i].Text = (i == accentIndex ? "✓ " : "") + accentNames[i]; choices[i].BackColor = i == accentIndex ? Theme.Sky : Theme.Ice; choices[i].ForeColor = i == accentIndex ? Theme.Blue : Theme.Ink; choices[i].Invalidate(); } };
-            for (int i = 0; i < 3; i++)
+            for (int i = 0; i < 3; i++) accent.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F / 3));
+            for (int i = 0; i < choices.Length; i++)
             {
-                int index = i; accent.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F / 3));
+                int index = i;
                 choices[i] = Theme.Button(accentNames[i], delegate { accentIndex = index; refreshAccent(); }, false);
                 choices[i].AccessibleName = accentNames[i];
-                choices[i].Dock = DockStyle.Fill; choices[i].Margin = new Padding(3); accent.Controls.Add(choices[i], i, 0);
+                choices[i].Dock = DockStyle.Fill; choices[i].Margin = new Padding(3, 5, 3, 5); accent.Controls.Add(choices[i], i % 3, i / 3);
             }
             refreshAccent(); accent.Top = 638; body.Controls.Add(accent);
             string backgroundMode=current.ChatBackground??"orbits", backgroundPath=current.BackgroundImage??"";
             int messageSize=Math.Max(9,Math.Min(18,current.ChatFontSize));
             Action refreshPattern=delegate {};Button image=null;
-            TableLayoutPanel appearance=new TableLayoutPanel {ColumnCount=1,RowCount=6,Height=458,Top=292,AccessibleName="聊天外观"};
+            TableLayoutPanel appearance=new TableLayoutPanel {ColumnCount=1,RowCount=6,Height=552,Top=292,AccessibleName="聊天外观"};
             appearance.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));
-            foreach(int height in new[]{128,120,36,52,58,62})appearance.RowStyles.Add(new RowStyle(SizeType.Absolute,height));
+            foreach(int height in new[]{128,216,36,52,58,62})appearance.RowStyles.Add(new RowStyle(SizeType.Absolute,height));
             Panel preview=new Panel {Dock=DockStyle.Fill,Margin=new Padding(0,0,0,18),AccessibleName="主题预览"};appearance.Controls.Add(preview,0,0);
             preview.Paint+=delegate(object sender,PaintEventArgs e){
-                Color blue=accentIndex==1?Color.FromArgb(34,153,116):accentIndex==2?Color.FromArgb(139,103,215):Color.FromArgb(51,144,236);
-                Color surface=accentIndex==1?ColorTranslator.FromHtml(dark.Checked?"#172D29":"#F4FAF4"):accentIndex==2?ColorTranslator.FromHtml(dark.Checked?"#292338":"#FCF7FC"):dark.Checked?Color.FromArgb(30,39,49):Color.White;
-                using(GraphicsPath frame=Theme.Rounded(new Rectangle(0,0,preview.Width-1,preview.Height-1),Theme.ControlRadius))using(SolidBrush b=new SolidBrush(Theme.Blend(blue,surface,dark.Checked?.10F:.15F)))e.Graphics.FillPath(b,frame);
+                string[] hex=Theme.PaletteHex(dark.Checked,accentKeys[accentIndex]);
+                Color blue=Theme.Hex(hex[0]),surface=Theme.Hex(hex[1]),ink=Theme.Hex(hex[2]);
+                Color w0=Theme.Hex(hex[6]),w1=Theme.Hex(hex[7]),w2=Theme.Hex(hex[8]),w3=Theme.Hex(hex[9]);
+                Color wall=Color.FromArgb((w0.R+w1.R+w2.R+w3.R)/4,(w0.G+w1.G+w2.G+w3.G)/4,(w0.B+w1.B+w2.B+w3.B)/4);
+                using(GraphicsPath frame=Theme.Rounded(new Rectangle(0,0,preview.Width-1,preview.Height-1),Theme.ControlRadius))using(SolidBrush b=new SolidBrush(wall))e.Graphics.FillPath(b,frame);
                 Rectangle left=new Rectangle(12,12,Math.Max(120,preview.Width-100),32),right=new Rectangle(76,52,Math.Max(120,preview.Width-90),32);
                 using(System.Drawing.Drawing2D.GraphicsPath path=Theme.Rounded(left,10))using(SolidBrush b=new SolidBrush(surface))e.Graphics.FillPath(b,path);
-                using(System.Drawing.Drawing2D.GraphicsPath path=Theme.Rounded(right,10))using(SolidBrush b=new SolidBrush(Theme.Blend(blue,surface,dark.Checked?.30F:.17F)))e.Graphics.FillPath(b,path);
-                using(Font font=new Font(Theme.Body.FontFamily,messageSize)) {Color ink=dark.Checked?Color.White:Color.FromArgb(23,33,43);TextRenderer.DrawText(e.Graphics,"今天也保持联系",font,left,ink,TextFormatFlags.HorizontalCenter|TextFormatFlags.VerticalCenter);TextRenderer.DrawText(e.Graphics,"消息与输入字号预览",font,right,ink,TextFormatFlags.HorizontalCenter|TextFormatFlags.VerticalCenter);}
+                using(System.Drawing.Drawing2D.GraphicsPath path=Theme.Rounded(right,10))using(SolidBrush b=new SolidBrush(Theme.Blend(blue,surface,dark.Checked?.42F:.15F)))e.Graphics.FillPath(b,path);
+                using(Font font=new Font(Theme.Body.FontFamily,messageSize)) {TextRenderer.DrawText(e.Graphics,"今天也保持联系",font,left,ink,TextFormatFlags.HorizontalCenter|TextFormatFlags.VerticalCenter);TextRenderer.DrawText(e.Graphics,"消息与输入字号预览",font,right,ink,TextFormatFlags.HorizontalCenter|TextFormatFlags.VerticalCenter);}
             };
-            TableLayoutPanel presets=new TableLayoutPanel {Dock=DockStyle.Fill,ColumnCount=2,RowCount=2,Margin=Padding.Empty};for(int i=0;i<2;i++){presets.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,50));presets.RowStyles.Add(new RowStyle(SizeType.Percent,50));}
-            string[] presetNames={"晴空 · 经典","薄荷 · 日间","深海 · 夜间","暮紫 · 夜间"};
-            for(int i=0;i<4;i++){int choice=i;Button pick=Theme.Button(presetNames[i],delegate {follow.Checked=false;dark.Checked=choice>=2;accentIndex=choice==1?1:choice==3?2:0;backgroundMode=choice==1?"lines":"orbits";refreshAccent();refreshPattern();preview.Invalidate();},false);pick.Dock=DockStyle.Fill;pick.Margin=new Padding(i%2==0?0:6,0,i%2==0?6:0,12);presets.Controls.Add(pick,i%2,i/2);}appearance.Controls.Add(presets,0,1);
+            TableLayoutPanel presets=new TableLayoutPanel {Dock=DockStyle.Fill,ColumnCount=2,RowCount=4,Margin=new Padding(0,0,0,6)};
+            for(int i=0;i<2;i++)presets.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,50));
+            for(int i=0;i<4;i++)presets.RowStyles.Add(new RowStyle(SizeType.Percent,25));
+            string[] presetNames={"晴空 · 经典","薄荷 · 日间","暖阳 · 日间","绯樱 · 日间","深海 · 夜间","森幽 · 夜间","暮紫 · 夜间","石墨 · 夜间"};
+            string[] presetAccents={"blue","green","amber","rose","blue","green","purple","slate"};
+            bool[] presetDark={false,false,false,false,true,true,true,true};
+            string[] presetPatterns={"orbits","lines","aurora","orbits","orbits","lines","aurora","grid"};
+            for(int i=0;i<presetNames.Length;i++){int choice=i;Button pick=Theme.Button(presetNames[i],delegate {follow.Checked=false;dark.Checked=presetDark[choice];accentIndex=Math.Max(0,Array.IndexOf(accentKeys,presetAccents[choice]));backgroundMode=presetPatterns[choice];refreshAccent();refreshPattern();preview.Invalidate();},false);pick.Dock=DockStyle.Fill;pick.Margin=new Padding(i%2==0?0:6,0,i%2==0?6:0,12);presets.Controls.Add(pick,i%2,i/2);}appearance.Controls.Add(presets,0,1);
             Label sizeLabel=Theme.Label("聊天字号 · "+messageSize+" pt",Theme.Body,Theme.Ink);sizeLabel.Dock=DockStyle.Fill;sizeLabel.Margin=new Padding(0,4,0,0);appearance.Controls.Add(sizeLabel,0,2);
             ThemedSlider sizeSlider=new ThemedSlider {Minimum=9,Maximum=18,Value=messageSize,Dock=DockStyle.Fill,AccessibleName="聊天字号",BackColor=Theme.Surface};sizeSlider.ValueChanged+=delegate {messageSize=sizeSlider.Value;sizeLabel.Text="聊天字号 · "+messageSize+" pt";preview.Invalidate();};appearance.Controls.Add(sizeSlider,0,3);
-            TableLayoutPanel patterns=new TableLayoutPanel {Dock=DockStyle.Fill,ColumnCount=3,RowCount=1,Margin=new Padding(0,2,0,10)};string[] patternNames={"纯色","星环","流线"},patternKeys={"none","orbits","lines"};Button[] patternButtons=new Button[3];
-            refreshPattern=delegate {for(int j=0;j<3;j++)patternButtons[j].Text=(backgroundMode==patternKeys[j]?"✓ ":"")+patternNames[j];if(image!=null)image.Text=backgroundMode=="image"?"背景图片 · "+System.IO.Path.GetFileName(backgroundPath):"选择背景图片…";};
-            for(int i=0;i<3;i++){int choice=i;patterns.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100F/3));patternButtons[i]=Theme.Button(patternNames[i],delegate{backgroundMode=patternKeys[choice];refreshPattern();},false);patternButtons[i].Dock=DockStyle.Fill;patternButtons[i].Margin=new Padding(i==0?0:6,0,i==2?0:6,0);patterns.Controls.Add(patternButtons[i],i,0);}refreshPattern();appearance.Controls.Add(patterns,0,4);
+            TableLayoutPanel patterns=new TableLayoutPanel {Dock=DockStyle.Fill,ColumnCount=5,RowCount=1,Margin=new Padding(0,2,0,10)};
+            string[] patternNames={"纯色","星环","流线","网格","极光"},patternKeys={"none","orbits","lines","grid","aurora"};
+            Button[] patternButtons=new Button[patternKeys.Length];
+            refreshPattern=delegate {for(int j=0;j<patternKeys.Length;j++)patternButtons[j].Text=(backgroundMode==patternKeys[j]?"✓ ":"")+patternNames[j];if(image!=null)image.Text=backgroundMode=="image"?"背景图片 · "+System.IO.Path.GetFileName(backgroundPath):"选择背景图片…";};
+            for(int i=0;i<patternKeys.Length;i++){int choice=i;patterns.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100F/patternKeys.Length));patternButtons[i]=Theme.Button(patternNames[i],delegate{backgroundMode=patternKeys[choice];refreshPattern();},false);patternButtons[i].Dock=DockStyle.Fill;patternButtons[i].Margin=new Padding(i==0?0:6,0,i==patternKeys.Length-1?0:6,0);patterns.Controls.Add(patternButtons[i],i,0);}refreshPattern();appearance.Controls.Add(patterns,0,4);
             image=Theme.Button(backgroundMode=="image"?"已选择背景图片 · 更换":"选择背景图片…",delegate {
                 using(OpenFileDialog picker=new OpenFileDialog {Title="选择聊天背景（不超过 20 MiB）",Filter="图片|*.jpg;*.jpeg;*.png;*.bmp;*.gif",CheckFileExists=true})if(picker.ShowDialog(this)==DialogResult.OK){
-                    try {using(Bitmap validated=ChatWallpaper.Load(picker.FileName)){}backgroundPath=picker.FileName;backgroundMode="image";refreshPattern();}
-                    catch(Exception errorImage){using(NoticeDialog notice=new NoticeDialog("无法使用图片",errorImage.Message))notice.ShowDialog(this);}
-                }
+                    Activate();
+                    string chosen=picker.FileName;
+                    image.Enabled=false;image.Text="读取背景图片中…";
+                    System.Threading.Tasks.Task.Run(delegate {using(Bitmap validated=ChatWallpaper.Load(chosen)){}}).ContinueWith(done => {
+                        if(IsDisposed||!IsHandleCreated)return;
+                        BeginInvoke((MethodInvoker)delegate {
+                            if(IsDisposed)return;
+                            image.Enabled=true;
+                            if(done.IsFaulted){
+                                Exception err=done.Exception!=null&&done.Exception.InnerException!=null?done.Exception.InnerException:done.Exception;
+                                refreshPattern();
+                                using(NoticeDialog notice=new NoticeDialog("无法使用图片",err!=null?err.Message:"读取失败"))notice.ShowDialog(this);
+                                return;
+                            }
+                            backgroundPath=chosen;backgroundMode="image";refreshPattern();
+                        });
+                    });
+                } else Activate();
             },false);image.AutoEllipsis=true;image.Dock=DockStyle.Fill;image.Margin=new Padding(0,0,0,10);refreshPattern();appearance.Controls.Add(image,0,5);body.Controls.Add(appearance);
             dark.CheckedChanged+=delegate {preview.Invalidate();};foreach(Button choice in choices)choice.Click+=delegate{preview.Invalidate();};
             // 错误提示独占一行；空 Label 也会遮住兄弟控件，不能与按钮使用重叠坐标。
@@ -434,7 +476,7 @@ namespace FeiqLight
                 try
                 {
                     string path = ReceiveStorage.Folder(folder.Text); ReceiveStorage.ValidateWritable(path);
-                    Value = new AppSettings { Avatar = avatarValue, Nickname = Protocol.Field(name.Text.Trim()), Group = String.IsNullOrWhiteSpace(group.Text) ? "我的局域网" : Protocol.Field(group.Text.Trim()), Signature = signature.Text.Trim(), CloseToTray = close.Checked, StartWithWindows = startup.Checked, Notifications = notifications.Checked,DiagnosticsEnabled = diagnostics.Checked, AutoSendDroppedFiles=autoDrop.Checked, AutoReceiveFiles = auto.Checked, ReceiveFolder = path, ChatFontSize=messageSize,ChatBackground=backgroundMode,BackgroundImage=backgroundPath,DarkMode=dark.Checked, FollowSystemTheme=follow.Checked, Accent=accentIndex==1?"green":accentIndex==2?"purple":"blue" };
+                    Value = new AppSettings { Avatar = avatarValue, Nickname = Protocol.Field(name.Text.Trim()), Group = String.IsNullOrWhiteSpace(group.Text) ? "我的局域网" : Protocol.Field(group.Text.Trim()), Signature = signature.Text.Trim(), CloseToTray = close.Checked, StartWithWindows = startup.Checked, Notifications = notifications.Checked,DiagnosticsEnabled = diagnostics.Checked, AutoSendDroppedFiles=autoDrop.Checked, AutoReceiveFiles = auto.Checked, ReceiveFolder = path, ChatFontSize=messageSize,ChatBackground=backgroundMode,BackgroundImage=backgroundPath,DarkMode=dark.Checked, FollowSystemTheme=follow.Checked, Accent=accentKeys[accentIndex] };
                     DialogResult = DialogResult.OK;
                 }
                 catch (Exception e) { error.Text = "保存目录不可用：" + e.Message; SelectTab(2); folder.Focus(); }

@@ -25,14 +25,20 @@ public final class MainActivity extends Activity implements ChatService.Observer
     private int BLUE=0xff3390ec, INK=0xff17212b, MUTED=0xff64727f, PALE=0xfff1f4f7, LINE=0xffe7ecf0, WALL=0xffd1dff5, SURFACE=Color.WHITE, BUBBLE=0xffd6e9fb, OUTGOING=0xffe0eefc, ONLINE=0xff3cb34f;
     private int[] WALLS={0xffd6e9fa,0xffc6d6f6,0xffcbe5ee,0xffdbd6f5};
     private boolean DARK;
-    // 六套配色与 Windows Theme.Configure 同表：强调、表面、正文、次要文字、输入底、分隔线、壁纸四色；派生色按同一公式换算。
+    // 十二套配色与 Windows Theme.Configure 同表：强调、表面、正文、次要文字、输入底、分隔线、壁纸四色；派生色按同一公式换算。
     private static final int[][] PALETTES={
         {0xff3390ec,0xffffffff,0xff17212b,0xff64727f,0xfff1f4f7,0xffe7ecf0,0xffd6e9fa,0xffc6d6f6,0xffcbe5ee,0xffdbd6f5},
         {0xff3390ec,0xff17212b,0xffe9eef3,0xff8a9aab,0xff22303d,0xff2b3a48,0xff0e1a28,0xff16294a,0xff0c1f2b,0xff1c2141},
         {0xff229974,0xfff7fbf8,0xff1d3328,0xff5e7368,0xffeaf2ec,0xffdce8df,0xffdaecce,0xffbedebe,0xffe2eac8,0xffc8e2cd},
         {0xff2cb385,0xff14221d,0xffe2f1e8,0xff8fae9f,0xff1e3129,0xff29423a,0xff0f241c,0xff16382b,0xff0e2a21,0xff1b3a31},
         {0xff8b67d7,0xfffcf9fd,0xff33263d,0xff6e6478,0xfff2ebf6,0xffe7ddec,0xffecdef6,0xffd7ccf2,0xfff2e0ec,0xffded6f4},
-        {0xff9a78e6,0xff211b2e,0xffeee7f6,0xffa897ba,0xff2d253d,0xff3a3050,0xff1c1330,0xff2d1e47,0xff25162f,0xff2a2045}};
+        {0xff9a78e6,0xff211b2e,0xffeee7f6,0xffa897ba,0xff2d253d,0xff3a3050,0xff1c1330,0xff2d1e47,0xff25162f,0xff2a2045},
+        {0xffd97706,0xfffffdf9,0xff2d2216,0xff786958,0xfff8f1e6,0xffede1cf,0xfffcecd2,0xfff6dbb8,0xfffbe8dc,0xfff3dfc1},
+        {0xffdd8014,0xff221b15,0xfff5ede3,0xffb3a18e,0xff2e241c,0xff3d3025,0xff24180f,0xff362313,0xff2b1b15,0xff322418},
+        {0xffe0537c,0xfffff9fb,0xff341f27,0xff7d616b,0xfffaecf1,0xfff0dce3,0xfffce0ea,0xfff3d3e6,0xfffde4df,0xffeed5eb},
+        {0xffe25b84,0xff24181e,0xfff6eaef,0xffb393a0,0xff312129,0xff422c37,0xff24111b,0xff38192a,0xff2b1522,0xff351e30},
+        {0xff4b647d,0xfffafbfd,0xff1e252d,0xff64707d,0xffedf1f5,0xffdfe5ec,0xffdfe6ee,0xffd2dce7,0xffe5eaef,0xffd8dfe8},
+        {0xff5f7e9e,0xff181c21,0xffeaeef2,0xff939fab,0xff222830,0xff2f3742,0xff12161b,0xff1b222c,0xff161b22,0xff1f2530}};
     private void applyTheme() {
         SharedPreferences prefs=getSharedPreferences("settings",MODE_PRIVATE); DARK=prefs.getBoolean("follow_system_theme",false)?systemDark():prefs.getBoolean("dark_mode",false);
         int[] p=palette(prefs.getString("accent","blue"),DARK);
@@ -42,7 +48,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         getWindow().setStatusBarColor(SURFACE);getWindow().setNavigationBarColor(SURFACE);
     }
     private boolean systemDark() {return (getResources().getConfiguration().uiMode & android.content.res.Configuration.UI_MODE_NIGHT_MASK)==android.content.res.Configuration.UI_MODE_NIGHT_YES;}
-    private static int[] palette(String accent,boolean dark) { return PALETTES[(accent.equals("green")?2:accent.equals("purple")?4:0)+(dark?1:0)]; }
+    private static int[] palette(String accent,boolean dark) { int group="green".equals(accent)?2:"purple".equals(accent)?4:"amber".equals(accent)?6:"rose".equals(accent)?8:"slate".equals(accent)?10:0; return PALETTES[group+(dark?1:0)]; }
     // 纯色背景与日期胶囊取壁纸四色的平均值。
     private static int wall(int[] p) { return Color.rgb((Color.red(p[6])+Color.red(p[7])+Color.red(p[8])+Color.red(p[9]))/4,(Color.green(p[6])+Color.green(p[7])+Color.green(p[8])+Color.green(p[9]))/4,(Color.blue(p[6])+Color.blue(p[7])+Color.blue(p[8])+Color.blue(p[9]))/4); }
     // 气泡元信息、日期胶囊与气泡投影：与 Windows OutgoingMeta、ServiceFill 及气泡阴影同一换算。
@@ -800,9 +806,12 @@ public final class MainActivity extends Activity implements ChatService.Observer
         settingHeading(box,"外观");
         Switch follow=settingSwitch("跟随系统切换",prefs.getBoolean("follow_system_theme",false));box.addView(follow,settingSpacing(0,8));
         Switch dark=settingSwitch("夜间模式",follow.isChecked()?systemDark():prefs.getBoolean("dark_mode",false));dark.setEnabled(!follow.isChecked());box.addView(dark,new LinearLayout.LayoutParams(-1,-2));
-        RadioGroup accent=settingChoices(3);accent.setContentDescription("主题颜色");
-        String selectedAccent=prefs.getString("accent","blue");String[] keys={"blue","green","purple"},names={"经典蓝","青绿色","紫罗兰"};
-        for(int i=0;i<keys.length;i++){RadioButton choice=new RadioButton(this);choice.setId(View.generateViewId());choice.setTag(keys[i]);choice.setText(names[i]);choice.setTextSize(15);choice.setTextColor(INK);choice.setButtonTintList(new android.content.res.ColorStateList(new int[][]{new int[]{android.R.attr.state_checked},new int[]{}},new int[]{BLUE,MUTED}));choice.setMinHeight(dp(48));choice.setButtonDrawable(null);choice.setGravity(Gravity.CENTER);choice.setPadding(dp(4),0,dp(4),0);accent.addView(choice,choiceSpacing(i,3));if(keys[i].equals(selectedAccent))accent.check(choice.getId());}
+        boolean initialDark=follow.isChecked()?systemDark():prefs.getBoolean("dark_mode",false);
+        String initialAccent=prefs.getString("accent","blue"), initialBackground=prefs.getString("chat_background","orbits"), initialBackgroundImage=prefs.getString("background_image","");
+        int initialFontSize=messageSize();
+        RadioGroup accent=settingChoices(6);accent.setContentDescription("主题颜色");
+        String selectedAccent=initialAccent;String[] keys={"blue","green","purple","amber","rose","slate"},names={"经典蓝","青绿色","紫罗兰","琥珀金","绯樱粉","墨韵灰"};
+        for(int i=0;i<keys.length;i++){RadioButton choice=new RadioButton(this);choice.setId(View.generateViewId());choice.setTag(keys[i]);choice.setText(names[i]);choice.setTextSize(15);choice.setTextColor(INK);choice.setButtonTintList(new android.content.res.ColorStateList(new int[][]{new int[]{android.R.attr.state_checked},new int[]{}},new int[]{BLUE,MUTED}));choice.setMinHeight(dp(48));choice.setButtonDrawable(null);choice.setGravity(Gravity.CENTER);choice.setPadding(dp(4),0,dp(4),0);accent.addView(choice,choiceSpacing(i,keys.length));if(keys[i].equals(selectedAccent))accent.check(choice.getId());}
         accent.setOnCheckedChangeListener((groupView,checked)->{for(int i=0;i<groupView.getChildCount();i++){View choice=groupView.getChildAt(i);choice.setBackground(shape(choice.getId()==checked?BUBBLE:SURFACE,CONTROL_RADIUS));}});
         for(int i=0;i<accent.getChildCount();i++){View choice=accent.getChildAt(i);choice.setBackground(shape(choice.getId()==accent.getCheckedRadioButtonId()?BUBBLE:SURFACE,CONTROL_RADIUS));}
         box.addView(accent,settingSpacing(8,20));
@@ -819,12 +828,14 @@ public final class MainActivity extends Activity implements ChatService.Observer
         SeekBar fontSize=new SeekBar(this);fontSize.setContentDescription("聊天字号");fontSize.setThumbTintList(android.content.res.ColorStateList.valueOf(BLUE));fontSize.setProgressTintList(android.content.res.ColorStateList.valueOf(BLUE));fontSize.setProgressBackgroundTintList(android.content.res.ColorStateList.valueOf(blend(INK,SURFACE,.18f)));fontSize.setMax(10);fontSize.setProgress(messageSize()-14);box.addView(fontSize,new LinearLayout.LayoutParams(-1,dp(48)));
         fontSize.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener(){public void onStartTrackingTouch(SeekBar bar){}public void onStopTrackingTouch(SeekBar bar){}public void onProgressChanged(SeekBar bar,int value,boolean user){sizeCaption.setText("聊天字号 · "+(value+14)+" sp");sampleIn.setTextSize(value+14);sampleOut.setTextSize(value+14);}});
         TextView wallpaperHeading=text("聊天背景",14,INK);wallpaperHeading.setPadding(0,dp(12),0,dp(8));box.addView(wallpaperHeading);
-        RadioGroup backgrounds=settingChoices(4);wallpaperChoices=backgrounds;String[] backgroundKeys={"none","orbits","lines","image"},backgroundNames={"纯色","星环","流线","我的图片"};
-        for(int i=0;i<4;i++){RadioButton choice=new RadioButton(this);choice.setId(View.generateViewId());choice.setTag(backgroundKeys[i]);choice.setText(backgroundNames[i]);choice.setTextColor(INK);choice.setTextSize(14);choice.setMinHeight(dp(48));choice.setButtonDrawable(null);choice.setGravity(Gravity.CENTER);choice.setPadding(dp(2),0,dp(2),0);backgrounds.addView(choice,choiceSpacing(i,4));if(backgroundKeys[i].equals(prefs.getString("chat_background","orbits")))backgrounds.check(choice.getId());}box.addView(backgrounds,settingSpacing(0,12));
+        RadioGroup backgrounds=settingChoices(6);wallpaperChoices=backgrounds;String[] backgroundKeys={"none","orbits","lines","grid","aurora","image"},backgroundNames={"纯色","星环","流线","网格","极光","我的图片"};
+        for(int i=0;i<backgroundKeys.length;i++){RadioButton choice=new RadioButton(this);choice.setId(View.generateViewId());choice.setTag(backgroundKeys[i]);choice.setText(backgroundNames[i]);choice.setTextColor(INK);choice.setTextSize(14);choice.setMinHeight(dp(48));choice.setButtonDrawable(null);choice.setGravity(Gravity.CENTER);choice.setPadding(dp(2),0,dp(2),0);backgrounds.addView(choice,choiceSpacing(i,backgroundKeys.length));if(backgroundKeys[i].equals(initialBackground))backgrounds.check(choice.getId());}box.addView(backgrounds,settingSpacing(0,12));
         backgrounds.setOnCheckedChangeListener((groupView,checked)->{for(int i=0;i<groupView.getChildCount();i++){View choice=groupView.getChildAt(i);choice.setBackground(shape(choice.getId()==checked?BUBBLE:PALE,CONTROL_RADIUS));}});
         for(int i=0;i<backgrounds.getChildCount();i++){View choice=backgrounds.getChildAt(i);choice.setBackground(shape(choice.getId()==backgrounds.getCheckedRadioButtonId()?BUBBLE:PALE,CONTROL_RADIUS));}
-        String[] presetNames={"晴空 · 经典","薄荷 · 日间","深海 · 夜间","暮紫 · 夜间"};
-        for(int lineIndex=0;lineIndex<2;lineIndex++){LinearLayout presetRow=row();presetRow.setBaselineAligned(false);presetRow.setGravity(Gravity.TOP);box.addView(presetRow,box.indexOfChild(preview)+1+lineIndex,new LinearLayout.LayoutParams(-1,-2));for(int columnIndex=0;columnIndex<2;columnIndex++){int preset=lineIndex*2+columnIndex;Button pick=button(presetNames[preset],false);LinearLayout.LayoutParams pp=weight();pp.setMargins(columnIndex==0?0:dp(6),0,columnIndex==0?dp(6):0,dp(12));presetRow.addView(pick,pp);pick.setOnClickListener(v->{follow.setChecked(false);dark.setChecked(preset>=2);accent.check(accent.getChildAt(preset==1?1:preset==3?2:0).getId());backgrounds.check(backgrounds.getChildAt(preset==1?2:1).getId());updatePreview.run();});}}
+        String[] presetNames={"晴空 · 经典","薄荷 · 日间","暖阳 · 日间","绯樱 · 日间","深海 · 夜间","森幽 · 夜间","暮紫 · 夜间","石墨 · 夜间"};
+        int[] presetAccentIndex={0,1,3,4,0,1,2,5}, presetBgIndex={1,2,4,1,1,2,4,3};
+        boolean[] presetDark={false,false,false,false,true,true,true,true};
+        for(int lineIndex=0;lineIndex<4;lineIndex++){LinearLayout presetRow=row();presetRow.setBaselineAligned(false);presetRow.setGravity(Gravity.TOP);box.addView(presetRow,box.indexOfChild(preview)+1+lineIndex,new LinearLayout.LayoutParams(-1,-2));for(int columnIndex=0;columnIndex<2;columnIndex++){int preset=lineIndex*2+columnIndex;Button pick=button(presetNames[preset],false);LinearLayout.LayoutParams pp=weight();pp.setMargins(columnIndex==0?0:dp(6),0,columnIndex==0?dp(6):0,dp(12));presetRow.addView(pick,pp);pick.setOnClickListener(v->{follow.setChecked(false);dark.setChecked(presetDark[preset]);accent.check(accent.getChildAt(presetAccentIndex[preset]).getId());backgrounds.check(backgrounds.getChildAt(presetBgIndex[preset]).getId());updatePreview.run();});}}
         Button chooseBackground=button("选择背景图片…",false);box.addView(chooseBackground,settingSpacing(0,4));chooseBackground.setOnClickListener(v->{try{startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("image/*").addCategory(Intent.CATEGORY_OPENABLE).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION),23);}catch(ActivityNotFoundException e){error("系统没有可用的图片选择器");}});
         TextView backgroundHint=text("图片授权立即保存；其他外观选项点击保存后生效。支持最长边抽样至 1920 像素，不影响原图。",12,MUTED);backgroundHint.setPadding(0,dp(8),0,0);box.addView(backgroundHint);
         settingHeading(box,"存储管理");
@@ -847,11 +858,22 @@ public final class MainActivity extends Activity implements ChatService.Observer
             String n=name.getText().toString().trim(), g=group.getText().toString().trim(); int p;
             if(n.isEmpty()||n.length()>64) { settingsError(dialog,name,"昵称须为 1–64 个字符"); return; } if(g.length()>64) { settingsError(dialog,group,"分组最多 64 个字符"); return; }
             try { p=Integer.parseInt(port.getText().toString()); if(p<1024||p>65535) throw new NumberFormatException(); } catch(NumberFormatException e) { settingsError(dialog,port,"端口须为 1024–65535"); return; }
-            View color=accent.findViewById(accent.getCheckedRadioButtonId());
+            View color=accent.findViewById(accent.getCheckedRadioButtonId());String accentKey=color==null?"blue":color.getTag().toString();
             View backdrop=backgrounds.findViewById(backgrounds.getCheckedRadioButtonId());String backdropKey=backdrop==null?"orbits":backdrop.getTag().toString();
             if(backdropKey.equals("image")&&prefs.getString("background_image","").isEmpty()){dialog.getWindow().getDecorView().findViewWithTag("settings-tab:1").performClick();error("请先选择背景图片");return;}
-            boolean saved=prefs.edit().putString("avatar",avatarValue[0]).putString("name",n).putString("group",g).putInt("port",p).putBoolean("auto_connect",autoConnect.isChecked()).putBoolean("diagnostics",diagnosticSwitch.isChecked()).putBoolean(ReceivedStorage.AUTO,automatic.isChecked()).putBoolean("follow_system_theme",follow.isChecked()).putBoolean("dark_mode",dark.isChecked()).putString("accent",color==null?"blue":color.getTag().toString()).putInt("chat_font_size",fontSize.getProgress()+14).putString("chat_background",backdropKey).commit();
-            if(!saved){error("设置未保存，请检查设备存储空间");return;}if(service!=null){service.receiveSettingsChanged();service.profileSettingsChanged();}dialog.dismiss();saveDraft();renderPage();error("已保存；昵称、头像、主题和接收选项立即生效，端口下次连接生效");
+            int nextSize=fontSize.getProgress()+14;boolean nextDark=follow.isChecked()?systemDark():dark.isChecked();String nextBgImage=prefs.getString("background_image","");
+            boolean saved=prefs.edit().putString("avatar",avatarValue[0]).putString("name",n).putString("group",g).putInt("port",p).putBoolean("auto_connect",autoConnect.isChecked()).putBoolean("diagnostics",diagnosticSwitch.isChecked()).putBoolean(ReceivedStorage.AUTO,automatic.isChecked()).putBoolean("follow_system_theme",follow.isChecked()).putBoolean("dark_mode",dark.isChecked()).putString("accent",accentKey).putInt("chat_font_size",nextSize).putString("chat_background",backdropKey).commit();
+            if(!saved){error("设置未保存，请检查设备存储空间");return;}if(service!=null){service.receiveSettingsChanged();service.profileSettingsChanged();}dialog.dismiss();
+            boolean visualChanged=nextDark!=initialDark||!accentKey.equals(initialAccent)||nextSize!=initialFontSize||!backdropKey.equals(initialBackground)||!nextBgImage.equals(initialBackgroundImage);
+            if(visualChanged) {
+                themeScrollPosition=scroll==null?null:scroll.getScrollY();
+                boolean choosing=selectingMessages;Set<String> marks=new LinkedHashSet<>(messageMarks);
+                saveDraft();renderPage();selectingMessages=choosing;messageMarks.addAll(marks);updateMessageSelection();
+            } else {
+                if(!selected.isEmpty()&&messages!=null&&!messageRows.isEmpty()) renderMessages(messageRows);
+                else if(selected.isEmpty()&&list!=null) renderList();
+            }
+            error("已保存；昵称、头像、主题和接收选项立即生效，端口下次连接生效");
         });
     }
     private void showAvatarPicker(String value,java.util.function.Consumer<String> use) {

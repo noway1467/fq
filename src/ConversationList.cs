@@ -109,8 +109,8 @@ namespace FeiqLight
                 string caption = item.Peer.BaseDisplayName, suffix = item.Peer.NameSuffix;
                 int suffixWidth = String.IsNullOrEmpty(suffix) ? 0 : TextRenderer.MeasureText(g, suffix, Theme.Small, Size.Empty, Line).Width + Dp(4);
                 Rectangle captionBounds = name; captionBounds.Width = Math.Max(1, name.Width - suffixWidth);
-                TextRenderer.DrawText(g, caption, Theme.Strong, captionBounds, ink, Line);
-                if (suffixWidth > 0) { int offset = Math.Min(captionBounds.Width, TextRenderer.MeasureText(g, caption, Theme.Strong, Size.Empty, Line).Width) + Dp(4); TextRenderer.DrawText(g, suffix, Theme.Small, new Rectangle(name.X + offset, name.Y + Dp(1), suffixWidth, name.Height), muted, Line); }
+                ColorEmoji.DrawSingleLine(g, caption, Theme.Strong, captionBounds, ink, Line);
+                if (suffixWidth > 0) { int offset = Math.Min(captionBounds.Width, ColorEmoji.MeasureSingleLine(g, caption, Theme.Strong)) + Dp(4); TextRenderer.DrawText(g, suffix, Theme.Small, new Rectangle(name.X + offset, name.Y + Dp(1), suffixWidth, name.Height), muted, Line); }
                 if (timeWidth > 0) TextRenderer.DrawText(g, time, Theme.Small, new Rectangle(right - timeWidth - Dp(2), name.Y, timeWidth + Dp(2), name.Height), item.Unread > 0 && !selected ? Theme.Blue : muted, Tight | TextFormatFlags.VerticalCenter);
                 int badgeWidth = 0;
                 if (item.Unread > 0)
@@ -128,10 +128,10 @@ namespace FeiqLight
                 {
                     // 自己发出的预览前缀用强调色区分，正文保持次要色。
                     int prefix = TextRenderer.MeasureText(g, "你：", Theme.Body, Size.Empty, Line).Width;
-                    TextRenderer.DrawText(g, "你：", Theme.Body, new Rectangle(preview.X, preview.Y, Math.Min(prefix, preview.Width), preview.Height), selected ? Color.White : Theme.Blue, Line);
-                    TextRenderer.DrawText(g, text.Substring(2), Theme.Body, new Rectangle(preview.X + prefix, preview.Y, Math.Max(1, preview.Width - prefix), preview.Height), muted, Line);
+                    TextRenderer.DrawText(g, "你：", Theme.Body, new Rectangle(preview.X, preview.Y, Math.Min(prefix + Dp(4), preview.Width), preview.Height), selected ? Color.White : Theme.Blue, prefix <= preview.Width ? (Line & ~TextFormatFlags.EndEllipsis) : Line);
+                    ColorEmoji.DrawSingleLine(g, text.Substring(2), Theme.Body, new Rectangle(preview.X + prefix, preview.Y, Math.Max(1, preview.Width - prefix), preview.Height), muted, Line);
                 }
-                else TextRenderer.DrawText(g, text, Theme.Body, preview, muted, Line);
+                else ColorEmoji.DrawSingleLine(g, text, Theme.Body, preview, muted, Line);
             }
             DrawScrollbar(g);
         }

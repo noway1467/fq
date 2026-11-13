@@ -42,13 +42,26 @@ namespace FeiqLight
         public const int BubbleRadius = 15;
         // 字段初值只是占位；启动即按默认浅色经典蓝换算全部角色，避免与 Configure 的结果漂移。
         static Theme() { Configure(false, "blue"); }
+        public static string NormalizeAccent(string accent)
+        {
+            return accent == "green" || accent == "purple" || accent == "amber" || accent == "rose" || accent == "slate" ? accent : "blue";
+        }
+        internal static string[] PaletteHex(bool dark, string accent)
+        {
+            switch (NormalizeAccent(accent))
+            {
+                case "green": return dark ? new[]{"#2CB385","#14221D","#E2F1E8","#8FAE9F","#1E3129","#29423A","#0F241C","#16382B","#0E2A21","#1B3A31"} : new[]{"#229974","#F7FBF8","#1D3328","#5E7368","#EAF2EC","#DCE8DF","#DAECCE","#BEDEBE","#E2EAC8","#C8E2CD"};
+                case "purple": return dark ? new[]{"#9A78E6","#211B2E","#EEE7F6","#A897BA","#2D253D","#3A3050","#1C1330","#2D1E47","#25162F","#2A2045"} : new[]{"#8B67D7","#FCF9FD","#33263D","#6E6478","#F2EBF6","#E7DDEC","#ECDEF6","#D7CCF2","#F2E0EC","#DED6F4"};
+                case "amber": return dark ? new[]{"#DD8014","#221B15","#F5EDE3","#B3A18E","#2E241C","#3D3025","#24180F","#362313","#2B1B15","#322418"} : new[]{"#D97706","#FFFDF9","#2D2216","#786958","#F8F1E6","#EDE1CF","#FCECD2","#F6DBB8","#FBE8DC","#F3DFC1"};
+                case "rose": return dark ? new[]{"#E25B84","#24181E","#F6EAEF","#B393A0","#312129","#422C37","#24111B","#38192A","#2B1522","#351E30"} : new[]{"#E0537C","#FFF9FB","#341F27","#7D616B","#FAECF1","#F0DCE3","#FCE0EA","#F3D3E6","#FDE4DF","#EED5EB"};
+                case "slate": return dark ? new[]{"#5F7E9E","#181C21","#EAEEF2","#939FAB","#222830","#2F3742","#12161B","#1B222C","#161B22","#1F2530"} : new[]{"#4B647D","#FAFBFD","#1E252D","#64707D","#EDF1F5","#DFE5EC","#DFE6EE","#D2DCE7","#E5EAEF","#D8DFE8"};
+                default: return dark ? new[]{"#3390EC","#17212B","#E9EEF3","#8A9AAB","#22303D","#2B3A48","#0E1A28","#16294A","#0C1F2B","#1C2141"} : new[]{"#3390EC","#FFFFFF","#17212B","#64727F","#F1F4F7","#E7ECF0","#D6E9FA","#C6D6F6","#CBE5EE","#DBD6F5"};
+            }
+        }
         public static void Configure(bool dark,string accent)
         {
-            Dark=dark; AccentKey=accent=="green"||accent=="purple"?accent:"blue"; Version++;
-            string[] palette;
-            if(AccentKey=="green") palette=dark?new[]{"#2CB385","#14221D","#E2F1E8","#8FAE9F","#1E3129","#29423A","#0F241C","#16382B","#0E2A21","#1B3A31"}:new[]{"#229974","#F7FBF8","#1D3328","#5E7368","#EAF2EC","#DCE8DF","#DAECCE","#BEDEBE","#E2EAC8","#C8E2CD"};
-            else if(AccentKey=="purple") palette=dark?new[]{"#9A78E6","#211B2E","#EEE7F6","#A897BA","#2D253D","#3A3050","#1C1330","#2D1E47","#25162F","#2A2045"}:new[]{"#8B67D7","#FCF9FD","#33263D","#6E6478","#F2EBF6","#E7DDEC","#ECDEF6","#D7CCF2","#F2E0EC","#DED6F4"};
-            else palette=dark?new[]{"#3390EC","#17212B","#E9EEF3","#8A9AAB","#22303D","#2B3A48","#0E1A28","#16294A","#0C1F2B","#1C2141"}:new[]{"#3390EC","#FFFFFF","#17212B","#64727F","#F1F4F7","#E7ECF0","#D6E9FA","#C6D6F6","#CBE5EE","#DBD6F5"};
+            Dark=dark; AccentKey=NormalizeAccent(accent); Version++;
+            string[] palette=PaletteHex(dark,AccentKey);
             Blue=Hex(palette[0]);Surface=Hex(palette[1]);Ink=Hex(palette[2]);Muted=Hex(palette[3]);Ice=Hex(palette[4]);Line=Hex(palette[5]);
             WallpaperColors=new[]{Hex(palette[6]),Hex(palette[7]),Hex(palette[8]),Hex(palette[9])};
             Wallpaper=Color.FromArgb((WallpaperColors[0].R+WallpaperColors[1].R+WallpaperColors[2].R+WallpaperColors[3].R)/4,(WallpaperColors[0].G+WallpaperColors[1].G+WallpaperColors[2].G+WallpaperColors[3].G)/4,(WallpaperColors[0].B+WallpaperColors[1].B+WallpaperColors[2].B+WallpaperColors[3].B)/4);
@@ -59,7 +72,7 @@ namespace FeiqLight
             ScrollThumb=dark?Color.FromArgb(200,210,220):Color.FromArgb(40,50,60);
             Online=dark?Color.FromArgb(88,196,104):Color.FromArgb(60,179,79);
         }
-        private static Color Hex(string value) { return ColorTranslator.FromHtml(value); }
+        internal static Color Hex(string value) { return ColorTranslator.FromHtml(value); }
         public static Color Blend(Color foreground, Color background, float amount)
         {
             return Color.FromArgb((int)(foreground.R*amount+background.R*(1-amount)),(int)(foreground.G*amount+background.G*(1-amount)),(int)(foreground.B*amount+background.B*(1-amount)));
@@ -73,7 +86,7 @@ namespace FeiqLight
         {
             Color[] old={Blue,Surface,Ink,Muted,Ice,Line,Wallpaper,Sky,Outgoing,Hover};Configure(dark,accent);
             Color[] next={Blue,Surface,Ink,Muted,Ice,Line,Wallpaper,Sky,Outgoing,Hover};
-            foreach(Form form in Application.OpenForms) Recolor(form,old,next);
+            foreach(Form form in Application.OpenForms) if(!form.IsDisposed) Recolor(form,old,next);
             Action handler=Changed;if(handler!=null)handler();
         }
         public static event Action Changed;
@@ -799,6 +812,17 @@ namespace FeiqLight
             // 旧系统不支持此属性时保留方角，不影响缩放与输入。
             Theme.RoundWindow(Handle, 2);
         }
+        protected override void SetVisibleCore(bool value)
+        {
+            // 模态窗在 WinForms 重新 EnableWindow(Owner) 前就会先隐藏，系统会把焦点和 Z 序切到桌面或其他程序；
+            // 提前恢复可见 Owner 的可用状态并激活它，避免点击保存/关闭后主窗口整体落到底部。
+            if (!value && Modal && IsHandleCreated && Owner != null && !Owner.IsDisposed && Owner.IsHandleCreated && Owner.Visible)
+            {
+                EnableWindow(Owner.Handle, true);
+                SetActiveWindow(Owner.Handle);
+            }
+            base.SetVisibleCore(value);
+        }
         private void Drag(object sender, MouseEventArgs e) { if (e.Button == MouseButtons.Left) { ReleaseCapture(); SendMessage(Handle, 0xA1, new IntPtr(2), IntPtr.Zero); } }
         protected override void WndProc(ref Message m)
         {
@@ -814,6 +838,8 @@ namespace FeiqLight
         }
         [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern bool ReleaseCapture();
         [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr w, IntPtr l);
+        [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern bool EnableWindow(IntPtr hWnd, bool bEnable);
+        [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern IntPtr SetActiveWindow(IntPtr hWnd);
     }
     public sealed class SkyPanel : Panel
     {

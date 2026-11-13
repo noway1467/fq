@@ -64,7 +64,7 @@ namespace FeiqLight
                 }
                 if(pattern=="none") {using(SolidBrush solid=new SolidBrush(Theme.Wallpaper))g.FillRectangle(solid,area);return result;}
                 Gradient(g,area);
-                if(pattern=="lines")Waves(g,area,scale);else Doodles(g,area,scale);
+                if(pattern=="lines")Waves(g,area,scale);else if(pattern=="grid")Grid(g,area,scale);else if(pattern=="aurora")Aurora(g,area,scale);else Doodles(g,area,scale);
             }
             return result;
         }
@@ -126,6 +126,35 @@ namespace FeiqLight
                     for(float x=-20;x<=area.Width+20;x+=6*scale)points.Add(new PointF(x,(float)(band*gap+Math.Sin(x/length*Math.PI*2+phase)*amplitude+Math.Sin(x/(length*.43)+phase*1.7)*amplitude*.35)));
                     if(points.Count>1)g.DrawCurve(pen,points.ToArray(),.5F);
                 }
+            }
+        }
+        private static void Grid(Graphics g,Rectangle area,float scale)
+        {
+            int cell=Math.Max(18,(int)Math.Round(28*scale));
+            using(Pen minor=new Pen(PatternColor(14),Math.Max(1F,scale)))
+            using(Pen major=new Pen(PatternColor(28),Math.Max(1F,1.25F*scale)))
+            using(SolidBrush dot=new SolidBrush(PatternColor(34)))
+            {
+                for(int x=0,col=0;x<area.Width;x+=cell,col++) g.DrawLine(col%4==0?major:minor,x,0,x,area.Height);
+                for(int y=0,row=0;y<area.Height;y+=cell,row++) g.DrawLine(row%4==0?major:minor,0,y,area.Width,y);
+                float r=Math.Max(1.6F,1.8F*scale);
+                for(int y=0;y<area.Height;y+=cell*4)for(int x=0;x<area.Width;x+=cell*4) g.FillEllipse(dot,x-r,y-r,r*2,r*2);
+            }
+        }
+        private static void Aurora(Graphics g,Rectangle area,float scale)
+        {
+            g.SmoothingMode=SmoothingMode.AntiAlias;
+            float w=Math.Max(1,area.Width),h=Math.Max(1,area.Height);
+            Color c0=Color.FromArgb(Theme.Dark?34:42,Theme.WallpaperColors[1]);
+            Color c1=Color.FromArgb(Theme.Dark?28:36,Theme.WallpaperColors[3]);
+            using(SolidBrush b0=new SolidBrush(c0))using(SolidBrush b1=new SolidBrush(c1))
+            using(Pen ring=new Pen(PatternColor(24),Math.Max(1.2F,1.4F*scale)))
+            {
+                g.FillEllipse(b0,-w*.15F,-h*.08F,w*.72F,h*.48F);
+                g.FillEllipse(b1,w*.42F,h*.28F,w*.76F,h*.52F);
+                g.FillEllipse(b0,w*.10F,h*.64F,w*.68F,h*.46F);
+                g.DrawEllipse(ring,-w*.08F,h*.04F,w*.68F,h*.42F);
+                g.DrawEllipse(ring,w*.32F,h*.36F,w*.74F,h*.48F);
             }
         }
     }

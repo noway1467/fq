@@ -1567,11 +1567,68 @@ namespace FeiqLight.Tests
                                 }
                             }
                             Theme.Change(false,"blue");
+                            foreach(string accent in new[]{"blue","green","purple","amber","rose","slate"})foreach(bool dark in new[]{false,true}) {
+                                Theme.Change(dark,accent);Check(Theme.AccentKey==accent,"强调色未应用："+accent);
+                                Check(Theme.Sky==Theme.Blend(Theme.Blue,Theme.Surface,dark?.30F:.17F),"扩展配色选中态公式不一致："+accent);
+                            }
+                            Theme.Change(false,"blue");
+                            foreach(string pat in new[]{"grid","aurora"}) {
+                                using(Bitmap wall=ChatWallpaper.Render(new Size(180,120),pat,null,1F)) {
+                                    HashSet<int> tones=new HashSet<int>();for(int y=0;y<wall.Height;y+=6)for(int x=0;x<wall.Width;x+=6)tones.Add(wall.GetPixel(x,y).ToArgb());
+                                    Check(tones.Count>6,"新增壁纸图案没有有效纹理："+pat);
+                                }
+                            }
+                            using(SettingsDialog dialog=new SettingsDialog(new AppSettings { AutoReceiveFiles = false },storeA.Root,a.Port)) {
+                                dialog.Show();Application.DoEvents();SettingsTab(dialog,"外观");
+                                Button(dialog,"石墨").PerformClick();Button(dialog,"保存").PerformClick();
+                                Check(dialog.Value!=null&&dialog.Value.DarkMode&&dialog.Value.Accent=="slate"&&dialog.Value.ChatBackground=="grid","新增预设未正确保存");
+                                dialog.Close();
+                            }
                             using(SettingsDialog dialog=new SettingsDialog(new AppSettings { AutoReceiveFiles = false },storeA.Root,a.Port)) {
                                 dialog.Show(mainA);dialog.Size=new Size(470,500);Application.DoEvents();SettingsTab(dialog,"外观");Control accent=Find<TableLayoutPanel>(dialog,"主题颜色");((ScrollableControl)accent.Parent.Parent).ScrollControlIntoView(accent);Application.DoEvents();
                                 Check(Button(dialog,"保存").Parent.ClientRectangle.Contains(Button(dialog,"保存").Bounds),"小窗口保存按钮不可见");Render(dialog,"preview-unified-small-settings");dialog.Close();
                             }
                         }finally {Theme.Change(false,"blue");}
+                    });
+                    test("彩色表情与热刷新：输入框与侧边栏彩色绘制、模态关闭不掉激活且非主题修改不重置Theme",()=>{
+                        string sample="🤝 🙌 😇 😂 😀";
+                        using(Form host=new Form{ClientSize=new Size(460,260)})using(ChatEditor editor=new ChatEditor{Dock=DockStyle.Top,Height=80,Font=new Font(Theme.Body.FontFamily,10F)})using(ConversationList list=new ConversationList{Dock=DockStyle.Fill}) {
+                            list.SetItems(new[]{new ConversationList.Item{Peer=new Peer{Endpoint=new IPEndPoint(IPAddress.Loopback,2425),Login="emoji",Host="host",DeviceId="emoji-peer",Nickname="🤝 测试联系人",Online=true},Preview="你：😂 开心测试",Time=DateTime.Now}});
+                            host.Controls.Add(list);host.Controls.Add(editor);host.Show();editor.Text=sample;Application.DoEvents();
+                            using(Bitmap edBmp=new Bitmap(editor.Width,editor.Height)) {
+                                editor.DrawToBitmap(edBmp,new Rectangle(Point.Empty,edBmp.Size));
+                                int warm=0;for(int y=0;y<edBmp.Height;y++)for(int x=0;x<edBmp.Width;x++){Color c=edBmp.GetPixel(x,y);if(c.R>180&&c.G>90&&c.G<220&&c.B<100)warm++;}
+                                Check(warm>10,"输入框表情仍为单色轮廓：warm="+warm);
+                                Check(editor.Text==sample,"输入框绘制改变了原文");
+                                edBmp.Save(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"preview-editor-emoji.png"),ImageFormat.Png);
+                            }
+                            using(Bitmap listBmp=new Bitmap(list.Width,list.Height)) {
+                                list.DrawToBitmap(listBmp,new Rectangle(Point.Empty,listBmp.Size));
+                                int warm=0;for(int y=0;y<listBmp.Height;y++)for(int x=0;x<listBmp.Width;x++){Color c=listBmp.GetPixel(x,y);if(c.R>180&&c.G>90&&c.G<220&&c.B<100)warm++;}
+                                Check(warm>10,"侧边会话列表表情仍为单色：warm="+warm);
+                                listBmp.Save(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"preview-sidebar-emoji.png"),ImageFormat.Png);
+                            }
+                            host.Close();
+                        }
+                        int themeVersion=Theme.Version;
+                        MenuDialog<SettingsDialog>(()=>Find<Button>(mainA,"菜单").PerformClick(),"设置",dialog=>{
+                            using(System.Windows.Forms.Timer timer=new System.Windows.Forms.Timer{Interval=40}) {
+                                timer.Tick+=delegate {
+                                    AvatarPickerDialog picker=Application.OpenForms.OfType<AvatarPickerDialog>().FirstOrDefault();
+                                    if(picker==null)return;timer.Stop();
+                                    Find<Control>(picker,"内置头像列表").Controls.OfType<Button>().ElementAt(3).PerformClick();
+                                    Button(picker,"使用此头像").PerformClick();
+                                };
+                                timer.Start();
+                                Button(dialog,"更换头像").PerformClick();
+                            }
+                            Application.DoEvents();Check(dialog.Enabled,"关闭头像弹窗后设置窗仍被禁用");
+                            Button(dialog,"保存").PerformClick();
+                        });
+                        Application.DoEvents();
+                        Check(mainA.Enabled,"保存设置后主窗口仍被禁用");
+                        Check(Theme.Version==themeVersion,"仅更换头像不应触发全量 Theme.Version 重建");
+                        Check(storeA.LoadSettings().Avatar=="builtin:3","仅更换头像未保存");
                     });
                     test("联系人资料：改名、下线和重新打开会话同步抬头", () =>
                     {

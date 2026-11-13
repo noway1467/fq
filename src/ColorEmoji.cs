@@ -38,6 +38,71 @@ namespace FeiqLight
             int index;if(!indices.TryGetValue(emoji,out index))return false;
             graphics.DrawImage(atlas,bounds,new Rectangle(index%12*72,index/12*72,72,72),GraphicsUnit.Pixel);return true;
         }
+        internal static int MeasureSingleLine(Graphics graphics,string text,Font font)
+        {
+            if(String.IsNullOrEmpty(text))return 0;
+            const TextFormatFlags plain=TextFormatFlags.NoPrefix|TextFormatFlags.SingleLine|TextFormatFlags.NoPadding;
+            if(!Contains(text))return TextRenderer.MeasureText(graphics,text,font,Size.Empty,plain).Width;
+            int total=0,pos=0,runStart=0,emojiSize=Math.Max(12,font.Height);
+            while(pos<text.Length)
+            {
+                string emoji;
+                if(Match(text,pos,out emoji))
+                {
+                    if(pos>runStart)total+=TextRenderer.MeasureText(graphics,text.Substring(runStart,pos-runStart),font,Size.Empty,plain).Width;
+                    total+=emojiSize+2;pos+=emoji.Length;runStart=pos;continue;
+                }
+                pos+=Char.IsSurrogatePair(text,pos)?2:1;
+            }
+            if(pos>runStart)total+=TextRenderer.MeasureText(graphics,text.Substring(runStart,pos-runStart),font,Size.Empty,plain).Width;
+            return total;
+        }
+        internal static void DrawSingleLine(Graphics graphics,string text,Font font,Rectangle bounds,Color color,TextFormatFlags flags)
+        {
+            if(String.IsNullOrEmpty(text)||bounds.Width<=0||bounds.Height<=0)return;
+            if(!Contains(text)){TextRenderer.DrawText(graphics,text,font,bounds,color,flags);return;}
+            const TextFormatFlags plain=TextFormatFlags.NoPrefix|TextFormatFlags.SingleLine|TextFormatFlags.VerticalCenter|TextFormatFlags.NoPadding;
+            bool ellipsis=(flags&TextFormatFlags.EndEllipsis)!=0;
+            int emojiSize=Math.Max(12,Math.Min(bounds.Height,font.Height)),x=bounds.X,right=bounds.Right;
+            int ellipsisWidth=ellipsis?TextRenderer.MeasureText(graphics,"…",font,Size.Empty,plain).Width:0;
+            int limit=ellipsis?Math.Max(bounds.X,right-ellipsisWidth):right;
+            var prevInterp=graphics.InterpolationMode;
+            graphics.InterpolationMode=System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+            try
+            {
+                int pos=0,runStart=0;
+                while(pos<text.Length&&x<right)
+                {
+                    string emoji;
+                    if(Match(text,pos,out emoji))
+                    {
+                        if(pos>runStart)
+                        {
+                            string chunk=text.Substring(runStart,pos-runStart);
+                            int w=TextRenderer.MeasureText(graphics,chunk,font,Size.Empty,plain).Width;
+                            if(ellipsis&&x+w>limit&&pos<text.Length)
+                            {
+                                TextRenderer.DrawText(graphics,chunk,font,new Rectangle(x,bounds.Y,Math.Max(1,right-x),bounds.Height),color,plain|TextFormatFlags.EndEllipsis);
+                                return;
+                            }
+                            TextRenderer.DrawText(graphics,chunk,font,new Rectangle(x,bounds.Y,Math.Max(1,Math.Min(w+4,right-x)),bounds.Height),color,plain);
+                            x+=w;
+                        }
+                        if(x+emojiSize>(ellipsis?limit:right))
+                        {
+                            if(ellipsis)TextRenderer.DrawText(graphics,"…",font,new Rectangle(x,bounds.Y,Math.Max(1,right-x),bounds.Height),color,plain);
+                            return;
+                        }
+                        Draw(graphics,emoji,new Rectangle(x,bounds.Y+(bounds.Height-emojiSize)/2,emojiSize,emojiSize));
+                        x+=emojiSize+2;pos+=emoji.Length;runStart=pos;continue;
+                    }
+                    pos+=Char.IsSurrogatePair(text,pos)?2:1;
+                }
+                if(pos>runStart&&x<right)
+                    TextRenderer.DrawText(graphics,text.Substring(runStart,pos-runStart),font,new Rectangle(x,bounds.Y,Math.Max(1,right-x),bounds.Height),color,ellipsis?(plain|TextFormatFlags.EndEllipsis):plain);
+            }
+            finally{graphics.InterpolationMode=prevInterp;}
+        }
         internal sealed class EmojiButton : Button
         {
             private bool hovering;

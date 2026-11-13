@@ -43,6 +43,8 @@ final class ChatWallpaper extends Drawable {
             for(int i=0;i<waves.length;i++){line.setColor(waveColors[i]);line.setStrokeWidth(waveWidths[i]);canvas.drawPath(waves[i],line);}
             return;
         }
+        if(pattern.equals("grid")){drawGrid(canvas,area);return;}
+        if(pattern.equals("aurora")){drawAurora(canvas,area);return;}
         if(tile==null)tile=doodles();
         paint.setShader(new BitmapShader(tile,Shader.TileMode.REPEAT,Shader.TileMode.REPEAT));canvas.drawRect(area,paint);paint.setShader(null);
     }
@@ -120,6 +122,25 @@ final class ChatWallpaper extends Drawable {
             for(float x=-20;x<=area.width()+20;x+=6*density){float y=(float)(band*gap+Math.sin(x/length*Math.PI*2+phase)*amplitude+Math.sin(x/(length*.43)+phase*1.7)*amplitude*.35);if(x==-20)path.moveTo(x,y);else path.lineTo(x,y);}
             waves[line]=path;
         }
+    }
+    private void drawGrid(Canvas canvas,Rect area) {
+        int cell=Math.max(18,Math.round(28*density));
+        Paint line=new Paint(Paint.ANTI_ALIAS_FLAG);line.setStyle(Paint.Style.STROKE);
+        int minorColor=ink(14),majorColor=ink(28);float minorW=Math.max(1f,density),majorW=Math.max(1f,1.25f*density);
+        for(int x=0,col=0;x<area.width();x+=cell,col++){line.setColor(col%4==0?majorColor:minorColor);line.setStrokeWidth(col%4==0?majorW:minorW);canvas.drawLine(x,0,x,area.height(),line);}
+        for(int y=0,row=0;y<area.height();y+=cell,row++){line.setColor(row%4==0?majorColor:minorColor);line.setStrokeWidth(row%4==0?majorW:minorW);canvas.drawLine(0,y,area.width(),y,line);}
+        Paint dot=new Paint(Paint.ANTI_ALIAS_FLAG);dot.setColor(ink(34));float r=Math.max(1.6f,1.8f*density);
+        for(int y=0;y<area.height();y+=cell*4)for(int x=0;x<area.width();x+=cell*4)canvas.drawCircle(x,y,r,dot);
+    }
+    private void drawAurora(Canvas canvas,Rect area) {
+        float w=Math.max(1,area.width()),h=Math.max(1,area.height());
+        Paint fill=new Paint(Paint.ANTI_ALIAS_FLAG);fill.setStyle(Paint.Style.FILL);
+        int a0=dark?34:42,a1=dark?28:36;
+        int c0=(a0<<24)|(colors[1]&0x00ffffff),c1=(a1<<24)|(colors[3]&0x00ffffff);
+        fill.setColor(c0);canvas.drawOval(-w*.15f,-h*.08f,w*.57f,h*.40f,fill);canvas.drawOval(w*.10f,h*.64f,w*.78f,h*1.10f,fill);
+        fill.setColor(c1);canvas.drawOval(w*.42f,h*.28f,w*1.18f,h*.80f,fill);
+        Paint ring=new Paint(Paint.ANTI_ALIAS_FLAG);ring.setStyle(Paint.Style.STROKE);ring.setColor(ink(24));ring.setStrokeWidth(Math.max(1.2f,1.4f*density));
+        canvas.drawOval(-w*.08f,h*.04f,w*.60f,h*.46f,ring);canvas.drawOval(w*.32f,h*.36f,w*1.06f,h*.84f,ring);
     }
     private static int blend(int a,int b,float t){return Color.rgb((int)(Color.red(a)*t+Color.red(b)*(1-t)),(int)(Color.green(a)*t+Color.green(b)*(1-t)),(int)(Color.blue(a)*t+Color.blue(b)*(1-t)));}
     @Override public void setAlpha(int alpha) { }

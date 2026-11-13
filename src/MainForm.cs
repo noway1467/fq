@@ -322,6 +322,16 @@ public sealed class MainForm : ModernWindow
             }
         }
         private void RefreshNetwork() { if (started) try { network.Revalidate(); } catch (Exception e) { status.Text = e.Message; } }
+        private void RefreshNetworkAsync()
+        {
+            if (!started) return;
+            System.Threading.Tasks.Task.Run(delegate { network.Revalidate(); }).ContinueWith(task => {
+                if (!task.IsFaulted || IsDisposed || !IsHandleCreated) return;
+                Exception error = task.Exception != null && task.Exception.InnerException != null ? task.Exception.InnerException : task.Exception;
+                try { BeginInvoke((MethodInvoker)delegate { if (!IsDisposed && error != null) status.Text = error.Message; }); }
+                catch (InvalidOperationException) { }
+            });
+        }
         private void AddPeer()
         {
             if (!started) return; using (AddressDialog dialog = new AddressDialog(network.Port)) if (dialog.ShowDialog(this) == DialogResult.OK) try { network.Probe(dialog.Endpoint); status.Text = "正在查找"; } catch (Exception e) { status.Text = e.Message; }
@@ -337,15 +347,42 @@ public sealed class MainForm : ModernWindow
             bool enabled = false, startupAvailable = startup != null;
             try { enabled = startup != null && startup.IsEnabled; }
             catch (Exception e) { startupAvailable = false; status.Text = "启动项读取失败，其他设置仍可保存：" + e.Message; }
-            using (SettingsDialog dialog = new SettingsDialog(network.Settings, store.Root, network.Port, startupAvailable, enabled))
+            bool restoreFront = Visible && WindowState != FormWindowState.Minimized;
+            AppSettings previous = network.Settings;
+            AppSettings next = null;
+            using (SettingsDialog dialog = new SettingsDialog(previous, store.Root, network.Port, startupAvailable, enabled))
             {
-                if (dialog.ShowDialog(this) != DialogResult.OK) return;
-                dialog.Value.Window = network.Settings.Window;
-                dialog.Value.KnownPeers = network.Settings.KnownPeers;
-                dialog.Value.Conversations = network.Settings.Conversations;
-                dialog.Value.DeviceId = network.Settings.DeviceId;
-                try { if (startupAvailable) startup.SaveSettings(store, network.Settings, dialog.Value); else store.SaveSettings(dialog.Value); network.Settings = dialog.Value; Theme.Change(dialog.Value.FollowSystemTheme ? Theme.SystemDark : dialog.Value.DarkMode,dialog.Value.Accent); foreach(ChatForm chat in chats.Values)chat.ApplyAppearance(); RefreshFilters(); RefreshNetwork(); ReceiveAutomatically(); } catch (Exception e) { status.Text = "设置保存失败：" + e.Message; }
+                if (dialog.ShowDialog(this) != DialogResult.OK)
+                {
+                    if (restoreFront && !IsDisposed) Activate();
+                    return;
+                }
+                next = dialog.Value;
             }
+            if (restoreFront && !IsDisposed) Activate();
+            next.Window = previous.Window;
+            next.KnownPeers = previous.KnownPeers;
+            next.Conversations = previous.Conversations;
+            next.DeviceId = previous.DeviceId;
+            try
+            {
+                if (startupAvailable) startup.SaveSettings(store, previous, next);
+                else store.SaveSettings(next);
+                network.Settings = next;
+                bool nextDark = next.FollowSystemTheme ? Theme.SystemDark : next.DarkMode;
+                string nextAccent = Theme.NormalizeAccent(next.Accent);
+                bool themeChanged = nextDark != Theme.Dark || nextAccent != Theme.AccentKey;
+                bool appearanceChanged = themeChanged || previous.ChatFontSize != next.ChatFontSize ||
+                    !string.Equals(previous.ChatBackground ?? "orbits", next.ChatBackground ?? "orbits", StringComparison.Ordinal) ||
+                    !string.Equals(previous.BackgroundImage ?? "", next.BackgroundImage ?? "", StringComparison.OrdinalIgnoreCase);
+                bool avatarChanged = !string.Equals(previous.Avatar ?? "", next.Avatar ?? "", StringComparison.Ordinal);
+                if (themeChanged) Theme.Change(nextDark, nextAccent);
+                if (appearanceChanged || avatarChanged) foreach (ChatForm chat in chats.Values) chat.ApplyAppearance();
+                RefreshFilters();
+                RefreshNetworkAsync();
+                ReceiveAutomatically();
+            }
+            catch (Exception e) { status.Text = "设置保存失败：" + e.Message; }
         }
         internal void OpenShared(Peer peer)
         {

@@ -52,7 +52,8 @@ namespace FeiqLight
         private bool multiSelectMode;
         private readonly Timer longPress = new Timer { Interval = 500 };
         private ChatRecord pressedRecord;
-        private string wallpaperPattern="none";
+        private string wallpaperPattern="none", wallpaperKey="";
+        private int wallpaperThemeVersion=-1;
         private ChatWallpaper.Asset wallpaperImage;
         // 新消息入场：整列内容从旧位置平滑上移；跳到最新按钮的显隐；离开底部后新到消息计数。
         private double appearFrom, appearStart;
@@ -63,8 +64,13 @@ namespace FeiqLight
         private readonly ToolTip tips = new ToolTip { InitialDelay = 450, ReshowDelay = 120, AutoPopDelay = 8000 };
         private string tipText;
         public void SetWallpaper(string pattern,string path) {
-            ChatWallpaper.Asset next=null;if(pattern=="image")try{next=ChatWallpaper.Acquire(path);}catch(Exception){pattern="orbits";}
-            ChatWallpaper.Release(wallpaperImage);wallpaperImage=next;wallpaperPattern=pattern;Invalidate();
+            string nextPattern=pattern??"none", nextKey="";
+            if(nextPattern=="image"&&!string.IsNullOrEmpty(path)) {
+                try{FileInfo fi=new FileInfo(path);if(fi.Exists)nextKey=fi.FullName+"|"+fi.LastWriteTimeUtc.Ticks+"|"+fi.Length;}catch{}
+            }
+            if(wallpaperPattern==nextPattern&&wallpaperKey==nextKey&&wallpaperThemeVersion==Theme.Version&&(nextPattern!="image"||wallpaperImage!=null)) return;
+            ChatWallpaper.Asset next=null;if(nextPattern=="image")try{next=ChatWallpaper.Acquire(path);}catch(Exception){nextPattern="orbits";nextKey="";}
+            ChatWallpaper.Release(wallpaperImage);wallpaperImage=next;wallpaperPattern=nextPattern;wallpaperKey=next==null?"":next.Key;wallpaperThemeVersion=Theme.Version;Invalidate();
         }
         private readonly Dictionary<string,Bitmap> previews = new Dictionary<string,Bitmap>();
         private readonly HashSet<string> pending = new HashSet<string>();

@@ -138,10 +138,16 @@ namespace FeiqLight
     public sealed class ChatEditor : RichTextBox
     {
         public string Placeholder = "输入消息…";
+        private static readonly IntPtr RichEdit50 = LoadLibrary("msftedit.dll");
+        private bool hadSelection;
         [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
         private struct TextArea { internal int Left, Top, Right, Bottom; }
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)] private static extern IntPtr LoadLibrary(string path);
         [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr handle, int message, IntPtr wparam, ref TextArea area);
         [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr handle, int message, IntPtr wparam, IntPtr lparam);
+        [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern bool HideCaret(IntPtr handle);
+        [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern bool ShowCaret(IntPtr handle);
+        protected override CreateParams CreateParams { get { CreateParams cp = base.CreateParams; if (RichEdit50 != IntPtr.Zero) cp.ClassName = "RICHEDIT50W"; return cp; } }
         private Rectangle textArea;
         internal int FirstVisibleLine { get { return IsHandleCreated ? (int)SendMessage(Handle, 0x00CE, IntPtr.Zero, IntPtr.Zero) : 0; } }
         private int LastLineTop()
@@ -207,6 +213,63 @@ namespace FeiqLight
         protected override void OnTextChanged(EventArgs e) { base.OnTextChanged(e); AlignText(); if (TextLength <= 1) Invalidate(); }
         protected override void OnGotFocus(EventArgs e) { base.OnGotFocus(e); Invalidate(); }
         protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); Invalidate(); }
+        protected override void OnVScroll(EventArgs e) { base.OnVScroll(e); if (ColorEmoji.Contains(Text)) Invalidate(false); }
+        protected override void OnSelectionChanged(EventArgs e)
+        {
+            base.OnSelectionChanged(e);
+            bool active = SelectionLength > 0;
+            if ((active || hadSelection) && ColorEmoji.Contains(Text)) Invalidate(false);
+            hadSelection = active;
+        }
+        private void PaintColorEmojis(Graphics g)
+        {
+            string text = Text;
+            if (!ColorEmoji.Contains(text)) return;
+            Rectangle clip = textArea.Width > 0 ? textArea : ClientRectangle;
+            if (clip.Width <= 0 || clip.Height <= 0) return;
+            int lineHeight = Math.Max(12, Font.Height);
+            int selStart = SelectionStart, selEnd = selStart + SelectionLength;
+            bool showSelection = (Focused || !HideSelection) && selEnd > selStart;
+            GraphicsState state = g.Save();
+            try
+            {
+                Rectangle clearClip = Rectangle.Intersect(ClientRectangle, new Rectangle(clip.X - 2, clip.Y - 3, clip.Width + 4, clip.Height + 6));
+                g.SetClip(clearClip);
+                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                var cells = new System.Collections.Generic.List<Tuple<string, Rectangle, bool>>();
+                int pos = 0;
+                while (pos < text.Length)
+                {
+                    string emoji;
+                    if (!ColorEmoji.Match(text, pos, out emoji)) { pos += Char.IsSurrogatePair(text, pos) ? 2 : 1; continue; }
+                    Point p = GetPositionFromCharIndex(pos);
+                    if (p.Y + lineHeight >= clip.Top - 2 && p.Y <= clip.Bottom + 2 && p.X <= clip.Right + 2)
+                    {
+                        Point next = GetPositionFromCharIndex(pos + emoji.Length);
+                        int slotW = next.Y == p.Y && next.X > p.X ? next.X - p.X : Math.Max(12, lineHeight - 2);
+                        if (p.X + slotW >= clip.Left - 2)
+                        {
+                            bool selected = showSelection && pos < selEnd && pos + emoji.Length > selStart;
+                            cells.Add(Tuple.Create(emoji, new Rectangle(p.X, p.Y, slotW, lineHeight), selected));
+                        }
+                    }
+                    pos += emoji.Length;
+                }
+                if (cells.Count == 0) return;
+                using (SolidBrush normalBg = new SolidBrush(BackColor))
+                using (SolidBrush selectedBg = new SolidBrush(SystemColors.Highlight))
+                {
+                    foreach (var cell in cells)
+                        g.FillRectangle(cell.Item3 ? selectedBg : normalBg, cell.Item2.X - 1, cell.Item2.Y - 2, cell.Item2.Width + 2, cell.Item2.Height + 3);
+                    foreach (var cell in cells)
+                    {
+                        int size = Math.Min(cell.Item2.Height - 2, Math.Max(10, cell.Item2.Width));
+                        ColorEmoji.Draw(g, cell.Item1, new Rectangle(cell.Item2.X + (cell.Item2.Width - size) / 2, cell.Item2.Y + (cell.Item2.Height - size) / 2, size, size));
+                    }
+                }
+            }
+            finally { g.Restore(state); }
+        }
         protected override void WndProc(ref Message m)
         {
             if (m.Msg == 0x020A)
@@ -217,9 +280,27 @@ namespace FeiqLight
                 return;
             }
             base.WndProc(ref m);
-            if (m.Msg == 0x000F && TextLength == 0 && !String.IsNullOrEmpty(Placeholder) && IsHandleCreated)
-                using (Graphics g = CreateGraphics())
-                    TextRenderer.DrawText(g, Placeholder, Font, new Rectangle(GetPositionFromCharIndex(0), new Size(Math.Max(1, textArea.Width), Font.Height)), Theme.Muted, TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.Left | TextFormatFlags.NoPadding);
+            if ((m.Msg == 0x000F || m.Msg == 0x0318) && IsHandleCreated)
+            {
+                if (TextLength == 0)
+                {
+                    if (!String.IsNullOrEmpty(Placeholder))
+                    {
+                        using (Graphics g = m.Msg == 0x0318 && m.WParam != IntPtr.Zero ? Graphics.FromHdc(m.WParam) : CreateGraphics())
+                            TextRenderer.DrawText(g, Placeholder, Font, new Rectangle(GetPositionFromCharIndex(0), new Size(Math.Max(1, textArea.Width), Font.Height)), Theme.Muted, TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.Left | TextFormatFlags.NoPadding);
+                    }
+                }
+                else if (ColorEmoji.Contains(Text))
+                {
+                    bool hid = m.Msg == 0x000F && HideCaret(Handle);
+                    try
+                    {
+                        using (Graphics g = m.Msg == 0x0318 && m.WParam != IntPtr.Zero ? Graphics.FromHdc(m.WParam) : CreateGraphics())
+                            PaintColorEmojis(g);
+                    }
+                    finally { if (hid) ShowCaret(Handle); }
+                }
+            }
         }
     }
     // 拖入文件时覆盖消息区的投放提示；自身也接收投放。
