@@ -21,10 +21,22 @@ namespace FeiqLight
         private readonly List<MessageLayout> textLayouts=new List<MessageLayout>();
         private readonly List<Item> items=new List<Item>();
         private Dictionary<ChatRecord,Measure> measures=new Dictionary<ChatRecord,Measure>();
+        private string peerIdentity, peerAvatar, ownIdentity, ownAvatar;
+        internal void SetAvatars(string incomingIdentity, string incomingAvatar, string outgoingIdentity, string outgoingAvatar)
+        {
+            if (peerIdentity == incomingIdentity && peerAvatar == incomingAvatar && ownIdentity == outgoingIdentity && ownAvatar == outgoingAvatar) return;
+            bool first = peerIdentity == null;
+            peerIdentity = incomingIdentity; peerAvatar = incomingAvatar; ownIdentity = outgoingIdentity; ownAvatar = outgoingAvatar;
+            // 换头像只重绘；首次绑定才为头像留位置，避免资料更新打断阅读。
+            if (first) Arrange();
+            Invalidate();
+        }
         private readonly List<Tuple<Rectangle,string>> linkHits=new List<Tuple<Rectangle,string>>();
         private readonly List<Tuple<Rectangle,ChatRecord,int>> fileHits=new List<Tuple<Rectangle,ChatRecord,int>>();
         private readonly List<Tuple<Rectangle,ChatRecord>> stampHits=new List<Tuple<Rectangle,ChatRecord>>();
         private readonly List<Tuple<Rectangle,int>> retryHits=new List<Tuple<Rectangle,int>>();
+        private readonly List<Tuple<Rectangle,bool>> avatarHits=new List<Tuple<Rectangle,bool>>();
+        private bool pressedAvatar;
         private string dragFilePath;
         private Point dragStart;
         private bool fileDragStarted;
@@ -70,6 +82,7 @@ namespace FeiqLight
         }
         private int previousHeight;
         public event Action<ChatRecord> RetryRequested;
+        public event Action<bool> AvatarClicked;
         public event Action<ChatRecord> ForwardRequested;
         public event Action<ChatRecord,int> FileRequested;
         public event Action<ChatRecord[]> DeleteRequested;
@@ -166,7 +179,7 @@ namespace FeiqLight
             }
             catch (Exception e) { using (NoticeDialog dialog = new NoticeDialog("无法定位文件", e.Message)) dialog.ShowDialog(owner.FindForm()); }
         }
-        public void Clear() { CancelLongPress(); records.Clear(); bounds.Clear(); textLayouts.Clear(); items.Clear(); measures.Clear(); linkHits.Clear(); mediaHits.Clear(); fileHits.Clear(); stampHits.Clear(); retryHits.Clear(); pressedAction=null; dragFilePath=null; Text = ""; AutoScrollMinSize = Size.Empty; selected = -1; EndSelection(); unseen = 0; appearFrom = 0; Invalidate(); }
+        public void Clear() { CancelLongPress(); records.Clear(); bounds.Clear(); textLayouts.Clear(); items.Clear(); measures.Clear(); linkHits.Clear(); mediaHits.Clear(); fileHits.Clear(); stampHits.Clear(); retryHits.Clear(); avatarHits.Clear(); pressedAction=null; pressedAvatar=false; dragFilePath=null; Text = ""; AutoScrollMinSize = Size.Empty; selected = -1; EndSelection(); unseen = 0; appearFrom = 0; Invalidate(); }
         public bool HasDelivery(string state) { return records.Any(r => r.State == state); }
         // 自己发送后回到最新：近处平滑滚动，远处先贴近再滑行；逻辑位置立即落到底部。
         public void ScrollToLatest() { unseen = 0; SmoothTo(AutoScrollMinSize.Height); }
@@ -257,6 +270,7 @@ namespace FeiqLight
         private int PadX { get { return Dp(11); } }
         private int PadTop { get { return Dp(7); } }
         private int PadBottom { get { return Dp(7); } }
+        private int AvatarSize { get { return Dp(44); } }
         private int FileRow { get { return Dp(52); } }
         private int MediaHeight { get { return Dp(172); } }
         private int Caption { get { return Dp(20); } }
@@ -348,7 +362,9 @@ namespace FeiqLight
         {
             if (ClientSize.Width < 50) return;
             int width = ClientSize.Width, side = Dp(14), tail = Dp(7);
+            int avatarGutter = peerIdentity == null ? 0 : AvatarSize + Dp(8);
             int maxBubble = Math.Max(Dp(120), Math.Min(Dp(540), (int)((width - side * 2 - tail) * .78)));
+            if (avatarGutter > 0) maxBubble = Math.Min(maxBubble, Math.Max(Dp(40) + PadX * 2, width - side * 2 - tail - avatarGutter));
             bounds.Clear(); textLayouts.Clear(); items.Clear();
             Dictionary<ChatRecord,Measure> next = new Dictionary<ChatRecord,Measure>();
             int y = Dp(10); DateTime day = DateTime.MinValue;
@@ -365,8 +381,9 @@ namespace FeiqLight
                 else y += i > 0 && Continues(records[i - 1], r) ? Dp(3) : Dp(10);
                 item.First = item.DateLabel != null || !Continues(records[i - 1], r);
                 Measure m = MeasureRecord(r, maxBubble); next[r] = m; item.M = m;
-                bounds.Add(new Rectangle(r.Outgoing ? width - side - tail - m.Width : side + tail, y, m.Width, m.Height));
-                textLayouts.Add(m.Layout); items.Add(item); y += m.Height;
+                int rowHeight = Math.Max(m.Height, avatarGutter > 0 ? AvatarSize : 0);
+                bounds.Add(new Rectangle(r.Outgoing ? width - side - tail - avatarGutter - m.Width : side + tail + avatarGutter, y + rowHeight - m.Height, m.Width, m.Height));
+                textLayouts.Add(m.Layout); items.Add(item); y += rowHeight;
             }
             for (int i = 0; i < items.Count; i++) items[i].Last = i == items.Count - 1 || !items[i + 1].First;
             measures = next; y += Dp(14);
@@ -413,7 +430,7 @@ namespace FeiqLight
         {
             Graphics g = e.Graphics;
             ChatWallpaper.Draw(g, ClientRectangle, wallpaperPattern, wallpaperImage, DpiScale);
-            mediaHits.Clear(); linkHits.Clear(); fileHits.Clear(); stampHits.Clear(); retryHits.Clear();
+            mediaHits.Clear(); linkHits.Clear(); fileHits.Clear(); stampHits.Clear(); retryHits.Clear(); avatarHits.Clear();
             g.SmoothingMode = SmoothingMode.AntiAlias; g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
             int dy = -ScrollOffset + Shift, first = FirstVisible(-dy - Dp(48));
             for (int i = first; i < records.Count && i < bounds.Count; i++)
@@ -421,8 +438,17 @@ namespace FeiqLight
                 Item item = items[i];
                 if (item.DateLabel != null) { Rectangle date = item.DateBounds; date.Offset(0, dy); if (date.Top > ClientSize.Height) break; if (date.Bottom >= 0) DrawPill(g, date, item.DateLabel, 255); }
                 Rectangle r = bounds[i]; r.Offset(0, dy);
-                if (r.Top > ClientSize.Height) break; if (r.Bottom < -Dp(4)) continue;
+                if (Math.Min(r.Top, peerIdentity == null ? r.Top : r.Bottom - AvatarSize) > ClientSize.Height) break; if (r.Bottom < -Dp(4)) continue;
                 DrawMessage(g, i, r, item);
+                if (peerIdentity != null)
+                {
+                    bool outgoing = records[i].Outgoing;
+                    int size = AvatarSize, halo = Theme.AvatarHalo(size);
+                    Bitmap portrait = Theme.CachedAvatar(size, outgoing ? ownIdentity : peerIdentity, false, outgoing ? ownAvatar : peerAvatar);
+                    int x = outgoing ? ClientSize.Width - Dp(14) - size : Dp(14);
+                    g.DrawImageUnscaled(portrait, x - halo, r.Bottom - size - halo);
+                    avatarHits.Add(Tuple.Create(new Rectangle(x, r.Bottom - size, size, size), outgoing));
+                }
             }
             DrawFloatingDate(g, dy);
             DrawJump(g);
@@ -661,8 +687,15 @@ namespace FeiqLight
             CancelLongPress();
             base.OnMouseDown(e); Focus();
             if (ScrollbarMouseDown(e)) return;
-            pressedAction=null;dragFilePath=null;fileDragStarted=false;
+            pressedAction=null;pressedAvatar=false;dragFilePath=null;fileDragStarted=false;
             if (JumpVisible && JumpBounds().Contains(e.Location)) { if (e.Button == MouseButtons.Left) ScrollToLatest(); return; }
+            var avatar = avatarHits.FirstOrDefault(item => item.Item1.Contains(e.Location));
+            if (avatar != null && e.Button == MouseButtons.Left && AvatarClicked != null)
+            {
+                dragStart = e.Location; pressedAvatar = true; Capture = true;
+                pressedAction = delegate { AvatarClicked(avatar.Item2); };
+                return;
+            }
             var retry = retryHits.FirstOrDefault(item => item.Item1.Contains(e.Location));
             if (retry != null && !multiSelectMode && ModifierKeys == Keys.None) { selected = retry.Item2; Invalidate(); ContextMenuStrip.Show(this, e.Location); return; }
             int hit = HitBubble(e.Location);
@@ -695,12 +728,13 @@ namespace FeiqLight
             if (ScrollbarMouseUp(e)) return;
             if (e.Button != MouseButtons.Left) return;
             Action action=pressedAction;
+            bool avatarClick=pressedAvatar;
             bool click=!fileDragStarted&&!MovedPastDragThreshold(e.Location);
-            pressedAction=null;dragFilePath=null;fileDragStarted=false;Capture=false;
-            if(click&&!multiSelectMode&&action!=null)action();
+            pressedAction=null;pressedAvatar=false;dragFilePath=null;fileDragStarted=false;Capture=false;
+            if(click&&(!multiSelectMode||avatarClick)&&action!=null)action();
         }
         private void CancelLongPress() { longPress.Stop(); pressedRecord = null; }
-        protected override void OnMouseCaptureChanged(EventArgs e) { base.OnMouseCaptureChanged(e); if (!Capture) { CancelLongPress(); pressedAction = null; } }
+        protected override void OnMouseCaptureChanged(EventArgs e) { base.OnMouseCaptureChanged(e); if (!Capture) { CancelLongPress(); pressedAction = null; pressedAvatar = false; } }
         private static string ValidDragPath(string path) { return !String.IsNullOrEmpty(path)&&Path.IsPathRooted(path)&&File.Exists(path)?Path.GetFullPath(path):null; }
         private bool MovedPastDragThreshold(Point point) { Size size=SystemInformation.DragSize;return !new Rectangle(dragStart.X-size.Width/2,dragStart.Y-size.Height/2,size.Width,size.Height).Contains(point); }
         internal static DataObject FileDragData(string path) {
@@ -715,13 +749,13 @@ namespace FeiqLight
         protected override void OnMouseDoubleClick(MouseEventArgs e)
         {
             base.OnMouseDoubleClick(e);
-            if (!multiSelectMode && e.Button == MouseButtons.Left && !InScrollbar(e.Location) && !(JumpVisible && JumpBounds().Contains(e.Location)) && !mediaHits.Any(h => h.Item1.Contains(e.Location)) && !fileHits.Any(h => h.Item1.Contains(e.Location))) ShowFullText();
+            if (!multiSelectMode && e.Button == MouseButtons.Left && !InScrollbar(e.Location) && !(JumpVisible && JumpBounds().Contains(e.Location)) && !avatarHits.Any(h => h.Item1.Contains(e.Location)) && !mediaHits.Any(h => h.Item1.Contains(e.Location)) && !fileHits.Any(h => h.Item1.Contains(e.Location))) ShowFullText();
         }
         protected override void OnMouseMove(MouseEventArgs e) {
             base.OnMouseMove(e);
             if (pressedRecord != null && MovedPastDragThreshold(e.Location)) CancelLongPress();
             if (ScrollbarMouseMove(e) && e.Button == MouseButtons.Left && dragFilePath == null) { Cursor = Cursors.Default; return; }
-            bool hand = linkHits.Any(h=>h.Item1.Contains(e.Location))||fileHits.Any(h=>h.Item1.Contains(e.Location))||mediaHits.Any(h=>h.Item1.Contains(e.Location))||retryHits.Any(h=>h.Item1.Contains(e.Location))||(JumpVisible&&JumpBounds().Contains(e.Location));
+            bool hand = linkHits.Any(h=>h.Item1.Contains(e.Location))||fileHits.Any(h=>h.Item1.Contains(e.Location))||mediaHits.Any(h=>h.Item1.Contains(e.Location))||retryHits.Any(h=>h.Item1.Contains(e.Location))||(AvatarClicked!=null&&avatarHits.Any(h=>h.Item1.Contains(e.Location)))||(JumpVisible&&JumpBounds().Contains(e.Location));
             Cursor=hand?Cursors.Hand:Cursors.Default;
             var stamp = stampHits.FirstOrDefault(h => h.Item1.Contains(e.Location));
             string tip = stamp == null ? null : stamp.Item2.Time.ToString("yyyy-MM-dd HH:mm:ss") + (String.IsNullOrEmpty(stamp.Item2.State) ? "" : " · " + StateDescription(stamp.Item2));

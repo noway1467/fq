@@ -364,14 +364,14 @@ public final class UiTest {
             for(int i=0;i<times.length;i++){LanNode.Message m=new LanNode.Message();m.number=i+1;m.time=times[i];m.outgoing=outgoing[i];m.text="分组消息 "+i;m.state=outgoing[i]?"已送达":"已收到";rows.add(m);}
             invoke(activity,"renderMessages",List.class,rows);measure((View)field(activity,"root"),786,1704,true);screenshot(activity,"android-message-groups");
             LinearLayout messages=(LinearLayout)field(activity,"messages");List<String> pills=new ArrayList<>();List<View> bubbles=new ArrayList<>();
-            for(int i=0;i<messages.getChildCount();i++){View child=messages.getChildAt(i);if(child.getBackground() instanceof BubbleDrawable)bubbles.add(child);else pills.add(((TextView)child).getText().toString());}
+            for(int i=0;i<messages.getChildCount();i++){View child=messages.getChildAt(i);if(child instanceof TextView)pills.add(((TextView)child).getText().toString());else for(View view:descendants(child))if(view.getBackground() instanceof BubbleDrawable)bubbles.add(view);}
             assertEquals(Arrays.asList("昨天","今天"),pills);assertEquals(times.length,bubbles.size());
             // 隔日的单条与今天三条连续发出各成一组；相隔超过 5 分钟或换边重新分组。
             boolean[] first={true,true,false,false,true,true},last={true,false,false,true,true,true};float density=activity.getResources().getDisplayMetrics().density;
             for(int i=0;i<bubbles.size();i++) {
                 BubbleDrawable shape=(BubbleDrawable)bubbles.get(i).getBackground();
                 assertEquals("组首："+i,first[i],field(shape,"first"));assertEquals("组尾："+i,last[i],field(shape,"last"));
-                assertEquals("组间距："+i,Math.round((last[i]?10:3)*density),((LinearLayout.LayoutParams)bubbles.get(i).getLayoutParams()).bottomMargin);
+                assertEquals("组间距："+i,Math.round((last[i]?10:3)*density),((LinearLayout.LayoutParams)((View)bubbles.get(i).getParent()).getLayoutParams()).bottomMargin);
             }
         } finally {ac.pause().stop().destroy();sc.destroy();}
     }

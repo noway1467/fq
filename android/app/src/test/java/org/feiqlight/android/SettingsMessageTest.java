@@ -129,7 +129,7 @@ public final class SettingsMessageTest {
     }
     @Test public void contactAvatarOpensCenteredProfileAnd128PreviewWithLocalNickname() throws Exception {
         ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));
-        ActivityController<MainActivity> ac=Robolectric.buildActivity(MainActivity.class).create().start().resume().visible();MainActivity activity=ac.get();Dialog profile=null,preview=null;
+        ActivityController<MainActivity> ac=Robolectric.buildActivity(MainActivity.class).create().start().resume().visible();MainActivity activity=ac.get();Dialog profile=null,preview=null,selfSettings=null;
         try {
             LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:32425"),"profile","host","原昵称","部门 Engineering");Bitmap image=Bitmap.createBitmap(128,128,Bitmap.Config.ARGB_8888);image.eraseColor(Color.MAGENTA);ByteArrayOutputStream bytes=new ByteArrayOutputStream();image.compress(Bitmap.CompressFormat.JPEG,85,bytes);image.recycle();peer.avatar="image:"+java.util.Base64.getEncoder().encodeToString(bytes.toByteArray());
             LanNode.Message message=new LanNode.Message();message.number=1;message.text="资料";message.time=1;message.state="已收到";service.incoming(peer,message,false);settle(service);invoke(activity,"open",new Class<?>[]{String.class},peer.id());settle(service);
@@ -142,8 +142,13 @@ public final class SettingsMessageTest {
                 EditText nickname=(EditText)views(profile.getWindow().getDecorView()).stream().filter(v->"联系人资料昵称".contentEquals(v.getContentDescription()==null?"":v.getContentDescription())).findFirst().orElseThrow();nickname.setText("本机昵称 English");click(profile,"保存");settle(service);assertEquals("本机昵称 English",service.conversations().get(0).note);
             }
             try(ChatStore store=new ChatStore(service)){assertEquals("本机昵称 English",store.conversations().get(0).note);assertEquals("原昵称",store.conversations().get(0).peer.name);}
+            View incomingAvatar=views((View)field(activity,"messages")).stream().filter(v->v.getContentDescription()!=null&&v.getContentDescription().toString().endsWith("的资料")&&!"我的资料".contentEquals(v.getContentDescription())).findFirst().orElseThrow();
+            incomingAvatar.performClick();profile=ShadowDialog.getLatestDialog();assertTrue(views(profile.getWindow().getDecorView()).stream().anyMatch(v->"联系人资料头像，点击查看大图".contentEquals(v.getContentDescription()==null?"":v.getContentDescription())));profile.dismiss();
+            LanNode.Message sent=new LanNode.Message();sent.number=2;sent.text="我的消息";sent.time=2;sent.state="已送达";sent.outgoing=true;service.incoming(peer,sent,false);settle(service);activity.changed();
+            View outgoingAvatar=views((View)field(activity,"messages")).stream().filter(v->"我的资料".contentEquals(v.getContentDescription()==null?"":v.getContentDescription())).findFirst().orElseThrow();
+            outgoingAvatar.performClick();selfSettings=ShadowDialog.getLatestDialog();assertTrue(views(selfSettings.getWindow().getDecorView()).stream().anyMatch(v->v instanceof Button&&"更换头像".contentEquals(((Button)v).getText())));selfSettings.dismiss();
             ((View)field(activity,"chatAvatar")).performClick();profile=ShadowDialog.getLatestDialog();EditText nickname=(EditText)views(profile.getWindow().getDecorView()).stream().filter(v->v instanceof EditText).findFirst().orElseThrow();nickname.setText("旧窗口修改");invoke(activity,"open",new Class<?>[]{String.class},"other-peer");click(profile,"保存");settle(service);assertEquals("本机昵称 English",service.conversations().get(0).note);
-        } finally {if(preview!=null)preview.dismiss();if(profile!=null)profile.dismiss();ac.pause().stop().destroy();sc.destroy();}
+        } finally {if(preview!=null)preview.dismiss();if(profile!=null)profile.dismiss();if(selfSettings!=null)selfSettings.dismiss();ac.pause().stop().destroy();sc.destroy();}
     }
     @Test public void emojiGroupsShareOneScrollablePanelAndOldPanelCannotEditAnotherChat() throws Exception {
         ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));

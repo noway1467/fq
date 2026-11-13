@@ -39,6 +39,7 @@ namespace FeiqLight
             }
             ResizeComposer();
             history.SetWallpaper(network.Settings.ChatBackground,network.Settings.BackgroundImage);
+            history.SetAvatars(peer.Id, peer.Avatar, "device:" + network.Settings.DeviceId, network.Settings.Avatar);
         }
         private readonly TableLayoutPanel root, head, compose, queue, drawer;
         private readonly Panel middle;
@@ -75,6 +76,7 @@ namespace FeiqLight
             head.Paint += delegate(object sender, PaintEventArgs e) { using (Pen line = new Pen(Theme.Line)) e.Graphics.DrawLine(line, 0, head.Height - 1, head.Width, head.Height - 1); };
             middle = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty, BackColor = Theme.Wallpaper };
             history.RetryRequested += RetryMessage;
+            history.AvatarClicked += outgoing => { if (outgoing) main.OpenSettings(); else main.ShowContactProfile(peer); };
             history.FileRequested += (record, id) => {
                 ReceivedFile item = files.Items.Cast<ReceivedFile>().FirstOrDefault(f => f.Packet == record.Packet && f.File.Id == id);
                 if (item == null) { main.FileReceiveStatus("此文件邀请已结束；未保存的附件请让对方重新发送。"); return; }
@@ -169,6 +171,7 @@ namespace FeiqLight
         public void SaveDraft() { draftTimer.Stop(); main.SaveDraft(peer.Id, editor.Text); }
         public void RefreshPeer()
         {
+            history.SetAvatars(peer.Id, peer.Avatar, "device:" + network.Settings.DeviceId, network.Settings.Avatar);
             Text = peer.DisplayName; peerName.Text = peer.DisplayName;
             peerStatus.Text = (peer.Online ? "在线" : "离线") + (peer.DuplicateName ? peer.NameSuffix+" · "+peer.Endpoint : "");
             peerStatus.ForeColor = peer.Online ? Theme.Online : Theme.Muted;

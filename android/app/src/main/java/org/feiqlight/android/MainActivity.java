@@ -82,6 +82,9 @@ public final class MainActivity extends Activity implements ChatService.Observer
     private boolean forceLatest;
     private LinearLayout root, body, toolbar, messages, connectionBar;
     private TextView title, subtitle, transferStatus, empty, chatAvatar;
+    private AvatarDrawable incomingMessageAvatar, outgoingMessageAvatar;
+    private String messageAvatarSignature="";
+    private final List<View> messageAvatarViews=new ArrayList<>();
     private EditText search, editor;
     private ListView list;
     private ScrollView scroll;
@@ -169,7 +172,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         });
     }
     private void renderPage() {
-        selectingMessages=false;messageMarks.clear();messageViews.clear();messageRows.clear();messageSelectionBar=null;
+        selectingMessages=false;messageMarks.clear();messageViews.clear();messageRows.clear();messageAvatarViews.clear();messageSelectionBar=null;
         closeHistory();
         historyAppliedVersion=++historyRequestVersion;
         finishSelection();
@@ -340,14 +343,24 @@ public final class MainActivity extends Activity implements ChatService.Observer
         messageRows=new ArrayList<>(rows);Set<String> availableKeys=new HashSet<>();for(LanNode.Message message:rows)availableKeys.add(messageKey(message));messageMarks.retainAll(availableKeys);updateMessageSelection();
         StringBuilder fingerprint=new StringBuilder(selected);
         ChatStore.Conversation conversation=conversation(selected);
+        SharedPreferences prefs=getSharedPreferences("settings",MODE_PRIVATE);
+        String ownIdentity="device:"+prefs.getString("device_id",""), ownAvatar=prefs.getString("avatar","default"), peerAvatar=conversation==null?null:conversation.peer.avatar;
+        String avatarSignature=selected+"\u0001"+peerAvatar+"\u0001"+ownIdentity+"\u0001"+ownAvatar;
+        if(!avatarSignature.equals(messageAvatarSignature)) {
+            // 每个会话只复用两张头像；资料变化不重建气泡，也不改变滚动位置。
+            incomingMessageAvatar=new AvatarDrawable(this,selected,false,dp(2),SURFACE,ONLINE,peerAvatar);
+            outgoingMessageAvatar=new AvatarDrawable(this,ownIdentity,false,dp(2),SURFACE,ONLINE,ownAvatar);
+            messageAvatarSignature=avatarSignature;for(View avatar:messageAvatarViews)avatar.invalidate();
+        }
         for(LanNode.Message m:rows) { fingerprint.append(m.number).append(m.outgoing).append(m.state); if(conversation!=null) for(int i=0;i<m.files.size();i++) { File local=service.receivedFile(conversation.peer,m.number,m.files.get(i)); fingerprint.append(m.outgoing?outgoingUri(m,i):local.isFile()).append(m.outgoing?null:receivedStorage.saved(local)); } }
         boolean newOutgoing=!historySignature.isEmpty()&&rows.stream().anyMatch(m->m.outgoing&&!displayedOutgoing.contains(m.number));
         if(fingerprint.toString().equals(historySignature)) { transfersChanged(); if(forceLatest) {forceLatest=false;scrollToLatest();} return; }
         fileProgressViews.clear(); progressPeer=selected;
         displayedOutgoing.clear(); for(LanNode.Message m:rows) if(m.outgoing) displayedOutgoing.add(m.number);
         int previousY=scroll.getScrollY();
-        boolean bottom=scroll.getChildAt(0).getHeight()-previousY-scroll.getHeight()<dp(100); boolean first=historySignature.isEmpty(); historySignature=fingerprint.toString(); messages.removeAllViews();messageViews.clear();
-        int maxWidth=(int)(getResources().getDisplayMetrics().widthPixels*.79f);
+        boolean bottom=scroll.getChildAt(0).getHeight()-previousY-scroll.getHeight()<dp(100); boolean first=historySignature.isEmpty(); historySignature=fingerprint.toString(); messages.removeAllViews();messageViews.clear();messageAvatarViews.clear();
+        int viewport=scroll.getWidth()>0?scroll.getWidth():getResources().getDisplayMetrics().widthPixels;
+        int maxWidth=Math.min((int)(viewport*.79f),viewport-messages.getPaddingLeft()-messages.getPaddingRight()-dp(56));
         String lastDate=""; int previewCount=0; float density=getResources().getDisplayMetrics().density;
         final String cardPeer=selected;final int cardGeneration=editorGeneration;
         for(int index=0;index<rows.size();index++) {
@@ -356,6 +369,22 @@ public final class MainActivity extends Activity implements ChatService.Observer
             if(newDay) { TextView day=text(dayLabel(m.time),12,Color.WHITE); day.setGravity(Gravity.CENTER); day.setPadding(dp(10),dp(3),dp(10),dp(3)); day.setBackground(shape(serviceFill(),99)); LinearLayout.LayoutParams d=new LinearLayout.LayoutParams(-2,-2); d.gravity=Gravity.CENTER_HORIZONTAL; d.topMargin=dp(lastDate.isEmpty()?0:6); d.bottomMargin=dp(10); messages.addView(day,d); lastDate=date; }
             // 与 Windows 一致：同侧且相隔 5 分钟内的消息成组，组内间距收紧，只有组尾带尾巴。
             boolean groupFirst=newDay||!continues(rows.get(index-1),m), groupLast=next==null||!continues(m,next)||!dayKey(next.time).equals(date);
+            LinearLayout messageRow=row();messageRow.setGravity((m.outgoing?Gravity.END:Gravity.START)|Gravity.BOTTOM);
+            LinearLayout.LayoutParams rp=new LinearLayout.LayoutParams(-1,-2);rp.bottomMargin=dp(groupLast?10:3);messages.addView(messageRow,rp);
+            View portrait=new View(this) {
+                @Override protected void onDraw(Canvas canvas) {
+                    super.onDraw(canvas);AvatarDrawable image=m.outgoing?outgoingMessageAvatar:incomingMessageAvatar;
+                    image.setBounds(0,0,getWidth(),getHeight());image.draw(canvas);
+                }
+            };
+            portrait.setContentDescription(m.outgoing?"我的资料":(conversation==null?"联系人":conversation.displayName())+"的资料");portrait.setFocusable(true);
+            portrait.setBackground(new android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(BUBBLE),null,shape(Color.WHITE,24)));
+            portrait.setOnClickListener(v->{
+                if(!cardPeer.equals(selected)||cardGeneration!=editorGeneration)return;
+                if(m.outgoing)settings();else {ChatStore.Conversation contact=conversation(cardPeer);if(contact!=null)showContactProfile(contact);}
+            });messageAvatarViews.add(portrait);
+            LinearLayout.LayoutParams ap=new LinearLayout.LayoutParams(dp(48),dp(48));ap.bottomMargin=-dp(2);
+            if(!m.outgoing){ap.rightMargin=dp(8);messageRow.addView(portrait,ap);}else ap.leftMargin=dp(8);
             final TextView[] menuStamp={null};
             LinearLayout bubble=new LinearLayout(this) {
                 private boolean cardTouch;
@@ -372,7 +401,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
                 @Override public boolean performClick() {boolean handled=super.performClick();if(!cardPeer.equals(selected)||cardGeneration!=editorGeneration)return handled;if(selectingMessages){toggleMessage(m);return true;}return handled;}
             };bubble.setOrientation(LinearLayout.VERTICAL);bubble.setClickable(true);bubble.setContentDescription("消息："+m.text);messageViews.put(messageKey(m),bubble);bubble.setBackground(new BubbleDrawable(m.outgoing?OUTGOING:SURFACE,bubbleShadow(),density,m.outgoing,groupFirst,groupLast));
             bubble.setPadding(dp(m.outgoing?14:21),dp(8),dp(m.outgoing?21:14),0);
-            LinearLayout.LayoutParams bp=new LinearLayout.LayoutParams(-2,-2); bp.gravity=m.outgoing?Gravity.END:Gravity.START; bp.bottomMargin=dp(groupLast?10:3); messages.addView(bubble,bp);
+            messageRow.addView(bubble,new LinearLayout.LayoutParams(-2,-2));if(m.outgoing)messageRow.addView(portrait,ap);
             if(!m.text.isEmpty()) {
                 String preview=MessageText.preview(m.text);TextView content=text(preview,messageSize(),INK);selectable(content);MessageLinks.apply(content,BLUE);content.setMaxWidth(maxWidth-dp(35));content.setLineSpacing(dp(3),1);bubble.addView(content);
                 if(!preview.equals(m.text)){TextView more=text("查看全文",14,BLUE);more.setMinHeight(dp(44));more.setGravity(Gravity.CENTER_VERTICAL);more.setFocusable(true);more.setOnClickListener(v->showFullText(m.text));bubble.addView(more);}

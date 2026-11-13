@@ -883,6 +883,31 @@ namespace FeiqLight.Tests
                     for(int i=0;i<right.Length;i++)Check(Math.Abs(right[i].X+left[i].X-220)<.01F&&Math.Abs(right[i].Y-left[i].Y)<.01F,"尾角未镜像");
                 }
             });
+            test("消息头像：固定圆形尺寸、贴在气泡外侧且两侧可点击", () => {
+                using(Form form=new Form { ClientSize=new Size(620,420) }) using(BubbleHistory history=new BubbleHistory { Dock=DockStyle.Fill }) {
+                    form.Controls.Add(history);form.Show();history.SetAvatars("peer","builtin:2","self-device","builtin:3");
+                    history.SetRecords(new[] {
+                        new ChatRecord { PeerId="peer",Packet=1,Sender="对方",Text="短消息",Time=DateTime.Now },
+                        new ChatRecord { PeerId="peer",Packet=2,Sender="我",Text="回复",Time=DateTime.Now.AddSeconds(1),Outgoing=true,State="已送达" }
+                    });
+                    using(Bitmap preview=new Bitmap(history.Width,history.Height)) history.DrawToBitmap(preview,new Rectangle(Point.Empty,preview.Size));
+                    Form saved=form;
+                    using(Bitmap image=new Bitmap(saved.Width,saved.Height)) saved.DrawToBitmap(image,new Rectangle(Point.Empty,image.Size));
+                    var hits=(List<Tuple<Rectangle,bool>>)typeof(BubbleHistory).GetField("avatarHits",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(history);
+                    int expected=(int)Math.Round(44*history.DeviceDpi/96F);
+                    Check(hits.Count==2&&hits.All(hit=>hit.Item1.Width==expected&&hit.Item1.Height==expected),"消息头像不是固定圆形尺寸");
+                    Check(hits[0].Item2==false&&hits[0].Item1.Left<hits[0].Item1.Right/2,"对方头像不在最左侧");
+                    Check(hits[1].Item2&&hits[1].Item1.Right>history.Width/2,"我方头像不在最右侧");
+                    List<bool> clicked=new List<bool>();history.AvatarClicked+=outgoing=>clicked.Add(outgoing);
+                    foreach(Tuple<Rectangle,bool> hit in hits) {
+                        Point center=new Point(hit.Item1.Left+hit.Item1.Width/2,hit.Item1.Top+hit.Item1.Height/2);
+                        typeof(BubbleHistory).GetMethod("OnMouseDown",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(history,new object[]{new MouseEventArgs(MouseButtons.Left,1,center.X,center.Y,0)});
+                        typeof(BubbleHistory).GetMethod("OnMouseUp",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(history,new object[]{new MouseEventArgs(MouseButtons.Left,1,center.X,center.Y,0)});
+                    }
+                    Check(clicked.SequenceEqual(new[]{false,true}),"消息头像点击方向错误");
+                    form.Close();
+                }
+            });
             test("离线会话：重启仍显示联系人、预览和未读，历史与草稿可打开", () =>
             {
                 LocalStore store=new LocalStore(Path.Combine(directory,"offline-roster"));int aPort=Port(),bPort=Port();string peerId;
@@ -1140,7 +1165,7 @@ namespace FeiqLight.Tests
                         });
                         test("原生 UI：发送按钮到远端记录、ACK、历史持久化", () =>
                         {
-                            const string text = "你好，飞秋！这是一条真实的回环测试消息。\n中文、换行与表情 😊 都能正常收发。";
+                            const string text = "你好，飞Q！这是一条真实的回环测试消息。\n中文、换行与表情 😊 都能正常收发。";
                             Find<RichTextBox>(chatA, "消息输入框").Text = text; Find<Button>(chatA, "发送消息").PerformClick();
                             Pump(() => Find<BubbleHistory>(chatB, "聊天记录").Text.Contains(text), "远端界面未出现消息");
                             Pump(() => Find<BubbleHistory>(chatA, "聊天记录").HasDelivery("已送达"), "发送方未显示已送达");
