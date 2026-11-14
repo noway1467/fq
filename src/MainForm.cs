@@ -377,6 +377,7 @@ public sealed class MainForm : ModernWindow
                     !string.Equals(previous.BackgroundImage ?? "", next.BackgroundImage ?? "", StringComparison.OrdinalIgnoreCase);
                 bool avatarChanged = !string.Equals(previous.Avatar ?? "", next.Avatar ?? "", StringComparison.Ordinal);
                 if (themeChanged) Theme.Change(nextDark, nextAccent);
+                if (appearanceChanged) ApplyWallpaper();
                 if (appearanceChanged || avatarChanged) foreach (ChatForm chat in chats.Values) chat.ApplyAppearance();
                 RefreshFilters();
                 RefreshNetworkAsync();

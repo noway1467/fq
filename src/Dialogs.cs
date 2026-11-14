@@ -251,6 +251,8 @@ namespace FeiqLight
         private readonly PictureBox preview = new PictureBox { Dock = DockStyle.Fill, SizeMode = PictureBoxSizeMode.Zoom, AccessibleName = "所选头像预览" };
         private readonly AvatarChoice[] choices = new AvatarChoice[24];
         private readonly string identity;
+        private readonly Button localImage, useAvatar;
+        private int selectionVersion;
         public string SelectedValue { get; private set; }
         internal AvatarPickerDialog(string value, string identity)
         {
@@ -267,38 +269,43 @@ namespace FeiqLight
             content.Controls.Add(grid, 0, 1);
             TableLayoutPanel actions = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty };
             actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50)); actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-            Button local = null;
-            local = Theme.Button("选择本地图片…", delegate {
+            localImage = Theme.Button("选择本地图片…", async delegate {
                 using(OpenFileDialog picker = new OpenFileDialog { Title = "选择头像图片", Filter = "图片|*.jpg;*.jpeg;*.png;*.bmp;*.gif", CheckFileExists = true }) if(picker.ShowDialog(this) == DialogResult.OK) {
                     Activate();
                     string chosen = picker.FileName;
-                    local.Enabled = false; local.Text = "处理图片中…";
-                    System.Threading.Tasks.Task.Run(() => EmojiAvatars.FromLocalImage(chosen)).ContinueWith(done => {
-                        if(IsDisposed || !IsHandleCreated) return;
-                        BeginInvoke((MethodInvoker)delegate {
-                            if(IsDisposed) return;
-                            local.Enabled = true; local.Text = "选择本地图片…";
-                            if(done.IsFaulted) {
-                                Exception error = done.Exception != null && done.Exception.InnerException != null ? done.Exception.InnerException : done.Exception;
-                                using(NoticeDialog notice = new NoticeDialog("无法使用图片", error != null ? error.Message : "图片处理失败")) notice.ShowDialog(this);
-                                return;
-                            }
-                            SetAvatar(done.Result);
-                        });
-                    });
+                    await ImportImageAsync(System.Threading.Tasks.Task.Run(() => EmojiAvatars.FromLocalImage(chosen)));
                 } else Activate();
-            }, false); local.Dock = DockStyle.Fill; local.Margin = new Padding(0, 0, 6, 4); actions.Controls.Add(local, 0, 0);
+            }, false); localImage.Dock = DockStyle.Fill; localImage.Margin = new Padding(0, 0, 6, 4); actions.Controls.Add(localImage, 0, 0);
             Button reset = Theme.Button("使用默认头像", delegate { SetAvatar("default"); }, false); reset.Dock = DockStyle.Fill; reset.Margin = new Padding(6, 0, 0, 4); actions.Controls.Add(reset, 1, 0); content.Controls.Add(actions, 0, 2);
             Label hint = Theme.Label("回到设置页点击保存后生效。", Theme.Small, Theme.Muted); hint.Dock = DockStyle.Fill; content.Controls.Add(hint, 0, 3);
             Panel body = DialogLayout.Body(this); body.Controls.Add(content);
-            DialogLayout.Actions(this, Theme.Button("使用此头像", delegate { DialogResult = DialogResult.OK; }, true), Theme.Button("取消", delegate { DialogResult = DialogResult.Cancel; }, false));
+            useAvatar = Theme.Button("使用此头像", delegate { DialogResult = DialogResult.OK; }, true);
+            DialogLayout.Actions(this, useAvatar, Theme.Button("取消", delegate { DialogResult = DialogResult.Cancel; }, false));
             SetAvatar(Protocol.NormalizeAvatar(value) ?? "default");
         }
         private void SetAvatar(string value) {
+            selectionVersion++; localImage.Enabled = useAvatar.Enabled = true; localImage.Text = "选择本地图片…";
             SelectedValue = value; Image old = preview.Image; preview.Image = Theme.ContactAvatar(64, identity, false, value); if(old != null) old.Dispose();
             for(int i = 0; i < choices.Length; i++) { choices[i].Active = value == "builtin:" + i; choices[i].Invalidate(); }
         }
         internal void ImportImage(string path) { SetAvatar(EmojiAvatars.FromLocalImage(path)); }
+        private bool CurrentImage(int version) { return !IsDisposed && !Disposing && Visible && selectionVersion == version; }
+        internal async System.Threading.Tasks.Task ImportImageAsync(System.Threading.Tasks.Task<string> image)
+        {
+            int version = ++selectionVersion;
+            localImage.Enabled = useAvatar.Enabled = false; localImage.Text = "处理图片中…";
+            try {
+                string value = await image;
+                // 后选的内置/默认头像优先；取消或关闭窗口后的结果也不能再回写。
+                if(CurrentImage(version)) SetAvatar(value);
+            }
+            catch(Exception error) {
+                if(CurrentImage(version)) using(NoticeDialog notice = new NoticeDialog("无法使用图片", error.Message)) notice.ShowDialog(this);
+            }
+            finally {
+                if(CurrentImage(version)) { localImage.Enabled = useAvatar.Enabled = true; localImage.Text = "选择本地图片…"; }
+            }
+        }
         protected override void Dispose(bool disposing) { if(disposing && preview.Image != null) { preview.Image.Dispose(); preview.Image = null; } base.Dispose(disposing); }
     }
     public sealed class SettingsDialog : ModernWindow
@@ -340,6 +347,10 @@ namespace FeiqLight
         }
         private readonly Panel body = new Panel { Dock = DockStyle.Fill, AutoScroll = true, BackColor = Theme.Surface, Padding = new Padding(0, 0, 0, 8) };
         private Label pageTitle;
+        private string backgroundMode, backgroundPath;
+        private int backgroundVersion;
+        private Button image, save;
+        private Action refreshPattern;
         public AppSettings Value { get; private set; }
         public SettingsDialog(AppSettings current, string dataPath, int port, bool startupAvailable = false, bool startupEnabled = false)
         {
@@ -404,9 +415,9 @@ namespace FeiqLight
                 choices[i].Dock = DockStyle.Fill; choices[i].Margin = new Padding(3, 5, 3, 5); accent.Controls.Add(choices[i], i % 3, i / 3);
             }
             refreshAccent(); accent.Top = 638; body.Controls.Add(accent);
-            string backgroundMode=current.ChatBackground??"orbits", backgroundPath=current.BackgroundImage??"";
+            backgroundMode=current.ChatBackground??"orbits"; backgroundPath=current.BackgroundImage??"";
             int messageSize=Math.Max(9,Math.Min(18,current.ChatFontSize));
-            Action refreshPattern=delegate {};Button image=null;
+            refreshPattern=delegate {};
             TableLayoutPanel appearance=new TableLayoutPanel {ColumnCount=1,RowCount=6,Height=552,Top=292,AccessibleName="聊天外观"};
             appearance.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));
             foreach(int height in new[]{128,216,36,52,58,62})appearance.RowStyles.Add(new RowStyle(SizeType.Absolute,height));
@@ -429,33 +440,19 @@ namespace FeiqLight
             string[] presetAccents={"blue","green","amber","rose","blue","green","purple","slate"};
             bool[] presetDark={false,false,false,false,true,true,true,true};
             string[] presetPatterns={"orbits","lines","aurora","orbits","orbits","lines","aurora","grid"};
-            for(int i=0;i<presetNames.Length;i++){int choice=i;Button pick=Theme.Button(presetNames[i],delegate {follow.Checked=false;dark.Checked=presetDark[choice];accentIndex=Math.Max(0,Array.IndexOf(accentKeys,presetAccents[choice]));backgroundMode=presetPatterns[choice];refreshAccent();refreshPattern();preview.Invalidate();},false);pick.Dock=DockStyle.Fill;pick.Margin=new Padding(i%2==0?0:6,0,i%2==0?6:0,12);presets.Controls.Add(pick,i%2,i/2);}appearance.Controls.Add(presets,0,1);
+            for(int i=0;i<presetNames.Length;i++){int choice=i;Button pick=Theme.Button(presetNames[i],delegate {follow.Checked=false;dark.Checked=presetDark[choice];accentIndex=Math.Max(0,Array.IndexOf(accentKeys,presetAccents[choice]));SelectBackground(presetPatterns[choice]);refreshAccent();preview.Invalidate();},false);pick.Dock=DockStyle.Fill;pick.Margin=new Padding(i%2==0?0:6,0,i%2==0?6:0,12);presets.Controls.Add(pick,i%2,i/2);}appearance.Controls.Add(presets,0,1);
             Label sizeLabel=Theme.Label("聊天字号 · "+messageSize+" pt",Theme.Body,Theme.Ink);sizeLabel.Dock=DockStyle.Fill;sizeLabel.Margin=new Padding(0,4,0,0);appearance.Controls.Add(sizeLabel,0,2);
             ThemedSlider sizeSlider=new ThemedSlider {Minimum=9,Maximum=18,Value=messageSize,Dock=DockStyle.Fill,AccessibleName="聊天字号",BackColor=Theme.Surface};sizeSlider.ValueChanged+=delegate {messageSize=sizeSlider.Value;sizeLabel.Text="聊天字号 · "+messageSize+" pt";preview.Invalidate();};appearance.Controls.Add(sizeSlider,0,3);
             TableLayoutPanel patterns=new TableLayoutPanel {Dock=DockStyle.Fill,ColumnCount=5,RowCount=1,Margin=new Padding(0,2,0,10)};
             string[] patternNames={"纯色","星环","流线","网格","极光"},patternKeys={"none","orbits","lines","grid","aurora"};
             Button[] patternButtons=new Button[patternKeys.Length];
             refreshPattern=delegate {for(int j=0;j<patternKeys.Length;j++)patternButtons[j].Text=(backgroundMode==patternKeys[j]?"✓ ":"")+patternNames[j];if(image!=null)image.Text=backgroundMode=="image"?"背景图片 · "+System.IO.Path.GetFileName(backgroundPath):"选择背景图片…";};
-            for(int i=0;i<patternKeys.Length;i++){int choice=i;patterns.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100F/patternKeys.Length));patternButtons[i]=Theme.Button(patternNames[i],delegate{backgroundMode=patternKeys[choice];refreshPattern();},false);patternButtons[i].Dock=DockStyle.Fill;patternButtons[i].Margin=new Padding(i==0?0:6,0,i==patternKeys.Length-1?0:6,0);patterns.Controls.Add(patternButtons[i],i,0);}refreshPattern();appearance.Controls.Add(patterns,0,4);
-            image=Theme.Button(backgroundMode=="image"?"已选择背景图片 · 更换":"选择背景图片…",delegate {
+            for(int i=0;i<patternKeys.Length;i++){int choice=i;patterns.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100F/patternKeys.Length));patternButtons[i]=Theme.Button(patternNames[i],delegate{SelectBackground(patternKeys[choice]);},false);patternButtons[i].Dock=DockStyle.Fill;patternButtons[i].Margin=new Padding(i==0?0:6,0,i==patternKeys.Length-1?0:6,0);patterns.Controls.Add(patternButtons[i],i,0);}refreshPattern();appearance.Controls.Add(patterns,0,4);
+            image=Theme.Button(backgroundMode=="image"?"已选择背景图片 · 更换":"选择背景图片…",async delegate {
                 using(OpenFileDialog picker=new OpenFileDialog {Title="选择聊天背景（不超过 20 MiB）",Filter="图片|*.jpg;*.jpeg;*.png;*.bmp;*.gif",CheckFileExists=true})if(picker.ShowDialog(this)==DialogResult.OK){
                     Activate();
                     string chosen=picker.FileName;
-                    image.Enabled=false;image.Text="读取背景图片中…";
-                    System.Threading.Tasks.Task.Run(delegate {using(Bitmap validated=ChatWallpaper.Load(chosen)){}}).ContinueWith(done => {
-                        if(IsDisposed||!IsHandleCreated)return;
-                        BeginInvoke((MethodInvoker)delegate {
-                            if(IsDisposed)return;
-                            image.Enabled=true;
-                            if(done.IsFaulted){
-                                Exception err=done.Exception!=null&&done.Exception.InnerException!=null?done.Exception.InnerException:done.Exception;
-                                refreshPattern();
-                                using(NoticeDialog notice=new NoticeDialog("无法使用图片",err!=null?err.Message:"读取失败"))notice.ShowDialog(this);
-                                return;
-                            }
-                            backgroundPath=chosen;backgroundMode="image";refreshPattern();
-                        });
-                    });
+                    await ImportBackgroundAsync(chosen,System.Threading.Tasks.Task.Run(delegate {using(Bitmap validated=ChatWallpaper.Load(chosen)){}}));
                 } else Activate();
             },false);image.AutoEllipsis=true;image.Dock=DockStyle.Fill;image.Margin=new Padding(0,0,0,10);refreshPattern();appearance.Controls.Add(image,0,5);body.Controls.Add(appearance);
             dark.CheckedChanged+=delegate {preview.Invalidate();};foreach(Button choice in choices)choice.Click+=delegate{preview.Invalidate();};
@@ -470,7 +467,7 @@ namespace FeiqLight
                 footer.Height = actionRow.Height + footer.Padding.Vertical + (error.Visible ? Math.Max((int)(32 * scale), detail + (int)(8 * scale)) : (int)(4 * scale));
             };
             Button cancel = Theme.Button("取消", delegate { DialogResult = DialogResult.Cancel; }, false); cancel.Size = new Size(92, 40); CancelButton = cancel;
-            Button save = Theme.Button("保存", delegate
+            save = Theme.Button("保存", delegate
             {
                 if (String.IsNullOrWhiteSpace(name.Text)) { error.Text = "昵称不能为空"; SelectTab(0); name.Focus(); return; }
                 try
@@ -537,6 +534,25 @@ namespace FeiqLight
             };
             body.SizeChanged += delegate { fit(); }; fit();SelectTab(0);
             Theme.ThemeScrollbars(body);
+        }
+        private void SelectBackground(string pattern)
+        {
+            backgroundVersion++; backgroundMode=pattern; image.Enabled=save.Enabled=true; refreshPattern();
+        }
+        private bool CurrentBackground(int version) { return !IsDisposed && !Disposing && Visible && backgroundVersion==version; }
+        internal async System.Threading.Tasks.Task ImportBackgroundAsync(string path,System.Threading.Tasks.Task validation)
+        {
+            int version=++backgroundVersion; image.Enabled=save.Enabled=false; image.Text="读取背景图片中…";
+            try {
+                await validation;
+                if(CurrentBackground(version)) { backgroundPath=path; SelectBackground("image"); }
+            }
+            catch(Exception error) {
+                if(CurrentBackground(version)) using(NoticeDialog notice=new NoticeDialog("无法使用图片",error.Message)) notice.ShowDialog(this);
+            }
+            finally {
+                if(CurrentBackground(version)) { image.Enabled=save.Enabled=true; refreshPattern(); }
+            }
         }
         protected override void OnLoad(EventArgs e) { base.OnLoad(e); Height = Math.Min(Height, Screen.FromControl(this).WorkingArea.Height - 24); }
         private TextBox Input(string title, string value, int y, int max)

@@ -68,8 +68,9 @@ public final class ToolsHttp implements AutoCloseable {
             timeout=timeouts.scheduleWithFixedDelay(()->{if(System.nanoTime()-progress.get()>TimeUnit.SECONDS.toNanos(15))try{socket.close();}catch(IOException ignored){}},1,1,TimeUnit.SECONDS);
             socket.setSoTimeout(5000);socket.setTcpNoDelay(true);socket.setSendBufferSize(262144);
             // 将请求头批量读入内存，避免每个字节都跨一次系统调用。
-            InputStream input=new BufferedInputStream(socket.getInputStream(),8192);
+            RequestInput deadline=new RequestInput(socket);InputStream input=new BufferedInputStream(deadline,8192);
             for(int index=0;index<16;index++){
+            deadline.begin(index==0?5000:3000);
             Request request=read(input);boolean reuse=index<15&&request.path.equals("/file")&&(request.method.equals("GET")||request.method.equals("HEAD"))&&request.header("Connection").equalsIgnoreCase("keep-alive");
             response=new Response(socket.getOutputStream(),request.method.equals("HEAD"),progress,reuse);
             request.address=socket.getInetAddress().getHostAddress();String expected=socket.getLocalAddress().getHostAddress()+":"+port();

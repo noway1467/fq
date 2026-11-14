@@ -1,6 +1,7 @@
 package org.feiqlight.android.core;
 
 import org.junit.Test;
+import java.io.*;
 import java.lang.reflect.*;
 import java.net.*;
 import java.nio.file.*;
@@ -108,5 +109,39 @@ public final class NetworkRecoveryTest {
             announce(raw,port);await(()->peer.online);
             assertTrue(events.errors.toString(),events.errors.isEmpty());
         }
+    }
+    @Test public void routePolicyGuardsRealUdpSendAndReceivesTcpDestination()throws Exception {
+        Events events=new Events();Path directory=Files.createTempDirectory("route-policy-");
+        java.util.concurrent.atomic.AtomicBoolean permitted=new java.util.concurrent.atomic.AtomicBoolean(true);
+        java.util.concurrent.atomic.AtomicReference<InetAddress> tcpTarget=new java.util.concurrent.atomic.AtomicReference<>();
+        try(LanNode node=new LanNode(port(),false,"policy","host","路由检查","",events);
+            DatagramSocket sender=new DatagramSocket(0,InetAddress.getLoopbackAddress());
+            DatagramSocket remote=new DatagramSocket(0,InetAddress.getLoopbackAddress())) {
+            node.setSocketBinding(new LanNode.SocketBinding() {
+                public void bind(DatagramSocket socket){fail("测试不应扫描或绑定真实网卡");}
+                public void bind(Socket socket){fail("TCP 绑定丢失目标地址");}
+                public void bind(Socket socket,InetAddress destination)throws IOException {tcpTarget.set(destination);throw new IOException("策略拒绝连接");}
+                public boolean allows(InetAddress address){return permitted.get();}
+            });
+            // 仅注入回环 socket，以执行正式发送路径，同时隔离宿主机网卡与局域网。
+            Field udp=LanNode.class.getDeclaredField("udp");udp.setAccessible(true);udp.set(node,sender);
+            InetSocketAddress endpoint=new InetSocketAddress(InetAddress.getLoopbackAddress(),remote.getLocalPort());
+            node.probe(endpoint);remote.setSoTimeout(1000);
+            DatagramPacket packet=new DatagramPacket(new byte[2048],2048);remote.receive(packet);
+            assertEquals(Protocol.ENTRY,Protocol.parse(Arrays.copyOf(packet.getData(),packet.getLength())).mode());
+            permitted.set(false);
+            try {node.probe(endpoint);fail("策略拒绝后仍发送 UDP");}catch(IOException expected){assertTrue(expected.getMessage().contains("局域网"));}
+            remote.setSoTimeout(120);
+            try {remote.receive(packet);fail("被拒绝的发现包泄露到 socket");}catch(SocketTimeoutException expected){ }
+            LanNode.Peer peer=new LanNode.Peer(endpoint,"remote","host","远端","");
+            Protocol.Attachment attachment=new Protocol.Attachment(0,"safe.bin",3,0);
+            File destination=directory.resolve("received.bin").toFile();
+            try(LanNode.Transfer transfer=new LanNode.Transfer()) {
+                try {node.receiveFile(peer,1,attachment,destination,transfer,null);fail("拒绝的 TCP 请求仍连接");}
+                catch(IOException expected){assertEquals("策略拒绝连接",expected.getMessage());}
+            }
+            assertEquals(endpoint.getAddress(),tcpTarget.get());
+            assertFalse(destination.exists());assertFalse(LanNode.partialFile(peer,1,attachment,destination).exists());
+        } finally {Files.deleteIfExists(directory);}
     }
 }

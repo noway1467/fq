@@ -98,7 +98,7 @@ public final class LanNetworkTest {
         CountingConnectivity manager=org.robolectric.shadow.api.Shadow.extract(cm);manager.duringQuery=route::changed;
         route.networkKey();route.networkKey();assertEquals("扫描中的网络回调不能被已检查标记覆盖",2,manager.queries);
     }
-    private static LanNetwork.LocalInterface iface(String name,boolean up,boolean loopback,boolean p2p,boolean virtual,String ip,int prefix) throws Exception {
+    private static LanNetwork.LocalInterface iface(String name,boolean up,boolean loopback,boolean p2p,boolean virtual,String ip,int prefix) throws UnknownHostException {
         return new LanNetwork.LocalInterface(name,up,loopback,p2p,virtual,Collections.singletonList(new LanNetwork.LocalLink((Inet4Address)InetAddress.getByName(ip),prefix)));
     }
     @Test public void hotspotInterfaceWorksWithoutWifiAndRebindsWhenWifiJoins() throws Exception {
@@ -148,12 +148,12 @@ public final class LanNetworkTest {
     }
     @Test public void hotspotFilterAllowsStandardHotspotAndTetherAndRejectsUnsafeInterfaces() throws Exception {
         ConnectivityManager cm=(ConnectivityManager)RuntimeEnvironment.getApplication().getSystemService(Context.CONNECTIVITY_SERVICE);shadowOf(cm).clearAllNetworks();
-        Network vpn=add(cm,930,NetworkCapabilities.TRANSPORT_VPN,"10.99.0.2",24);
-        LinkProperties vpnLinks=cm.getLinkProperties(vpn);
-        LinkProperties.class.getDeclaredMethod("setInterfaceName",String.class).invoke(vpnLinks,"wlan0");
-        shadowOf(cm).setLinkProperties(vpn,vpnLinks);
+        Network cellular=add(cm,930,NetworkCapabilities.TRANSPORT_CELLULAR,"10.99.0.2",24);
+        LinkProperties cellLinks=cm.getLinkProperties(cellular);
+        LinkProperties.class.getDeclaredMethod("setInterfaceName",String.class).invoke(cellLinks,"wlan0");
+        shadowOf(cm).setLinkProperties(cellular,cellLinks);
         AtomicReference<List<LanNetwork.LocalInterface>> local=new AtomicReference<>(Arrays.asList(
-            iface("wlan0",true,false,false,false,"10.99.0.2",24), // 已被 ConnectivityManager 标记为 VPN 接口
+            iface("wlan0",true,false,false,false,"10.99.0.2",24), // 已被 ConnectivityManager 标记为蜂窝接口
             iface("rmnet0",true,false,false,false,"10.10.0.5",24),
             iface("ccmni0",true,false,false,false,"172.16.0.5",24),
             iface("tun0",true,false,false,false,"10.8.0.2",24),
@@ -171,14 +171,13 @@ public final class LanNetworkTest {
             Arrays.asList(InetAddress.getByName("192.168.42.255"),InetAddress.getByName("172.20.10.15")),
             new ArrayList<>(route.broadcasts())
         );
-        // 仅剩被排除的接口与 VPN 时仍应拒绝放行并提示 VPN 限制。
+        // 仅剩被排除的接口时不能当作局域网。
         local.set(Arrays.asList(
             iface("wlan0",true,false,false,false,"10.99.0.2",24),
             iface("rmnet0",true,false,false,false,"10.10.0.5",24)
         ));
         route.changed();
-        try {route.networkKey();fail("仅有 VPN 与蜂窝接口不能放行");}
-        catch(IOException expected){assertTrue(expected.getMessage().contains("VPN"));}
+        assertNull(route.networkKey());assertTrue(route.broadcasts().isEmpty());
     }
     @Test public void transientPhysicalWifiWithoutIpv4DoesNotLeakToHotspotFallback() throws Exception {
         ConnectivityManager cm=(ConnectivityManager)RuntimeEnvironment.getApplication().getSystemService(Context.CONNECTIVITY_SERVICE);shadowOf(cm).clearAllNetworks();
@@ -194,5 +193,72 @@ public final class LanNetworkTest {
         LanNetwork route=new LanNetwork(cm,local::get);
         assertNull("无 IPv4 的托管 Wi-Fi 接口不应漏进热点回退",route.networkKey());
         assertTrue(route.broadcasts().isEmpty());
+    }
+    @Test public void hotspotTrafficCannotUseHistoricalAddressesOutsideCurrentSubnets() throws Exception {
+        ConnectivityManager cm=(ConnectivityManager)RuntimeEnvironment.getApplication().getSystemService(Context.CONNECTIVITY_SERVICE);shadowOf(cm).clearAllNetworks();
+        Network cell=add(cm,950,NetworkCapabilities.TRANSPORT_CELLULAR,"10.88.0.2",24);
+        AtomicReference<List<LanNetwork.LocalInterface>> local=new AtomicReference<>(Arrays.asList(
+            iface("ap0",true,false,false,false,"192.168.43.1",24),
+            iface("rndis0",true,false,false,false,"172.20.10.1",28)
+        ));
+        LanNetwork route=new LanNetwork(cm,local::get);
+        for(String address:new String[]{"192.168.43.2","192.168.43.255","172.20.10.14","172.20.10.15"})
+            assertTrue(address,route.allows(InetAddress.getByName(address)));
+        for(String address:new String[]{"192.168.1.9","192.168.44.2","172.20.10.16","10.88.0.2","8.8.8.8","255.255.255.255","127.0.0.1","::1"})
+            assertFalse("热点放行了网段外目标："+address,route.allows(InetAddress.getByName(address)));
+        assertEquals(0,shadowOf(cell).boundSocketCount());
+        local.set(Collections.singletonList(iface("ap0",true,false,false,false,"192.168.44.1",24)));route.changed();
+        assertFalse("切网后旧热点地址仍可访问",route.allows(InetAddress.getByName("192.168.43.2")));
+        assertTrue(route.allows(InetAddress.getByName("192.168.44.2")));
+        local.set(Collections.emptyList());route.changed();
+        assertFalse("热点关闭后仍放行流量",route.allows(InetAddress.getByName("192.168.44.2")));
+    }
+    private static final class RecordingSocket extends Socket {
+        SocketAddress source;
+        @Override public void bind(SocketAddress endpoint) { source=endpoint; }
+    }
+    @Test public void hotspotTcpBindsMatchingSourceAndRejectsOutsideBeforeConnect() throws Exception {
+        LanNetwork route=new LanNetwork(null,()->Arrays.asList(
+            iface("rndis0",true,false,false,false,"192.168.0.1",16),
+            iface("ap0",true,false,false,false,"192.168.43.1",24)
+        ));
+        try(RecordingSocket tcp=new RecordingSocket()) {
+            route.bind(tcp,InetAddress.getByName("192.168.43.42"));
+            assertEquals("应使用最具体的热点接口地址",new InetSocketAddress("192.168.43.1",0),tcp.source);
+        }
+        try(RecordingSocket tcp=new RecordingSocket()) {
+            route.bind(tcp,InetAddress.getByName("192.168.42.42"));
+            assertEquals(new InetSocketAddress("192.168.0.1",0),tcp.source);
+        }
+        try(RecordingSocket tcp=new RecordingSocket()) {
+            try {route.bind(tcp,InetAddress.getByName("203.0.113.9"));fail("网段外 TCP 请求被放行");}
+            catch(IOException expected){assertTrue(expected.getMessage().contains("子网"));}
+            assertNull("拒绝的目标不能先绑定或连接",tcp.source);
+        }
+    }
+    @Test public void privateInterfaceWithOverbroadMaskCannotBroadcastOutsidePrivateRanges() throws Exception {
+        LanNetwork route=new LanNetwork(null,()->Arrays.asList(
+            iface("ap0",true,false,false,false,"192.168.43.1",8),
+            iface("ap1",true,false,false,false,"172.20.10.1",8),
+            iface("ap2",true,false,false,false,"192.168.43.1",31),
+            iface("rndis0",true,false,false,false,"10.12.34.1",8)
+        ));
+        assertEquals(Collections.singletonList(InetAddress.getByName("10.255.255.255")),new ArrayList<>(route.broadcasts()));
+        assertFalse(route.allows(InetAddress.getByName("192.168.43.2")));
+        assertFalse(route.allows(InetAddress.getByName("172.20.10.2")));
+    }
+    @Test public void vpnWithoutBindablePhysicalNetworkCannotCarryHotspotTraffic() throws Exception {
+        ConnectivityManager cm=(ConnectivityManager)RuntimeEnvironment.getApplication().getSystemService(Context.CONNECTIVITY_SERVICE);shadowOf(cm).clearAllNetworks();
+        Network vpn=add(cm,951,NetworkCapabilities.TRANSPORT_VPN,"10.99.0.2",24);
+        LanNetwork route=new LanNetwork(cm,()->Collections.singletonList(iface("ap0",true,false,false,false,"192.168.43.1",24)));
+        try {route.networkKey();fail("没有可绑定物理 Network 时不能放行 VPN 默认路由");}
+        catch(IOException expected){assertTrue(expected.getMessage().contains("VPN"));}
+        try {route.allows(InetAddress.getByName("192.168.43.2"));fail("热点子网流量仍可能进入 VPN");}
+        catch(IOException expected){assertTrue(expected.getMessage().contains("VPN"));}
+        try(DatagramSocket udp=new DatagramSocket(null)) {
+            try {route.bind(udp);fail("VPN 热点回退仍放行 UDP");}catch(IOException expected){assertTrue(expected.getMessage().contains("VPN"));}
+            Network wifi=add(cm,952,NetworkCapabilities.TRANSPORT_WIFI,"192.168.1.2",24);route.changed();route.bind(udp);
+            assertTrue(shadowOf(wifi).isSocketBound(udp));assertEquals(0,shadowOf(vpn).boundSocketCount());
+        }
     }
 }

@@ -147,9 +147,7 @@ public final class ChatService extends Service {
                     }
                 });
                 next.setDeviceId(deviceId);
-                String avatar=Protocol.normalizeAvatar(prefs.getString("avatar","default"));next.setAvatar(avatar==null?"default":avatar);
-                next.nickname=prefs.getString("name",Build.MODEL);
-                next.group=prefs.getString("group","我的局域网");
+                applyProfile(next,prefs);
                 next.rememberPeers(store.conversations().stream().map(c->c.peer).collect(java.util.stream.Collectors.toList()));
                 next.rememberEndpoints(store.conversations().stream().map(c->c.peer.endpoint).collect(java.util.stream.Collectors.toList()));
                 next.setSocketBinding(new LanNetwork(getSystemService(ConnectivityManager.class)));
@@ -187,8 +185,10 @@ public final class ChatService extends Service {
                         if(Build.VERSION.SDK_INT>=33) registerReceiver(tetherReceiver,tetherFilter,Context.RECEIVER_EXPORTED);
                         else registerReceiver(tetherReceiver,tetherFilter);
                     } catch (RuntimeException e) { showError("自动发现可能受限，可尝试手动 IP："+e.getMessage()); }
+                    // 建连期间设置仍可保存；发布节点时补上最新资料，端口则以实际监听值为准。
+                    applyProfile(connected,prefs);
                     diagnostics.record(Diagnostics.Event.Connected);connecting=false;
-                    connectedPort=prefs.getInt("port",2425);
+                    connectedPort=connected.port();
                     updateNetworkStatus();
                     connected.networkChanged();
                 });
@@ -221,14 +221,16 @@ public final class ChatService extends Service {
         });
     }
     void receiveSettingsChanged() { drainReceives(); changed(); }
+    private static void applyProfile(LanNode target,SharedPreferences prefs) {
+        String avatar=Protocol.normalizeAvatar(prefs.getString("avatar","default"));
+        target.setAvatar(avatar==null?"default":avatar);
+        target.nickname=prefs.getString("name",Build.MODEL);
+        target.group=prefs.getString("group","我的局域网");
+    }
     void profileSettingsChanged() {
         LanNode current=node;
-        SharedPreferences prefs=getSharedPreferences("settings",MODE_PRIVATE);
-        String avatar=Protocol.normalizeAvatar(prefs.getString("avatar","default"));
         if(current!=null){
-            current.setAvatar(avatar==null?"default":avatar);
-            current.nickname=prefs.getString("name",Build.MODEL);
-            current.group=prefs.getString("group","我的局域网");
+            applyProfile(current,getSharedPreferences("settings",MODE_PRIVATE));
             refresh();
         }
     }

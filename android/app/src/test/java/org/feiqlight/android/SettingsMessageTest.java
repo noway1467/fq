@@ -60,6 +60,30 @@ public final class SettingsMessageTest {
             try{UserAvatar.read(activity,Uri.parse("file:///ungranted.png"));fail("绕过系统 URI 授权");}catch(IOException expected){assertTrue(expected.getMessage().contains("授权"));}
         } finally {if(picker!=null)picker.dismiss();if(settings!=null)settings.dismiss();ac.pause().stop().destroy();sc.destroy();}
     }
+    @Test public void slowAvatarReadCannotConfirmEarlyOrReplaceLaterBuiltinChoice() throws Exception {
+        ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();
+        shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));
+        ActivityController<MainActivity> ac=Robolectric.buildActivity(MainActivity.class).create().start().resume().visible();MainActivity activity=ac.get();
+        Dialog settings=null,picker=null;CountDownLatch release=new CountDownLatch(1),waiting=new CountDownLatch(1);
+        try {
+            settle(service);invoke(activity,"settings",new Class<?>[0]);settings=ShadowDialog.getLatestDialog();click(settings,"更换头像");picker=ShadowDialog.getLatestDialog();
+            ExecutorService loader=(ExecutorService)field(activity,"avatarLoader");
+            loader.submit(()->{waiting.countDown();try{release.await(5,TimeUnit.SECONDS);}catch(InterruptedException e){Thread.currentThread().interrupt();}});
+            assertTrue(waiting.await(3,TimeUnit.SECONDS));click(picker,"本地图片");shadowOf(activity).getNextStartedActivityForResult();
+            Uri uri=Uri.parse("content://avatar.test/slow");Bitmap image=Bitmap.createBitmap(64,64,Bitmap.Config.ARGB_8888);image.eraseColor(Color.GREEN);
+            ByteArrayOutputStream bytes=new ByteArrayOutputStream();image.compress(Bitmap.CompressFormat.PNG,100,bytes);image.recycle();
+            shadowOf(activity.getContentResolver()).registerInputStream(uri,new ByteArrayInputStream(bytes.toByteArray()));
+            invoke(activity,"onActivityResult",new Class<?>[]{int.class,int.class,Intent.class},25,Activity.RESULT_OK,new Intent().setData(uri));
+            Button confirm=(Button)picker.getWindow().getDecorView().findViewWithTag("sheet-primary");
+            assertFalse("图片未读完不能确认旧头像",confirm.isEnabled());
+            View builtin=views(picker.getWindow().getDecorView()).stream().filter(v->"builtin:15".equals(v.getTag())).findFirst().orElseThrow();builtin.performClick();
+            assertTrue("后选内置头像应立即可用",confirm.isEnabled());
+            release.countDown();loader.submit(()->{}).get(5,TimeUnit.SECONDS);shadowOf(Looper.getMainLooper()).idle();
+            assertEquals("较慢的本地图覆盖了后选头像","builtin:15",field(field(activity,"avatarSelection"),"value"));
+            click(picker,"使用此头像");click(settings,"保存");
+            assertEquals("builtin:15",activity.getSharedPreferences("settings",0).getString("avatar",""));
+        } finally {release.countDown();if(picker!=null)picker.dismiss();if(settings!=null)settings.dismiss();ac.pause().stop().destroy();sc.destroy();}
+    }
     @Test public void storeDeletesPersistWithoutRemovingAttachmentsOrOtherConversations() throws Exception {
         Context context=RuntimeEnvironment.getApplication();LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:32425"),"peer","host","联系人","部门"),other=new LanNode.Peer(LanNode.endpoint("127.0.0.1:32426"),"other","host","其他","部门");
         File file=new File(context.getFilesDir(),"保留的文件.txt");try(OutputStream output=new FileOutputStream(file)){output.write(7);}new DraftStore(context).save(peer.id(),"保留草稿");

@@ -298,7 +298,7 @@ namespace FeiqLight
                 s.KnownPeers = AppSettings.NormalizeKnownPeers(s.KnownPeers);
                 s.Conversations = SavedConversation.Normalize(s.Conversations);
                 s.ChatFontSize=Math.Max(9,Math.Min(18,s.ChatFontSize));
-                if(s.ChatBackground!="none"&&s.ChatBackground!="lines"&&s.ChatBackground!="image")s.ChatBackground="orbits";
+                if(s.ChatBackground!="none"&&s.ChatBackground!="lines"&&s.ChatBackground!="grid"&&s.ChatBackground!="aurora"&&s.ChatBackground!="image")s.ChatBackground="orbits";
                 return s;
             }
             catch (Exception e)

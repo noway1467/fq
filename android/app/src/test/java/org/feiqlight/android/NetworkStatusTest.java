@@ -87,4 +87,36 @@ public final class NetworkStatusTest {
             assertFalse(service.online());assertFalse(service.canDisconnect());assertEquals("已断开",service.status());
         } finally {sc.destroy();}
     }
+    @Test public void profileSavedWhileConnectingIsPublishedWithoutChangingBoundPort()throws Exception {
+        ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();
+        CountDownLatch created=new CountDownLatch(1),release=new CountDownLatch(1);
+        java.util.concurrent.atomic.AtomicReference<LanNode> candidate=new java.util.concurrent.atomic.AtomicReference<>();
+        try(ServerSocket probe=new ServerSocket(0,1,InetAddress.getLoopbackAddress())) {
+            int port=probe.getLocalPort();probe.close();settle(service);
+            SharedPreferences prefs=service.getSharedPreferences("settings",0);
+            prefs.edit().putInt("port",port).putString("name","连接前昵称").putString("group","旧部门").commit();
+            service.connectionFactory=(settings,listener)->{
+                LanNode next=new LanNode(port,true,"profile-race","host",settings.getString("name",""),settings.getString("group",""),listener);
+                candidate.set(next);created.countDown();
+                try {if(!release.await(5,TimeUnit.SECONDS))throw new IllegalStateException("等待测试放行超时");}
+                catch(InterruptedException e){Thread.currentThread().interrupt();throw new IllegalStateException(e);}
+                return next;
+            };
+            service.onStartCommand(new Intent(),0,1);assertTrue(created.await(5,TimeUnit.SECONDS));
+            synchronized(field(service,"connectionLock")) {
+                release.countDown();long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(3);
+                while(!candidate.get().networkAvailable()&&System.nanoTime()<deadline)Thread.sleep(10);
+                assertTrue(candidate.get().networkAvailable());assertNull("节点应仍在等待发布",field(service,"node"));
+                int laterPort=port==65535?65534:port+1;
+                assertTrue(prefs.edit().putString("name","建连中保存的新昵称").putString("group","新部门").putString("avatar","builtin:3").putInt("port",laterPort).commit());
+                service.profileSettingsChanged();
+            }
+            settle(service);LanNode connected=(LanNode)field(service,"node");
+            assertSame(candidate.get(),connected);assertEquals(port,connected.port());assertEquals(port,field(service,"connectedPort"));
+            assertEquals("建连中保存的新昵称",connected.nickname);assertEquals("新部门",connected.group);
+            assertEquals("builtin:3",field(connected,"avatar"));assertTrue(service.status().contains(Integer.toString(port)));
+            assertNotEquals("下次连接的端口配置不能被本次监听覆盖",port,prefs.getInt("port",0));
+            assertTrue(ChatService.shouldRestoreConnection(service));
+        } finally {release.countDown();sc.destroy();}
+    }
 }

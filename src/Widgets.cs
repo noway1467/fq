@@ -138,7 +138,8 @@ namespace FeiqLight
     public sealed class ChatEditor : RichTextBox
     {
         public string Placeholder = "输入消息…";
-        private static readonly IntPtr RichEdit50 = LoadLibrary("msftedit.dll");
+        // 固定从系统目录加载，避免同目录的同名 DLL 被当作系统 RichEdit 执行。
+        private static readonly IntPtr RichEdit50 = LoadLibrary(System.IO.Path.Combine(Environment.SystemDirectory, "msftedit.dll"));
         private bool hadSelection;
         [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
         private struct TextArea { internal int Left, Top, Right, Bottom; }
@@ -213,18 +214,17 @@ namespace FeiqLight
         protected override void OnTextChanged(EventArgs e) { base.OnTextChanged(e); AlignText(); if (TextLength <= 1) Invalidate(); }
         protected override void OnGotFocus(EventArgs e) { base.OnGotFocus(e); Invalidate(); }
         protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); Invalidate(); }
-        protected override void OnVScroll(EventArgs e) { base.OnVScroll(e); if (ColorEmoji.Contains(Text)) Invalidate(false); }
+        protected override void OnVScroll(EventArgs e) { base.OnVScroll(e); Invalidate(false); }
         protected override void OnSelectionChanged(EventArgs e)
         {
             base.OnSelectionChanged(e);
             bool active = SelectionLength > 0;
-            if ((active || hadSelection) && ColorEmoji.Contains(Text)) Invalidate(false);
+            if (active || hadSelection) Invalidate(false);
             hadSelection = active;
         }
         private void PaintColorEmojis(Graphics g)
         {
             string text = Text;
-            if (!ColorEmoji.Contains(text)) return;
             Rectangle clip = textArea.Width > 0 ? textArea : ClientRectangle;
             if (clip.Width <= 0 || clip.Height <= 0) return;
             int lineHeight = Math.Max(12, Font.Height);
@@ -237,8 +237,11 @@ namespace FeiqLight
                 g.SetClip(clearClip);
                 g.InterpolationMode = InterpolationMode.HighQualityBicubic;
                 var cells = new System.Collections.Generic.List<Tuple<string, Rectangle, bool>>();
-                int pos = 0;
-                while (pos < text.Length)
+                // 草稿可达一百万字符；重绘只检查可见行及两端少量组合字符，不能逐帧扫描整篇正文。
+                int pos = Math.Max(0, GetCharIndexFromPosition(new Point(clip.Left, clip.Top)) - 16);
+                int end = Math.Min(text.Length, GetCharIndexFromPosition(new Point(clip.Right - 1, clip.Bottom - 1)) + 16);
+                if (pos > 0 && pos < text.Length && Char.IsLowSurrogate(text[pos])) pos--;
+                while (pos < end)
                 {
                     string emoji;
                     if (!ColorEmoji.Match(text, pos, out emoji)) { pos += Char.IsSurrogatePair(text, pos) ? 2 : 1; continue; }
@@ -290,7 +293,7 @@ namespace FeiqLight
                             TextRenderer.DrawText(g, Placeholder, Font, new Rectangle(GetPositionFromCharIndex(0), new Size(Math.Max(1, textArea.Width), Font.Height)), Theme.Muted, TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.Left | TextFormatFlags.NoPadding);
                     }
                 }
-                else if (ColorEmoji.Contains(Text))
+                else
                 {
                     bool hid = m.Msg == 0x000F && HideCaret(Handle);
                     try

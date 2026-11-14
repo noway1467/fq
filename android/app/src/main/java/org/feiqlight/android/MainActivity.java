@@ -101,8 +101,10 @@ public final class MainActivity extends Activity implements ChatService.Observer
     private ConversationAdapter adapter;
     private final java.util.concurrent.ExecutorService avatarLoader=java.util.concurrent.Executors.newSingleThreadExecutor();
     private AvatarSelection avatarSelection, avatarImageRequest;
+    private int avatarImageRevision;
     private static final class AvatarSelection {
-        String value; Dialog dialog; TextView preview; final List<ImageButton> choices=new ArrayList<>();
+        String value; Dialog dialog; TextView preview; Button confirm,local; int revision; boolean loading;
+        final List<ImageButton> choices=new ArrayList<>();
     }
     private boolean selectingMessages;
     private final Set<String> messageMarks=new LinkedHashSet<>();
@@ -182,7 +184,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         });
     }
     private void renderPage() {
-        selectingMessages=false;messageMarks.clear();messageViews.clear();messageRows.clear();messageAvatarViews.clear();messageSelectionBar=null;
+        selectingMessages=false;messageMarks.clear();messageViews.clear();messageRows.clear();messageAvatarViews.clear();messageAvatarSignature="";messageSelectionBar=null;
         closeHistory();
         historyAppliedVersion=++historyRequestVersion;
         finishSelection();
@@ -812,7 +814,6 @@ public final class MainActivity extends Activity implements ChatService.Observer
         settingHeading(box,"外观");
         Switch follow=settingSwitch("跟随系统切换",prefs.getBoolean("follow_system_theme",false));box.addView(follow,settingSpacing(0,8));
         Switch dark=settingSwitch("夜间模式",follow.isChecked()?systemDark():prefs.getBoolean("dark_mode",false));dark.setEnabled(!follow.isChecked());box.addView(dark,new LinearLayout.LayoutParams(-1,-2));
-        boolean initialDark=follow.isChecked()?systemDark():prefs.getBoolean("dark_mode",false);
         String initialAccent=prefs.getString("accent","blue"), initialBackground=prefs.getString("chat_background","orbits"), initialBackgroundImage=prefs.getString("background_image","");
         int initialFontSize=messageSize();
         RadioGroup accent=settingChoices(6);accent.setContentDescription("主题颜色");
@@ -870,7 +871,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
             int nextSize=fontSize.getProgress()+14;boolean nextDark=follow.isChecked()?systemDark():dark.isChecked();String nextBgImage=prefs.getString("background_image","");
             boolean saved=prefs.edit().putString("avatar",avatarValue[0]).putString("name",n).putString("group",g).putInt("port",p).putBoolean("auto_connect",autoConnect.isChecked()).putBoolean("diagnostics",diagnosticSwitch.isChecked()).putBoolean(ReceivedStorage.AUTO,automatic.isChecked()).putBoolean("follow_system_theme",follow.isChecked()).putBoolean("dark_mode",dark.isChecked()).putString("accent",accentKey).putInt("chat_font_size",nextSize).putString("chat_background",backdropKey).commit();
             if(!saved){error("设置未保存，请检查设备存储空间");return;}if(service!=null){service.receiveSettingsChanged();service.profileSettingsChanged();}dialog.dismiss();
-            boolean visualChanged=nextDark!=initialDark||!accentKey.equals(initialAccent)||nextSize!=initialFontSize||!backdropKey.equals(initialBackground)||!nextBgImage.equals(initialBackgroundImage);
+            boolean visualChanged=nextDark!=DARK||!accentKey.equals(initialAccent)||nextSize!=initialFontSize||!backdropKey.equals(initialBackground)||!nextBgImage.equals(initialBackgroundImage);
             if(visualChanged) {
                 rerenderPreservingState();
             } else {
@@ -888,20 +889,23 @@ public final class MainActivity extends Activity implements ChatService.Observer
         for(int i=0;i<avatars.count();i++) {
             String selected="builtin:"+i;ImageButton choice=new ImageButton(this);choice.setTag(selected);choice.setContentDescription("内置头像："+avatars.description(i));choice.setPadding(dp(4),dp(4),dp(4),dp(4));choice.setImageDrawable(new AvatarDrawable(this,"",false,dp(3),SURFACE,ONLINE,selected));
             GridLayout.LayoutParams spacing=new GridLayout.LayoutParams(GridLayout.spec(i/6),GridLayout.spec(i%6,1f));spacing.width=0;spacing.height=dp(56);spacing.setMargins(dp(2),dp(2),dp(2),dp(2));grid.addView(choice,spacing);state.choices.add(choice);
-            choice.setOnClickListener(v->{state.value=selected;updateAvatarPicker(state,identity);});
+            choice.setOnClickListener(v->{state.revision++;state.loading=false;state.value=selected;updateAvatarPicker(state,identity);});
         }
         LinearLayout actions=row();Button local=button("本地图片",false),reset=button("默认头像",false);actions.addView(local,weight());LinearLayout.LayoutParams resetSpacing=weight();resetSpacing.leftMargin=dp(12);actions.addView(reset,resetSpacing);box.addView(actions,settingSpacing(12,8));
-        reset.setOnClickListener(v->{state.value="default";updateAvatarPicker(state,identity);});
+        state.local=local;
+        reset.setOnClickListener(v->{state.revision++;state.loading=false;state.value="default";updateAvatarPicker(state,identity);});
         local.setOnClickListener(v->{
-            avatarImageRequest=state;
+            avatarImageRequest=state;avatarImageRevision=++state.revision;state.loading=false;updateAvatarPicker(state,identity);
             try{startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("image/*").addCategory(Intent.CATEGORY_OPENABLE).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),25);}
             catch(ActivityNotFoundException e){avatarImageRequest=null;error("系统没有可用的图片选择器");}
         });
         box.addView(text("选择后回到设置页点击保存。原图移动不影响头像。",12,MUTED));
-        state.dialog=sheet("更换头像",box,"使用此头像",dialog->{use.accept(state.value);dialog.dismiss();});
+        state.dialog=sheet("更换头像",box,"使用此头像",dialog->{if(!state.loading){use.accept(state.value);dialog.dismiss();}});
+        state.confirm=(Button)state.dialog.getWindow().getDecorView().findViewWithTag("sheet-primary");
         state.dialog.setOnDismissListener(d->{if(avatarSelection==state)avatarSelection=null;});updateAvatarPicker(state,identity);
     }
     private void updateAvatarPicker(AvatarSelection state,String identity) {
+        state.confirm.setEnabled(!state.loading);state.local.setText(state.loading?"读取图片中…":"本地图片");
         bindAvatar(state.preview,identity,"所选头像",false,state.value);
         for(ImageButton choice:state.choices){boolean checked=choice.getTag().equals(state.value);choice.setSelected(checked);choice.setBackground(shape(checked?BUBBLE:PALE,CONTROL_RADIUS));}
     }
@@ -1015,7 +1019,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         LinearLayout box=column(); box.setPadding(dp(18),dp(12),dp(18),dp(22)); box.setBackground(shape(SURFACE,18));
         LinearLayout heading=row(); heading.setPadding(dp(8),0,0,dp(10)); TextView caption=text(name,18,INK); caption.setTypeface(null,Typeface.BOLD); caption.setMaxLines(2); caption.setEllipsize(TextUtils.TruncateAt.END); caption.setContentDescription(name); heading.addView(caption,weight()); IconButton close=new IconButton("close","关闭",MUTED); heading.addView(close,new LinearLayout.LayoutParams(dp(44),dp(44))); close.setOnClickListener(v->dialog.dismiss()); box.addView(heading);
         box.addView(content,new LinearLayout.LayoutParams(-1,-2));
-        if(action!=null) { Button done=button(action,true); LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(-1,-2); p.topMargin=dp(20); box.addView(done,p); done.setOnClickListener(v->{ if(handler!=null) handler.accept(dialog); }); }
+        if(action!=null) { Button done=button(action,true); done.setTag("sheet-primary"); LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(-1,-2); p.topMargin=dp(20); box.addView(done,p); done.setOnClickListener(v->{ if(handler!=null) handler.accept(dialog); }); }
         // 整张操作面板可滚动；遵守父窗口实际给出的高度，避免键盘、横屏或长标题把底部按钮挤到屏外。
         ScrollView scroller=new ScrollView(this) { @Override protected void onMeasure(int width,int height) {
             int visible=root!=null&&root.getHeight()>0?root.getHeight()-root.getPaddingTop()-root.getPaddingBottom():getResources().getDisplayMetrics().heightPixels;
@@ -1155,14 +1159,18 @@ public final class MainActivity extends Activity implements ChatService.Observer
         try { startActivityForResult(intent,21); } catch(ActivityNotFoundException e) { error("系统没有可用的保存选择器"); }
     }
     @Override protected void onActivityResult(int request,int result,Intent data) {
-        super.onActivityResult(request,result,data); if(result!=RESULT_OK||data==null) return;
+        super.onActivityResult(request,result,data);
+        if(request==25&&(result!=RESULT_OK||data==null||data.getData()==null)){avatarImageRequest=null;return;}
+        if(result!=RESULT_OK||data==null) return;
         if(request!=20&&data.getData()==null) return;
         if(request==25) {
-            AvatarSelection expected=avatarImageRequest;avatarImageRequest=null;if(expected==null||avatarSelection!=expected||!expected.dialog.isShowing())return;
+            AvatarSelection expected=avatarImageRequest;int revision=avatarImageRevision;avatarImageRequest=null;if(expected==null||avatarSelection!=expected||expected.revision!=revision||!expected.dialog.isShowing())return;
             Uri uri=data.getData();String identity="device:"+getSharedPreferences("settings",MODE_PRIVATE).getString("device_id","");
+            expected.loading=true;updateAvatarPicker(expected,identity);
             avatarLoader.execute(()->{
-                try{String value=UserAvatar.read(this,uri);runOnUiThread(()->{if(!isDestroyed()&&!isFinishing()&&avatarSelection==expected&&expected.dialog.isShowing()){expected.value=value;updateAvatarPicker(expected,identity);}});}
-                catch(Exception e){runOnUiThread(()->{if(!isDestroyed()&&!isFinishing()&&avatarSelection==expected)error("头像未更改："+e.getMessage());});}
+                // 窗口实例和选择版本都要匹配；较慢的本地图不能覆盖后来选择的默认/内置头像。
+                try{String value=UserAvatar.read(this,uri);runOnUiThread(()->{if(currentAvatarRequest(expected,revision)){expected.loading=false;expected.value=value;updateAvatarPicker(expected,identity);}});}
+                catch(Exception e){runOnUiThread(()->{if(currentAvatarRequest(expected,revision)){expected.loading=false;updateAvatarPicker(expected,identity);error("头像未更改："+e.getMessage());}});}
             });return;
         }
         if(request==24) {
@@ -1193,6 +1201,9 @@ public final class MainActivity extends Activity implements ChatService.Observer
             catch(IllegalArgumentException e) { error(e.getMessage()); }
         }
         if(request==21) { File file=new File(exportPath); if(file.isFile()&&file.getParentFile().equals(new File(getFilesDir(),"received"))) service.exportFile(file,data.getData()); else error("应用内文件已不存在"); }
+    }
+    private boolean currentAvatarRequest(AvatarSelection state,int revision) {
+        return !isDestroyed()&&!isFinishing()&&avatarSelection==state&&state.revision==revision&&state.dialog.isShowing();
     }
     static List<Uri> selectedFiles(Intent data) {
         LinkedHashSet<Uri> files=new LinkedHashSet<>(); ClipData clip=data.getClipData();

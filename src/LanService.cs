@@ -16,8 +16,15 @@ namespace FeiqLight
     {
         private sealed class Pending
         {
-            public Peer Peer; public byte[] Bytes; public ChatRecord Record;
+            public readonly IPEndPoint Endpoint;
+            public readonly string Login, DeviceId;
+            public byte[] Bytes; public ChatRecord Record;
             public DateTime Last; public int Attempts;
+            public Pending(Peer peer)
+            {
+                Endpoint = new IPEndPoint(peer.Endpoint.Address, peer.Endpoint.Port);
+                Login = peer.Login; DeviceId = peer.DeviceId;
+            }
         }
         private sealed class Offer
         {
@@ -219,7 +226,7 @@ namespace FeiqLight
                 lock (gate)
                 {
                     Pending candidate;
-                    if (pending.TryGetValue(number, out candidate) && candidate.Peer.Endpoint.Equals(remote) && candidate.Peer.Login == packet.Login && (packet.DeviceId == null || candidate.Peer.DeviceId == null || candidate.Peer.DeviceId == packet.DeviceId))
+                    if (pending.TryGetValue(number, out candidate) && candidate.Endpoint.Equals(remote) && candidate.Login == packet.Login && (packet.DeviceId == null || candidate.DeviceId == null || candidate.DeviceId == packet.DeviceId))
                     { item = candidate; pending.Remove(number); }
                 }
                 if (item != null) Complete(item.Record, "已送达");
@@ -299,6 +306,9 @@ namespace FeiqLight
             if (String.IsNullOrWhiteSpace(text) && (paths == null || paths.Count == 0)) throw new ArgumentException("请先输入消息或选择文件。");
             if ((text ?? "").IndexOf('\0') >= 0) throw new ArgumentException("消息不能包含空字符。");
             if (paths != null && paths.Count > 20) throw new ArgumentException("一次最多发送 20 个文件。");
+            Pending delivery; bool utf8;
+            // 发现报文可以更新联系人地址，但不能改变已发消息的接收者、ACK 或附件授权。
+            lock (gate) { delivery = new Pending(peer); utf8 = peer.Utf8; }
             long number = original == null ? Next() : original.Packet; List<Attachment> files = new List<Attachment>(); Dictionary<string, Offer> additions = new Dictionary<string, Offer>();
             if (paths != null)
             {
@@ -309,10 +319,10 @@ namespace FeiqLight
                     if (!info.Exists || !Protocol.SafeFileName(info.Name)) throw new IOException("文件不存在、文件名不安全或过长：" + info.Name);
                     Attachment file = new Attachment { Id = id++, Name = info.Name, Size = info.Length, Modified = (long)(info.LastWriteTimeUtc - new DateTime(1970, 1, 1)).TotalSeconds };
                     files.Add(file);
-                    additions[number + ":" + file.Id] = new Offer { Path = info.FullName, Size = info.Length, Modified = info.LastWriteTimeUtc, Address = peer.Endpoint.Address.ToString(), Expires = DateTime.UtcNow.AddMinutes(30) };
+                    additions[number + ":" + file.Id] = new Offer { Path = info.FullName, Size = info.Length, Modified = info.LastWriteTimeUtc, Address = delivery.Endpoint.Address.ToString(), Expires = DateTime.UtcNow.AddMinutes(30) };
                 }
             }
-            uint command = Protocol.SendMessage | Protocol.SendCheck | (peer.Utf8 ? Protocol.Utf8 : 0) | (files.Count > 0 ? Protocol.FileAttach : 0);
+            uint command = Protocol.SendMessage | Protocol.SendCheck | (utf8 ? Protocol.Utf8 : 0) | (files.Count > 0 ? Protocol.FileAttach : 0);
             byte[] bytes = Protocol.Encode(number, Login, Host, command, text, files.Count > 0 ? Protocol.FileList(files) : null, Settings.DeviceId);
             string display = text ?? "";
             if (files.Count > 0) display += (display.Length > 0 ? "\n" : "") + "[文件] " + String.Join("、", files.Select(f => f.Name));
@@ -331,9 +341,10 @@ namespace FeiqLight
                 if (pending.Count >= 256 || offers.Count + additions.Count > 1000) throw new InvalidOperationException("待处理消息或文件过多，请稍后再试。");
                 record.State = "等待确认";
                 foreach (var item in additions) offers[item.Key] = item.Value;
-                pending[number] = new Pending { Peer = peer, Bytes = bytes, Record = record, Last = DateTime.UtcNow, Attempts = 1 };
+                delivery.Bytes = bytes; delivery.Record = record; delivery.Last = DateTime.UtcNow; delivery.Attempts = 1;
+                pending[number] = delivery;
             }
-            try { Send(bytes, peer.Endpoint); }
+            try { Send(bytes, delivery.Endpoint); }
             catch
             {
                 lock (gate) { pending.Remove(number); foreach (string key in additions.Keys) offers.Remove(key); }
@@ -373,7 +384,7 @@ namespace FeiqLight
                         else { peer.Probed = elapsed; peer.Misses++; probes.Add(peer.Endpoint); }
                     }
                 }
-                foreach (Pending item in retry) try { Send(item.Bytes, item.Peer.Endpoint); } catch (SocketException) { }
+                foreach (Pending item in retry) try { Send(item.Bytes, item.Endpoint); } catch (SocketException) { }
                 foreach (IPEndPoint target in probes) try { Probe(target); } catch (SocketException) { }
                 foreach (Pending item in failed) Complete(item.Record, "未确认送达，请检查网络后重发");
                 if (changed) Changed();
@@ -405,10 +416,12 @@ namespace FeiqLight
                 client.ReceiveTimeout = 5000; client.SendTimeout = 15000;
                 using (NetworkStream stream = client.GetStream())
                 {
-                    List<byte> request = new List<byte>(); int b;
-                    while (request.Count < 4096 && (b = stream.ReadByte()) > 0) request.Add((byte)b);
+                    RequestInput deadline = new RequestInput(client); deadline.Begin(5000);
+                    BufferedStream input = new BufferedStream(deadline, 4096);
+                    List<byte> request = new List<byte>(); int b = -1;
+                    while (request.Count < 4096 && (b = input.ReadByte()) > 0) request.Add((byte)b);
                     Packet packet;
-                    if (request.Count >= 4096 || !Protocol.TryParse(request.ToArray(), out packet) || packet.Mode != Protocol.GetFile) return;
+                    if (b != 0 || request.Count >= 4096 || !Protocol.TryParse(request.ToArray(), out packet) || packet.Mode != Protocol.GetFile) return;
                     string[] fields = packet.Body.Split(':'); long messageId, offset; int fileId;
                     if (fields.Length < 3 || !Int64.TryParse(fields[0], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out messageId) || !Int32.TryParse(fields[1], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out fileId) || !Int64.TryParse(fields[2], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out offset)) return;
                     Offer offer;

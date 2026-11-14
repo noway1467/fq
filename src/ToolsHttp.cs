@@ -82,9 +82,11 @@ namespace FeiqLight
                 client.ReceiveTimeout = 5000; client.SendTimeout = 10000; client.NoDelay = true; client.SendBufferSize = 262144;
                 NetworkStream stream = client.GetStream();
                 // 请求头逐字解析，但不再为每个字节调用一次 socket 读取。
-                BufferedStream input = new BufferedStream(stream, 8192);
+                RequestInput deadline = new RequestInput(client);
+                BufferedStream input = new BufferedStream(deadline, 8192);
                 for (int index = 0; index < 16; index++)
                 {
+                    deadline.Begin(index == 0 ? 5000 : 3000);
                     Request request = Read(input);
                     bool reuse = index < 15 && request.Path == "/file" && (request.Method == "GET" || request.Method == "HEAD") && request.Header("Connection").Equals("keep-alive", StringComparison.OrdinalIgnoreCase);
                     response = new Response(stream, request.Method == "HEAD", reuse);
