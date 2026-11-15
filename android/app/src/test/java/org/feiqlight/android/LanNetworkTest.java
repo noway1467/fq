@@ -260,4 +260,26 @@ public final class LanNetworkTest {
             assertTrue(shadowOf(wifi).isSocketBound(udp));assertEquals(0,shadowOf(vpn).boundSocketCount());
         }
     }
+    @org.robolectric.annotation.Implements(Network.class)
+    public static class BlockingBindNetwork extends ShadowNetwork {
+        @SuppressWarnings("unchecked") private static <T extends Throwable> void raise(Throwable e) throws T {throw (T)e;}
+        @org.robolectric.annotation.Implementation protected void bindSocket(DatagramSocket socket) {raise(new IOException("Operation not permitted"));}
+        @org.robolectric.annotation.Implementation protected void bindSocket(Socket socket) {raise(new IOException("Operation not permitted"));}
+    }
+    @Test @Config(shadows=BlockingBindNetwork.class)
+    public void vpnBindSocketBlockedFallsBackToLocalInterfaceSourceAddress() throws Exception {
+        ConnectivityManager cm=(ConnectivityManager)RuntimeEnvironment.getApplication().getSystemService(Context.CONNECTIVITY_SERVICE);shadowOf(cm).clearAllNetworks();
+        add(cm,960,NetworkCapabilities.TRANSPORT_VPN,"198.18.0.1",16);
+        add(cm,961,NetworkCapabilities.TRANSPORT_WIFI,"192.168.10.25",24);
+        LanNetwork route=new LanNetwork(cm,NO_LOCAL);
+        try(DatagramSocket udp=new DatagramSocket(null);RecordingSocket tcp=new RecordingSocket()) {
+            route.bind(udp);
+            route.bind(tcp,InetAddress.getByName("192.168.10.42"));
+            assertEquals(new InetSocketAddress("192.168.10.25",0),tcp.source);
+        }
+        try(RecordingSocket outside=new RecordingSocket()) {
+            try {route.bind(outside,InetAddress.getByName("192.168.99.42"));fail("不应允许访问当前物理子网外地址");}
+            catch(IOException expected){assertTrue(expected.getMessage().contains("子网")||expected.getMessage().contains("局域网"));}
+        }
+    }
 }

@@ -95,6 +95,24 @@ public final class RemoteActivityTest {
             if(android.os.Build.VERSION.SDK_INT<35){assertEquals(0xff17212b,activity.getWindow().getStatusBarColor());assertEquals(0xff17212b,activity.getWindow().getNavigationBarColor());}
         }
     }
+    @Test public void shareTargetForcesPortraitAndBrowserIntentOpensShare() {
+        Context context=RuntimeEnvironment.getApplication();
+        Uri shareUrl=Uri.parse("http://127.0.0.1:2426/?access=01234567-89ab-cdef-0123-456789abcdef-01234567-89ab-cdef-0123-456789abcdef#share");
+        Intent browser=ChatService.toolIntent(context,shareUrl,"peer1","share",false);
+        assertEquals(Intent.ACTION_VIEW,browser.getAction());
+        assertTrue(browser.hasCategory(Intent.CATEGORY_BROWSABLE));
+        assertEquals(shareUrl,browser.getData());
+        Intent remote=ChatService.toolIntent(context,Uri.parse("http://127.0.0.1:2426/#remote"),"peer1","remote",false);
+        assertEquals(RemoteActivity.class.getName(),remote.getComponent().getClassName());
+        Intent fallback=new Intent(context,RemoteActivity.class).setData(Uri.parse("http://127.0.0.1:2426/#share"));
+        try(ActivityController<RemoteActivity> controller=Robolectric.buildActivity(RemoteActivity.class,fallback).setup()){
+            RemoteActivity activity=controller.get();
+            assertEquals(ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT,activity.getRequestedOrientation());
+            WebView web=find(activity.getWindow().getDecorView(),WebView.class);
+            assertTrue(web.getWebViewClient().shouldOverrideUrlLoading(web,request("http://127.0.0.1:2426/native/paired")));
+            assertNull(RemoteActivity.lastConnection(context));
+        }
+    }
     private static WebResourceRequest request(String address){return new WebResourceRequest(){public Uri getUrl(){return Uri.parse(address);}public boolean isForMainFrame(){return true;}public boolean isRedirect(){return false;}public boolean hasGesture(){return true;}public String getMethod(){return "GET";}public java.util.Map<String,String> getRequestHeaders(){return java.util.Collections.emptyMap();}};}
     private static <T extends View> T find(View view,Class<T> type){if(type.isInstance(view))return type.cast(view);if(view instanceof ViewGroup)for(int i=0;i<((ViewGroup)view).getChildCount();i++){T match=find(((ViewGroup)view).getChildAt(i),type);if(match!=null)return match;}return null;}
 }

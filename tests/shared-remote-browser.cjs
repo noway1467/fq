@@ -22,6 +22,9 @@ const check = (name, value) => {assert.ok(value, name);results.push(name);};
   page.on('pageerror', error => errors.push(error.message));
   page.on('console', message => {if (message.type() === 'error' && !message.text().includes('favicon')) errors.push(message.text()+' '+message.location().url);});
   try {
+    const sampleDir = path.join(data, 'shared', '演示子目录');
+    fs.mkdirSync(sampleDir, {recursive: true});
+    fs.writeFileSync(path.join(sampleDir, '目录说明.txt'), '双击进入文件夹测试内容', 'utf8');
     await page.goto(`http://127.0.0.1:${server.port}/#share`);
     check('six digit numeric login', await page.locator('#code').evaluate(input => input.maxLength===6 && input.inputMode==='numeric'));
     await page.locator('#code').fill(server.share); await page.locator('#connect').click();
@@ -30,6 +33,11 @@ const check = (name, value) => {assert.ok(value, name);results.push(name);};
       await resize({width,height:800});
       check('shared no horizontal overflow ' + width, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
     }
+    await page.locator('.file-row[data-dir="1"] .file-name').first().dblclick();
+    await page.locator('.file-name', {hasText: '目录说明.txt'}).waitFor();
+    check('double click folder enters directory', await page.locator('#breadcrumbs button').last().innerText() === '演示子目录');
+    await page.locator('#breadcrumbs button').first().click();
+    await page.locator('.file-name', {hasText: 'playback.webm'}).waitFor();
     await page.locator('#search').fill('does-not-exist'); check('empty search state', await page.locator('.empty').innerText() === '没有匹配的文件');
     await page.locator('#search').fill('playback');
     await page.getByRole('button',{name:'播放 playback.webm',exact:true}).click();

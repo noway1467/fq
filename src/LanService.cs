@@ -41,6 +41,11 @@ namespace FeiqLight
         private readonly Dictionary<long, Pending> pending = new Dictionary<long, Pending>();
         private readonly Dictionary<string, Offer> offers = new Dictionary<string, Offer>();
         private readonly HashSet<TcpClient> connections = new HashSet<TcpClient>();
+        private readonly HashSet<TcpClient> probeSockets = new HashSet<TcpClient>();
+        private readonly HashSet<IPEndPoint> pendingTcpTargets = new HashSet<IPEndPoint>();
+        private readonly HashSet<IPEndPoint> activeTcpProbes = new HashSet<IPEndPoint>();
+        private readonly SemaphoreSlim probeConcurrency = new SemaphoreSlim(4, 4);
+        private int tcpFallbackScheduled;
         private static readonly SemaphoreSlim[] receiveLocks = Enumerable.Range(0, 32).Select(i => new SemaphoreSlim(1, 1)).ToArray();
         private static readonly System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();
         // 静默 6 秒后逐个单播 ENTRY，连续 3 次无回应判离线；网络切换或手动刷新后 2 次无回应即离线。
@@ -178,10 +183,32 @@ namespace FeiqLight
         }
         private void Report(string message) { Action<string> handler = Error; if (!disposed && handler != null) handler(message); }
         private void Changed() { Action handler = PeersChanged; if (!disposed && handler != null) handler(); }
-        public void Probe(IPEndPoint endpoint)
+        private byte[] WithPort(byte[] bytes)
+        {
+            byte[] suffix = System.Text.Encoding.ASCII.GetBytes("FQPORT=" + Port + "\0");
+            byte[] wire = new byte[bytes.Length + suffix.Length];
+            Buffer.BlockCopy(bytes, 0, wire, 0, bytes.Length);
+            Buffer.BlockCopy(suffix, 0, wire, bytes.Length, suffix.Length);
+            return wire;
+        }
+        public void Probe(IPEndPoint endpoint) { Probe(endpoint, false); }
+        private void Probe(IPEndPoint endpoint, bool broadcast)
         {
             if (endpoint.Address.AddressFamily != AddressFamily.InterNetwork) throw new ArgumentException("目前仅支持 IPv4。");
-            Send(Encode(Protocol.Entry | Protocol.CapUtf8 | Protocol.FileAttach, Protocol.Field(Settings.Nickname), Protocol.Field(Settings.Group)), endpoint);
+            bool allowed = LoopbackOnly ? IPAddress.IsLoopback(endpoint.Address) : LanNetwork.Route(links, endpoint.Address) != null;
+            bool schedule = !broadcast && tcp != null && !disposed && HeartbeatRetry >= TimeSpan.FromSeconds(1) && allowed;
+            try
+            {
+                Send(Encode(Protocol.Entry | Protocol.CapUtf8 | Protocol.FileAttach, Protocol.Field(Settings.Nickname), Protocol.Field(Settings.Group)), endpoint);
+            }
+            finally
+            {
+                if (schedule)
+                {
+                    lock (gate) { if (pendingTcpTargets.Count < 256) pendingTcpTargets.Add(endpoint); }
+                    ScheduleTcpFallback();
+                }
+            }
         }
         public void Refresh()
         {
@@ -194,7 +221,7 @@ namespace FeiqLight
                 localAddresses=new HashSet<IPAddress>(next.Select(l=>l.Address));localAddresses.Add(IPAddress.Loopback);
                 if(reset)ResetNetwork();
                 foreach (IPAddress address in next.Select(l=>l.Broadcast).Distinct())
-                    try { Probe(new IPEndPoint(address, Port)); } catch (SocketException e) { Report("广播失败：" + e.Message); }
+                    try { Probe(new IPEndPoint(address, Port), true); } catch (SocketException e) { Report("广播失败：" + e.Message); }
             }
             // 单播补充广播；只有收到真实报文才置为在线，不把历史地址伪装成在线联系人。
             List<Peer> known = Peers; TimeSpan now = clock.Elapsed;
@@ -217,6 +244,8 @@ namespace FeiqLight
                 interrupted=pending.Values.ToList();pending.Clear();
                 foreach(string key in offers.Where(o=>o.Value.Fingerprint==null).Select(o=>o.Key).ToList()){EndOffer(offers[key],"网络已切换，请重新发送邀请");offers.Remove(key);}
                 foreach(TcpClient client in connections)client.Close();
+                foreach(TcpClient client in probeSockets)client.Close();
+                pendingTcpTargets.Clear();
             }
             foreach(Pending item in interrupted)Complete(item.Record,"网络已切换，未确认送达");
             Action reset=NetworkReset;if(reset!=null)reset();Changed();
@@ -224,7 +253,7 @@ namespace FeiqLight
         // 网络切换或用户刷新时立即复核：仍能回应的联系人保持在线，失联者约 6 秒内离线。
         public void Revalidate()
         {
-            lock (gate) verifyFrom = clock.Elapsed;
+            lock (gate) { verifyFrom = clock.Elapsed; foreach (Peer peer in peers.Values) if (!peer.Online) peer.Misses = 0; }
             Refresh();
         }
         // 系统地址通知常成批到达，只记标记，由每秒维护合并处理。
@@ -258,12 +287,17 @@ namespace FeiqLight
                 {
                     if(packet.Avatar != null) peer.Avatar = packet.Avatar;
                     peer.Nickname = String.IsNullOrWhiteSpace(packet.Body) ? packet.Login : Protocol.Prefix(packet.Body, 128);
-                    peer.Group = String.IsNullOrWhiteSpace(packet.Extra) ? "我的局域网" : Protocol.Prefix(packet.Extra, 128);
+                    if (!String.IsNullOrWhiteSpace(packet.Extra) || String.IsNullOrEmpty(peer.Group))
+                        peer.Group = String.IsNullOrWhiteSpace(packet.Extra) ? "我的局域网" : Protocol.Prefix(packet.Extra, 128);
                 }
                 peer.Utf8 = peer.Utf8 || (packet.Command & (Protocol.Utf8 | Protocol.CapUtf8)) != 0;
                 peer.Online = packet.Mode != Protocol.Exit; peer.LastSeen = DateTime.UtcNow; peer.Seen = clock.Elapsed; peer.Misses = 0;
             }
             Changed(); return peer;
+        }
+        private bool IsSelf(Packet packet, IPEndPoint remote)
+        {
+            return (Settings.DeviceId != null && packet.DeviceId == Settings.DeviceId) || ((packet.ReplyPort > 0 ? packet.ReplyPort : remote.Port) == Port && localAddresses.Contains(remote.Address) && packet.Login == Login && packet.Host == Host);
         }
         private void ReceiveLoop()
         {
@@ -275,7 +309,7 @@ namespace FeiqLight
                     byte[] bytes = udp.Receive(ref remote); Packet packet;
                     if(!LoopbackOnly&&LanNetwork.Route(links,remote.Address)==null)continue;
                     if (!Protocol.TryParse(bytes, out packet)) continue;
-                    if ((Settings.DeviceId!=null&&packet.DeviceId==Settings.DeviceId)||((packet.ReplyPort>0?packet.ReplyPort:remote.Port) == Port && localAddresses.Contains(remote.Address) && packet.Login == Login && packet.Host == Host)) continue;
+                    if (IsSelf(packet, remote)) continue;
                     Handle(packet, packet.ReplyPort>0?new IPEndPoint(remote.Address,packet.ReplyPort):remote);
                 }
                 catch (ObjectDisposedException) { break; }
@@ -484,7 +518,7 @@ namespace FeiqLight
                         }
                         bool verify = peer.Seen < verifyFrom;
                         if ((!verify && elapsed - peer.Seen < HeartbeatIdle) || elapsed - peer.Probed < HeartbeatRetry) continue;
-                        if (peer.Misses >= (verify ? VerifyMisses : IdleMisses)) { peer.Online = false; changed = true; }
+                        if (peer.Misses >= (verify ? VerifyMisses : IdleMisses)) { peer.Online = false; peer.Misses = 0; changed = true; }
                         else { peer.Probed = elapsed; peer.Misses++; probes.Add(peer.Endpoint); }
                     }
                 }
@@ -497,6 +531,78 @@ namespace FeiqLight
             }
             catch (ObjectDisposedException) { }
             catch (Exception e) { Report("网络维护失败：" + e.Message); }
+        }
+        private void ScheduleTcpFallback()
+        {
+            if (disposed || tcp == null || Interlocked.CompareExchange(ref tcpFallbackScheduled, 1, 0) != 0) return;
+            Task.Delay(150).ContinueWith(_ => RunTcpFallback(), TaskScheduler.Default);
+        }
+        private void RunTcpFallback()
+        {
+            Interlocked.Exchange(ref tcpFallbackScheduled, 0);
+            if (disposed || tcp == null) return;
+            List<IPEndPoint> batch = new List<IPEndPoint>();
+            lock (gate)
+            {
+                if (pendingTcpTargets.Count == 0) return;
+                foreach (IPEndPoint target in pendingTcpTargets)
+                    if (activeTcpProbes.Add(target)) batch.Add(target);
+                pendingTcpTargets.Clear();
+            }
+            foreach (IPEndPoint target in batch)
+            {
+                Task.Run(() =>
+                {
+                    probeConcurrency.Wait();
+                    try { ProbeTcp(target); }
+                    finally { probeConcurrency.Release(); lock (gate) activeTcpProbes.Remove(target); }
+                });
+            }
+        }
+        private void ProbeTcp(IPEndPoint target)
+        {
+            if (disposed || tcp == null) return;
+            if (LoopbackOnly && !IPAddress.IsLoopback(target.Address)) return;
+            if (!LoopbackOnly && LanNetwork.Route(links, target.Address) == null) return;
+            Peer known = null;
+            lock (gate)
+            {
+                if (disposed) return;
+                known = peers.Values.FirstOrDefault(p => p.Endpoint.Equals(target));
+                TimeSpan elapsed = clock.Elapsed;
+                if (known != null && known.Online && known.Misses == 0 && known.Seen >= verifyFrom && elapsed - known.Seen < TimeSpan.FromSeconds(1)) return;
+            }
+            bool connected = false, discovered = false;
+            TcpClient client = new TcpClient(AddressFamily.InterNetwork);
+            lock (gate) { if (disposed) { client.Close(); return; } probeSockets.Add(client); }
+            try
+            {
+                using (client)
+                {
+                    BindClient(client, target.Address);
+                    Task connecting = client.ConnectAsync(target.Address, target.Port);
+                    connecting.ContinueWith(t => { var unused = t.Exception; }, TaskContinuationOptions.OnlyOnFaulted);
+                    if (!connecting.Wait(1200)) return;
+                    connected = true;
+                    client.ReceiveTimeout = 1500; client.SendTimeout = 1500;
+                    NetworkStream stream = client.GetStream();
+                    stream.Write(new byte[] { 70, 81, 68, 10 }, 0, 4);
+                    SecureIdentity.WriteFrame(stream, WithPort(Encode(Protocol.Entry | Protocol.CapUtf8 | Protocol.FileAttach, Protocol.Field(Settings.Nickname), Protocol.Field(Settings.Group))));
+                    Packet packet;
+                    if (Protocol.TryParse(SecureIdentity.ReadFrame(new SecureIdentity.Deadline(stream, 1500), 60000), out packet)
+                        && (packet.Mode == Protocol.AnswerEntry || packet.Mode == Protocol.Entry || packet.Mode == Protocol.Absence))
+                    {
+                        IPEndPoint from = new IPEndPoint(target.Address, packet.ReplyPort > 0 ? packet.ReplyPort : target.Port);
+                        if (!IsSelf(packet, from)) { Upsert(packet, from); discovered = true; }
+                    }
+                }
+            }
+            catch (Exception) { }
+            finally { lock (gate) probeSockets.Remove(client); }
+            if (connected && !discovered && known != null && Security != null && known.Fingerprint != null && Security.IsTrusted(known.DeviceId, known.Fingerprint))
+            {
+                try { VerifyPeer(known); } catch (Exception) { }
+            }
         }
         private void AcceptLoop()
         {
@@ -571,14 +677,31 @@ namespace FeiqLight
                 if(!LoopbackOnly&&LanNetwork.Route(links,((IPEndPoint)client.Client.RemoteEndPoint).Address)==null)return;
                 client.ReceiveTimeout=5000;byte[] first=new byte[1];
                 if(client.Client.Receive(first,0,1,SocketFlags.Peek)!=1)return;
-                if(first[0]=='F'&&Security!=null) {
+                if(first[0]=='F') {
                     RequestInput prefix=new RequestInput(client);prefix.Begin(5000);
-                    if(prefix.ReadByte()!='F'||prefix.ReadByte()!='Q'||prefix.ReadByte()!='2'||prefix.ReadByte()!='\n')return;
-                    ServeSecure(client);
+                    int b0=prefix.ReadByte(),b1=prefix.ReadByte(),b2=prefix.ReadByte(),b3=prefix.ReadByte();
+                    if(b0=='F'&&b1=='Q'&&b2=='2'&&b3=='\n'&&Security!=null)ServeSecure(client);
+                    else if(b0=='F'&&b1=='Q'&&b2=='D'&&b3=='\n')ServeDiscovery(client,prefix);
+                    return;
                 }
-                else if(Security==null||Settings.AllowLegacyProtocol)ServeFile(client);
+                if(Security==null||Settings.AllowLegacyProtocol)ServeFile(client);
             } catch(IOException e) {Report("安全连接未完成："+e.Message);} catch(SocketException) {} catch(System.Security.Authentication.AuthenticationException e) {Report("TLS 握手未通过："+e.GetBaseException().Message);} catch(ObjectDisposedException) {} catch(System.ComponentModel.Win32Exception e){Report("TLS 系统凭据失败："+e.NativeErrorCode+" "+e.Message);} catch(CryptographicException e){Report("TLS 证书失败："+e.Message);}
             finally {client.Close();lock(gate)connections.Remove(client);}
+        }
+        private void ServeDiscovery(TcpClient client, Stream input)
+        {
+            Packet packet;
+            if (!Protocol.TryParse(SecureIdentity.ReadFrame(input, 60000), out packet)) return;
+            if (packet.Mode != Protocol.Entry && packet.Mode != Protocol.AnswerEntry && packet.Mode != Protocol.Absence) return;
+            IPEndPoint from = new IPEndPoint(((IPEndPoint)client.Client.RemoteEndPoint).Address, packet.ReplyPort > 0 ? packet.ReplyPort : Port);
+            if (IsSelf(packet, from)) return;
+            Peer peer = Upsert(packet, from);
+            if (peer == null) return;
+            if (packet.Mode == Protocol.Entry)
+            {
+                uint flags = Protocol.AnswerEntry | Protocol.CapUtf8 | Protocol.FileAttach | (peer.Utf8 ? Protocol.Utf8 : 0);
+                SecureIdentity.WriteFrame(client.GetStream(), WithPort(Encode(flags, Protocol.Field(Settings.Nickname), Protocol.Field(Settings.Group))));
+            }
         }
         private TcpClient SecureConnect(IPEndPoint endpoint)
         {
@@ -599,10 +722,11 @@ namespace FeiqLight
             try {
                 using(TcpClient client=connection=SecureConnect(item.Endpoint))using(SslStream stream=Security.Client(client,item.Fingerprint)) {
                     client.ReceiveTimeout=45000;stream.ReadTimeout=45000;
-                    AuthenticateSecureClient(stream,item.DeviceId,item.Fingerprint,item.Login);
+                    Packet remote=AuthenticateSecureClient(stream,item.DeviceId,item.Fingerprint,item.Login);
                     SaveOffers();
                     SecureIdentity.WriteText(stream,"M\n"+Port);SecureIdentity.WriteFrame(stream,item.Bytes);
                     if(SecureIdentity.ReadText(stream,1024)!="OK")throw new IOException("对方未接受消息或未完成配对。");
+                    Upsert(remote,item.Endpoint);
                     lock(gate){Pending active;if(!pending.TryGetValue(item.Record.Packet,out active)||active!=item)return;pending.Remove(item.Record.Packet);}
                     Complete(item.Record,"已送达");
                 }
@@ -626,8 +750,9 @@ namespace FeiqLight
                 client.ReceiveTimeout=45000;stream.ReadTimeout=45000;
                 IPEndPoint endpoint=new IPEndPoint(((IPEndPoint)client.Client.RemoteEndPoint).Address,senderPort);
                 if(header[0]=="M"&&(packet.Mode==Protocol.SendMessage||packet.Mode==Protocol.ReleaseFiles)) {Handle(packet,endpoint,true);SecureIdentity.WriteText(stream,"OK");return;}
-                if(header[0]=="V"&&packet.Mode==Protocol.Entry){SecureIdentity.WriteText(stream,"OK");return;}
+                if(header[0]=="V"&&packet.Mode==Protocol.Entry){Upsert(packet,endpoint);SecureIdentity.WriteText(stream,"OK");return;}
                 if(header[0]!="F"||packet.Mode!=Protocol.GetFile)throw new IOException("未知安全操作。");
+                Upsert(identity,endpoint);
                 string[] fields=packet.Body.Split(':');long number,offset;int fileId;
                 if(fields.Length<3||!Int64.TryParse(fields[0],NumberStyles.HexNumber,CultureInfo.InvariantCulture,out number)||!Int32.TryParse(fields[1],NumberStyles.HexNumber,CultureInfo.InvariantCulture,out fileId)||!Int64.TryParse(fields[2],NumberStyles.HexNumber,CultureInfo.InvariantCulture,out offset))throw new IOException("文件请求无效。");
                 Offer offer;lock(gate){if(!offers.TryGetValue(number+":"+fileId,out offer))throw new IOException("文件邀请不存在或已过期。");}
@@ -643,16 +768,17 @@ namespace FeiqLight
                 }catch(IOException){Transfer(offer,version,offer.Percent,"传输中断或保存确认未送达");throw;}
             }
         }
-        private byte[] SecureHello() { return Protocol.Encode(0,Login,Host,Protocol.Entry|Protocol.Utf8,Protocol.Field(Settings.Nickname),null,Settings.DeviceId,null,Security.Fingerprint); }
-        public void VerifyPeer(Peer peer){if(Security==null||peer.Fingerprint==null)throw new IOException("请先升级对方飞Q并刷新联系人。");using(TcpClient client=SecureConnect(peer.Endpoint))try{using(SslStream stream=Security.Client(client,peer.Fingerprint)){AuthenticateSecureClient(stream,peer.DeviceId,peer.Fingerprint,peer.DisplayName);SecureIdentity.WriteText(stream,"V\n"+Port);SecureIdentity.WriteFrame(stream,SecureHello());if(SecureIdentity.ReadText(stream,16)!="OK")throw new IOException("身份验证未完成。");}}finally{lock(gate)connections.Remove(client);}}
+        private byte[] SecureHello() { return Protocol.Encode(0,Login,Host,Protocol.Entry|Protocol.Utf8,Protocol.Field(Settings.Nickname),Protocol.Field(Settings.Group),Settings.DeviceId,null,Security.Fingerprint); }
+        public void VerifyPeer(Peer peer){if(Security==null||peer.Fingerprint==null)throw new IOException("请先升级对方飞Q并刷新联系人。");using(TcpClient client=SecureConnect(peer.Endpoint))try{using(SslStream stream=Security.Client(client,peer.Fingerprint)){Packet remote=AuthenticateSecureClient(stream,peer.DeviceId,peer.Fingerprint,peer.DisplayName);SecureIdentity.WriteText(stream,"V\n"+Port);SecureIdentity.WriteFrame(stream,SecureHello());if(SecureIdentity.ReadText(stream,16)!="OK")throw new IOException("身份验证未完成。");Upsert(remote,peer.Endpoint);}}finally{lock(gate)connections.Remove(client);}}
         public void ForgetSecurity(Peer peer){try{Security.Forget(peer.DeviceId);}finally{lock(gate){foreach(Pending item in pending.Values.Where(p=>p.DeviceId==peer.DeviceId).ToList()){pending.Remove(item.Record.Packet);Complete(item.Record,"设备信任已撤销，未确认送达");}foreach(string key in offers.Where(o=>o.Value.DeviceId==peer.DeviceId).Select(o=>o.Key).ToList())offers.Remove(key);foreach(TcpClient client in connections)client.Close();SaveOffers();}}}
-        private void AuthenticateSecureClient(SslStream stream,string id,string fingerprint,string name)
+        private Packet AuthenticateSecureClient(SslStream stream,string id,string fingerprint,string name)
         {
             stream.ReadTimeout=45000;stream.WriteTimeout=15000;
             SecureIdentity.WriteFrame(stream,SecureHello());Packet remote;
             if(!Protocol.TryParse(SecureIdentity.ReadFrame(new SecureIdentity.Deadline(stream,5000),4096),out remote)||remote.DeviceId!=id||remote.Fingerprint!=fingerprint)throw new IOException("对方设备身份与所选联系人不一致。");
             bool accepted=Security.EnsureTrusted(id,fingerprint,name);SecureIdentity.WriteText(stream,accepted?"YES":"NO");
             if(!accepted||SecureIdentity.ReadText(new SecureIdentity.Deadline(stream,45000),16)!="YES")throw new SecureIdentity.TrustException("设备配对未通过，请在两端核对后重试。");
+            return remote;
         }
         private Packet AuthenticateSecureServer(SslStream stream)
         {
@@ -665,7 +791,7 @@ namespace FeiqLight
         }
         public void RejectFiles(Peer peer, long packet)
         {
-            if(Security!=null&&peer.Fingerprint!=null){Pending item=new Pending(peer);item.Record=new ChatRecord{Packet=packet};item.Bytes=Encode(Protocol.ReleaseFiles,packet.ToString(CultureInfo.InvariantCulture),null);Task.Run(()=>{TcpClient connection=null;try{using(TcpClient client=connection=SecureConnect(item.Endpoint))using(SslStream stream=Security.Client(client,item.Fingerprint)){AuthenticateSecureClient(stream,item.DeviceId,item.Fingerprint,item.Login);SecureIdentity.WriteText(stream,"M\n"+Port);SecureIdentity.WriteFrame(stream,item.Bytes);SecureIdentity.ReadText(stream,1024);}}catch(Exception e){Report("拒绝文件通知未送达："+e.Message);}finally{if(connection!=null)lock(gate)connections.Remove(connection);}});return;}
+            if(Security!=null&&peer.Fingerprint!=null){Pending item=new Pending(peer);item.Record=new ChatRecord{Packet=packet};item.Bytes=Encode(Protocol.ReleaseFiles,packet.ToString(CultureInfo.InvariantCulture),null);Task.Run(()=>{TcpClient connection=null;try{using(TcpClient client=connection=SecureConnect(item.Endpoint))using(SslStream stream=Security.Client(client,item.Fingerprint)){Packet remote=AuthenticateSecureClient(stream,item.DeviceId,item.Fingerprint,item.Login);SecureIdentity.WriteText(stream,"M\n"+Port);SecureIdentity.WriteFrame(stream,item.Bytes);if(SecureIdentity.ReadText(stream,1024)=="OK")Upsert(remote,item.Endpoint);}}catch(Exception e){Report("拒绝文件通知未送达："+e.Message);}finally{if(connection!=null)lock(gate)connections.Remove(connection);}});return;}
             if(Security!=null&&(!Settings.AllowLegacyProtocol||Security.TrustedFingerprint(peer.DeviceId)!=null))throw new IOException("未允许旧版明文协议。");Send(Encode(Protocol.ReleaseFiles, packet.ToString(CultureInfo.InvariantCulture), null), peer.Endpoint);
         }
         public Task<string> ReceiveFileAsync(Peer peer, long packet, Attachment file, string destination, IProgress<int> progress, CancellationToken cancel, bool renameOnCollision = false, IProgress<TransferProgress> details = null)
@@ -773,7 +899,8 @@ namespace FeiqLight
             try {
                 if(!rename&&(File.Exists(path)||Directory.Exists(path)))throw new IOException("目标已存在，不会覆盖。");
                 cancel.ThrowIfCancellationRequested();using(TcpClient client=connection=SecureConnect(peer.Endpoint))using(cancel.Register(()=>client.Close()))using(SslStream stream=Security.Client(client,peer.Fingerprint)) {
-                    AuthenticateSecureClient(stream,peer.DeviceId,peer.Fingerprint,peer.DisplayName);
+                    Packet remote=AuthenticateSecureClient(stream,peer.DeviceId,peer.Fingerprint,peer.DisplayName);
+                    Upsert(remote,peer.Endpoint);
                     lock(gate)connections.Add(client);
                     try {
                         using(FileStream output=new FileStream(part,FileMode.OpenOrCreate,FileAccess.ReadWrite,FileShare.None)) {
@@ -812,7 +939,10 @@ namespace FeiqLight
             if (tcp != null) tcp.Stop();
             lock (gate)
             {
-                foreach (TcpClient client in connections) client.Close(); offers.Clear();
+                foreach (TcpClient client in connections) client.Close();
+                foreach (TcpClient client in probeSockets) client.Close();
+                pendingTcpTargets.Clear();
+                offers.Clear();
                 // 即使 UI 已销毁，持久层仍持有原记录，可在退出时保存明确终态。
                 foreach (Pending item in pending.Values) item.Record.State = "已退出，未确认送达";
                 pending.Clear();

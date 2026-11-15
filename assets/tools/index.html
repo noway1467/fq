@@ -11,26 +11,42 @@
 <body>
   <main>
     <header class="topbar">
-      <div><strong class="brand">飞Q</strong><span id="page-title">共享文件</span></div>
+      <div class="brand-wrap">
+        <span class="brand-mark" aria-hidden="true">FQ</span>
+        <div class="brand-text"><strong class="brand">飞Q</strong><span id="page-title">共享文件</span></div>
+      </div>
       <button id="disconnect" class="quiet" hidden>断开连接</button>
     </header>
     <p id="status" role="status" aria-live="polite" hidden></p>
     <section id="login" class="connect-panel">
-      <h1 id="login-title">连接共享文件夹</h1>
+      <div class="connect-header">
+        <span class="connect-badge">局域网加密直连</span>
+        <h1 id="login-title">连接共享文件夹</h1>
+        <p id="login-desc" class="connect-desc">输入对方设备显示的 6 位数字连接码，或直接恢复已配对连接</p>
+      </div>
       <form id="connect-form">
-        <label for="code">连接码</label>
-        <div class="connect-row"><input id="code" aria-label="6 位连接码" inputmode="numeric" pattern="[0-9]{6}" autocomplete="off" spellcheck="false" minlength="6" maxlength="6"><button id="connect" class="primary" type="submit">连接</button></div>
+        <label for="code">6 位数字连接码</label>
+        <div class="connect-row">
+          <input id="code" aria-label="6 位连接码" inputmode="numeric" pattern="[0-9]{6}" placeholder="••••••" autocomplete="off" spellcheck="false" minlength="6" maxlength="6">
+          <button id="connect" class="primary" type="submit">连接</button>
+        </div>
       </form>
-      <button id="reconnect">连接上次</button>
+      <div class="connect-divider"><span>或使用已信任设备</span></div>
+      <button id="reconnect" type="button">连接上次</button>
+      <p class="connect-footnote">仅限当前局域网点对点加密通信，共享目录默认只读访问。</p>
     </section>
     <section id="files" hidden>
-      <div class="file-toolbar"><nav id="breadcrumbs" aria-label="目录位置"></nav><button id="refresh">刷新</button></div>
-      <label class="search-label" for="search">筛选当前文件夹</label>
-      <input id="search" type="search" placeholder="输入文件名" autocomplete="off">
-      <div class="list-heading"><span id="count">正在加载</span><span>只读共享</span></div>
+      <div class="files-header-card">
+        <div class="file-toolbar"><nav id="breadcrumbs" aria-label="目录位置"></nav><button id="refresh" type="button">刷新</button></div>
+        <div class="search-wrap">
+          <label class="search-label" for="search">筛选当前文件夹</label>
+          <input id="search" type="search" placeholder="输入文件名或文件夹名筛选…" autocomplete="off">
+        </div>
+      </div>
+      <div class="list-heading"><span id="count">正在加载</span><span class="readonly-pill">只读共享 · 双击目录进入</span></div>
       <div id="file-list"></div>
       <section id="player-panel" hidden>
-        <div class="player-heading"><h2 id="player-title"></h2><button id="close-player">关闭播放</button></div>
+        <div class="player-heading"><h2 id="player-title"></h2><button id="close-player" type="button">关闭播放</button></div>
         <video id="player" controls playsinline preload="auto"></video>
         <p id="player-error" role="alert"></p>
       </section>

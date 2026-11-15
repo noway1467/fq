@@ -144,4 +144,38 @@ public final class NetworkRecoveryTest {
             assertFalse(destination.exists());assertFalse(LanNode.partialFile(peer,1,attachment,destination).exists());
         } finally {Files.deleteIfExists(directory);}
     }
+    @Test public void tcpFallbackRecoversAndKeepsPeerOnlineWhenVpnDropsUdp()throws Exception {
+        Events ea=new Events(), eb=new Events();
+        int pa=port(), pb=port();
+        try(LanNode a=new LanNode(pa,true,"alice","host-a","Alice","研发",ea);
+            LanNode b=new LanNode(pb,true,"bob","host-b","Bob","测试",eb);
+            DatagramSocket dropUdp=new DatagramSocket(new InetSocketAddress(InetAddress.getLoopbackAddress(),0)) {
+                @Override public void send(DatagramPacket p) { /* 模拟 VPN 静默拦截或丢弃 UDP 报文 */ }
+            }) {
+            b.start();
+            a.heartbeatIdle=TimeUnit.MILLISECONDS.toNanos(120);
+            a.heartbeatRetry=TimeUnit.SECONDS.toNanos(1);
+            a.idleMisses=1;
+            a.verifyMisses=2;
+            InetSocketAddress bEndpoint=new InetSocketAddress(InetAddress.getLoopbackAddress(),pb);
+            LanNode.Peer saved=new LanNode.Peer(bEndpoint,"bob","host-b","历史Bob","测试");
+            saved.online=false;
+            a.rememberPeers(Collections.singletonList(saved));
+            a.start();
+            Field udpField=LanNode.class.getDeclaredField("udp");udpField.setAccessible(true);
+            DatagramSocket realUdp=(DatagramSocket)udpField.get(a);
+            udpField.set(a,dropUdp);
+            if(realUdp!=null)realUdp.close();
+            a.revalidate();
+            await(()->saved.online);
+            await(()->!b.peers().isEmpty()&&b.peers().get(0).online);
+            Thread.sleep(1500);
+            assertTrue("UDP 被拦截但 TCP 互通时不应被心跳误判离线",saved.online);
+            assertEquals("Bob",saved.name);
+            b.close();
+            a.revalidate();
+            await(()->!saved.online);
+            assertTrue(ea.errors.toString(),ea.errors.isEmpty());
+        }
+    }
 }

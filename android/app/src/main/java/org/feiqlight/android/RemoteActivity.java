@@ -19,6 +19,7 @@ public final class RemoteActivity extends Activity {
     private WebView web;
     private Uri target;
     private boolean landscape=true;
+    private boolean share;
     private boolean dark;
     private final Handler main=new Handler(Looper.getMainLooper());
     private final Runnable loadTimeout=this::unavailable;
@@ -38,7 +39,10 @@ public final class RemoteActivity extends Activity {
     @SuppressLint("SetJavaScriptEnabled")
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);Uri initial=getIntent().getData();target=initial;if(!validTarget(target)){Toast.makeText(this,"远控地址无效，请从联系人菜单打开",Toast.LENGTH_LONG).show();finish();return;}target=target.buildUpon().clearQuery().build();
-        landscape=state==null?getSharedPreferences("settings",MODE_PRIVATE).getBoolean(getIntent().getBooleanExtra("phone",false)?"phone_remote_landscape":"remote_landscape",!getIntent().getBooleanExtra("phone",false)):state.getBoolean("landscape",true);setRequestedOrientation(landscape?ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE:ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT);
+        share="share".equals(target.getFragment())||"share".equals(getIntent().getStringExtra("tool_mode"));
+        if(share){landscape=false;}
+        else{landscape=state==null?getSharedPreferences("settings",MODE_PRIVATE).getBoolean(getIntent().getBooleanExtra("phone",false)?"phone_remote_landscape":"remote_landscape",!getIntent().getBooleanExtra("phone",false)):state.getBoolean("landscape",true);}
+        setRequestedOrientation(landscape?ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE:ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
         dark=SystemBars.isDark(this);int surface=dark?0xff17212b:Color.WHITE;
         LinearLayout root=new LinearLayout(this);root.setOrientation(LinearLayout.VERTICAL);root.setBackgroundColor(surface);
@@ -51,7 +55,7 @@ public final class RemoteActivity extends Activity {
                 if(request.isForMainFrame()&&samePage(Uri.parse(view.getUrl()==null?"":view.getUrl()))&&uri.toString().equals(target.buildUpon().path("/native/paired").fragment(null).build().toString())){
                     // 配对成功后立即刷盘，覆盖安装可能直接结束进程，不一定再触发 onPause。
                     CookieManager.getInstance().flush();
-                    if(!getSharedPreferences("settings",MODE_PRIVATE).edit().putString("last_remote_target",target.buildUpon().clearQuery().build().toString()).putString("last_remote_peer",getIntent().getStringExtra("peer_id")).putBoolean("last_remote_phone",getIntent().getBooleanExtra("phone",false)).commit())Toast.makeText(RemoteActivity.this,"上次远控地址未保存",Toast.LENGTH_SHORT).show();
+                    if(!share&&!getSharedPreferences("settings",MODE_PRIVATE).edit().putString("last_remote_target",target.buildUpon().clearQuery().build().toString()).putString("last_remote_peer",getIntent().getStringExtra("peer_id")).putBoolean("last_remote_phone",getIntent().getBooleanExtra("phone",false)).commit())Toast.makeText(RemoteActivity.this,"上次远控地址未保存",Toast.LENGTH_SHORT).show();
                     return true;
                 }
                 if(request.isForMainFrame()&&uri.toString().equals(target.buildUpon().path("/native/unavailable").fragment(null).build().toString())){unavailable();return true;}
@@ -69,10 +73,11 @@ public final class RemoteActivity extends Activity {
         hideSystemBars();
         main.postDelayed(loadTimeout,6000);web.loadUrl(initial.toString());
     }
-    private void rotate(){landscape=!landscape;getSharedPreferences("settings",MODE_PRIVATE).edit().putBoolean(getIntent().getBooleanExtra("phone",false)?"phone_remote_landscape":"remote_landscape",landscape).apply();setRequestedOrientation(landscape?ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE:ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT);updateRotation();}
-    private void updateRotation(){web.evaluateJavascript("document.getElementById('rotate').textContent='"+(landscape?"竖屏":"横屏")+"';",null);}
+    private void rotate(){if(share)return;landscape=!landscape;getSharedPreferences("settings",MODE_PRIVATE).edit().putBoolean(getIntent().getBooleanExtra("phone",false)?"phone_remote_landscape":"remote_landscape",landscape).apply();setRequestedOrientation(landscape?ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE:ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT);updateRotation();}
+    private void updateRotation(){if(!share)web.evaluateJavascript("document.getElementById('rotate').textContent='"+(landscape?"竖屏":"横屏")+"';",null);}
     @SuppressWarnings("deprecation") private void hideSystemBars(){
         SystemBars.appearance(getWindow(),dark);
+        if(share)return;
         if(Build.VERSION.SDK_INT>=30){WindowInsetsController controller=getWindow().getInsetsController();if(controller!=null){controller.hide(WindowInsets.Type.systemBars());controller.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);}}
         else getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_FULLSCREEN|View.SYSTEM_UI_FLAG_HIDE_NAVIGATION|View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY|SystemBars.lightBarFlags(dark));
     }

@@ -1,5 +1,8 @@
 using System;
+using System.Diagnostics;
 using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
@@ -31,7 +34,7 @@ namespace FeiqLight
             foreach (int height in new[] { 36, 80, -1, 52, 24, 152, 44 }) body.RowStyles.Add(new RowStyle(height < 0 ? SizeType.Percent : SizeType.Absolute, height < 0 ? 100 : height));
             Surface.Controls.Add(body);
             AddLabel(body, "共享文件夹", true);
-            RoundedPanel summary = new RoundedPanel { Dock = DockStyle.Fill, Fill = Theme.Ice, Radius = Theme.ControlRadius, Padding = new Padding(16, 8, 12, 8), Margin = new Padding(0, 0, 0, 12) };
+            RoundedPanel summary = new RoundedPanel { Dock = DockStyle.Fill, Fill = Theme.Ice, Border = Theme.Line, Radius = Theme.ControlRadius, Padding = new Padding(16, 8, 12, 8), Margin = new Padding(0, 0, 0, 12) };
             TableLayoutPanel summaryRow = new TableLayoutPanel { Dock = DockStyle.Fill, BackColor = Theme.Ice, ColumnCount = 3, RowCount = 1, Margin = Padding.Empty };
             summaryRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); summaryRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 156)); summaryRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 104)); summaryRow.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             share = Theme.Label("未共享", Theme.Body, Theme.Ink); share.Dock = DockStyle.Fill; share.Margin = Padding.Empty; summaryRow.Controls.Add(share, 0, 0);
@@ -40,6 +43,7 @@ namespace FeiqLight
             RoundedPanel listFrame = new RoundedPanel { Dock = DockStyle.Fill, Fill = Theme.Surface, Border = Theme.Line, Radius = Theme.ControlRadius, Padding = new Padding(8), Margin = Padding.Empty };
             folders.Dock = DockStyle.Fill; folders.BorderStyle = BorderStyle.None; folders.BackColor = Theme.Surface; folders.ForeColor = Theme.Ink; folders.IntegralHeight = false; folders.DrawMode = DrawMode.OwnerDrawFixed; folders.ItemHeight = 60; folders.AccessibleName = "共享文件夹列表";
             folders.DrawItem += DrawFolder; folders.SelectedIndexChanged += delegate { removeFolder.Enabled = folders.SelectedItem != null; tips.SetToolTip(folders, folders.SelectedItem as string); };
+            folders.DoubleClick += delegate { OpenSelectedFolder(); };
             folders.MouseMove += delegate(object sender, MouseEventArgs e) { int index = folders.IndexFromPoint(e.Location); string path = index < 0 ? "" : (string)folders.Items[index]; if (tips.GetToolTip(folders) != path) tips.SetToolTip(folders, path); };
             Theme.ThemeScrollbars(folders); listFrame.Controls.Add(folders);
             empty = Theme.Label("暂无共享文件夹", Theme.Body, Theme.Muted); empty.TextAlign = ContentAlignment.MiddleCenter; empty.Dock = DockStyle.Fill; listFrame.Controls.Add(empty); body.Controls.Add(listFrame, 0, 2);
@@ -49,7 +53,7 @@ namespace FeiqLight
             stopShare = AddButton(shareActions, "停止共享", delegate { ChangeSettings(service.StopSharing); }, false, 108);
             removeFolder = AddButton(shareActions, "移除所选", delegate { string path = folders.SelectedItem as string; if (path != null) ChangeSettings(() => service.RemoveFolder(path)); }, false, 108);
             body.Controls.Add(shareActions, 0, 3);
-            Label hint = AddLabel(body, "只读共享 · 最多 20 个文件夹", false); hint.Font = Theme.Small;
+            Label hint = AddLabel(body, "只读共享 · 最多 20 个文件夹 · 双击列表项可打开本地目录", false); hint.Font = Theme.Small;
             tips.SetToolTip(addFolder, "支持多选；增减目录后需重新配对。");
             tips.SetToolTip(removeFolder, "仅取消共享，不删除文件；现有连接会断开。");
             tips.SetToolTip(startShare, "连接码有效 10 分钟；更新后现有连接会断开。");
@@ -100,15 +104,45 @@ namespace FeiqLight
             }
             catch (COMException e) { using (NoticeDialog notice = new NoticeDialog("无法打开文件夹选择器", e.Message)) notice.ShowDialog(this); }
         }
+        private void OpenSelectedFolder()
+        {
+            string path = folders.SelectedItem as string;
+            if (string.IsNullOrEmpty(path)) return;
+            if (!Directory.Exists(path)) { using (NoticeDialog notice = new NoticeDialog("无法打开文件夹", "文件夹不存在或已被移动：\n" + path)) notice.ShowDialog(this); return; }
+            try { Process.Start(new ProcessStartInfo(path) { UseShellExecute = true }); }
+            catch (Exception e) { if (!(e is System.ComponentModel.Win32Exception || e is InvalidOperationException || e is IOException || e is UnauthorizedAccessException)) throw; using (NoticeDialog notice = new NoticeDialog("无法打开文件夹", e.Message)) notice.ShowDialog(this); }
+        }
         private void DrawFolder(object sender, DrawItemEventArgs e)
         {
             if (e.Index < 0 || e.Index >= folders.Items.Count) return;
             float scale = e.Graphics.DpiX / 96F; string path = (string)folders.Items[e.Index]; bool selected = (e.State & DrawItemState.Selected) != 0;
-            using (Brush fill = new SolidBrush(selected ? Theme.Sky : Theme.Surface)) e.Graphics.FillRectangle(fill, e.Bounds);
-            Theme.Glyph(e.Graphics, "folder", new Rectangle(e.Bounds.Left + (int)(12 * scale), e.Bounds.Top + (int)(18 * scale), (int)(24 * scale), (int)(24 * scale)), Theme.Blue);
-            Rectangle text = new Rectangle(e.Bounds.Left + (int)(48 * scale), e.Bounds.Top + (int)(8 * scale), Math.Max(1, e.Bounds.Width - (int)(60 * scale)), (int)(24 * scale));
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            using (Brush back = new SolidBrush(Theme.Surface)) e.Graphics.FillRectangle(back, e.Bounds);
+            RectangleF card = new RectangleF(e.Bounds.Left + 2F * scale, e.Bounds.Top + 3F * scale, Math.Max(4F, e.Bounds.Width - 4F * scale), Math.Max(4F, e.Bounds.Height - 6F * scale));
+            using (GraphicsPath cardPath = Theme.RoundedF(card, 8F * scale))
+            {
+                using (Brush fill = new SolidBrush(selected ? Theme.Sky : Theme.Ice)) e.Graphics.FillPath(fill, cardPath);
+                using (Pen border = new Pen(selected ? Theme.Blend(Theme.Blue, Theme.Surface, .45F) : Theme.Line)) e.Graphics.DrawPath(border, cardPath);
+            }
+            RectangleF badge = new RectangleF(card.Left + 10F * scale, card.Top + (card.Height - 36F * scale) / 2F, 36F * scale, 36F * scale);
+            using (GraphicsPath badgePath = Theme.RoundedF(badge, 8F * scale))
+            using (Brush badgeFill = new SolidBrush(selected ? Theme.Surface : Theme.Outgoing))
+            {
+                e.Graphics.FillPath(badgeFill, badgePath);
+            }
+            float inset = 8F * scale;
+            Theme.Glyph(e.Graphics, "folder", new RectangleF(badge.Left + inset, badge.Top + inset, badge.Width - inset * 2F, badge.Height - inset * 2F), Theme.Blue);
+            int hintWidth = e.Bounds.Width >= (int)(360 * scale) ? (int)(74 * scale) : 0;
+            int textLeft = (int)(badge.Right + 12F * scale);
+            int textWidth = Math.Max(1, (int)(card.Right - textLeft - 12F * scale - hintWidth));
+            Rectangle text = new Rectangle(textLeft, (int)(card.Top + 7F * scale), textWidth, (int)(22 * scale));
             TextRenderer.DrawText(e.Graphics, ToolsService.FolderName(path), Theme.Section, text, Theme.Ink, TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
-            text.Y += (int)(24 * scale); text.Height = (int)(20 * scale); TextRenderer.DrawText(e.Graphics, path, Theme.Small, text, Theme.Muted, TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.PathEllipsis);
+            text.Y += (int)(21 * scale); text.Height = (int)(18 * scale); TextRenderer.DrawText(e.Graphics, path, Theme.Small, text, Theme.Muted, TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.PathEllipsis);
+            if (hintWidth > 0)
+            {
+                Rectangle hintRect = new Rectangle((int)(card.Right - hintWidth - 10F * scale), (int)card.Top, hintWidth, (int)card.Height);
+                TextRenderer.DrawText(e.Graphics, "双击打开", Theme.Small, hintRect, selected ? Theme.Blue : Theme.Muted, TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
+            }
             if ((e.State & DrawItemState.Focus) != 0) e.DrawFocusRectangle();
         }
         private int Confirm(string address)

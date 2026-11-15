@@ -41,13 +41,19 @@ public final class ChatService extends Service {
     }
     private volatile LanNode node;
     private final List<ToolsGateway> gateways=new ArrayList<>();
+    static Intent toolIntent(Context context,Uri url,String peerId,String mode,boolean phone) {
+        if("share".equals(mode)) {
+            return new Intent(Intent.ACTION_VIEW,url).addCategory(Intent.CATEGORY_BROWSABLE).putExtra("peer_id",peerId).putExtra("tool_mode",mode);
+        }
+        return new Intent(context,RemoteActivity.class).setData(url).putExtra("phone",phone).putExtra("peer_id",peerId).putExtra("tool_mode",mode);
+    }
     void openTool(LanNode.Peer peer,int port,String mode,boolean phone,Consumer<Intent> ready) {
         LanNode current=node;long epoch=connectionEpoch;
         queue(()->{try {
             if(current==null)throw new IOException("请先连接局域网");current.verifyPeer(peer);
             ToolsGateway gateway=new ToolsGateway(current.security(),peer,port,new LanNetwork(getSystemService(ConnectivityManager.class)));
             main.post(()->{if(!currentConnection(epoch)||node!=current){gateway.close();return;}gateways.add(gateway);
-                ready.accept(new Intent(this,RemoteActivity.class).setData(Uri.parse(gateway.url()+"#"+mode)).putExtra("phone",phone).putExtra("peer_id",peer.id()).putExtra("tool_mode",mode));});
+                ready.accept(toolIntent(this,Uri.parse(gateway.url()+"#"+mode),peer.id(),mode,phone));});
         }catch(Exception error){fail(error);}});
     }
     void forgetSecurity(LanNode.Peer peer){queue(()->{try{requireNode().forgetSecurity(peer);new ToolsPairings(this).forgetFingerprint(peer.fingerprint);main.post(()->{closeGateways();closeSharing();PhoneRemoteService.stopActive();});showError("已撤销设备信任，下次连接需重新核对");}catch(Exception e){fail(e);}});}

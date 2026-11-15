@@ -719,25 +719,86 @@ public final class MainActivity extends Activity implements ChatService.Observer
     private void closeHistory() { if(historyDialog!=null){historyDialog.dismiss();historyDialog=null;} }
     private void openTools(ChatStore.Conversation conversation,boolean remote) {
         if(service==null){error("请先连接局域网");return;}
-        service.openTool(conversation.peer,ToolsHttp.portFor(conversation.peer.endpoint.getPort()),remote?"remote":"share",false,intent->{if(!isFinishing()&&!isDestroyed())startActivity(intent);});
+        service.openTool(conversation.peer,ToolsHttp.portFor(conversation.peer.endpoint.getPort()),remote?"remote":"share",false,intent->{
+            if(isFinishing()||isDestroyed())return;
+            try {startActivity(intent);}
+            catch(ActivityNotFoundException ex) {
+                if(!remote&&intent.getData()!=null)startActivity(new Intent(this,RemoteActivity.class).setData(intent.getData()).putExtra("peer_id",conversation.peer.id()).putExtra("tool_mode","share").putExtra("phone",true));
+                else error("设备没有可用的浏览器");
+            }
+        });
     }
     private void openPhone(ChatStore.Conversation conversation){
         if(service==null){error("请先连接局域网");return;}
         service.openTool(conversation.peer,PhoneRemoteAccess.portFor(conversation.peer.endpoint.getPort()),"remote",true,intent->{if(!isFinishing()&&!isDestroyed())startActivity(intent);});
     }
+    private String folderDisplayName(Uri tree) {
+        if(tree==null)return "";
+        try {
+            String docId=DocumentsContract.getTreeDocumentId(tree);
+            Uri docUri=DocumentsContract.buildDocumentUriUsingTree(tree,docId);
+            try(android.database.Cursor cursor=getContentResolver().query(docUri,new String[]{DocumentsContract.Document.COLUMN_DISPLAY_NAME},null,null,null)) {
+                if(cursor!=null&&cursor.moveToFirst()){String name=cursor.getString(0);if(name!=null&&!name.isEmpty())return name;}
+            }
+            int colon=docId.indexOf(':');
+            String path=colon>=0?docId.substring(colon+1):docId;
+            if(path.isEmpty())return "内部存储根目录";
+            int slash=path.lastIndexOf('/');
+            return slash>=0&&slash+1<path.length()?path.substring(slash+1):path;
+        } catch(RuntimeException ignored) { return "已授权文件夹"; }
+    }
     private void sharing() {
         if(service==null||!service.online()){error("请先连接局域网");return;}
-        SharedFiles current=service.sharedFiles();LinearLayout box=column();
-        TextView note=text(current==null?"未共享":"连接码  "+current.code(),20,INK);note.setTextIsSelectable(true);box.addView(note);
+        SharedFiles current=service.sharedFiles();Uri savedTree=new SharedFolderSettings(this).tree();
+        LinearLayout box=column();
+        LinearLayout card=column();
+        GradientDrawable cardBg=shape(PALE,CONTROL_RADIUS);cardBg.setStroke(dp(1),LINE);
+        card.setBackground(cardBg);card.setPadding(dp(14),dp(14),dp(14),dp(14));
+        LinearLayout topRow=row();
+        boolean active=current!=null;
+        TextView badge=text(active?"正在共享 · 只读":"未开启共享",12,active?ONLINE:MUTED);
+        badge.setTypeface(null,Typeface.BOLD);
+        badge.setPadding(dp(10),dp(4),dp(10),dp(4));
+        badge.setBackground(shape(blend(active?ONLINE:MUTED,SURFACE,DARK?.28f:.14f),99));
+        topRow.addView(badge);
+        TextView safeNote=text("仅允许只读浏览与下载",12,MUTED);safeNote.setGravity(Gravity.END|Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams safeParams=weight();safeParams.leftMargin=dp(8);topRow.addView(safeNote,safeParams);
+        card.addView(topRow);
+        String folderText=active?"共享目录："+folderDisplayName(savedTree):savedTree!=null?"上次目录："+folderDisplayName(savedTree)+"（未开启）":"尚未选择共享文件夹，仅授予所选目录只读权限";
+        TextView folderTextView=text(folderText,14,INK);folderTextView.setPadding(0,dp(10),0,active?dp(12):0);folderTextView.setMaxLines(2);folderTextView.setEllipsize(TextUtils.TruncateAt.MIDDLE);
+        card.addView(folderTextView);
+        if(active) {
+            String codeValue=current.code();
+            boolean validCode=codeValue.length()==6;
+            LinearLayout codeCard=row();
+            GradientDrawable codeBg=shape(SURFACE,CONTROL_RADIUS);codeBg.setStroke(dp(1),LINE);
+            codeCard.setBackground(codeBg);codeCard.setPadding(dp(14),dp(10),dp(10),dp(10));
+            LinearLayout codeLeft=column();
+            codeLeft.addView(text("6 位连接码（10 分钟内有效）",11,MUTED));
+            TextView codeView=text(codeValue,validCode?24:14,validCode?INK:0xffd24e54);
+            if(validCode){codeView.setTypeface(Typeface.MONOSPACE,Typeface.BOLD);codeView.setLetterSpacing(0.18f);}
+            codeView.setTextIsSelectable(true);codeView.setPadding(0,dp(2),0,0);
+            codeLeft.addView(codeView);codeCard.addView(codeLeft,weight());
+            if(validCode) {
+                Button copy=button("复制",false);
+                copy.setTextColor(BLUE);copy.setMinHeight(dp(38));copy.setPadding(dp(14),dp(6),dp(14),dp(6));
+                copy.setBackground(new android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(BUBBLE),shape(OUTGOING,CONTROL_RADIUS),null));
+                copy.setOnClickListener(v->copyText("连接码",codeValue));
+                LinearLayout.LayoutParams copyParams=new LinearLayout.LayoutParams(-2,-2);copyParams.leftMargin=dp(8);
+                codeCard.addView(copy,copyParams);
+            }
+            card.addView(codeCard);
+        }
+        LinearLayout.LayoutParams cardParams=new LinearLayout.LayoutParams(-1,-2);cardParams.bottomMargin=dp(10);
+        box.addView(card,cardParams);
         Dialog dialog=sheet("共享本机文件夹",box,null,null);
-        Uri savedTree=new SharedFolderSettings(this).tree();
         if(current==null&&savedTree!=null)fileAction(box,dialog,"开启上次的共享文件夹",()->{ChatService expected=service;if(expected!=null)expected.shareFolder(savedTree,success->{if(success&&!isFinishing()&&!isDestroyed()&&service==expected)sharing();});});
         fileAction(box,dialog,current==null?"选择文件夹并开启":"更换文件夹 / 更新连接码",()->{
             try {Intent pick=new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION|Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);if(savedTree!=null)pick.putExtra(android.provider.DocumentsContract.EXTRA_INITIAL_URI,savedTree);startActivityForResult(pick,24);}
             catch(ActivityNotFoundException e){error("系统没有可用的文件夹选择器");}
         });
         if(current!=null)fileAction(box,dialog,"停止共享",()->{if(service!=null)service.stopSharing();});
-        fileAction(box,dialog,"清除已配对设备",()->{try{PhoneRemoteService.stopActive();SharedFiles active=service==null?null:service.sharedFiles();if(active!=null)active.forgetPairings();else new ToolsPairings(this).clear();}catch(java.io.IOException e){error(e.getMessage());}});
+        fileAction(box,dialog,"清除已配对设备",()->{try{PhoneRemoteService.stopActive();SharedFiles activeShared=service==null?null:service.sharedFiles();if(activeShared!=null)activeShared.forgetPairings();else new ToolsPairings(this).clear();}catch(java.io.IOException e){error(e.getMessage());}});
     }
     private CharSequence searchHighlight(String value,String query) {
         SpannableString spans=new SpannableString(value);

@@ -118,9 +118,21 @@ final class LanNetwork implements LanNode.SocketBinding {
         }
         if(chosen!=null) {
             List<String> addresses=new ArrayList<>();
-            for(LinkAddress link:chosenLinks.getLinkAddresses())if(link.getAddress() instanceof Inet4Address)addresses.add(link.toString());
+            List<LocalLink> chosenLocalLinks=new ArrayList<>();
+            Set<InetAddress> chosenLocalBroadcasts=new LinkedHashSet<>();
+            for(LinkAddress link:chosenLinks.getLinkAddresses())if(link.getAddress() instanceof Inet4Address){
+                addresses.add(link.toString());
+                Inet4Address ipv4=(Inet4Address)link.getAddress();
+                if(ipv4.isSiteLocalAddress()){
+                    int first=ipv4.getAddress()[0]&255;
+                    InetAddress broadcast=broadcastAddress(ipv4,link.getPrefixLength(),first==10?8:first==172?12:16);
+                    if(broadcast!=null){chosenLocalLinks.add(new LocalLink(ipv4,link.getPrefixLength()));chosenLocalBroadcasts.add(broadcast);}
+                }
+            }
             Collections.sort(addresses);
             cachedNetwork=chosen;cachedLinks=chosenLinks;
+            cachedLocalLinks=Collections.unmodifiableList(chosenLocalLinks);
+            cachedLocalBroadcasts=Collections.unmodifiableList(new ArrayList<>(chosenLocalBroadcasts));
             cachedKey=Arrays.asList(chosen,chosenLinks.getInterfaceName(),addresses);
             return;
         }
@@ -179,7 +191,10 @@ final class LanNetwork implements LanNode.SocketBinding {
             throw new IOException(DISCONNECTED_STATUS);
         }
         if(network.equals(bound.get(socket)))return;
-        try {network.bindSocket(socket);bound.put(socket,network);} catch(IOException e) {changed();throw blocked(e);}
+        try {network.bindSocket(socket);bound.put(socket,network);} catch(IOException e) {
+            if(!cachedLocalLinks.isEmpty()){cachedNetwork=null;cachedLocal=true;return;}
+            changed();throw blocked(e);
+        }
     }
     @Override public synchronized void bind(Socket socket) throws IOException {
         Network network=select();
@@ -190,7 +205,16 @@ final class LanNetwork implements LanNode.SocketBinding {
         try {network.bindSocket(socket);} catch(IOException e) {changed();throw blocked(e);}
     }
     @Override public synchronized void bind(Socket socket,InetAddress destination) throws IOException {
-        if(select()!=null){if(!allows(destination))throw new IOException("目标不在当前物理局域网内");bind(socket);return;}
+        Network network=select();
+        if(network!=null){
+            if(!allows(destination))throw new IOException("目标不在当前物理局域网内");
+            try {network.bindSocket(socket);return;}
+            catch(IOException e) {
+                LocalLink link=localLink(destination);
+                if(link!=null){socket.bind(new InetSocketAddress(link.address,0));return;}
+                changed();throw blocked(e);
+            }
+        }
         LocalLink link=localLink(destination);
         if(link==null)throw new IOException("目标不在当前热点或共享子网内，请重新发现设备");
         socket.bind(new InetSocketAddress(link.address,0));

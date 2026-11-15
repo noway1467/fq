@@ -716,6 +716,31 @@ namespace FeiqLight.Tests
                     }
                     finally { idleField.SetValue(a, idle); retryField.SetValue(a, retry); missesField.SetValue(a, misses); }
                 });
+                Run("UDP 不可达时通过 TCP 发现与安全握手保持双端在线", () =>
+                {
+                    int port1 = FreePort(), port2 = FreePort();
+                    var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+                    var udpField = typeof(LanService).GetField("udp", flags);
+                    var idleField = typeof(LanService).GetField("HeartbeatIdle", flags);
+                    var retryField = typeof(LanService).GetField("HeartbeatRetry", flags);
+                    using (LanService node1 = new LanService(new AppSettings { Nickname = "节点一", DeviceId = Guid.NewGuid().ToString("N") }, port1, true, "u1"))
+                    using (LanService node2 = new LanService(new AppSettings { Nickname = "节点二", DeviceId = Guid.NewGuid().ToString("N") }, port2, true, "u2"))
+                    {
+                        node1.Error += e => { }; node2.Error += e => { };
+                        node1.Start(); node2.Start();
+                        idleField.SetValue(node1, TimeSpan.FromMilliseconds(120));
+                        retryField.SetValue(node1, TimeSpan.FromSeconds(1));
+                        // 关闭 node2 的 UDP 监听模拟 VPN 阻断 UDP，仅留 TCP 监听可用。
+                        UdpClient u2 = (UdpClient)udpField.GetValue(node2);
+                        if (u2 != null) u2.Close();
+                        node1.Probe(Endpoint(port2));
+                        Wait(() => node1.Peers.Any(p => p.Login == "u2" && p.Online), "UDP 阻断时节点一未能通过 TCP 发现节点二", 3000);
+                        Wait(() => node2.Peers.Any(p => p.Login == "u1" && p.Online), "节点二未收到 TCP 发现更新节点一为在线", 3000);
+                        node1.Revalidate();
+                        Thread.Sleep(1500);
+                        Assert(node1.Peers.Single(p => p.Login == "u2").Online, "UDP 阻断下 TCP 互通节点被心跳误判离线");
+                    }
+                });
             }
         }
     }

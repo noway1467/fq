@@ -13,7 +13,12 @@
   if (mode === 'remote') {
     document.title = '飞Q · 远程控制'; $('page-title').textContent = '远程控制';
     $('login-title').textContent = '连接远程设备';
+    if ($('login-desc')) $('login-desc').textContent = '输入对方电脑显示的 6 位远控连接码，或直接恢复已配对连接';
   }
+  $('code').addEventListener('input', () => {
+    const digits = $('code').value.replace(/\D/g, '').slice(0, 6);
+    if ($('code').value !== digits) $('code').value = digits;
+  });
   async function request(path, data, timeout = 10000, currentToken = token) {
     const abort = new AbortController(), timer = setTimeout(() => abort.abort(), timeout);
     if(path.startsWith('/api/screen?'))frameAbort=abort;
@@ -92,25 +97,61 @@
   }
   function breadcrumbs() {
     $('breadcrumbs').replaceChildren();
-    trail.forEach((entry, index) => { const button = document.createElement('button'); button.textContent = entry.name; button.title = entry.name; button.onclick = () => { trail = trail.slice(0, index + 1); $('search').value = ''; loadDirectory(); }; $('breadcrumbs').append(button); });
+    trail.forEach((entry, index) => {
+      if (index > 0) {
+        const sep = document.createElement('span');
+        sep.className = 'crumb-sep';
+        sep.setAttribute('aria-hidden', 'true');
+        sep.textContent = '›';
+        $('breadcrumbs').append(sep);
+      }
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = entry.name;
+      button.title = entry.name;
+      if (index === trail.length - 1) button.setAttribute('aria-current', 'location');
+      button.onclick = () => { trail = trail.slice(0, index + 1); $('search').value = ''; loadDirectory(); };
+      $('breadcrumbs').append(button);
+    });
+  }
+  function classifyItem(item) {
+    if (item.dir) return {kind: 'dir', label: '目录', media: false};
+    if (/\.(mp4|m4v|webm|mkv|mov)$/i.test(item.name)) return {kind: 'video', label: '视频', media: true};
+    if (/\.(mp3|ogg)$/i.test(item.name)) return {kind: 'audio', label: '音频', media: true};
+    if (/\.(wav|flac|aac|m4a)$/i.test(item.name)) return {kind: 'audio', label: '音频', media: false};
+    if (/\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(item.name)) return {kind: 'image', label: '图片', media: false};
+    if (/\.(zip|rar|7z|tar|gz)$/i.test(item.name)) return {kind: 'archive', label: '压缩', media: false};
+    if (/\.(pdf|docx?|xlsx?|pptx?|txt|md|json|csv|log)$/i.test(item.name)) return {kind: 'doc', label: '文档', media: false};
+    return {kind: 'file', label: '文件', media: false};
+  }
+  function enterDirectory(dirItem) {
+    if (trail[trail.length - 1].id === dirItem.id) return;
+    trail.push({id: dirItem.id, name: dirItem.name});
+    $('search').value = '';
+    loadDirectory();
   }
   function renderFiles() {
     const filter = $('search').value.toLocaleLowerCase(), list = items.filter(item => item.name.toLocaleLowerCase().includes(filter)).sort((a,b) => Number(b.dir) - Number(a.dir) || a.name.localeCompare(b.name));
     $('count').textContent = `${list.length} 项`; $('file-list').replaceChildren();
     if (!list.length) { const empty = document.createElement('p'); empty.className = 'empty'; empty.textContent = filter ? '没有匹配的文件' : '这个文件夹是空的'; $('file-list').append(empty); }
     list.forEach(item => {
-      const media = /\.(mp4|m4v|webm|mkv|mov|mp3|ogg)$/i.test(item.name);
+      const meta = classifyItem(item);
       const row = document.createElement('div'); row.className = 'file-row';
-      const kind = document.createElement('span'); kind.className = 'file-kind'; kind.textContent = item.dir ? '目录' : media ? '影音' : '文件'; row.append(kind);
+      if (item.dir) {
+        row.dataset.dir = '1'; row.title = '双击进入文件夹';
+        row.ondblclick = event => { if (event.target && event.target.closest('button, a')) return; enterDirectory(item); };
+      }
+      const kind = document.createElement('span'); kind.className = 'file-kind'; kind.dataset.kind = meta.kind; kind.textContent = meta.label; row.append(kind);
       const detail = document.createElement('div'); detail.className = 'file-detail';
       const name = document.createElement('div'); name.className = 'file-name'; name.textContent = item.name; name.title = item.name;
-      const info = document.createElement('div'); info.className = 'file-size'; info.textContent = item.dir ? '文件夹' : size(item.size); detail.append(name, info); row.append(detail);
+      const info = document.createElement('div'); info.className = 'file-size'; info.textContent = item.dir ? '文件夹 · 双击进入' : size(item.size); detail.append(name, info); row.append(detail);
       const actions = document.createElement('div'); actions.className = 'file-actions';
-      if (item.dir || media) {
-        const open = document.createElement('button'); open.textContent = item.dir ? '进入' : '播放'; open.setAttribute('aria-label', open.textContent + ' ' + item.name);
-        open.onclick = () => { if (item.dir) { trail.push({id: item.id, name: item.name}); $('search').value = ''; loadDirectory(); } else play(item); }; actions.append(open);
+      if (item.dir || meta.media) {
+        const open = document.createElement('button'); open.type = 'button'; open.className = item.dir ? 'btn-enter' : 'btn-play';
+        open.textContent = item.dir ? '进入' : '播放'; open.setAttribute('aria-label', open.textContent + ' ' + item.name);
+        open.onclick = () => { if (item.dir) enterDirectory(item); else play(item); }; actions.append(open);
       }
-      if (!item.dir) { const download = document.createElement('a'); download.textContent = '下载'; download.href = '/file?id=' + encodeURIComponent(item.id) + '&download=1'; download.download = item.name; download.setAttribute('aria-label', '下载 ' + item.name); actions.append(download); }
+      if (!item.dir) { const download = document.createElement('a'); download.className = 'btn-download'; download.textContent = '下载'; download.href = '/file?id=' + encodeURIComponent(item.id) + '&download=1'; download.download = item.name; download.setAttribute('aria-label', '下载 ' + item.name); actions.append(download); }
       row.append(actions); $('file-list').append(row);
     });
   }

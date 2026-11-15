@@ -111,8 +111,8 @@ public final class SecurityAudit {
             LanNode.Message record=node.sendMessage(node.peers().get(0),"文件占位检查",Collections.singletonList(file.toFile()));
             check(Arrays.equals(content,download(node.port(),record.number,receiver)),"攻击前合法下载失败");
             await(()->connectionCount(node)==0,"前一合法下载连接未释放");
-            try(SlowClients slow=new SlowClients(node.port(),4,false)){
-                await(()->connectionCount(node)==4,"慢连接未全部接入");check(download(node.port(),record.number,receiver).length==0,"没有成功填满附件服务名额");
+            try(SlowClients slow=new SlowClients(node.port(),8,false)){
+                await(()->connectionCount(node)==8,"慢连接未全部接入");check(download(node.port(),record.number,receiver).length==0,"没有成功填满附件服务名额");
                 Thread.sleep(5600);boolean recovered=Arrays.equals(content,download(node.port(),record.number,receiver));
                 System.out.println("EVIDENCE file_recovered_while_dripping="+recovered);check(recovered!=baseline,"慢附件请求总时限未生效或基线未复现");
             }
@@ -139,7 +139,7 @@ public final class SecurityAudit {
         root=Paths.get(args[0]).toAbsolutePath();Files.createDirectories(root);baseline=args.length>1&&args[1].equals("baseline");
         local=InetAddress.getByName("127.0.0.1");receiver=InetAddress.getByName("127.0.0.2");attacker=InetAddress.getByName("127.0.0.3");
         run("冒用设备 ID 的重发截获、ACK 与附件权限",SecurityAudit::spoofRetry);
-        run("4 个未认证慢附件请求与合法下载",SecurityAudit::slowFile);
+        run("8 个未认证慢附件请求与合法下载",SecurityAudit::slowFile);
         run("12 个慢 HTTP 请求头/正文与合法请求",SecurityAudit::slowHttp);
         System.out.println("RESULT Android mode="+(baseline?"baseline":"fixed")+" passed="+passed+" failed="+failed);
         if(failed>0)System.exit(1);
