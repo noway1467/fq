@@ -15,7 +15,8 @@ public final class ToolsHttp implements AutoCloseable {
         public Failure(int code,String text) {super(text);this.code=code;}
     }
     public static final class Request {
-        public String method,path,query,address;
+        public String method,path,query,address,fingerprint;
+        public String pairScope(String scope){return fingerprint==null?scope:scope+"|tls="+fingerprint;}
         public byte[] body;
         public final Map<String,String> headers=new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
         public String header(String key) {return headers.getOrDefault(key,"");}
@@ -48,10 +49,22 @@ public final class ToolsHttp implements AutoCloseable {
     private final ScheduledExecutorService timeouts=Executors.newSingleThreadScheduledExecutor(r->{Thread t=new Thread(r,"shared-files-timeouts");t.setDaemon(true);return t;});
     private final ExecutorService workers=Executors.newFixedThreadPool(12,r->{Thread t=new Thread(r,"shared-files-http");t.setDaemon(true);return t;});
     private boolean closed;
+    private final SecureIdentity security;
+    private final LanNode.SocketBinding binding;
+    private final java.util.function.Consumer<String> revoked=fingerprint->disconnectClients();
     public ToolsHttp(int port,boolean loopback,Handler handler) throws IOException {
+        this(port,loopback,handler,null);
+    }
+    public ToolsHttp(int port,boolean loopback,Handler handler,SecureIdentity security) throws IOException {
+        this(port,loopback,handler,security,null);
+    }
+    public ToolsHttp(int port,boolean loopback,Handler handler,SecureIdentity security,LanNode.SocketBinding binding) throws IOException {
+        this.security=security;
+        this.binding=binding;
         this.handler=handler;server=new ServerSocket();
         try {server.bind(new InetSocketAddress(loopback?InetAddress.getByName("127.0.0.1"):InetAddress.getByName("0.0.0.0"),port),16);}
         catch(IOException e){server.close();workers.shutdownNow();timeouts.shutdownNow();throw e;}
+        if(security!=null)security.observeRevocation(revoked);
         Thread accept=new Thread(this::accept,"shared-files-listener");accept.setDaemon(true);accept.start();
     }
     public int port() {return server.getLocalPort();}
@@ -65,17 +78,22 @@ public final class ToolsHttp implements AutoCloseable {
         AtomicLong progress=new AtomicLong(System.nanoTime());
         ScheduledFuture<?> timeout=null;
         try {
+            if(binding!=null&&!binding.allows(socket.getInetAddress()))return;
             timeout=timeouts.scheduleWithFixedDelay(()->{if(System.nanoTime()-progress.get()>TimeUnit.SECONDS.toNanos(15))try{socket.close();}catch(IOException ignored){}},1,1,TimeUnit.SECONDS);
             socket.setSoTimeout(5000);socket.setTcpNoDelay(true);socket.setSendBufferSize(262144);
+            Socket transport=security==null?socket:security.server(socket,true);
+            String fingerprint=security==null?null:SecureIdentity.remoteFingerprint((javax.net.ssl.SSLSocket)transport);
+            if(security!=null&&!security.isTrustedFingerprint(fingerprint))throw new IOException("请先从联系人核对设备身份");
             // 将请求头批量读入内存，避免每个字节都跨一次系统调用。
-            RequestInput deadline=new RequestInput(socket);InputStream input=new BufferedInputStream(deadline,8192);
+            RequestInput deadline=new RequestInput(transport);InputStream input=new BufferedInputStream(deadline,8192);
             for(int index=0;index<16;index++){
             deadline.begin(index==0?5000:3000);
             Request request=read(input);boolean reuse=index<15&&request.path.equals("/file")&&(request.method.equals("GET")||request.method.equals("HEAD"))&&request.header("Connection").equalsIgnoreCase("keep-alive");
-            response=new Response(socket.getOutputStream(),request.method.equals("HEAD"),progress,reuse);
+            request.fingerprint=fingerprint;if(security!=null&&!security.isTrustedFingerprint(fingerprint))throw new IOException("设备信任已撤销");
+            response=new Response(transport.getOutputStream(),request.method.equals("HEAD"),progress,reuse);
             request.address=socket.getInetAddress().getHostAddress();String expected=socket.getLocalAddress().getHostAddress()+":"+port();
             if(!request.header("Host").equals(expected))throw new Failure(403,"请使用设备的 IPv4 地址访问");
-            if(!request.header("Origin").isEmpty()&&!request.header("Origin").equals("http://"+expected))throw new Failure(403,"不允许跨站请求");
+            if(!request.header("Origin").isEmpty()&&!request.header("Origin").equals((security==null?"http://":"https://")+expected))throw new Failure(403,"不允许跨站请求");
             handler.handle(request,response);
             if(!reuse||!response.started||response.remaining!=0)break;socket.setSoTimeout(3000);
             }
@@ -110,6 +128,8 @@ public final class ToolsHttp implements AutoCloseable {
         }catch(NumberFormatException e){return null;}
     }
     @Override public void close() {
+        if(security!=null)security.removeRevocationObserver(revoked);
         synchronized(clients){if(closed)return;closed=true;try{server.close();}catch(IOException ignored){}for(Socket socket:clients)try{socket.close();}catch(IOException ignored){}workers.shutdownNow();timeouts.shutdownNow();}
     }
+    public void disconnectClients(){synchronized(clients){for(Socket socket:clients)try{socket.close();}catch(IOException ignored){}}}
 }

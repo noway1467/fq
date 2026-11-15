@@ -212,6 +212,7 @@ namespace FeiqLight
             if(text.Contains("转发")) return "forward";
             if(text.Contains("刷新") || text.Contains("重发") || text.Contains("重新发送")) return "refresh";
             if(text=="发送文件") return "clip";
+            if(text.StartsWith("发送文件夹",StringComparison.Ordinal))return "folder";
             if(text.StartsWith("接收")) return "download";
             if(text.Contains("备注")) return "edit";
             if(text.Contains("已移除")) return "people";

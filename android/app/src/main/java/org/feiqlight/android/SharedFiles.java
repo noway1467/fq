@@ -15,7 +15,7 @@ import java.util.*;
 /** 仅访问用户授权的只读 SAF 目录；授权持久化由共享设置入口管理。 */
 final class SharedFiles implements AutoCloseable {
     private static final class Entry {final Uri uri;final String name;final long size;final boolean directory;Entry(Uri uri,String name,long size,boolean directory){this.uri=uri;this.name=name;this.size=size;this.directory=directory;}}
-    private static final class Session {final String token,address;volatile long last;Session(String token,String address){this.token=token;this.address=address;last=SystemClock.elapsedRealtime();}}
+    private static final class Session {final String token,address,fingerprint;volatile long last;Session(String token,String address,String fingerprint){this.token=token;this.address=address;this.fingerprint=fingerprint;last=SystemClock.elapsedRealtime();}}
     private final Context context;
     private final Uri tree,root;
     private final Map<String,Entry> entries=new LinkedHashMap<>();
@@ -34,7 +34,7 @@ final class SharedFiles implements AutoCloseable {
         try(Cursor cursor=context.getContentResolver().query(root,new String[]{DocumentsContract.Document.COLUMN_MIME_TYPE},null,null)) {
             if(cursor==null||!cursor.moveToFirst()||!DocumentsContract.Document.MIME_TYPE_DIR.equals(cursor.getString(0)))throw new IOException("无法读取所选目录，请重新授权");
         }
-        pairings=new ToolsPairings(this.context);http=new ToolsHttp(port,loopback,this::handle);
+        pairings=new ToolsPairings(this.context);http=new ToolsHttp(port,loopback,this::handle,loopback?null:AppIdentity.get(context),loopback?null:new LanNetwork(context.getSystemService(android.net.ConnectivityManager.class)));
     }
     String code(){return SystemClock.elapsedRealtime()<codeUntil?code:"已过期，请停止后重新开启";}
     int port(){return http.port();}
@@ -49,7 +49,7 @@ final class SharedFiles implements AutoCloseable {
     private synchronized boolean valid(Session session){return !closed&&sessions.contains(session)&&SystemClock.elapsedRealtime()-session.last<1800000;}
     private synchronized Session authorize(ToolsHttp.Request request) throws ToolsHttp.Failure {
         String token="";for(String cookie:request.header("Cookie").split(";"))if(cookie.trim().startsWith("fq_share="))token=cookie.trim().substring(9);
-        for(Session session:sessions)if(session.token.equals(token)&&session.address.equals(request.address)&&valid(session)) {
+        for(Session session:sessions)if(session.token.equals(token)&&session.address.equals(request.address)&&Objects.equals(session.fingerprint,request.fingerprint)&&valid(session)) {
             if(request.method.equals("POST")&&!request.header("X-FQ-Token").equals(token))throw new ToolsHttp.Failure(403,"请求校验失败");
             session.last=SystemClock.elapsedRealtime();return session;
         }
@@ -60,19 +60,19 @@ final class SharedFiles implements AutoCloseable {
         if(!data.optString("mode").equals("share"))throw new ToolsHttp.Failure(403,"Android 仅提供文件共享，远控请连接 Windows");
         if(reconnect&&!request.header("X-FQ-Reconnect").equals("1"))throw new ToolsHttp.Failure(403,"请求校验失败");
         if(now-attemptsSince>=60000){attempts=0;attemptsSince=now;}if(++attempts>8)throw new ToolsHttp.Failure(429,"尝试过多，请一分钟后重试");
-        String remembered=cookie(request,pairCookie()),scope="share:"+tree;
+        String remembered=cookie(request,pairCookie()),scope=request.pairScope("share:"+tree);
         if(closed)throw new ToolsHttp.Failure(403,"共享已关闭");
         if(reconnect){if(!pairings.contains(remembered,scope))throw new ToolsHttp.Failure(401,"没有可用的上次连接，请输入连接码");}
         else if(now>=codeUntil||!data.optString("code").trim().equals(code))throw new ToolsHttp.Failure(403,"连接码错误或已过期");
         sessions.removeIf(s->!valid(s));if(sessions.size()>=8)throw new ToolsHttp.Failure(409,"连接人数已满");
         remembered=pairings.remember(remembered,scope);
-        Session session=new Session(random(32),request.address);sessions.add(session);
+        Session session=new Session(random(32),request.address,request.fingerprint);sessions.add(session);
         response.json(new JSONObject().put("token",session.token).put("mode","share").toString(),"Set-Cookie: fq_share="+session.token+"; Path=/; HttpOnly; SameSite=Strict\r\nSet-Cookie: "+pairCookie()+"="+remembered+"; Path=/; HttpOnly; SameSite=Strict; Max-Age=7776000\r\n");
     }
     private void handle(ToolsHttp.Request request,ToolsHttp.Response response) throws Exception {
         if(!request.method.equals("GET")&&!request.method.equals("HEAD")&&!request.method.equals("POST"))throw new ToolsHttp.Failure(405,"不支持此操作");
         if(request.method.equals("GET")&&request.path.equals("/api/status")){
-            boolean paired;synchronized(this){paired=!closed&&pairings.contains(cookie(request,pairCookie()),"share:"+tree);}
+            boolean paired;synchronized(this){paired=!closed&&pairings.contains(cookie(request,pairCookie()),request.pairScope("share:"+tree));}
             response.json(new JSONObject().put("remote",false).put("share",!closed).put("paired",paired).put("platform","android").toString(),"");return;
         }
         if(request.method.equals("POST")) {

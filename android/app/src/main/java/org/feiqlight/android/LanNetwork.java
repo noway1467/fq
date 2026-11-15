@@ -143,13 +143,11 @@ final class LanNetwork implements LanNode.SocketBinding {
             }
         }
         if(!localKeys.isEmpty()) {
-            // 热点没有可调用 bindSocket 的 Network；存在 VPN 时不能保证默认路由仍走热点。
-            if(vpn)throw new IOException("VPN 下无法确认热点或 USB 共享直连，请将飞Q排除于 VPN，或连接可直连的 Wi-Fi/以太网后重试");
             Collections.sort(localKeys);
             cachedLocal=true;
             cachedLocalLinks=Collections.unmodifiableList(localLinks);
             cachedLocalBroadcasts=Collections.unmodifiableList(new ArrayList<>(localBroadcasts));
-            cachedKey=Arrays.asList("local",localKeys);
+            cachedKey=Arrays.asList("local",localKeys,vpn);
             return;
         }
         if(vpn) throw new IOException("VPN 下未找到可直连的 Wi-Fi/以太网或热点。请连接局域网或开启热点，并在 VPN 中允许局域网或将飞Q排除；强制 VPN 模式可能阻止直连。");
@@ -171,7 +169,8 @@ final class LanNetwork implements LanNode.SocketBinding {
     @Override public synchronized boolean allows(InetAddress destination) throws IOException {
         Network network=select();
         // 没有 Network 绑定的热点 socket 会使用系统路由；历史地址只能在当前共享子网内探测。
-        return network!=null || (cachedLocal && localLink(destination)!=null);
+        if(network!=null){if(!(destination instanceof Inet4Address)||cachedLinks==null)return false;for(LinkAddress link:cachedLinks.getLinkAddresses())if(link.getAddress() instanceof Inet4Address){byte[] a=link.getAddress().getAddress(),b=destination.getAddress();boolean same=true;for(int i=0;i<4;i++){int bits=Math.max(0,Math.min(8,link.getPrefixLength()-i*8)),mask=(255<<(8-bits))&255;if((a[i]&mask)!=(b[i]&mask))same=false;}if(same)return true;}return false;}
+        return cachedLocal && localLink(destination)!=null;
     }
     @Override public synchronized void bind(DatagramSocket socket) throws IOException {
         Network network=select();
@@ -191,10 +190,17 @@ final class LanNetwork implements LanNode.SocketBinding {
         try {network.bindSocket(socket);} catch(IOException e) {changed();throw blocked(e);}
     }
     @Override public synchronized void bind(Socket socket,InetAddress destination) throws IOException {
-        if(select()!=null){bind(socket);return;}
+        if(select()!=null){if(!allows(destination))throw new IOException("目标不在当前物理局域网内");bind(socket);return;}
         LocalLink link=localLink(destination);
         if(link==null)throw new IOException("目标不在当前热点或共享子网内，请重新发现设备");
         socket.bind(new InetSocketAddress(link.address,0));
+    }
+    @Override public synchronized void send(DatagramSocket receiver,byte[] bytes,InetSocketAddress destination)throws IOException {
+        if(select()!=null){receiver.send(new DatagramPacket(bytes,bytes.length,destination));return;}
+        LocalLink link=localLink(destination.getAddress());if(link==null)throw new IOException("目标不在当前热点或共享子网内");
+        // 发送 socket 绑定热点本地地址，应用只使用当前共享子网；回复端口由发现报文明确提供。
+        try(DatagramSocket sender=new DatagramSocket(new InetSocketAddress(link.address,0))){sender.setBroadcast(true);sender.send(new DatagramPacket(bytes,bytes.length,destination));}
+        catch(IOException e){throw blocked(e);}
     }
     private IOException blocked(IOException cause) { return new IOException("局域网直连被系统限制，请检查 VPN 的允许局域网/应用排除与阻止非 VPN 连接设置。",cause); }
     @Override public synchronized Collection<InetAddress> broadcasts() throws IOException {
@@ -208,5 +214,11 @@ final class LanNetwork implements LanNode.SocketBinding {
             if(broadcast!=null) result.add(broadcast);
         }
         return new ArrayList<>(result);
+    }
+    @Override public synchronized String description()throws IOException{
+        Network network=select();List<String> addresses=new ArrayList<>();
+        if(network!=null&&cachedLinks!=null){for(LinkAddress link:cachedLinks.getLinkAddresses())if(link.getAddress() instanceof Inet4Address)addresses.add(link.toString());return "Wi-Fi / 以太网 · "+String.join("、",addresses);}
+        for(LocalLink link:cachedLocalLinks)addresses.add(link.address.getHostAddress()+"/"+link.prefix);
+        return addresses.isEmpty()?DISCONNECTED_STATUS:"热点 / USB 共享 · "+String.join("、",addresses);
     }
 }

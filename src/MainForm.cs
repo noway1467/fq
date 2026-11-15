@@ -28,6 +28,7 @@ public sealed class MainForm : ModernWindow
         private ToolStripMenuItem nightItem;
         private ProfileMenuItem profileItem;
         private ToolsWindow toolsWindow;
+        private readonly List<ToolsGateway> gateways=new List<ToolsGateway>();
         private bool toolsRestored;
         private readonly List<RoundedButton> filters = new List<RoundedButton>();
         private bool exiting, started, automaticReceiving;
@@ -36,6 +37,7 @@ public sealed class MainForm : ModernWindow
         private bool startInTray;
         private int peersRefreshQueued;
         private readonly Timer windowSaveTimer = new Timer { Interval = 500 };
+        private readonly Timer shareTimer=new Timer{Interval=1000};
         private int filter;
         private string fingerprint;
         private Peer latestSender;
@@ -94,6 +96,7 @@ public sealed class MainForm : ModernWindow
             network.PeersChanged += OnPeersChanged; network.MessageReceived += OnMessage; network.DeliveryChanged += OnDelivery; network.Error += OnError; network.TransferChanged += OnTransfer;
             RefreshFilters();
             ApplyWallpaper();
+            shareTimer.Tick+=delegate {if(!started||!network.Peers.Any(p=>p.Online))return;try{string[] files=WindowsShare.Take(store.Root);if(files==null)return;Show();WindowState=FormWindowState.Normal;Activate();using(ForwardDialog dialog=new ForwardDialog(network.Peers.Where(p=>p.Online).ToArray(),files.Length))if(dialog.ShowDialog(this)==DialogResult.OK){OpenChat(dialog.Target);ActiveChat.QueueSharedFiles(files);}}catch(Exception e){OnError("系统分享未完成："+e.Message);}};shareTimer.Start();
             Theme.Changed += ApplyWallpaper;
             Microsoft.Win32.SystemEvents.UserPreferenceChanged += SystemThemeChanged;
         }
@@ -123,12 +126,13 @@ public sealed class MainForm : ModernWindow
                 try
                 {
                     ToolsPreferences.State saved = new ToolsPreferences(store.Root).Value;
-                    if (saved.ShareEnabled || saved.RemoteEnabled) { toolsWindow = new ToolsWindow(network.Port, network.LoopbackOnly, store.Root); toolsWindow.PrepareRestoredWindow(); }
+                    if (saved.ShareEnabled || saved.RemoteEnabled) { toolsWindow = new ToolsWindow(network.Port, network.LoopbackOnly, store.Root,network.Security); toolsWindow.PrepareRestoredWindow(); }
                 }
                 catch (Exception e) { status.Text = "共享与远控未恢复：" + e.Message; }
             }
         }
-        internal void PrepareNetworkCallbacks() { if(!IsHandleCreated)CreateHandle(); }
+        internal void PrepareNetworkCallbacks() { if(!IsHandleCreated)CreateHandle();network.NetworkReset+=OnNetworkReset; }
+        private void OnNetworkReset(){Ui(()=>{foreach(ToolsGateway gateway in gateways)gateway.Dispose();gateways.Clear();if(toolsWindow!=null&&!toolsWindow.IsDisposed)toolsWindow.NetworkReset();});}
         private bool RememberPeerAddresses()
         {
             List<Peer> peers=network.Peers;Peer.UpdateConversationNames(peers);
@@ -137,7 +141,7 @@ public sealed class MainForm : ModernWindow
             SavedConversation[] old=SavedConversation.Normalize(network.Settings.Conversations);
             SavedConversation[] current=SavedConversation.Normalize(peers.Select(p=>new SavedConversation {
                 Endpoint=p.Endpoint.ToString(),Login=p.Login,Host=p.Host,Nickname=p.Nickname,Group=p.Group,Note=p.Note,Pinned=p.Pinned,Hidden=p.Hidden,ConversationNumber=p.ConversationNumber,
-                DeviceId=p.DeviceId,Avatar=p.Avatar,ConversationId=p.Id,
+                DeviceId=p.DeviceId,Avatar=p.Avatar,Fingerprint=p.Fingerprint,ConversationId=p.Id,
                 Preview=previews.ContainsKey(p.Id)?previews[p.Id]:"",Unread=unread.ContainsKey(p.Id)?unread[p.Id]:0,
                 MessageUtcTicks=times.ContainsKey(p.Id)&&times[p.Id]!=default(DateTime)?times[p.Id].ToUniversalTime().Ticks:0 }));
             if (new HashSet<string>(previous).SetEquals(next)&&old.Length==current.Length&&old.Zip(current,(a,b)=>a.SameAs(b)).All(equal=>equal)) return true;
@@ -152,12 +156,24 @@ public sealed class MainForm : ModernWindow
             Ui(() => { System.Threading.Interlocked.Exchange(ref peersRefreshQueued,0); RefreshPeers(); foreach (ChatForm chat in chats.Values) if (!chat.IsDisposed) chat.RefreshPeer(); });
         }
         private void OnError(string text) { diagnostics.Record(DiagnosticEvent.NetworkError); Ui(() => status.Text = text); }
+        internal bool ConfirmSecurity(string name, string code)
+        {
+            if(IsDisposed||Disposing||!IsHandleCreated)return false;
+            Func<bool> confirm=()=>{
+                if(IsDisposed||Disposing)return false;
+                using(ConfirmDialog dialog=new ConfirmDialog("核对设备安全身份", "正在与「"+name+"」建立加密连接。\n请核对两台设备的配对码：\n\n"+code+"\n\n只有两端显示一致才点击信任。此设备的信任会保存，可在联系人菜单撤销。", "信任并继续", false))
+                using(Timer timeout=new Timer{Interval=30000}) {
+                    timeout.Tick+=delegate {dialog.DialogResult=DialogResult.Cancel;};timeout.Start();return dialog.ShowDialog(this)==DialogResult.OK;
+                }
+            };
+            try {return InvokeRequired?(bool)Invoke(confirm):confirm();}catch(InvalidOperationException){return false;}
+        }
         private void Remember(Peer peer, ChatRecord record) { recent.Remove(peer.Id); recent.Insert(0, peer.Id); if (recent.Count > 1000) recent.RemoveAt(1000); previews[peer.Id] = (record.Outgoing ? "你：" : "") + record.Text; times[peer.Id] = record.Time; }
         private void OnMessage(IncomingMessage message)
         {
             Ui(() =>
             {
-                message.Record.Transfers = message.Files.Select(f => new FileTransferState { Id = f.Id, Name = f.Name, Size = f.Size, Status = "待接收 · 点击接收" }).ToArray();
+                message.Record.Transfers = message.Files.Select(f => new FileTransferState { Id = f.Id, Name = f.Name, Size = f.Size, Modified=f.Modified,Sha256=f.Sha256,RelativePath=f.RelativePath,Status = "待接收 · 点击接收" }).ToArray();
                 if (message.Files.Count > 0) { message.Record.HasAttachments = true; message.Record.AttachmentNames = message.Files.Select(f => f.Name).ToArray(); message.Record.Text += (String.IsNullOrEmpty(message.Record.Text) ? "" : "\n") + "[文件] " + String.Join("、", message.Files.Select(f => f.Name)); }
                 // ACK 已由网络层返回；重复邀请不能回退本机状态、增加未读或再次触发自动接收。
                 try { if (!store.AppendIncoming(message.Record)) return; }
@@ -170,8 +186,8 @@ public sealed class MainForm : ModernWindow
                 if (chat != null && !chat.IsDisposed)
                 {
                     if (!loaded) chat.Append(message.Record);
-                    if (chats.Values.Sum(c => c.PendingFileCount) + message.Files.Count <= 100) chat.AddAttachments(message);
-                    else status.Text = "待接收文件已达 100 个，请处理后让对方重发。";
+                    if (chats.Values.Sum(c => c.PendingFileCount) + (loaded?0:message.Files.Count) <= 1000) chat.AddAttachments(message);
+                    else status.Text = "待接收文件已达 1000 个，请处理后从历史记录继续。";
                 }
                 latestSender = message.Peer;
                 RefreshPeers();
@@ -184,7 +200,7 @@ public sealed class MainForm : ModernWindow
             Ui(() => {
                 FileTransferState file = record.Transfers == null ? null : record.Transfers.FirstOrDefault(f => f.Id == id);
                 if (file == null) return; file.Percent = percent; file.Status = status; file.BytesPerSecond = bytesPerSecond;
-                if (status != "发送中") TrySave(record);
+                if (status != "发送中"||percent%10==0) TrySave(record);
                 ChatForm chat; if (chats.TryGetValue(record.PeerId, out chat) && !chat.IsDisposed) chat.Delivery(record);
             });
         }
@@ -288,6 +304,7 @@ public sealed class MainForm : ModernWindow
             conversationMenu.Items.Clear();
             conversationMenu.Items.Add("浏览共享文件…",null,delegate { OpenShared(peer); });
             conversationMenu.Items.Add("控制 Android 手机…",null,delegate { OpenPhone(peer); });
+            if(network.Security!=null&&peer.Fingerprint!=null)conversationMenu.Items.Add("撤销设备信任…",null,delegate {using(ConfirmDialog confirm=new ConfirmDialog("撤销设备信任？","下次连接将重新核对配对码，并撤销该设备未完成的文件邀请。","撤销",true))if(confirm.ShowDialog(this)==DialogResult.OK){try{network.ForgetSecurity(peer);if(toolsWindow==null||toolsWindow.IsDisposed)new ToolsPairings(store.Root).ForgetFingerprint(peer.Fingerprint);OnNetworkReset();}catch(Exception error){OnError(error.Message);}}});
             conversationMenu.Items.Add("设置备注…",null,delegate { EditConversation(peer); });
             conversationMenu.Items.Add(peer.Pinned?"取消置顶":"置顶会话",null,delegate {
                 bool old=peer.Pinned;peer.Pinned=!old;if(!RememberPeerAddresses())peer.Pinned=old;fingerprint=null;RefreshPeers();
@@ -387,27 +404,26 @@ public sealed class MainForm : ModernWindow
         }
         internal void OpenShared(Peer peer)
         {
-            try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("http://" + peer.Endpoint.Address + ":" + ToolsHttp.PortFor(peer.Endpoint.Port) + "/#share") { UseShellExecute = true }); }
-            catch (Exception e) { using (NoticeDialog notice = new NoticeDialog("无法打开共享页面", e.Message)) notice.ShowDialog(this); }
+            OpenSecureTool(peer,ToolsHttp.PortFor(peer.Endpoint.Port),"share");
         }
-        internal async void OpenPhone(Peer peer)
+        internal void OpenPhone(Peer peer)
         {
             int port = peer.Endpoint.Port >= 65534 ? peer.Endpoint.Port - 2 : peer.Endpoint.Port + 2;
-            string url = "http://" + peer.Endpoint.Address + ":" + port;
+            OpenSecureTool(peer,port,"remote");
+        }
+        private async void OpenSecureTool(Peer peer,int port,string mode)
+        {
             try
             {
-                await System.Threading.Tasks.Task.Run(() => {
-                    var request = (System.Net.HttpWebRequest)System.Net.WebRequest.Create(url + "/api/status"); request.Proxy = null; request.Timeout = 4000; request.ReadWriteTimeout = 4000;
-                    using (var response = request.GetResponse()) using (var reader = new StreamReader(response.GetResponseStream()))
-                    { char[] buffer = new char[2048]; int count = reader.ReadBlock(buffer, 0, buffer.Length); if (count == buffer.Length) throw new InvalidOperationException("状态响应过长"); var data = new System.Web.Script.Serialization.JavaScriptSerializer().Deserialize<Dictionary<string, object>>(new string(buffer, 0, count)); if (!data.ContainsKey("remote") || !Object.Equals(data["remote"], true)) throw new InvalidOperationException("手机尚未开启远控"); }
-                });
-                if (!IsDisposed) System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url + "/#remote") { UseShellExecute = true });
+                await System.Threading.Tasks.Task.Run(()=>network.VerifyPeer(peer));if(IsDisposed)return;
+                ToolsGateway gateway=new ToolsGateway(network.Security,peer,port,network.LoopbackOnly);gateways.Add(gateway);
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(gateway.Url+"#"+mode){UseShellExecute=true});
             }
-            catch (Exception) { if (!IsDisposed) using (NoticeDialog notice = new NoticeDialog("无法控制", "手机未连接或尚未开启远控")) notice.ShowDialog(this); }
+            catch (Exception e) { if (!IsDisposed) using (NoticeDialog notice = new NoticeDialog("连接未完成", e.GetBaseException().Message)) notice.ShowDialog(this); }
         }
         private void OpenTools()
         {
-            try { if (toolsWindow == null || toolsWindow.IsDisposed) toolsWindow = new ToolsWindow(network.Port, network.LoopbackOnly, store.Root); toolsWindow.Show(); if (toolsWindow.WindowState == FormWindowState.Minimized) toolsWindow.WindowState = FormWindowState.Normal; toolsWindow.Activate(); }
+            try { if (toolsWindow == null || toolsWindow.IsDisposed) toolsWindow = new ToolsWindow(network.Port, network.LoopbackOnly, store.Root,network.Security); toolsWindow.Show(); if (toolsWindow.WindowState == FormWindowState.Minimized) toolsWindow.WindowState = FormWindowState.Normal; toolsWindow.Activate(); }
             catch (Exception e) { using (NoticeDialog notice = new NoticeDialog("共享与远控未开启", "请检查额外 TCP 端口是否被占用。\n" + e.Message)) notice.ShowDialog(this); }
         }
         private void ShowMenu(object sender, EventArgs args)
@@ -426,6 +442,8 @@ public sealed class MainForm : ModernWindow
                 mainMenu.Items.Add(nightItem);
                 mainMenu.Items.Add("设置", null, delegate { OpenSettings(); });
                 mainMenu.Items.Add("共享与远控…", null, delegate { OpenTools(); });
+                mainMenu.Items.Add("添加到 Windows 发送到菜单…",null,delegate {try{WindowsShare.Install(Environment.GetFolderPath(Environment.SpecialFolder.SendTo),Application.ExecutablePath,store.Root,network.Port);using(NoticeDialog notice=new NoticeDialog("已添加","资源管理器右键文件 → 发送到 → 飞Q。选择联系人后再确认发送。"))notice.ShowDialog(this);}catch(Exception e){OnError(e.Message);}});
+                mainMenu.Items.Add("连接诊断…",null,delegate {using(NoticeDialog notice=new NoticeDialog("连接诊断",network.NetworkStatus+"\n\n聊天 UDP/TCP 监听已启动；共享与远控需主动开启。\n未发现设备时：核对同一网段、防火墙、路由器客户端隔离和 VPN 允许局域网设置。可使用添加联系人输入 IPv4:端口。"))notice.ShowDialog(this);});
                 mainMenu.Items.Add("已移除的联系人…", null,delegate {using(ForwardDialog dialog=new ForwardDialog(network.Peers.Where(p=>p.Hidden).ToArray(),-1))if(dialog.ShowDialog(this)==DialogResult.OK)OpenChat(dialog.Target);});
                 mainMenu.Items.Add("关于", null, delegate { using (AboutDialog dialog = new AboutDialog()) dialog.ShowDialog(this); });
                 mainMenu.Items.Add(new ToolStripSeparator());
@@ -505,6 +523,8 @@ public sealed class MainForm : ModernWindow
         {
             if (disposing && !IsDisposed)
             {
+                network.NetworkReset-=OnNetworkReset;foreach(ToolsGateway gateway in gateways)gateway.Dispose();gateways.Clear();
+                shareTimer.Stop();shareTimer.Dispose();
                 if (toolsWindow != null) toolsWindow.Dispose();
                 windowSaveTimer.Stop(); SaveWindowPlacement(); windowSaveTimer.Dispose();
                 diagnostics.Record(DiagnosticEvent.Stopped);network.Dispose();

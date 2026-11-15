@@ -16,7 +16,8 @@ namespace FeiqLight
     {
         internal sealed class Request
         {
-            internal string Method, Path, Query, Address;
+            internal string Method, Path, Query, Address, Fingerprint;
+            internal string PairScope(string scope){return Fingerprint==null?scope:scope+"|tls="+Fingerprint;}
             internal readonly Dictionary<string, string> Headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             internal byte[] Body;
             internal string Header(string key) { string value; return Headers.TryGetValue(key, out value) ? value : ""; }
@@ -61,12 +62,17 @@ namespace FeiqLight
         private readonly HashSet<TcpClient> clients = new HashSet<TcpClient>();
         private readonly object gate = new object();
         private bool closed;
+        private readonly SecureIdentity security;
+        private readonly bool loopback;
         internal readonly int Port;
-        internal ToolsHttp(int port, bool loopback, Action<Request, Response> handler)
+        internal ToolsHttp(int port, bool loopback, Action<Request, Response> handler, SecureIdentity security = null)
         {
-            this.handler = handler; listener = new TcpListener(loopback ? IPAddress.Loopback : IPAddress.Any, port); listener.Start(16);
+            this.security=security;this.loopback=loopback;this.handler = handler; listener = new TcpListener(loopback ? IPAddress.Loopback : IPAddress.Any, port); listener.Start(16);
             Port = ((IPEndPoint)listener.LocalEndpoint).Port; Task.Run((Action)Accept);
+            if(security!=null)security.TrustRevoked+=OnTrustRevoked;
         }
+        private void OnTrustRevoked(string fingerprint){DisconnectClients();}
+        internal void DisconnectClients(){lock(gate)foreach(TcpClient client in clients)client.Close();}
         internal static int PortFor(int chatPort) { return chatPort == 65535 ? 65534 : chatPort + 1; }
         private void Accept()
         {
@@ -79,22 +85,27 @@ namespace FeiqLight
             Response response = null;
             try
             {
+                if(!loopback&&LanNetwork.Route(LanNetwork.Scan(),((IPEndPoint)client.Client.RemoteEndPoint).Address)==null)return;
                 client.ReceiveTimeout = 5000; client.SendTimeout = 10000; client.NoDelay = true; client.SendBufferSize = 262144;
-                NetworkStream stream = client.GetStream();
+                Stream stream = security==null?(Stream)client.GetStream():security.Server(client,true);
+                string fingerprint=security==null?null:SecureIdentity.RemoteFingerprint((System.Net.Security.SslStream)stream);
+                if(security!=null&&!security.IsTrustedFingerprint(fingerprint))throw new IOException("请先从联系人核对设备身份。");
                 // 请求头逐字解析，但不再为每个字节调用一次 socket 读取。
-                RequestInput deadline = new RequestInput(client);
+                RequestInput deadline = new RequestInput(client,stream);
                 BufferedStream input = new BufferedStream(deadline, 8192);
                 for (int index = 0; index < 16; index++)
                 {
                     deadline.Begin(index == 0 ? 5000 : 3000);
                     Request request = Read(input);
+                    request.Fingerprint=fingerprint;
+                    if(security!=null&&!security.IsTrustedFingerprint(fingerprint))throw new IOException("设备信任已撤销。");
                     bool reuse = index < 15 && request.Path == "/file" && (request.Method == "GET" || request.Method == "HEAD") && request.Header("Connection").Equals("keep-alive", StringComparison.OrdinalIgnoreCase);
                     response = new Response(stream, request.Method == "HEAD", reuse);
                     request.Address = ((IPEndPoint)client.Client.RemoteEndPoint).Address.ToString();
                     string expected = client.Client.LocalEndPoint.ToString();
                     if (request.Header("Host") != expected) throw new HttpError(403, "请使用设备的 IPv4 地址访问");
                     string origin = request.Header("Origin");
-                    if (origin.Length > 0 && origin != "http://" + expected) throw new HttpError(403, "不允许跨站请求");
+                    if (origin.Length > 0 && origin != (security==null?"http://":"https://") + expected) throw new HttpError(403, "不允许跨站请求");
                     handler(request, response);
                     if (!reuse || !response.Complete) break;
                     client.ReceiveTimeout = 3000;
@@ -153,6 +164,6 @@ namespace FeiqLight
             else if (!Int64.TryParse(parts[1], NumberStyles.None, CultureInfo.InvariantCulture, out end)) return null;
             return end < start ? null : new[] { start, Math.Min(end, size - 1) };
         }
-        public void Dispose() { lock (gate) { if (closed) return; closed = true; listener.Stop(); foreach (TcpClient client in clients) client.Close(); } }
+        public void Dispose() { if(security!=null)security.TrustRevoked-=OnTrustRevoked;lock (gate) { if (closed) return; closed = true; listener.Stop(); foreach (TcpClient client in clients) client.Close(); } }
     }
 }

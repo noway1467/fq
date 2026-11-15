@@ -16,7 +16,12 @@ import static org.junit.Assert.*;
 
 @RunWith(RobolectricTestRunner.class) @Config(sdk=35) @GraphicsMode(GraphicsMode.Mode.NATIVE)
 public final class PersistenceUiTest {
-    @Test public void savedRemoteEntryRendersAndReopensSameTarget()throws Exception{
+    @Test public void transferStateSurvivesReopenWithoutPretendingTransferIsActive()throws Exception{
+        Context context=RuntimeEnvironment.getApplication();String key="device:test/7/0/false";
+        try(ChatStore store=new ChatStore(context)){store.transfer(key,"device:test",7,47,"接收中 · 点击取消");store.transfer("device:test/8/0/true","device:test",8,100,"对方已校验保存");}
+        try(ChatStore reopened=new ChatStore(context)){java.util.List<ChatStore.TransferState> saved=reopened.transfers();assertEquals(2,saved.size());ChatStore.TransferState partial=saved.stream().filter(item->item.key.equals(key)).findFirst().orElseThrow();assertEquals(47,partial.percent);assertEquals("上次退出 · 点击续传",partial.state);assertTrue(saved.stream().anyMatch(item->item.state.equals("对方已校验保存")));reopened.remove("device:test",true,false);assertTrue(reopened.transfers().isEmpty());}
+    }
+    @Test public void savedRemoteEntryRendersButLegacyAddressRequiresIdentityVerification()throws Exception{
         Context context=RuntimeEnvironment.getApplication();
         org.robolectric.android.controller.ServiceController<ChatService> service=Robolectric.buildService(ChatService.class).create();
         Shadows.shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(context,ChatService.class),service.get().onBind(new Intent()));
@@ -30,7 +35,7 @@ public final class PersistenceUiTest {
                 TextView last=find(view,"上次远程连接");assertNotNull(last);
                 Bitmap image=Bitmap.createBitmap(720,1200,Bitmap.Config.ARGB_8888);view.draw(new Canvas(image));File directory=new File(System.getProperty("feiq.previewDir"));assertTrue(directory.isDirectory()||directory.mkdirs());
                 try(OutputStream output=new FileOutputStream(new File(directory,"persist-menu-"+(dark?"dark":"light")+".png"))){assertTrue(image.compress(Bitmap.CompressFormat.PNG,100,output));}finally{image.recycle();}
-                last.performClick();Intent started=Shadows.shadowOf(activity).getNextStartedActivity();assertNotNull(started);assertEquals("http://127.0.0.1:2426/#remote",started.getDataString());dialog.dismiss();
+                last.performClick();Intent started=Shadows.shadowOf(activity).getNextStartedActivity();assertNull("旧明文历史地址不能绕过证书核对",started);assertTrue(org.robolectric.shadows.ShadowToast.getTextOfLatestToast().contains("核对设备身份"));dialog.dismiss();
             }
         }
         }finally{service.destroy();}

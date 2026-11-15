@@ -136,7 +136,14 @@ namespace FeiqLight
             editor.EnableAutoDragDrop = false;
             RegisterFileDrop(this);
             ApplyAppearance();
-            try { var records = store.History(peer.Id, 150).Select(record => record.Outgoing ? network.OutgoingRecord(peer.Id, record.Packet) ?? record : record).ToList(); history.SetRecords(records); editor.Text = store.LoadDraft(peer.Id); } catch (Exception e) { Error("本地记录", e.Message); }
+            try { var records = store.History(peer.Id, 150).Select(record => record.Outgoing ? network.OutgoingRecord(peer.Id, record.Packet) ?? record : record).ToList(); history.SetRecords(records); editor.Text = store.LoadDraft(peer.Id);
+                foreach(ChatRecord record in records.Where(r=>!r.Outgoing))foreach(FileTransferState file in record.Transfers??new FileTransferState[0]) {
+                    if(files.Items.Count>=1000)break;
+                    if(file.Status=="已拒绝"||!String.IsNullOrEmpty(file.LocalPath)||!SecureIdentity.ValidFingerprint(file.Sha256))continue;
+                    files.Items.Add(new ReceivedFile{Packet=record.Packet,Record=record,File=new Attachment{Id=file.Id,Name=file.Name,Size=file.Size,Modified=file.Modified,Sha256=file.Sha256,RelativePath=file.RelativePath},AutomaticPending=false,Status="已恢复 · 点击续传"});
+                }
+                if(files.Items.Count>0){files.SelectedIndex=0;SetDrawer(true);}
+            } catch (Exception e) { Error("本地记录", e.Message); }
             // 侧栏宽度随窗口缩放，窄窗口时保持消息区可读。
             middle.SizeChanged += delegate { drawer.Width = Math.Min(drawer.Width, Math.Max(200, middle.ClientSize.Width / 2)); };
         }
@@ -173,7 +180,7 @@ namespace FeiqLight
         {
             history.SetAvatars(peer.Id, peer.Avatar, "device:" + network.Settings.DeviceId, network.Settings.Avatar);
             Text = peer.DisplayName; peerName.Text = peer.DisplayName;
-            peerStatus.Text = (peer.Online ? "在线" : "离线") + (peer.DuplicateName ? peer.NameSuffix+" · "+peer.Endpoint : "");
+            peerStatus.Text = (peer.Online ? "在线" : "离线") + (peer.Fingerprint==null?" · 旧版明文":" · TLS 加密") + (peer.DuplicateName ? peer.NameSuffix+" · "+peer.Endpoint : "");
             peerStatus.ForeColor = peer.Online ? Theme.Online : Theme.Muted;
             peerName.AccessibleDescription=peer.DisplayName+" · "+peer.Id;
             avatar.AccessibleDescription = peer.Online ? "在线" : "离线";
@@ -195,7 +202,7 @@ namespace FeiqLight
         public void Delivery(ChatRecord record) { history.Delivery(record); }
         public void AddAttachments(IncomingMessage message)
         {
-            foreach (Attachment file in message.Files) { if (files.Items.Count >= 100) { fileStatus.Text = "待接收文件已达上限"; break; } files.Items.Add(new ReceivedFile { Packet = message.Record.Packet, File = file, Record = message.Record }); }
+            foreach (Attachment file in message.Files) {ReceivedFile restored=files.Items.Cast<ReceivedFile>().FirstOrDefault(f=>f.Packet==message.Record.Packet&&f.File.Id==file.Id);if(restored!=null){restored.AutomaticPending=true;continue;}if (files.Items.Count >= 1000) { fileStatus.Text = "待接收文件已达上限"; break; } files.Items.Add(new ReceivedFile { Packet = message.Record.Packet, File = file, Record = message.Record }); }
             if (files.Items.Count > 0 && files.SelectedIndex < 0) files.SelectedIndex = 0;
             SetDrawer(files.Items.Count > 0); main.ReceiveAutomatically();
         }
@@ -221,37 +228,49 @@ namespace FeiqLight
             Rectangle name = new Rectangle(e.Bounds.Left + pad + circle + 8, e.Bounds.Top + 10, Math.Max(1, e.Bounds.Width - pad * 2 - circle - 12), 22); TextRenderer.DrawText(e.Graphics, item.File.Name, Theme.Section, name, Theme.Ink, TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
             name.Y += 24; TextRenderer.DrawText(e.Graphics, Theme.SizeText(item.File.Size) + " · " + item.Status, Theme.Small, name, Theme.Muted, TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
         }
-        private void SendMessage()
+        private bool sending;
+        private async void SendMessage()
         {
-            if (String.IsNullOrWhiteSpace(editor.Text) && attachments.Count == 0) return;
-            try { ChatRecord record = network.SendContent(peer, editor.Text, attachments, store.Root); pastedImages.Clear(); main.Sent(peer, record); Append(record); Delivery(record); editor.Clear(); SaveDraft(); attachments.Clear(); UpdateQueued(); editor.Focus(); history.ScrollToLatest(); }
-            catch (Exception e) { Error("发送失败", e.Message); }
+            if (sending || String.IsNullOrWhiteSpace(editor.Text) && attachments.Count == 0) return;
+            sending=true;sendButton.Enabled=false;string text=editor.Text;string[] selected=attachments.ToArray();
+            try {
+                if(selected.Any(Directory.Exists)||selected.Length>20)await Task.Run(()=>network.SendBatchContent(peer,text,selected,store.Root,(record,count,total)=>main.BeginInvoke((Action)(()=>{main.Sent(peer,record);if(!IsDisposed){Append(record);Delivery(record);fileStatus.Text="邀请已发送 "+count+" / "+total;}}))));
+                else {ChatRecord record=await Task.Run(()=>network.SendContent(peer,text,selected,store.Root));main.Sent(peer,record);if(!IsDisposed){Append(record);Delivery(record);}}
+                if(IsDisposed)return;pastedImages.ExceptWith(selected);if(editor.Text==text)editor.Clear();SaveDraft();attachments.RemoveAll(p=>selected.Contains(p));UpdateQueued();editor.Focus();history.ScrollToLatest(); }
+            catch (Exception e) { if(!IsDisposed)Error("发送失败", e.Message); }
+            finally {sending=false;if(!IsDisposed)sendButton.Enabled=true;}
         }
-        internal void ForwardContent(string text, string[] paths)
+        internal async void ForwardContent(string text, string[] paths)
         {
             // 转发独立发送，不读取或清空目标会话正在编辑的草稿和附件。
-            ChatRecord record = network.SendContent(peer, text, paths, store.Root);
-            main.Sent(peer, record); Append(record); Delivery(record); history.ScrollToLatest();
+            if(sending)return;sending=true;sendButton.Enabled=false;
+            try {
+                if(paths.Any(Directory.Exists)||paths.Length>20)await Task.Run(()=>network.SendBatchContent(peer,text,paths,store.Root,(record,count,total)=>main.BeginInvoke((Action)(()=>{main.Sent(peer,record);if(!IsDisposed){Append(record);Delivery(record);history.ScrollToLatest();}}))));
+                else {ChatRecord record=await Task.Run(()=>network.SendContent(peer,text,paths,store.Root));main.Sent(peer,record);if(!IsDisposed){Append(record);Delivery(record);history.ScrollToLatest();}}
+            }catch(Exception error){if(!IsDisposed)Error("发送失败",error.GetBaseException().Message);}
+            finally{sending=false;if(!IsDisposed)sendButton.Enabled=true;}
         }
-        private void RetryMessage(ChatRecord previous)
+        private async void RetryMessage(ChatRecord previous)
         {
-            if(!(previous.State??"").Contains("未确认")) return;
+            if(sending||!(previous.State??"").Contains("未确认")) return;
+            sending=true;sendButton.Enabled=false;
             try {
                 string[] paths=previous.GetLocalFiles();
                 if(paths.Any(p=>!File.Exists(p))) throw new IOException("原附件已移动或删除，请重新选择文件发送。");
                 // 复用消息号和原记录，ACK 只更新原气泡，不再追加第二条消息。
-                network.RetryMessage(peer,previous);main.TrySave(previous);Delivery(previous);history.ScrollToLatest();
-            } catch(Exception e) {Error("重发失败",e.Message);}
+                await Task.Run(()=>network.RetryMessage(peer,previous));main.TrySave(previous);if(!IsDisposed){Delivery(previous);history.ScrollToLatest();}
+            } catch(Exception e) {if(!IsDisposed)Error("重发失败",e.Message);}
+            finally{sending=false;if(!IsDisposed)sendButton.Enabled=true;}
         }
         private void QueueFiles(IEnumerable<string> paths)
         {
             foreach (string path in paths)
             {
-                if (Directory.Exists(path)) { Error("未添加文件夹", "请压缩后发送。"); continue; }
-                if (attachments.Count >= 20) { Error("附件数量", "一次最多 20 个文件。"); break; }
-                if (File.Exists(path) && !attachments.Contains(path)) attachments.Add(path);
+                if (attachments.Count >= 1000) { Error("附件数量", "单批最多 1000 项，请分批发送。"); break; }
+                if ((File.Exists(path)||Directory.Exists(path)) && !attachments.Contains(path)) attachments.Add(path);
             } UpdateQueued();
         }
+        internal void QueueSharedFiles(IEnumerable<string> paths){QueueFiles(paths);}
         private void PasteClipboard()
         {
             if (editor.ReadOnly) return;
@@ -333,6 +352,7 @@ namespace FeiqLight
             {
                 chatMenu = Theme.Menu(); chatMenu.MinimumSize = new Size((int)(236 * DeviceDpi / 96F), 0);
                 chatMenu.Items.Add("发送文件", null, SelectFiles); chatMenu.Items.Add("聊天记录", null, ShowHistory);
+                chatMenu.Items.Add("发送文件夹…",null,delegate {using(FolderBrowserDialog dialog=new FolderBrowserDialog{Description="选择发送的文件夹，保留内部目录结构"})if(dialog.ShowDialog(this)==DialogResult.OK)QueueFiles(new[]{dialog.SelectedPath});});
                 chatMenu.Items.Add("浏览共享文件…", null, delegate { main.OpenShared(peer); });
                 chatMenu.Items.Add("控制 Android 手机…", null, delegate { main.OpenPhone(peer); });
                 chatMenu.Items.Add(new ToolStripSeparator());
@@ -384,7 +404,7 @@ namespace FeiqLight
             receive.Text = "取消"; receive.Enabled = true; reject.Enabled = false; files.Enabled = false; files.Invalidate();
             try
             {
-                string destination = ReceiveStorage.Destination(network.Settings.ReceiveFolder, selected.File.Name);
+                string destination = SendBatch.Destination(network.Settings.ReceiveFolder, selected.File);
                 selected.PartialPaths.Add(LanService.PartialPath(peer, selected.Packet, selected.File, destination));
                 fileStatus.Text = "连接中";
                 string saved = await network.ReceiveFileAsync(peer, selected.Packet, selected.File, destination, null, cancel.Token, true, new Progress<TransferProgress>(p => {
@@ -401,7 +421,7 @@ namespace FeiqLight
                 selected.Record.State=remaining==0?"已保存":"已接收 "+selected.Record.GetLocalFiles().Length+" / "+(selected.Record.GetLocalFiles().Length+remaining);
                 // 完成状态与本地附件回写原邀请，不另造一条聊天消息或重复媒体卡片。
                 main.TrySave(selected.Record); history.Delivery(selected.Record);
-                files.Items.Remove(selected); if (files.Items.Count > 0 && files.SelectedIndex < 0) files.SelectedIndex = 0;
+                files.SelectedIndex=-1;files.Items.Remove(selected); if (files.Items.Count > 0) files.SelectedIndex = 0;
                 SetDrawer(files.Items.Count > 0); fileStatus.Text = "已保存"; main.FileReceiveStatus("文件已保存：" + Path.GetFileName(saved));
             }
             catch (OperationCanceledException) { if (!IsDisposed) { selected.Status = "已取消，可重试"; fileStatus.Text = "已取消，可重新接收"; FileState(selected, 0, "已取消 · 点击重试"); main.TrySave(selected.Record); } }

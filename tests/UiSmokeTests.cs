@@ -707,7 +707,7 @@ namespace FeiqLight.Tests
                     IncomingMessage incoming=null;b.MessageReceived+=message=>incoming=message;a.Settings.AutoSendDroppedFiles=true;drop(editor,new[]{second,second});Pump(()=>incoming!=null,"自动拖入未发送");
                     Check(incoming.Files.Count==1&&incoming.Files[0].Name=="automatic.txt"&&!incoming.Record.Text.Contains("草稿"),"自动发送夹带草稿或已有附件");Check(editor.Text=="不应自动发出的草稿"&&queued.SequenceEqual(new[]{first}),"自动发送清空草稿或已有附件");
                     string received=Path.Combine(folder,"received.txt");Task<string> transfer=b.ReceiveFileAsync(incoming.Peer,incoming.Record.Packet,incoming.Files[0],received,null,CancellationToken.None);Pump(()=>transfer.IsCompleted,"拖入文件下载未完成");Check(File.ReadAllText(transfer.Result)==File.ReadAllText(second),"拖入附件实际内容错误");
-                    a.Settings.AutoSendDroppedFiles=false;drop(chat,new[]{second});Check(queued.Count==2,"关闭开关后未恢复排队");Find<Button>(chat,"发送消息").PerformClick();Pump(()=>store.History(peer.Id,20).Count==2,"手动发送未成功");Check(editor.TextLength==0&&queued.Count==0,"手动发送后未清空");main.ExitApplication();
+                    Pump(()=>Find<Button>(chat,"发送消息").Enabled,"自动发送动作未结束");a.Settings.AutoSendDroppedFiles=false;drop(chat,new[]{second});Check(queued.Count==2,"关闭开关后未恢复排队");Find<Button>(chat,"发送消息").PerformClick();Pump(()=>store.History(peer.Id,20).Count==2&&Find<Button>(chat,"发送消息").Enabled,"手动发送未成功");Check(editor.TextLength==0&&queued.Count==0,"手动发送后未清空");main.ExitApplication();
                 }
             });
             test("会话排序：置顶优先、在线自动靠前、上下线不串会话或草稿",()=>{
@@ -803,7 +803,7 @@ namespace FeiqLight.Tests
                     history.Append(received);Application.DoEvents();Render(window,"preview-file-progress-light");
                     var rectangles=(List<Rectangle>)typeof(BubbleHistory).GetField("bounds",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(history);
                     // 与自绘控件相同，使用实际 Graphics DPI；系统缩放下 DeviceDpi 不一定等于绘图 DPI。
-                    using(Graphics graphics=history.CreateGraphics())Check(rectangles[0].Height<=200*graphics.DpiY/96F&&rectangles[1].Height<=135*graphics.DpiY/96F,"文件气泡残留过大固定空白");
+                    using(Graphics graphics=history.CreateGraphics())Check(rectangles[0].Height<=220*graphics.DpiY/96F&&rectangles[1].Height<=135*graphics.DpiY/96F,"文件气泡残留过大固定空白");
                     var hits=(System.Collections.ICollection)typeof(BubbleHistory).GetField("fileHits",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(history);Check(hits.Count==3,"缺少每个文件的独立卡片");
                     for(int i=0;i<12;i++)history.Append(new ChatRecord{Packet=100+i,Text="旧消息阅读位置",Sender="测试",Time=DateTime.Now});
                     history.AutoScrollPosition=new Point(0,40);int y=history.AutoScrollPosition.Y;sent.Transfers[0].Percent=83;history.Delivery(sent);Application.DoEvents();
@@ -939,10 +939,10 @@ namespace FeiqLight.Tests
                     using(LanService remote=new LanService(remoteSettings,bPort,true,"offline-peer"))
                     {
                         remote.Start();restarted.Refresh();Pump(()=>original.Online&&original.Nickname=="重新上线并改名","历史联系人重连后没有原位更新");
-                        Pump(()=>Find<Label>(window.ActiveChat,"聊天联系人昵称").Text=="重新上线并改名"&&Find<Label>(window.ActiveChat,"聊天联系人状态").Text=="在线","重连后的聊天抬头未刷新");
+                        Pump(()=>Find<Label>(window.ActiveChat,"聊天联系人昵称").Text=="重新上线并改名"&&Find<Label>(window.ActiveChat,"聊天联系人状态").Text=="在线 · 旧版明文","重连后的聊天抬头未刷新");
                         Check(Find<ConversationList>(window,"会话列表").Items.Count==1,"重连产生重复联系人");
                     }
-                    Pump(()=>!original.Online&&Find<Label>(window.ActiveChat,"聊天联系人状态").Text=="离线","退出后状态未刷新");
+                    Pump(()=>!original.Online&&Find<Label>(window.ActiveChat,"聊天联系人状态").Text=="离线 · 旧版明文","退出后状态未刷新");
                     Render(window,"preview-offline-history");window.ExitApplication();
                 }
             });
@@ -1122,7 +1122,7 @@ namespace FeiqLight.Tests
                                 foreach(bool dark in new[]{false,true}) {
                                     Theme.Change(dark,"blue");Find<Button>(chatA,"会话菜单").PerformClick();ContextMenuStrip menu=(ContextMenuStrip)OpenMenu();
                                     var actions=menu.Items.OfType<ToolStripMenuItem>().ToArray();var glyphs=actions.Select(i=>Theme.MenuGlyph(i.Text)).ToArray();
-                                    Check(glyphs.Length==8&&glyphs.All(s=>s.Length>0&&s!="more")&&glyphs.Distinct().Count()==8,"聊天菜单图标重复或缺失");
+                                    Check(glyphs.Length==9&&glyphs.All(s=>s.Length>0&&s!="more"),"聊天菜单图标缺失");Check(actions.Any(i=>i.Text=="发送文件夹…"&&Theme.MenuGlyph(i.Text)=="folder"),"缺少发送文件夹入口或图标");
                                     Check(actions.Any(i=>i.Text=="浏览共享文件…"&&Theme.MenuGlyph(i.Text)=="folder"),"缺少共享文件入口或图标");
                                     Check(actions.Any(i=>i.Text=="控制 Android 手机…"&&Theme.MenuGlyph(i.Text)=="monitor"),"缺少手机远控入口或图标");
                                     Check(menu.Items.OfType<ToolStripSeparator>().Count()==2&&menu.Width>=220,"菜单分组或宽度未生效");CheckMenuText(menu,"preview-chat-menu-text-"+(dark?"dark":"light"));
@@ -1169,7 +1169,7 @@ namespace FeiqLight.Tests
                             Find<RichTextBox>(chatA, "消息输入框").Text = text; Find<Button>(chatA, "发送消息").PerformClick();
                             Pump(() => Find<BubbleHistory>(chatB, "聊天记录").Text.Contains(text), "远端界面未出现消息");
                             Pump(() => Find<BubbleHistory>(chatA, "聊天记录").HasDelivery("已送达"), "发送方未显示已送达");
-                            Check(Find<RichTextBox>(chatA, "消息输入框").TextLength == 0, "发送后未清空输入");
+                            Pump(()=>Find<Button>(chatA,"发送消息").Enabled,"发送动作未结束");Check(Find<RichTextBox>(chatA, "消息输入框").TextLength == 0, "发送后未清空输入");
                             Check(storeB.History(b.Peers.Single(p => p.Login == "ui-a").Id, 10).Single().Text == text, "收到的消息未保存");
                             Render(mainA, "preview-chat"); Render(mainB, "preview-received");
                         });
@@ -1186,6 +1186,7 @@ namespace FeiqLight.Tests
                             }
                             if (failure != null) throw failure;
                             Pump(() => Find<BubbleHistory>(chatB, "聊天记录").Text.Contains("转发回环验证"), "转发未送到远端");
+                            Pump(()=>Find<Button>(chatA,"发送消息").Enabled,"转发动作未结束");
                             Check(editor.Text == "转发不能清空这份草稿", "转发清空了草稿"); editor.Clear(); chatA.SaveDraft();
                         });
                         test("转发：部分附件拒绝、同名避让后正文正确及普通文本不误判", () =>
@@ -1198,9 +1199,11 @@ namespace FeiqLight.Tests
                         });
                         test("原生 UI：Enter 事件发送与空消息防护", () =>
                         {
+                            Pump(()=>Find<Button>(chatB,"发送消息").Enabled,"前一个发送动作未结束");
                             RichTextBox editor = Find<RichTextBox>(chatB, "消息输入框"); editor.Text = "收到！发送确认与本地记录也都正常。";
                             typeof(Control).GetMethod("OnKeyDown", BindingFlags.Instance | BindingFlags.NonPublic).Invoke(editor, new object[] { new KeyEventArgs(Keys.Enter) });
                             Pump(() => Find<BubbleHistory>(chatA, "聊天记录").Text.Contains("收到！"), "Enter 未触发发送");
+                            Pump(()=>Find<Button>(chatB,"发送消息").Enabled,"Enter 发送动作未结束");Check(editor.TextLength==0,"Enter 发送后草稿未清空");
                             int length = Find<BubbleHistory>(chatB, "聊天记录").TextLength; Find<Button>(chatB, "发送消息").PerformClick();
                             Check(Find<BubbleHistory>(chatB, "聊天记录").TextLength == length, "空消息被发送");
                             Render(mainA, "preview-chat");
@@ -1209,7 +1212,7 @@ namespace FeiqLight.Tests
                             BubbleHistory history=Find<BubbleHistory>(chatA,"聊天记录");
                             for(int i=0;i<40;i++) history.Append(new ChatRecord {Packet=100000+i,Text="滚动测试记录 "+i,Sender="测试",State="已收到",Time=DateTime.Now});
                             history.AutoScrollPosition=Point.Empty;history.Append(new ChatRecord {Packet=200000,Text="收到消息不抢位置",Sender="测试",State="已收到"});Check(history.AutoScrollPosition.Y==0,"收到消息强制滚动");
-                            Find<RichTextBox>(chatA,"消息输入框").Text="发送后跳到最新";Find<Button>(chatA,"发送消息").PerformClick();Application.DoEvents();
+                            Find<RichTextBox>(chatA,"消息输入框").Text="发送后跳到最新";Find<Button>(chatA,"发送消息").PerformClick();Pump(()=>Find<Button>(chatA,"发送消息").Enabled,"发送动作未结束");
                             Check(-history.AutoScrollPosition.Y+history.ClientSize.Height>=history.AutoScrollMinSize.Height-4,"发送后没有滚到最新");
                         });
                         test("原生 UI：最小尺寸布局与关闭后恢复会话", () =>
@@ -1635,9 +1638,9 @@ namespace FeiqLight.Tests
                         Peer peer = a.Peers.Single(p => p.Login == "ui-b"); mainA.OpenChat(peer);
                         b.Settings.Nickname = "新昵称 B"; b.Refresh();
                         Pump(() => Find<Label>(chatA, "聊天联系人昵称").Text == "新昵称 B", "改名未刷新聊天抬头");
-                        b.Dispose(); Pump(() => !peer.Online && Find<Label>(chatA, "聊天联系人状态").Text == "离线", "离线未刷新聊天抬头");
+                        b.Dispose(); Pump(() => !peer.Online && Find<Label>(chatA, "聊天联系人状态").Text == "离线 · 旧版明文", "离线未刷新聊天抬头");
                         chatA.Close(); mainA.OpenChat(peer);
-                        Check(Find<Label>(chatA, "聊天联系人状态").Text == "离线" && Find<Label>(chatA, "聊天联系人昵称").Text == peer.Nickname, "恢复会话显示旧资料");
+                        Check(Find<Label>(chatA, "聊天联系人状态").Text == "离线 · 旧版明文" && Find<Label>(chatA, "聊天联系人昵称").Text == peer.Nickname, "恢复会话显示旧资料");
                     });
                     test("视觉布局：聊天气泡头像放大与底栏边线按钮无悬停底色", () =>
                     {
@@ -1654,6 +1657,7 @@ namespace FeiqLight.Tests
                     {
                         Peer offline = a.Peers.Single(p => p.Login == "ui-b");
                         Find<RichTextBox>(chatA, "消息输入框").Text = "退出前未收到 ACK"; Find<Button>(chatA, "发送消息").PerformClick();
+                        Pump(()=>Find<Button>(chatA,"发送消息").Enabled,"退出前发送动作未结束");
                         Check(storeA.History(offline.Id, 20).Last().State == "等待确认", "退出前状态不正确");
                         Find<Button>(mainA, "菜单").PerformClick(); ToolStripDropDown menu = OpenMenu(); ClickMenu(menu, "退出");
                         Check(!menu.IsDisposed, "退出操作在菜单事件派发中直接销毁了菜单");

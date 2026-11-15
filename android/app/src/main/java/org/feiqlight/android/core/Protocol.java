@@ -19,13 +19,16 @@ public final class Protocol {
     public static final class Packet {
         public long number;
         public int command;
-        public String login, host, body, extra, deviceId, avatar;
+        public int replyPort;
+        public String login, host, body, extra, deviceId, avatar, fingerprint;
         public int mode() { return command & 255; }
     }
     public static final class Attachment {
         public final int id;
         public final String name;
         public final long size, modified;
+        public String sha256;
+        public String relativePath;
         public Attachment(int id, String name, long size, long modified) {
             this.id=id; this.name=name; this.size=size; this.modified=modified;
         }
@@ -72,6 +75,9 @@ public final class Protocol {
         return encode(number,login,host,command,body,extra,deviceId,null);
     }
     public static byte[] encode(long number, String login, String host, int command, String body, String extra, String deviceId, String avatar) {
+        return encode(number,login,host,command,body,extra,deviceId,avatar,null);
+    }
+    public static byte[] encode(long number, String login, String host, int command, String body, String extra, String deviceId, String avatar,String fingerprint) {
         if (number < 0 || field(login).length() > 128 || field(host).length() > 128)
             throw new IllegalArgumentException("无效的报文头");
         if ((body!=null && body.indexOf('\0')>=0) || (extra!=null && extra.indexOf('\0')>=0))
@@ -80,6 +86,7 @@ public final class Protocol {
         if (extra != null || deviceId != null || avatar!=null) wire+=(extra==null?"":extra)+"\0";
         if (normalizeDeviceId(deviceId)!=null) wire+="FQID="+normalizeDeviceId(deviceId)+"\0";
         if(avatar!=null) {String normalized=normalizeAvatar(avatar);if(normalized==null)throw new IllegalArgumentException("头像数据无效");wire+="FQAV="+normalized+"\0";}
+        if(fingerprint!=null)wire+="FQSEC="+fingerprint+"\0";
         byte[] bytes;
         try {
             ByteBuffer encoded=((command & UTF8)!=0 ? StandardCharsets.UTF_8 : GBK).newEncoder().encode(CharBuffer.wrap(wire));
@@ -107,6 +114,8 @@ public final class Protocol {
             p.body=content[0]; p.extra=content.length>1 ? content[1] : "";
             p.deviceId=content.length>2 && content[2].startsWith("FQID=") ? normalizeDeviceId(content[2].substring(5)) : null;
             for(int i=2;i<content.length;i++) if(content[i].startsWith("FQAV=")) p.avatar=normalizeAvatar(content[i].substring(5));
+            for(int i=2;i<content.length;i++) if(content[i].startsWith("FQSEC=")) {String value=content[i].substring(6);if(value.matches("[0-9a-f]{64}"))p.fingerprint=value;}
+            for(int i=2;i<content.length;i++)if(content[i].startsWith("FQPORT=")){int port=Integer.parseInt(content[i].substring(7));if(port>=1024&&port<=65535)p.replyPort=port;}
             return p;
         } catch (IllegalArgumentException | IndexOutOfBoundsException | CharacterCodingException e) { return null; }
     }
@@ -124,12 +133,13 @@ public final class Protocol {
     public static String files(List<Attachment> list) {
         StringBuilder s=new StringBuilder();
         for (Attachment f:list) s.append(f.id).append(':').append(f.name).append(':')
-            .append(Long.toHexString(f.size)).append(':').append(Long.toHexString(f.modified)).append(":1:\u0007");
+            .append(Long.toHexString(f.size)).append(':').append(Long.toHexString(f.modified)).append(":1:").append(f.sha256==null?"":f.sha256).append(':').append(f.relativePath==null?"":java.util.Base64.getEncoder().encodeToString(f.relativePath.getBytes(StandardCharsets.UTF_8))).append(":\u0007");
         return s.toString();
     }
     public static List<Attachment> parseFiles(String text) {
         return parseFiles(text,false);
     }
+    public static boolean safeRelativePath(String value){if(value==null||value.length()>2048)return false;String[] parts=value.split("/",-1);return parts.length<=32&&java.util.Arrays.stream(parts).allMatch(Protocol::safeName);}
     // 旧版记录允许 240 个 UTF-16 单元。只恢复历史元数据，不放宽网络邀请或落盘文件名校验。
     public static List<Attachment> parseStoredFiles(String text) {
         return parseFiles(text,true);
@@ -144,8 +154,10 @@ public final class Protocol {
             int id=Integer.parseInt(f[0]); long size=Long.parseLong(f[2],16), time=Long.parseLong(f[3],16), attr=Long.parseLong(f[4],16);
             if (id<0 || size<0 || (attr & 255)!=1) continue;
             boolean duplicate=false; for (Attachment item:files) if (item.id==id) duplicate=true;
-            if (!duplicate) files.add(new Attachment(id,f[1],size,time));
-        } catch (IllegalArgumentException ignored) { /* 单个坏附件不影响其余合法附件。 */ }
+            String hash=f.length>5?f[5]:"";if(!hash.isEmpty()&&!hash.matches("[0-9a-f]{64}"))continue;
+            String relative=null;if(f.length>6&&!f[6].isEmpty()){relative=StandardCharsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(java.util.Base64.getDecoder().decode(f[6]))).toString();if(!safeRelativePath(relative)||!relative.substring(relative.lastIndexOf('/')+1).equals(f[1]))continue;}
+            if (!duplicate) {Attachment item=new Attachment(id,f[1],size,time);item.sha256=hash.isEmpty()?null:hash;item.relativePath=relative;files.add(item);}
+        } catch (IllegalArgumentException | CharacterCodingException ignored) { /* 单个坏附件不影响其余合法附件。 */ }
         return files;
     }
 }

@@ -172,7 +172,7 @@ public final class UiTest {
         }
         Map<String,String> names=new HashMap<>();
         try(ChatStore store=new ChatStore(context)) {
-            List<ChatStore.Conversation> all=store.conversations();assertEquals(7,store.getReadableDatabase().getVersion());assertEquals(2,all.stream().map(ChatStore.Conversation::displayName).distinct().count());
+            List<ChatStore.Conversation> all=store.conversations();assertEquals(9,store.getReadableDatabase().getVersion());assertEquals(2,all.stream().map(ChatStore.Conversation::displayName).distinct().count());
             for(ChatStore.Conversation c:all) {assertTrue(c.number>0);names.put(c.peer.id(),c.displayName());assertEquals("历史 #"+c.number,store.history(c.peer.id()).get(0).text);store.peer(c.peer);}
             assertTrue(all.get(0).hidden);assertTrue(all.get(0).pinned);
             LanNode.Peer fresh=new LanNode.Peer(LanNode.endpoint("127.0.0.1:32424"),"fresh","host","phone","");store.peer(fresh);assertEquals(3,store.conversations().stream().filter(c->c.peer.id().equals(fresh.id())).findFirst().get().number);
@@ -187,6 +187,7 @@ public final class UiTest {
         ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();CountDownLatch release=new CountDownLatch(1),blocked=new CountDownLatch(1);ActivityController<MainActivity> ac=null;
         try(java.net.DatagramSocket target=new java.net.DatagramSocket(0,java.net.InetAddress.getLoopbackAddress())) {
             settle(service);int port;try(java.net.ServerSocket socket=new java.net.ServerSocket(0,1,java.net.InetAddress.getLoopbackAddress())){port=socket.getLocalPort();}
+            service.getSharedPreferences("settings",Context.MODE_PRIVATE).edit().putBoolean("allow_legacy_protocol",true).commit();
             service.connectionFactory=(prefs,listener)->new LanNode(port,true,"pending-test","test","发送方","test",listener);service.onStartCommand(new Intent(),0,1);settle(service);
             LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:"+target.getLocalPort()),"pending-peer","test","发送反馈测试","");peer.utf8=true;
             LanNode.Message initial=new LanNode.Message();initial.number=1;initial.time=System.currentTimeMillis();initial.state="已收到";initial.text="发送消息时立即反馈，不会误认为没有点到。";service.incoming(peer,initial,false);settle(service);
@@ -705,7 +706,7 @@ public final class UiTest {
             db.execSQL("CREATE TABLE messages (id INTEGER PRIMARY KEY,peer TEXT,packet INTEGER,outgoing INTEGER,time INTEGER,text TEXT,state TEXT,files TEXT,local_files TEXT DEFAULT '[]',UNIQUE(peer,packet,outgoing))");
             db.execSQL("INSERT INTO peers(id,endpoint,login,host,name,grp) VALUES('127.0.0.1:32425/old','127.0.0.1:32425','old','host','旧联系人','')");db.execSQL("INSERT INTO messages(peer,packet,outgoing,time,text,state,files) VALUES('127.0.0.1:32425/old',1,0,1,'升级前消息','已收到','')");db.setVersion(3);
         }
-        try(ChatStore store=new ChatStore(context)){ChatStore.Conversation c=store.conversations().get(0);assertEquals("旧联系人",c.displayName());assertEquals("升级前消息",store.history(c.peer.id()).get(0).text);assertFalse(c.pinned);assertFalse(c.hidden);assertEquals(7,store.getReadableDatabase().getVersion());store.edit(c.peer.id(),"升级后备注",true);assertEquals("升级后备注",store.conversations().get(0).displayName());}
+        try(ChatStore store=new ChatStore(context)){ChatStore.Conversation c=store.conversations().get(0);assertEquals("旧联系人",c.displayName());assertEquals("升级前消息",store.history(c.peer.id()).get(0).text);assertFalse(c.pinned);assertFalse(c.hidden);assertEquals(9,store.getReadableDatabase().getVersion());store.edit(c.peer.id(),"升级后备注",true);assertEquals("升级后备注",store.conversations().get(0).displayName());}
     }
     @Test public void conversationMetadataSurvivesDiscoveryAndClearDoesNotResurrectAck() throws Exception {
         Context context=RuntimeEnvironment.getApplication();

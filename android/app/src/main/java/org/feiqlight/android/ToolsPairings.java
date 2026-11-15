@@ -33,4 +33,9 @@ final class ToolsPairings {
         return token;
     }
     void clear()throws IOException{if(!preferences.edit().clear().commit())throw new IOException("无法清除配对记录");}
+    void forgetFingerprint(String fingerprint)throws IOException{
+        SharedPreferences.Editor editor=preferences.edit();String suffix="|tls="+fingerprint;
+        for(Map.Entry<String,?> entry:preferences.getAll().entrySet())if(entry.getValue() instanceof String){String value=(String)entry.getValue();int end=value.lastIndexOf('|');if(end>=0&&value.substring(0,end).endsWith(suffix)){editor.remove(entry.getKey());editor.remove("allow:"+entry.getKey());}}
+        if(!editor.commit())throw new IOException("无法清除设备配对记录");
+    }
 }

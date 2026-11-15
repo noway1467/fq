@@ -7,6 +7,7 @@ using FeiqLight;
 
 public static class AndroidInteropHost
 {
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")] private static extern uint SetErrorMode(uint mode);
     private sealed class RateProgress : IProgress<TransferProgress>
     {
         public bool Observed;
@@ -14,6 +15,13 @@ public static class AndroidInteropHost
     }
     private static readonly string UnicodeText=String.Concat(Enumerable.Repeat("𠮷 e\u0301 👩🏽‍💻 👨‍👩‍👧‍👦 🇨🇳 1️⃣ (๑•̀ㅂ•́)و✧\t\r\n",400));
     public static int Main(string[] args)
+    {
+        // 测试失败写入日志和退出码，不让 Windows 错误对话框阻塞无人值守回归。
+        SetErrorMode(0x0001 | 0x0002);
+        try { return Run(args); }
+        catch(Exception error) { Console.Error.WriteLine("INTEROP HOST FAIL: "+error.GetType().Name+": "+error.Message);Console.Error.WriteLine(error.StackTrace);return 1; }
+    }
+    private static int Run(string[] args)
     {
         Console.OutputEncoding = Encoding.UTF8;
         long size = Int64.Parse(args[2]); byte[] bytes = new byte[65536]; for (int i = 0; i < bytes.Length; i++) bytes[i] = (byte)(i * 17 + 3);
@@ -27,6 +35,8 @@ public static class AndroidInteropHost
         using (LanService node = new LanService(new AppSettings { Avatar = "builtin:15", Nickname = "Windows 测试👩🏽‍💻", Group = "互通验证" }, Int32.Parse(args[0]), true, "windows-test"))
         {
             int outgoingRate=0;node.TransferChanged+=(record,id,percent,state,rate)=>{if(rate>0)Interlocked.Exchange(ref outgoingRate,1);};
+            node.Error+=text=>Console.Error.WriteLine("NOTICE "+text);
+            if(args.Length>3&&args[3]=="secure")node.ConfigureSecurity(Path.Combine(args[1],"windows-security"),(name,code)=>{Console.WriteLine("PAIR "+code);return true;});
             node.MessageReceived += async message =>
             {
                 try

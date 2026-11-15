@@ -45,12 +45,16 @@ final class ReceivedStorage {
         if(lower.endsWith(".pdf"))return "application/pdf";
         int dot=name.lastIndexOf('.'); String value=dot<0?null:MimeTypeMap.getSingleton().getMimeTypeFromExtension(name.substring(dot+1).toLowerCase(Locale.ROOT)); return value==null?"application/octet-stream":value; }
     Uri save(File file,String name,LanNode.Transfer task) throws IOException {
+        return save(file,name,null,task);
+    }
+    Uri save(File file,String name,String relativePath,LanNode.Transfer task) throws IOException {
         Uri tree=tree(); if(tree==null) return null;
         if(!Protocol.safeName(name)) throw new IOException("不安全的文件名");
         if(!file.isFile()) throw new IOException("应用内文件不可用");
         ContentResolver resolver=context.getContentResolver(); Uri created=null;
         try {
             check(task); String parent=DocumentsContract.getTreeDocumentId(tree);
+            if(relativePath!=null){if(!Protocol.safeRelativePath(relativePath))throw new IOException("目录结构无效");String[] parts=relativePath.split("/");for(int i=0;i<parts.length-1;i++)parent=directory(resolver,tree,parent,parts[i],task);}
             Set<String> names=new HashSet<>(), ids=new HashSet<>();
             Uri children=DocumentsContract.buildChildDocumentsUriUsingTree(tree,parent);
             try(Cursor cursor=resolver.query(children,new String[]{DocumentsContract.Document.COLUMN_DOCUMENT_ID,DocumentsContract.Document.COLUMN_DISPLAY_NAME},null,null)) {
@@ -76,6 +80,14 @@ final class ReceivedStorage {
             if(created!=null) try { cleaned=DocumentsContract.deleteDocument(resolver,created); } catch(Exception ignored) { }
             throw new IOException((task.isCancelled()?"保存已取消":"保存到所选目录失败，请检查授权或重新选择目录")+"；应用内完整文件保留，可重试或另存为。"+(cleaned?"":"目标目录可能留下不完整副本。"),e);
         }
+    }
+    private static String directory(ContentResolver resolver,Uri tree,String parent,String name,LanNode.Transfer task)throws IOException {
+        check(task);String found=null;
+        try(Cursor children=resolver.query(DocumentsContract.buildChildDocumentsUriUsingTree(tree,parent),new String[]{DocumentsContract.Document.COLUMN_DOCUMENT_ID,DocumentsContract.Document.COLUMN_DISPLAY_NAME,DocumentsContract.Document.COLUMN_MIME_TYPE},null,null)) {
+            if(children==null)throw new IOException("目录不可读");int count=0;while(children.moveToNext()){if(++count>10000)throw new IOException("目录文件过多");if(name.equalsIgnoreCase(children.getString(1))){if(!DocumentsContract.Document.MIME_TYPE_DIR.equals(children.getString(2)))throw new IOException("同名文件阻止创建目录");found=children.getString(0);}}
+        }
+        if(found!=null)return found;Uri created=DocumentsContract.createDocument(resolver,DocumentsContract.buildDocumentUriUsingTree(tree,parent),DocumentsContract.Document.MIME_TYPE_DIR,name);
+        if(created==null||!tree.getAuthority().equals(created.getAuthority())||parent.equals(DocumentsContract.getDocumentId(created)))throw new IOException("无法创建接收目录");return DocumentsContract.getDocumentId(created);
     }
     private static void check(LanNode.Transfer task) throws IOException { if(task.isCancelled()||Thread.currentThread().isInterrupted()) throw new IOException("文件任务已取消"); }
 }

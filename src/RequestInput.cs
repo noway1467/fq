@@ -9,16 +9,18 @@ namespace FeiqLight
     internal sealed class RequestInput : Stream
     {
         private readonly TcpClient client;
-        private readonly NetworkStream source;
+        private readonly Stream source;
         private readonly Stopwatch clock = new Stopwatch();
         private int limit;
         internal RequestInput(TcpClient client) { this.client = client; source = client.GetStream(); }
+        internal RequestInput(TcpClient client,Stream source) { this.client=client;this.source=source; }
         internal void Begin(int milliseconds) { limit = milliseconds; clock.Restart(); }
         private void BeforeRead()
         {
             long remaining = limit - clock.ElapsedMilliseconds;
             if (remaining <= 0) throw new IOException("请求读取超时");
             client.ReceiveTimeout = (int)remaining;
+            if(source.CanTimeout)source.ReadTimeout=(int)remaining;
         }
         public override int Read(byte[] buffer, int offset, int count) { BeforeRead(); return source.Read(buffer, offset, count); }
         public override int ReadByte() { BeforeRead(); return source.ReadByte(); }

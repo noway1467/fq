@@ -12,7 +12,7 @@ namespace FeiqLight
 {
     internal sealed class ToolsService : IDisposable
     {
-        private sealed class Session { internal string Token, Address, Mode; internal long Last; }
+        private sealed class Session { internal string Token, Address, Mode, Fingerprint; internal long Last; }
         private readonly object gate = new object();
         private readonly object captureGate = new object();
         private readonly Stopwatch clock = Stopwatch.StartNew();
@@ -21,6 +21,7 @@ namespace FeiqLight
         private readonly ToolsHttp http;
         private readonly ToolsPairings pairings;
         private readonly ToolsPreferences preferences;
+        private readonly SecureIdentity security;
         private string[] folders = new string[0];
         private string shareCode = "", remoteCode = "";
         private long shareUntil, remoteUntil, attemptsSince;
@@ -42,7 +43,9 @@ namespace FeiqLight
         internal bool RemoteEnabled { get { lock (gate) return remoteEnabled; } }
         internal string SavedFolder { get { lock (gate) return preferences.Value.Folder; } }
         internal string[] SavedFolders { get { lock (gate) return preferences.Value.Folders.ToArray(); } }
-        internal ToolsService(int port, bool loopback, string root = null) { pairings = new ToolsPairings(root); preferences = new ToolsPreferences(root); http = new ToolsHttp(port, loopback, Handle); }
+        internal ToolsService(int port, bool loopback, string root = null,SecureIdentity security=null) { this.security=security;pairings = new ToolsPairings(root); preferences = new ToolsPreferences(root); http = new ToolsHttp(port, loopback, Handle,loopback?null:security);if(security!=null)security.TrustRevoked+=OnTrustRevoked; }
+        private void OnTrustRevoked(string fingerprint){NetworkReset();lock(gate)pairings.ForgetFingerprint(fingerprint);}
+        internal void NetworkReset(){lock(gate){sessions.Clear();remoteEpoch++;shareEpoch++;remotePending=false;shareCode=ConnectionCode();remoteCode=ConnectionCode();shareUntil=remoteUntil=clock.ElapsedMilliseconds+600000;if(ReleaseInput!=null)ReleaseInput();}http.DisconnectClients();}
         internal string RestoreSettings()
         {
             lock (gate)
@@ -131,7 +134,7 @@ namespace FeiqLight
             string token = cookie == null ? "" : cookie.Substring(cookie.IndexOf('=') + 1);
             lock (gate)
             {
-                Session session = sessions.FirstOrDefault(s => s.Mode == mode && s.Token == token && s.Address == request.Address);
+                Session session = sessions.FirstOrDefault(s => s.Mode == mode && s.Token == token && s.Address == request.Address && s.Fingerprint==request.Fingerprint);
                 if (session == null || !Valid(session)) throw new ToolsHttp.HttpError(401, "连接已结束，请重新连接");
                 if (request.Method == "POST" && request.Header("X-FQ-Token") != token) throw new ToolsHttp.HttpError(403, "请求校验失败");
                 session.Last = clock.ElapsedMilliseconds; return session;
@@ -149,7 +152,7 @@ namespace FeiqLight
                 if (clock.ElapsedMilliseconds - attemptsSince >= 60000) { attemptsSince = clock.ElapsedMilliseconds; attempts = 0; }
                 if (++attempts > 8) throw new ToolsHttp.HttpError(429, "尝试过多，请一分钟后重试");
                 expected = mode == "share" ? shareCode : remoteCode;
-                epoch = mode == "share" ? shareEpoch : remoteEpoch; scope = Scope(mode);
+                epoch = mode == "share" ? shareEpoch : remoteEpoch; scope = request.PairScope(Scope(mode));
                 trusted = reconnect && pairings.AlwaysAllows(remembered, scope);
                 if (closed || (mode == "share" ? folders.Length == 0 : !remoteEnabled)) throw new ToolsHttp.HttpError(403, "对方尚未开启此功能");
                 if (reconnect) { if (!pairings.Contains(remembered, scope)) throw new ToolsHttp.HttpError(401, "没有可用的上次连接，请输入连接码"); }
@@ -172,7 +175,7 @@ namespace FeiqLight
                     if (closed || (mode == "share" ? shareEpoch : remoteEpoch) != epoch) throw new ToolsHttp.HttpError(403, "共享或控制已关闭");
                     if (sessions.Count >= 8) throw new ToolsHttp.HttpError(409, "连接人数已满");
                     remembered = pairings.Remember(remembered, scope, approval == 2);
-                    Session session = new Session { Mode = mode, Address = request.Address, Token = RandomToken(32), Last = clock.ElapsedMilliseconds };
+                    Session session = new Session { Mode = mode, Address = request.Address, Fingerprint=request.Fingerprint, Token = RandomToken(32), Last = clock.ElapsedMilliseconds };
                     sessions.Add(session); response.Json(new { token = session.Token, mode = mode }, "Set-Cookie: fq_" + mode + "=" + session.Token + "; Path=/; HttpOnly; SameSite=Strict\r\nSet-Cookie: " + PairCookie(mode) + "=" + remembered + "; Path=/; HttpOnly; SameSite=Strict; Max-Age=7776000\r\n");
                 }
             }
@@ -190,9 +193,9 @@ namespace FeiqLight
                 lock (gate)
                 {
                     string sharePair = Cookie(request, PairCookie("share")), remotePair = Cookie(request, PairCookie("remote"));
-                    bool sharePaired = !closed && folders.Length > 0 && pairings.Contains(sharePair, Scope("share"));
-                    bool remotePaired = !closed && remoteEnabled && pairings.Contains(remotePair, Scope("remote"));
-                    response.Json(new { remote = remoteEnabled, share = folders.Length > 0, paired = sharePaired, remotePaired = remotePaired, trusted = remotePaired && pairings.AlwaysAllows(remotePair, Scope("remote")), platform = "windows" });
+                    bool sharePaired = !closed && folders.Length > 0 && pairings.Contains(sharePair, request.PairScope(Scope("share")));
+                    bool remotePaired = !closed && remoteEnabled && pairings.Contains(remotePair, request.PairScope(Scope("remote")));
+                    response.Json(new { remote = remoteEnabled, share = folders.Length > 0, paired = sharePaired, remotePaired = remotePaired, trusted = remotePaired && pairings.AlwaysAllows(remotePair, request.PairScope(Scope("remote"))), platform = "windows" });
                 }
                 return;
             }
@@ -321,6 +324,6 @@ namespace FeiqLight
             }
         }
         // 应用退出或覆盖更新只结束会话；只有用户主动停止才修改保存的开关。
-        public void Dispose() { lock (gate) { if (closed) return; closed = true; EndRemote(); EndSharing(); } http.Dispose(); }
+        public void Dispose() { if(security!=null)security.TrustRevoked-=OnTrustRevoked;lock (gate) { if (closed) return; closed = true; EndRemote(); EndSharing(); } http.Dispose(); }
     }
 }

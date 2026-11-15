@@ -18,6 +18,8 @@ import org.feiqlight.android.core.*;
 import java.io.File;
 import java.text.SimpleDateFormat;
 import java.util.*;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /** 原生 View 界面：借鉴 Telegram 的信息层级，不加载 WebView 或第三方 UI 运行时。 */
 public final class MainActivity extends Activity implements ChatService.Observer {
@@ -82,6 +84,8 @@ public final class MainActivity extends Activity implements ChatService.Observer
     private ActionMode selectionMode;
     private TextView selectionOwner;
     private String selected="", pickerPeer="", exportPath="", historySignature="";
+    private boolean shareHandled;
+    private final SecureIdentity.Confirmation securityPrompt=this::confirmSecurity;
     private final Set<Long> displayedOutgoing=new HashSet<>();
     private final List<Runnable> fileProgressViews=new ArrayList<>();
     private String progressPeer="";
@@ -117,6 +121,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
     private final ServiceConnection connection=new ServiceConnection() {
         @Override public void onServiceConnected(ComponentName name,IBinder binder) {
             service=((ChatService.LocalBinder)binder).service(); if(visible) service.observe(MainActivity.this);
+            service.securityConfirmation=securityPrompt;
             service.active(visible?selected:""); saveDraft(); renderPage(); restoreConnection();
         }
         @Override public void onServiceDisconnected(ComponentName name) { service=null; restoreAttempted=false; renderPage(); }
@@ -124,7 +129,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         drafts=new DraftStore(this); receivedStorage=new ReceivedStorage(this); media=new MediaPreview(this);
-        if(state!=null) { selected=state.getString("peer",""); pickerPeer=state.getString("picker",""); exportPath=state.getString("export",""); }
+        if(state!=null) { selected=state.getString("peer",""); pickerPeer=state.getString("picker",""); exportPath=state.getString("export","");shareHandled=state.getBoolean("share_handled",false); }
         if(Build.VERSION.SDK_INT>=33) { backCallback=()->{ if(selectingMessages)endMessageSelection();else if(!selected.isEmpty()) open(""); else finish(); }; getOnBackInvokedDispatcher().registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT,backCallback); }
         renderPage(); bound=bindService(new Intent(this,ChatService.class),connection,BIND_AUTO_CREATE);
     }
@@ -132,8 +137,8 @@ public final class MainActivity extends Activity implements ChatService.Observer
     @Override protected void onStart() { super.onStart(); visible=true; if(SystemBars.isDark(this)!=DARK)rerenderPreservingState(); if(service!=null) { service.observe(this); service.active(selected); service.verifyPresence(); } restoreConnection(); }
     @Override public void onWindowFocusChanged(boolean hasFocus) { super.onWindowFocusChanged(hasFocus); if(hasFocus) SystemBars.appearance(getWindow(),DARK); }
     @Override protected void onStop() { historyAppliedVersion=++historyRequestVersion; closeHistory(); finishSelection(); saveDraft(); visible=false; if(service!=null) { service.remove(this); service.active(""); } super.onStop(); }
-    @Override protected void onDestroy() { avatarLoader.shutdownNow();avatarImageRequest=null;if(avatarSelection!=null&&avatarSelection.dialog!=null)avatarSelection.dialog.dismiss();if(media!=null) media.close(); if(backgroundBitmap!=null){backgroundBitmap.recycle();backgroundBitmap=null;} if(service!=null) service.remove(this); if(bound) unbindService(connection); if(Build.VERSION.SDK_INT>=33&&backCallback!=null) getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(backCallback); super.onDestroy(); }
-    @Override protected void onSaveInstanceState(Bundle state) { saveDraft(); state.putString("peer",selected); state.putString("picker",pickerPeer); state.putString("export",exportPath); super.onSaveInstanceState(state); }
+    @Override protected void onDestroy() { avatarLoader.shutdownNow();avatarImageRequest=null;if(avatarSelection!=null&&avatarSelection.dialog!=null)avatarSelection.dialog.dismiss();if(media!=null) media.close(); if(backgroundBitmap!=null){backgroundBitmap.recycle();backgroundBitmap=null;} if(service!=null){service.remove(this);if(service.securityConfirmation==securityPrompt)service.securityConfirmation=null;} if(bound) unbindService(connection); if(Build.VERSION.SDK_INT>=33&&backCallback!=null) getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(backCallback); super.onDestroy(); }
+    @Override protected void onSaveInstanceState(Bundle state) { saveDraft(); state.putString("peer",selected); state.putString("picker",pickerPeer); state.putString("export",exportPath);state.putBoolean("share_handled",shareHandled); super.onSaveInstanceState(state); }
     @Override public void onConfigurationChanged(android.content.res.Configuration configuration) {
         super.onConfigurationChanged(configuration);
         if(!getSharedPreferences("settings",MODE_PRIVATE).getBoolean("follow_system_theme",false))return;
@@ -318,6 +323,17 @@ public final class MainActivity extends Activity implements ChatService.Observer
     }
     private ChatStore.Conversation conversation(String id) { if(service!=null) for(ChatStore.Conversation item:service.conversations()) if(item.peer.id().equals(id)) return item; return null; }
     private void open(String peer) { themeScrollPosition=null;saveDraft(); selected=peer; if(service!=null) service.active(peer); renderPage(); }
+    private void acceptSystemShare(){
+        if(shareHandled||service==null||!service.online())return;Intent request=getIntent();String action=request.getAction();if(!Intent.ACTION_SEND.equals(action)&&!Intent.ACTION_SEND_MULTIPLE.equals(action))return;
+        List<ChatStore.Conversation> choices=new ArrayList<>();for(ChatStore.Conversation c:service.conversations())if(c.peer.online)choices.add(c);if(choices.isEmpty())return;
+        shareHandled=true;LinearLayout box=column();Dialog dialog=sheet("分享到飞Q · 选择联系人",box,null,null);
+        for(ChatStore.Conversation contact:choices)fileAction(box,dialog,contact.displayName(),()->{
+            try{ArrayList<Uri> uris=Intent.ACTION_SEND_MULTIPLE.equals(action)?request.getParcelableArrayListExtra(Intent.EXTRA_STREAM):new ArrayList<>();if(uris==null)uris=new ArrayList<>();if(Intent.ACTION_SEND.equals(action)){Uri uri=request.getParcelableExtra(Intent.EXTRA_STREAM);if(uri!=null)uris.add(uri);}
+                if(uris.isEmpty()&&request.getClipData()!=null)for(int i=0;i<request.getClipData().getItemCount();i++){Uri uri=request.getClipData().getItemAt(i).getUri();if(uri!=null)uris.add(uri);}
+                CharSequence text=request.getCharSequenceExtra(Intent.EXTRA_TEXT);if(!uris.isEmpty())service.sendFiles(contact.peer,uris);if(text!=null&&!text.toString().trim().isEmpty())service.send(contact.peer,text.toString(),success->{});open(contact.peer.id());
+            }catch(RuntimeException error){error("分享内容无效："+error.getMessage());}
+        });
+    }
     private void saveDraft() {
         if(isDestroyed() || editor==null || selected.isEmpty()) return;
         String text=editor.getText().toString();
@@ -325,6 +341,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         if(!text.equals(editorSavedText)) { drafts.save(selected,text); editorSavedText=text; }
     }
     @Override public void changed() {
+        acceptSystemShare();
         if(root==null || rendering) return; rendering=true;
         try {
             if(selected.isEmpty()) {
@@ -443,6 +460,10 @@ public final class MainActivity extends Activity implements ChatService.Observer
                     attachment.setOnLongClickListener(v->{ fileActions(conversation.peer,m.number,f); return true; });
                 }
                 addFileProgress(bubble,attachment,m,f,conversation,maxWidth);
+            }
+            if(m.files.size()>1){
+                TextView total=text("",12,MUTED);total.setMaxWidth(maxWidth-dp(35));bubble.addView(total);ChatService sourceService=service;ChatStore.Conversation sourceConversation=conversation;
+                Runnable update=()->{if(service!=sourceService||!cardPeer.equals(selected))return;double bytes=0,done=0;int savedCount=0;for(Protocol.Attachment file:m.files){ChatService.FileProgress p=sourceService.progress(cardPeer,m.number,file.id,m.outgoing);boolean saved=p!=null&&(p.state.equals("已保存")||p.state.equals("对方已校验保存"));if(!m.outgoing&&sourceConversation!=null){File local=sourceService.receivedFile(sourceConversation.peer,m.number,file);saved|=local.isFile()||receivedStorage.saved(local)!=null;}double weight=Math.max(1,file.size);bytes+=weight;done+=weight*(saved?100:p==null?0:p.percent)/100.0;if(saved)savedCount++;}total.setText("总进度 "+(int)(done*100/bytes)+"% · 已保存 "+savedCount+" / "+m.files.size());};fileProgressViews.add(update);update.run();
             }
             if(m.outgoing&&(m.state.contains("未确认")||m.state.equals("发送失败"))) {
                 TextView retry=text("发送未确认 · 点击重试",13,BLUE);retry.setPadding(0,dp(8),0,dp(8));bubble.addView(retry);
@@ -623,7 +644,11 @@ public final class MainActivity extends Activity implements ChatService.Observer
     private void showMenu(View anchor) {
         LinearLayout options=column(); Dialog dialog=sheet("飞Q",options,null,null);
         Intent lastRemote=RemoteActivity.lastConnection(this);
-        if(lastRemote!=null)fileAction(options,dialog,"上次远程连接",()->startActivity(lastRemote));
+        if(lastRemote!=null)fileAction(options,dialog,"上次远程连接",()->{
+            ChatStore.Conversation remembered=conversation(getSharedPreferences("settings",MODE_PRIVATE).getString("last_remote_peer",""));
+            if(remembered==null){error("请从联系人重新打开一次远控，以核对设备身份");return;}
+            if(lastRemote.getBooleanExtra("phone",false))openPhone(remembered);else openTools(remembered,true);
+        });
         String[] labels={"刷新","添加联系人","共享本机文件夹","允许控制本机","已移除的联系人","设置","关于",service!=null&&service.canDisconnect()?"断开":"连接"};
         for(String label:labels) {
             fileAction(options,dialog,label,()->{ if(label.equals("允许控制本机"))startActivity(new Intent(this,PhoneRemoteActivity.class));else if(label.equals("共享本机文件夹")) sharing(); else if(label.equals("已移除的联系人")) hiddenConversations(); else if(label.equals("设置")) settings(); else if(label.equals("添加联系人")) addPeer(); else if(label.equals("刷新")) { if(service!=null) service.refresh(); } else if(label.equals("断开")) { if(service!=null) service.disconnect(); } else if(label.equals("关于")) showAbout(); else connect(); });
@@ -637,7 +662,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         LinearLayout repository=row();repository.setPadding(dp(12),dp(10),dp(12),dp(10));repository.setBackground(new android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(BUBBLE),shape(PALE,CONTROL_RADIUS),null));repository.setFocusable(true);repository.setContentDescription("GitHub 仓库：github.com/noway1467/fq");
         IconButton source=new IconButton("code","源码",BLUE);source.setClickable(false);source.setFocusable(false);source.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);repository.addView(source,new LinearLayout.LayoutParams(dp(40),dp(44)));
         LinearLayout labels=column();labels.setPadding(dp(8),0,0,0);labels.addView(text("GitHub 仓库",15,BLUE));labels.addView(text("github.com/noway1467/fq",13,MUTED));repository.addView(labels,weight());repository.setOnClickListener(v->{try{startActivity(new Intent(Intent.ACTION_VIEW,Uri.parse(GITHUB_REPOSITORY)).addCategory(Intent.CATEGORY_BROWSABLE));}catch(ActivityNotFoundException e){error("没有可用的浏览器");}});content.addView(repository,new LinearLayout.LayoutParams(-1,-2));
-        TextView note=text("仅用于可信局域网 · 基础协议明文\n内置头像：Twemoji · CC BY 4.0\n© Twitter, Inc. 及贡献者；许可随 APK 内置。",12,MUTED);note.setPadding(0,dp(18),0,dp(4));note.setLineSpacing(dp(4),1);content.addView(note);
+        TextView note=text("新版设备默认 TLS 加密 · 首次核对配对码\n内置头像：Twemoji · CC BY 4.0\n© Twitter, Inc. 及贡献者；许可随 APK 内置。",12,MUTED);note.setPadding(0,dp(18),0,dp(4));note.setLineSpacing(dp(4),1);content.addView(note);
         sheet("关于飞Q",content,"确定",Dialog::dismiss);
     }
     private void hiddenConversations() {
@@ -654,6 +679,8 @@ public final class MainActivity extends Activity implements ChatService.Observer
         TextView hint=text("修改仅在本机显示；留空恢复对方昵称。",12,MUTED);hint.setPadding(0,dp(8),0,dp(4));content.addView(hint);
         if(c.peer.group!=null&&!c.peer.group.trim().isEmpty())profileField(content,"部门",c.peer.group,"联系人资料部门");
         profileField(content,"IP 地址",c.peer.endpoint.getAddress().getHostAddress()+":"+c.peer.endpoint.getPort(),"联系人资料地址");
+        profileField(content,"传输安全",c.peer.fingerprint==null?"旧版设备 · 明文兼容需手动开启":"TLS 加密 · 首次连接需两端核对","联系人安全状态");
+        if(c.peer.fingerprint!=null){Button forget=button("撤销设备信任",false);content.addView(forget);forget.setOnClickListener(v->confirm("撤销设备信任","下次连接将重新核对两端配对码。","撤销",()->{if(service!=null)service.forgetSecurity(c.peer);}));}
         Dialog dialog=sheet("联系人资料",content,"保存",d->{
             if(service!=source||source==null||!selected.equals(peer)||editorGeneration!=generation){d.dismiss();return;}
             String value=nickname.getText().toString().trim();source.editConversation(c.peer.id(),value.equals(c.peer.name)?"":value,c.pinned);d.dismiss();
@@ -691,15 +718,12 @@ public final class MainActivity extends Activity implements ChatService.Observer
     }
     private void closeHistory() { if(historyDialog!=null){historyDialog.dismiss();historyDialog=null;} }
     private void openTools(ChatStore.Conversation conversation,boolean remote) {
-        String address=conversation.peer.endpoint.getAddress().getHostAddress();
-        Uri uri=Uri.parse("http://"+address+":"+ToolsHttp.portFor(conversation.peer.endpoint.getPort())+"/#"+(remote?"remote":"share"));
-        if(remote){startActivity(new Intent(this,RemoteActivity.class).setData(uri));return;}
-        try {startActivity(new Intent(Intent.ACTION_VIEW,uri).addCategory(Intent.CATEGORY_BROWSABLE));}
-        catch(ActivityNotFoundException e){error("请安装支持 HTML5 视频的浏览器后再打开");}
+        if(service==null){error("请先连接局域网");return;}
+        service.openTool(conversation.peer,ToolsHttp.portFor(conversation.peer.endpoint.getPort()),remote?"remote":"share",false,intent->{if(!isFinishing()&&!isDestroyed())startActivity(intent);});
     }
     private void openPhone(ChatStore.Conversation conversation){
-        Uri uri=Uri.parse("http://"+conversation.peer.endpoint.getAddress().getHostAddress()+":"+PhoneRemoteAccess.portFor(conversation.peer.endpoint.getPort())+"/#remote");
-        startActivity(new Intent(this,RemoteActivity.class).setData(uri).putExtra("phone",true));
+        if(service==null){error("请先连接局域网");return;}
+        service.openTool(conversation.peer,PhoneRemoteAccess.portFor(conversation.peer.endpoint.getPort()),"remote",true,intent->{if(!isFinishing()&&!isDestroyed())startActivity(intent);});
     }
     private void sharing() {
         if(service==null||!service.online()){error("请先连接局域网");return;}
@@ -805,6 +829,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         port.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
         Switch autoConnect=settingSwitch("打开应用时恢复连接",prefs.getBoolean("auto_connect",true)); box.addView(autoConnect,new LinearLayout.LayoutParams(-1,-2));
         TextView reconnectHint=text("曾连接后，下次打开自动连接并查找历史联系人。主动断开后保持离线，需手动连接；不会开机自启。",12,MUTED); box.addView(reconnectHint);
+        Switch legacy=settingSwitch("允许旧版明文协议",prefs.getBoolean("allow_legacy_protocol",false));box.addView(legacy,new LinearLayout.LayoutParams(-1,-2));box.addView(text("默认关闭。仅旧设备聊天和附件使用明文；已配对设备不降级，共享和远控始终加密。",12,MUTED));
         settingHeading(box,"文件接收");
         Switch automatic=settingSwitch("自动接收文件",receivedStorage.automatic()); automatic.setContentDescription("自动接收文件"); box.addView(automatic,new LinearLayout.LayoutParams(-1,-2));
         TextView hint=text("开启后无需逐次确认，不会自动打开文件。仅用于可信局域网。\n目录选择立即生效，其他选项点击保存。",12,MUTED);hint.setLineSpacing(dp(3),1); box.addView(hint);
@@ -855,6 +880,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
             service.clearOffers(result->error(result.files==0?"没有可清理的发送缓存":"已撤销未接收的文件邀请，删除 "+result.files+" 个暂存副本，释放 "+size(result.bytes)));
         }));
         settingHeading(box,"故障诊断");
+        TextView connectionDetails=text(service==null?"尚未连接局域网":service.connectionDetails(),12,MUTED);selectable(connectionDetails);box.addView(connectionDetails,settingSpacing(0,12));
         Switch diagnosticSwitch=settingSwitch("记录故障诊断",prefs.getBoolean("diagnostics",false));box.addView(diagnosticSwitch,new LinearLayout.LayoutParams(-1,-2));
         box.addView(text("默认关闭，保存后生效。仅记 UTC 时间和事件码，不记聊天、身份、IP、URI 和路径；最多 128 KiB。关闭后保留，可手动清除。",12,MUTED));
         Diagnostics journal=new Diagnostics(this);
@@ -869,7 +895,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
             View backdrop=backgrounds.findViewById(backgrounds.getCheckedRadioButtonId());String backdropKey=backdrop==null?"orbits":backdrop.getTag().toString();
             if(backdropKey.equals("image")&&prefs.getString("background_image","").isEmpty()){dialog.getWindow().getDecorView().findViewWithTag("settings-tab:1").performClick();error("请先选择背景图片");return;}
             int nextSize=fontSize.getProgress()+14;boolean nextDark=follow.isChecked()?systemDark():dark.isChecked();String nextBgImage=prefs.getString("background_image","");
-            boolean saved=prefs.edit().putString("avatar",avatarValue[0]).putString("name",n).putString("group",g).putInt("port",p).putBoolean("auto_connect",autoConnect.isChecked()).putBoolean("diagnostics",diagnosticSwitch.isChecked()).putBoolean(ReceivedStorage.AUTO,automatic.isChecked()).putBoolean("follow_system_theme",follow.isChecked()).putBoolean("dark_mode",dark.isChecked()).putString("accent",accentKey).putInt("chat_font_size",nextSize).putString("chat_background",backdropKey).commit();
+            boolean saved=prefs.edit().putBoolean("allow_legacy_protocol",legacy.isChecked()).putString("avatar",avatarValue[0]).putString("name",n).putString("group",g).putInt("port",p).putBoolean("auto_connect",autoConnect.isChecked()).putBoolean("diagnostics",diagnosticSwitch.isChecked()).putBoolean(ReceivedStorage.AUTO,automatic.isChecked()).putBoolean("follow_system_theme",follow.isChecked()).putBoolean("dark_mode",dark.isChecked()).putString("accent",accentKey).putInt("chat_font_size",nextSize).putString("chat_background",backdropKey).commit();
             if(!saved){error("设置未保存，请检查设备存储空间");return;}if(service!=null){service.receiveSettingsChanged();service.profileSettingsChanged();}dialog.dismiss();
             boolean visualChanged=nextDark!=DARK||!accentKey.equals(initialAccent)||nextSize!=initialFontSize||!backdropKey.equals(initialBackground)||!nextBgImage.equals(initialBackgroundImage);
             if(visualChanged) {
@@ -1069,6 +1095,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
     }
     private Uri outgoingUri(LanNode.Message message,int index) {
         if(index<0||index>=message.localPaths.size())return null;
+        String origin=message.localPaths.get(index);if(origin.startsWith("uri:")){Uri uri=Uri.parse(origin.substring(4));if(!"content".equals(uri.getScheme()))return null;for(android.content.UriPermission permission:getContentResolver().getPersistedUriPermissions())if(permission.isReadPermission()&&permission.getUri().equals(uri))return uri;return null;}
         File file=new File(message.localPaths.get(index));if(!file.isFile())return null;
         try {return ReceivedFileProvider.uri(this,file,message.files.get(index).name);} catch(IllegalArgumentException e) {return null;}
     }
@@ -1150,8 +1177,13 @@ public final class MainActivity extends Activity implements ChatService.Observer
         try { startActivityForResult(intent,22); } catch(ActivityNotFoundException e) { error("系统没有可用的目录选择器"); }
     }
     private void pickFile() {
+        LinearLayout box=column();Dialog dialog=sheet("发送附件",box,null,null);fileAction(box,dialog,"选择文件（可多选）",this::pickDocuments);fileAction(box,dialog,"选择文件夹（保留目录）",()->{
+            if(service==null||!service.online()){error("请先连接局域网");return;}pickerPeer=selected;try{startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION|Intent.FLAG_GRANT_PREFIX_URI_PERMISSION),26);}catch(ActivityNotFoundException e){error("系统没有目录选择器");}
+        });
+    }
+    private void pickDocuments() {
         if(service==null||!service.online()) { error("请先连接局域网"); return; } if(service.busy()) { error("已有文件任务，请等待或取消"); return; }
-        pickerPeer=selected; Intent intent=new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*").addCategory(Intent.CATEGORY_OPENABLE).putExtra(Intent.EXTRA_ALLOW_MULTIPLE,true);
+        pickerPeer=selected; Intent intent=new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*").addCategory(Intent.CATEGORY_OPENABLE).putExtra(Intent.EXTRA_ALLOW_MULTIPLE,true).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
         try { startActivityForResult(intent,20); } catch(ActivityNotFoundException e) { error("系统没有可用的文件选择器"); }
     }
     private void export(File file,String name) {
@@ -1179,6 +1211,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
             try{new SharedFolderSettings(this).acquire(data.getData(),data.getFlags());}catch(java.io.IOException e){error(e.getMessage());return;}
             expected.shareFolder(data.getData(),success->{if(success&&!isFinishing()&&!isDestroyed()&&service==expected)sharing();});return;
         }
+        if(request==26){ChatStore.Conversation peer=conversation(pickerPeer);if(service==null||peer==null){error("联系人已失效");return;}try{getContentResolver().takePersistableUriPermission(data.getData(),Intent.FLAG_GRANT_READ_URI_PERMISSION);service.sendFolder(peer.peer,data.getData());}catch(RuntimeException e){error("目录授权失败："+e.getMessage());}return;}
         if(request==23) {
             try {
                 Uri uri=data.getData();try(android.os.ParcelFileDescriptor fd=getContentResolver().openFileDescriptor(uri,"r")){if(fd!=null&&fd.getStatSize()>20*1024*1024)throw new java.io.IOException("请选择不超过 20 MiB 的图片");}
@@ -1197,7 +1230,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         if(service==null) { error("连接服务尚未就绪，请重新选择文件"); return; }
         if(request==20) {
             ChatStore.Conversation peer=conversation(pickerPeer);
-            try { List<Uri> files=selectedFiles(data); if(peer!=null) service.sendFiles(peer.peer,files); else error("联系人已失效，请重新选择"); }
+            try { List<Uri> files=selectedFiles(data);if((data.getFlags()&Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)!=0)for(Uri uri:files)try{getContentResolver().takePersistableUriPermission(uri,Intent.FLAG_GRANT_READ_URI_PERMISSION);}catch(SecurityException ignored){/* 无持久权限的来源仍使用受限副本。 */}if(peer!=null) service.sendFiles(peer.peer,files); else error("联系人已失效，请重新选择"); }
             catch(IllegalArgumentException e) { error(e.getMessage()); }
         }
         if(request==21) { File file=new File(exportPath); if(file.isFile()&&file.getParentFile().equals(new File(getFilesDir(),"received"))) service.exportFile(file,data.getData()); else error("应用内文件已不存在"); }
@@ -1208,7 +1241,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
     static List<Uri> selectedFiles(Intent data) {
         LinkedHashSet<Uri> files=new LinkedHashSet<>(); ClipData clip=data.getClipData();
         if(clip!=null) {
-            if(clip.getItemCount()>20) throw new IllegalArgumentException("每批最多选择 20 个文件");
+            if(clip.getItemCount()>1000) throw new IllegalArgumentException("每批最多选择 1000 个文件");
             for(int i=0;i<clip.getItemCount();i++) files.add(clip.getItemAt(i).getUri());
         } else if(data.getData()!=null) files.add(data.getData());
         if(files.isEmpty()||files.contains(null)) throw new IllegalArgumentException("未取得有效文件，请重新选择");
@@ -1219,6 +1252,16 @@ public final class MainActivity extends Activity implements ChatService.Observer
     @android.annotation.SuppressLint("GestureBackNavigation")
     @Override public void onBackPressed() { if(selectingMessages)endMessageSelection();else if(!selected.isEmpty()) open(""); else super.onBackPressed(); }
     @Override public void error(String text) { if(!isFinishing()) Toast.makeText(this,text,Toast.LENGTH_LONG).show(); }
+    private boolean confirmSecurity(String name,String code) {
+        if(isFinishing()||isDestroyed()||!visible)return false;
+        CountDownLatch done=new CountDownLatch(1);AtomicBoolean accepted=new AtomicBoolean();
+        java.util.concurrent.atomic.AtomicReference<AlertDialog> prompt=new java.util.concurrent.atomic.AtomicReference<>();AtomicBoolean expired=new AtomicBoolean();
+        mainHandler().post(()->{if(isFinishing()||isDestroyed()||!visible||expired.get()){done.countDown();return;}AlertDialog dialog=new AlertDialog.Builder(this).setTitle("核对设备安全身份").setMessage("正在与「"+name+"」建立加密连接。\n\n请核对两台设备显示的配对码：\n"+code+"\n\n只有配对码一致才继续。").setNegativeButton("取消",(d,w)->done.countDown()).setPositiveButton("信任并继续",(d,w)->{if(!expired.get())accepted.set(true);done.countDown();}).setOnDismissListener(d->done.countDown()).create();prompt.set(dialog);dialog.show();});
+        try {if(!done.await(30,java.util.concurrent.TimeUnit.SECONDS))expired.set(true);}catch(InterruptedException e){expired.set(true);Thread.currentThread().interrupt();}
+        finally{mainHandler().post(()->{AlertDialog dialog=prompt.get();if(dialog!=null)dialog.dismiss();});}
+        return !expired.get()&&accepted.get()&&!isFinishing()&&!isDestroyed();
+    }
+    private Handler mainHandler(){return new Handler(Looper.getMainLooper());}
     private static String size(long value) { if(value>=1048576) return String.format(Locale.CHINA,"%.1f MB",value/1048576.0); if(value>=1024) return String.format(Locale.CHINA,"%.1f KB",value/1024.0); return value+" B"; }
     private void bindAvatar(TextView avatar,String id,String name,boolean online,String value) {
         String selectedAvatar=Protocol.normalizeAvatar(value);

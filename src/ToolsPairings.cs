@@ -52,6 +52,7 @@ namespace FeiqLight
             Save(next); return token;
         }
         internal void Clear() { Save(new List<Pairing>()); }
+        internal void ForgetFingerprint(string fingerprint){Save(items.Where(p=>!p.Scope.EndsWith("|tls="+fingerprint,StringComparison.Ordinal)).ToList());}
         private void Save(List<Pairing> next)
         {
             if (path != null)

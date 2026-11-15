@@ -31,14 +31,16 @@ final class ChatStore extends SQLiteOpenHelper {
         String displayName() { return baseDisplayName()+nameSuffix(); }
     }
     private static String displayBase(String name,String note) {return note==null||note.trim().isEmpty()?(name==null?"":name):note;}
-    ChatStore(Context context) { super(context,"chat.db",null,7); }
+    ChatStore(Context context) { super(context,"chat.db",null,9); }
     @Override public void onCreate(SQLiteDatabase db) {
         db.execSQL("CREATE TABLE peers (id TEXT PRIMARY KEY, endpoint TEXT, login TEXT, host TEXT, name TEXT, grp TEXT, preview TEXT DEFAULT '', time INTEGER DEFAULT 0, unread INTEGER DEFAULT 0, utf8 INTEGER DEFAULT 0, note TEXT DEFAULT '', pinned INTEGER DEFAULT 0, hidden INTEGER DEFAULT 0, conversation_number INTEGER NOT NULL DEFAULT 0)");
         db.execSQL("CREATE TABLE messages (id INTEGER PRIMARY KEY, peer TEXT, packet INTEGER, outgoing INTEGER, time INTEGER, text TEXT, state TEXT, files TEXT, local_files TEXT DEFAULT '[]', UNIQUE(peer,packet,outgoing))");
         db.execSQL("CREATE INDEX messages_peer_time ON messages(peer,time)");
         db.execSQL("ALTER TABLE peers ADD COLUMN device_id TEXT");
         db.execSQL("ALTER TABLE peers ADD COLUMN avatar TEXT");
+        db.execSQL("ALTER TABLE peers ADD COLUMN fingerprint TEXT");
         db.execSQL("CREATE TABLE deleted_messages(peer TEXT NOT NULL, packet INTEGER NOT NULL, outgoing INTEGER NOT NULL, PRIMARY KEY(peer,packet,outgoing))");
+        createTransfers(db);
     }
     @Override public void onUpgrade(SQLiteDatabase db,int oldVersion,int newVersion) {
         if(oldVersion<2) db.execSQL("ALTER TABLE peers ADD COLUMN utf8 INTEGER DEFAULT 0");
@@ -48,13 +50,27 @@ final class ChatStore extends SQLiteOpenHelper {
         if(oldVersion<5) { db.execSQL("ALTER TABLE peers ADD COLUMN conversation_number INTEGER NOT NULL DEFAULT 0"); db.execSQL("UPDATE peers SET conversation_number=rowid"); }
         if(oldVersion<6) db.execSQL("ALTER TABLE peers ADD COLUMN device_id TEXT");
         if(oldVersion<7 && newVersion>=7) db.execSQL("ALTER TABLE peers ADD COLUMN avatar TEXT");
+        if(oldVersion<8 && newVersion>=8) db.execSQL("ALTER TABLE peers ADD COLUMN fingerprint TEXT");
+        if(oldVersion<9 && newVersion>=9)createTransfers(db);
         if(oldVersion<7 && newVersion>=7) db.execSQL("CREATE TABLE deleted_messages(peer TEXT NOT NULL, packet INTEGER NOT NULL, outgoing INTEGER NOT NULL, PRIMARY KEY(peer,packet,outgoing))");
+    }
+    private static void createTransfers(SQLiteDatabase db){db.execSQL("CREATE TABLE transfer_states(task TEXT PRIMARY KEY, peer TEXT NOT NULL, packet INTEGER NOT NULL, percent INTEGER NOT NULL, state TEXT NOT NULL, time INTEGER NOT NULL)");}
+    static final class TransferState {final String key,state;final int percent;TransferState(String key,int percent,String state){this.key=key;this.percent=percent;this.state=state;}}
+    void transfer(String key,String peer,long packet,int percent,String state){
+        ContentValues values=new ContentValues();values.put("task",key);values.put("peer",peer);values.put("packet",packet);values.put("percent",percent);values.put("state",state);values.put("time",System.currentTimeMillis());
+        SQLiteDatabase db=getWritableDatabase();db.insertWithOnConflict("transfer_states",null,values,SQLiteDatabase.CONFLICT_REPLACE);db.execSQL("DELETE FROM transfer_states WHERE task NOT IN (SELECT task FROM transfer_states ORDER BY time DESC LIMIT 2000)");
+    }
+    List<TransferState> transfers(){
+        List<TransferState> result=new ArrayList<>();try(Cursor cursor=getReadableDatabase().rawQuery("SELECT task,percent,state FROM transfer_states ORDER BY time",null)){
+            while(cursor.moveToNext()){String state=cursor.getString(2);if(state.startsWith("发送中"))state="上次退出，等待对方续传";else if(state.startsWith("接收中")||state.startsWith("连接中"))state="上次退出 · 点击续传";result.add(new TransferState(cursor.getString(0),cursor.getInt(1),state));}
+        }return result;
     }
     void peer(LanNode.Peer p) {
         ContentValues v=new ContentValues(); v.put("id",p.id()); v.put("endpoint",p.endpoint.getAddress().getHostAddress()+":"+p.endpoint.getPort());
         v.put("login",p.login); v.put("host",p.host); v.put("name",p.name); v.put("grp",p.group); v.put("utf8",p.utf8?1:0);
         v.put("device_id",p.deviceId);
         if(p.avatar!=null) v.put("avatar",Protocol.normalizeAvatar(p.avatar));
+        if(p.fingerprint!=null) v.put("fingerprint",p.fingerprint);
         SQLiteDatabase db=getWritableDatabase(); if (db.update("peers",v,"id=?",new String[]{p.id()})==0) {
             v.put("conversation_number",DatabaseUtils.longForQuery(db,"SELECT COALESCE(MAX(conversation_number),0)+1 FROM peers",null));db.insertOrThrow("peers",null,v);
         }
@@ -97,6 +113,7 @@ final class ChatStore extends SQLiteOpenHelper {
             for(LanNode.Message message:selected) {
                 String[] key={peer,Long.toString(message.number),message.outgoing?"1":"0"};
                 if(db.delete("messages","peer=? AND packet=? AND outgoing=?",key)>0) {
+                    db.delete("transfer_states","peer=? AND packet=?",new String[]{peer,Long.toString(message.number)});
                     // 删除消息号与正文删除在同一事务里，重启后的重复包不能恢复记录。
                     db.execSQL("INSERT OR IGNORE INTO deleted_messages(peer,packet,outgoing) VALUES(?,?,?)",new Object[]{peer,message.number,message.outgoing?1:0});
                 }
@@ -115,17 +132,18 @@ final class ChatStore extends SQLiteOpenHelper {
     void remove(String id,boolean clear,boolean hide) {
         SQLiteDatabase db=getWritableDatabase();db.beginTransaction();
         try {
-            if(clear) { db.delete("messages","peer=?",new String[]{id});db.execSQL("UPDATE peers SET preview='',time=0 WHERE id=?",new Object[]{id}); }
+            if(clear) { db.delete("messages","peer=?",new String[]{id});db.delete("transfer_states","peer=?",new String[]{id});db.execSQL("UPDATE peers SET preview='',time=0 WHERE id=?",new Object[]{id}); }
             db.execSQL("UPDATE peers SET hidden=?,unread=0 WHERE id=?",new Object[]{hide?1:0,id});db.setTransactionSuccessful();
         } finally {db.endTransaction();}
     }
     List<Conversation> conversations() {
         List<Conversation> result=new ArrayList<>();
-        try (Cursor c=getReadableDatabase().rawQuery("SELECT endpoint,login,host,name,grp,preview,time,unread,utf8,note,pinned,hidden,conversation_number,id,device_id,avatar FROM peers ORDER BY pinned DESC,time DESC,name LIMIT 1000",null)) {
+        try (Cursor c=getReadableDatabase().rawQuery("SELECT endpoint,login,host,name,grp,preview,time,unread,utf8,note,pinned,hidden,conversation_number,id,device_id,avatar,fingerprint FROM peers ORDER BY pinned DESC,time DESC,name LIMIT 1000",null)) {
             while (c.moveToNext()) try {
                 Conversation item=new Conversation(); item.peer=new LanNode.Peer(LanNode.endpoint(c.getString(0)),c.getString(1),c.getString(2),c.getString(3),c.getString(4));
                 item.peer.conversationId=c.getString(13);item.peer.deviceId=Protocol.normalizeDeviceId(c.getString(14));
                 item.peer.avatar=Protocol.normalizeAvatar(c.getString(15));
+                item.peer.fingerprint=c.getString(16)!=null&&c.getString(16).matches("[0-9a-f]{64}")?c.getString(16):null;
                 item.preview=c.getString(5); item.time=c.getLong(6); item.unread=c.getInt(7); item.peer.utf8=c.getInt(8)!=0; item.note=c.getString(9);item.pinned=c.getInt(10)!=0;item.hidden=c.getInt(11)!=0;item.number=c.getLong(12);result.add(item);
             } catch (IOException ignored) { }
         }

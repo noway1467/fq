@@ -110,8 +110,9 @@ public final class SecurityAudit {
             send(good,node.port(),Protocol.ANSWER,"原接收者","peer");await(()->node.peers().size()==1,"未收到发现包");
             LanNode.Message record=node.sendMessage(node.peers().get(0),"文件占位检查",Collections.singletonList(file.toFile()));
             check(Arrays.equals(content,download(node.port(),record.number,receiver)),"攻击前合法下载失败");
+            await(()->connectionCount(node)==0,"前一合法下载连接未释放");
             try(SlowClients slow=new SlowClients(node.port(),4,false)){
-                Thread.sleep(700);check(download(node.port(),record.number,receiver).length==0,"没有成功填满附件服务名额");
+                await(()->connectionCount(node)==4,"慢连接未全部接入");check(download(node.port(),record.number,receiver).length==0,"没有成功填满附件服务名额");
                 Thread.sleep(5600);boolean recovered=Arrays.equals(content,download(node.port(),record.number,receiver));
                 System.out.println("EVIDENCE file_recovered_while_dripping="+recovered);check(recovered!=baseline,"慢附件请求总时限未生效或基线未复现");
             }
@@ -119,6 +120,7 @@ public final class SecurityAudit {
             check(inbox.errors.isEmpty(),inbox.errors.toString());
         }
     }
+    private static int connectionCount(LanNode node){try{java.lang.reflect.Field gate=LanNode.class.getDeclaredField("gate"),connections=LanNode.class.getDeclaredField("connections");gate.setAccessible(true);connections.setAccessible(true);synchronized(gate.get(node)){return ((Set<?>)connections.get(node)).size();}}catch(ReflectiveOperationException error){throw new IllegalStateException(error);}}
     private static void slowHttp()throws Exception {
         try(ToolsHttp server=new ToolsHttp(0,true,(request,response)->response.json("{\"ok\":true}",""))){
             check(httpAvailable(server.port()),"攻击前 HTTP 服务不可用");

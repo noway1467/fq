@@ -358,6 +358,7 @@ namespace FeiqLight
             m.ContentWidth = Math.Min(Math.Max(content, Dp(24)), m.TextMax);
             int height = PadTop + m.TextSize.Height;
             if (cards) height += (display.Length > 0 ? Dp(6) : Dp(1)) + r.Transfers.Sum(f => CardMedia(f) ? MediaHeight + Caption + Dp(4) : FileRow) + Dp(4) * (r.Transfers.Length - 1);
+            if(cards&&r.Transfers.Length>1)height+=Dp(20);
             if (media.Length > 0) height += (display.Length > 0 ? Dp(6) : Dp(1)) + media.Length * MediaHeight + Dp(6) * (media.Length - 1);
             if (!m.InlineStamp) height += Dp(3) + StampHeight;
             m.Height = height + PadBottom; m.Width = m.ContentWidth + PadX * 2;
@@ -504,6 +505,11 @@ namespace FeiqLight
             else if (!String.IsNullOrEmpty(m.Text)) TextRenderer.DrawText(g, m.Text, Font, new Rectangle(origin, new Size(m.TextMax, m.TextSize.Height + Dp(2))), Theme.Ink, MessageFormat);
             int y = origin.Y + m.TextSize.Height + (m.TextSize.Height > 0 ? Dp(6) : Dp(1));
             Color meta = outgoing ? Theme.OutgoingMeta : Theme.Muted, back = outgoing ? Theme.Outgoing : Theme.Surface;
+            if(record.Transfers!=null&&record.Transfers.Length>1){
+                double total=record.Transfers.Sum(f=>(double)Math.Max(1,f.Size)),done=record.Transfers.Sum(f=>Math.Max(1,f.Size)*Math.Max(0,Math.Min(100,f.Percent))/100.0);
+                int saved=record.Transfers.Count(f=>f.Status=="已保存"||f.Status=="对方已校验保存");
+                TextRenderer.DrawText(g,"总进度 "+(int)(done*100/total)+"% · 已保存 "+saved+" / "+record.Transfers.Length,Theme.Small,new Rectangle(origin.X,y,m.ContentWidth,Dp(20)),meta,Tight|TextFormatFlags.EndEllipsis);y+=Dp(20);
+            }
             if (record.Transfers != null && record.Transfers.Length > 0)
                 foreach (FileTransferState file in record.Transfers)
                 {

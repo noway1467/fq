@@ -19,7 +19,8 @@ import static org.robolectric.Shadows.shadowOf;
 @Config(sdk=35,qualifiers="w800dp-h360dp-land")
 public final class RemoteActivityTest {
     @Test public void onlyAcceptsExplicitIpv4RemoteTargets(){
-        assertTrue(RemoteActivity.validTarget(Uri.parse("http://192.168.1.5:2426/#remote")));
+        assertFalse(RemoteActivity.validTarget(Uri.parse("http://192.168.1.5:2426/#remote")));
+        assertTrue(RemoteActivity.validTarget(Uri.parse("http://127.0.0.1:2426/#remote")));
         for(String value:new String[]{"file:///data/secret","http://example.org:2426/#remote","http://127.0.0.1:80/#remote","http://user@127.0.0.1:2426/#remote","http://127.0.0.1:2426/file#remote","http://999.0.0.1:2426/#remote","http://127.0.0.1:2426/?next=bad#remote"})assertFalse(value,RemoteActivity.validTarget(Uri.parse(value)));
     }
     @Test public void defaultsLandscapeRotatesWithoutReplacingWebViewAndRestrictsCapabilities(){

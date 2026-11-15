@@ -18,6 +18,7 @@ public final class AndroidInterop {
         };
         try(LanNode node=new LanNode(port,true,"android-test","JVM-Android-Core","安卓测试😀","互通验证",listener)) {
             node.setDeviceId("0123456789abcdef0123456789abcdef");
+            if(args.length>4&&args[4].equals("secure"))node.configureSecurity(root.resolve("android-security").toFile(),(name,code)->{System.out.println("PAIR "+code);return true;});
             node.setAvatar("builtin:5");
             node.start(); node.probe(LanNode.endpoint("127.0.0.1:"+windows)); LanNode.Peer peer=null;
             for(int i=0;i<500&&peer==null;i++) { for(LanNode.Peer p:node.peers()) if(p.login.equals("windows-test")) peer=p; Thread.sleep(10); }
@@ -25,6 +26,8 @@ public final class AndroidInterop {
             if(peer.deviceId==null || !peer.id().startsWith("device:"))throw new AssertionError("Windows 稳定身份未互通");
             if(!peer.name.equals("Windows 测试👩🏽‍💻")) throw new AssertionError("Windows 昵称乱码");
             if(!"builtin:15".equals(peer.avatar))throw new AssertionError("Windows 内置头像未同步");
+            // 人工身份核对不属于已连接后的空闲消息延迟；先完成首次 TLS 配对。
+            if(args.length>4&&args[4].equals("secure"))node.verifyPeer(peer);
             for(int i=0;i<5;i++) {
                 Thread.sleep(150);long started=System.nanoTime();node.sendMessage(peer,"0",Collections.emptyList());
                 LanNode.Message echo=incoming.poll(2,TimeUnit.SECONDS),confirm=updates.poll(2,TimeUnit.SECONDS);

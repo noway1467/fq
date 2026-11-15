@@ -9,6 +9,7 @@ final class RequestInput extends FilterInputStream {
     private final Socket socket;
     private long deadline;
     RequestInput(Socket socket)throws IOException {super(socket.getInputStream());this.socket=socket;}
+    RequestInput(Socket socket,InputStream source)throws IOException {super(source);this.socket=socket;}
     void begin(int milliseconds){deadline=System.nanoTime()+TimeUnit.MILLISECONDS.toNanos(milliseconds);}
     private void beforeRead()throws IOException {
         long remaining=TimeUnit.NANOSECONDS.toMillis(deadline-System.nanoTime());

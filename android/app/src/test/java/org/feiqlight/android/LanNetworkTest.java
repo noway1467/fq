@@ -247,16 +247,15 @@ public final class LanNetworkTest {
         assertFalse(route.allows(InetAddress.getByName("192.168.43.2")));
         assertFalse(route.allows(InetAddress.getByName("172.20.10.2")));
     }
-    @Test public void vpnWithoutBindablePhysicalNetworkCannotCarryHotspotTraffic() throws Exception {
+    @Test public void vpnWithHotspotKeepsSubnetRoutingAndNeverBindsVpn() throws Exception {
         ConnectivityManager cm=(ConnectivityManager)RuntimeEnvironment.getApplication().getSystemService(Context.CONNECTIVITY_SERVICE);shadowOf(cm).clearAllNetworks();
         Network vpn=add(cm,951,NetworkCapabilities.TRANSPORT_VPN,"10.99.0.2",24);
         LanNetwork route=new LanNetwork(cm,()->Collections.singletonList(iface("ap0",true,false,false,false,"192.168.43.1",24)));
-        try {route.networkKey();fail("没有可绑定物理 Network 时不能放行 VPN 默认路由");}
-        catch(IOException expected){assertTrue(expected.getMessage().contains("VPN"));}
-        try {route.allows(InetAddress.getByName("192.168.43.2"));fail("热点子网流量仍可能进入 VPN");}
-        catch(IOException expected){assertTrue(expected.getMessage().contains("VPN"));}
+        assertNotNull(route.networkKey());assertTrue(route.allows(InetAddress.getByName("192.168.43.2")));
+        assertFalse(route.allows(InetAddress.getByName("10.99.0.3")));
+        try(RecordingSocket tcp=new RecordingSocket()){route.bind(tcp,InetAddress.getByName("192.168.43.2"));assertEquals(new InetSocketAddress("192.168.43.1",0),tcp.source);}
         try(DatagramSocket udp=new DatagramSocket(null)) {
-            try {route.bind(udp);fail("VPN 热点回退仍放行 UDP");}catch(IOException expected){assertTrue(expected.getMessage().contains("VPN"));}
+            route.bind(udp);assertEquals(0,shadowOf(vpn).boundSocketCount());
             Network wifi=add(cm,952,NetworkCapabilities.TRANSPORT_WIFI,"192.168.1.2",24);route.changed();route.bind(udp);
             assertTrue(shadowOf(wifi).isSocketBound(udp));assertEquals(0,shadowOf(vpn).boundSocketCount());
         }

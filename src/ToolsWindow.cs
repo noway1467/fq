@@ -22,10 +22,10 @@ namespace FeiqLight
         private string restoreError;
         [DllImport("user32.dll", SetLastError = true)] private static extern bool RegisterHotKey(IntPtr window, int id, uint modifiers, uint key);
         [DllImport("user32.dll")] private static extern bool UnregisterHotKey(IntPtr window, int id);
-        internal ToolsWindow(int port, bool loopback, string root = null)
+        internal ToolsWindow(int port, bool loopback, string root = null,SecureIdentity security=null)
         {
             Text = "共享与远控"; ClientSize = new Size(840, 740); MinimumSize = new Size(680, 620); UseSecondaryChrome();
-            service = new ToolsService(ToolsHttp.PortFor(port), loopback, root); service.Capture = desktop.Capture; service.Displays = desktop.Displays; service.Input = desktop.Apply; service.ReleaseInput = desktop.Release; service.ConfirmRemoteDevice = Confirm;
+            service = new ToolsService(ToolsHttp.PortFor(port), loopback, root,security); service.Capture = desktop.Capture; service.Displays = desktop.Displays; service.Input = desktop.Apply; service.ReleaseInput = desktop.Release; service.ConfirmRemoteDevice = Confirm;
             TableLayoutPanel body = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 7, Padding = new Padding(24, 16, 24, 12), Margin = Padding.Empty };
             body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             foreach (int height in new[] { 36, 80, -1, 52, 24, 152, 44 }) body.RowStyles.Add(new RowStyle(height < 0 ? SizeType.Percent : SizeType.Absolute, height < 0 ? 100 : height));
@@ -74,6 +74,7 @@ namespace FeiqLight
             UpdateState();
         }
         internal void PrepareRestoredWindow() { if (!IsHandleCreated) CreateHandle(); }
+        internal void NetworkReset(){service.NetworkReset();}
         protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); hotkey = RegisterHotKey(Handle, 941, 0x4003, 0x7b); }
         private void ChangeSettings(Action change)
         {

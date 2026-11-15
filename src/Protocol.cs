@@ -13,6 +13,8 @@ namespace FeiqLight
         public string Login;
         public string DeviceId;
         public string Avatar;
+        public string Fingerprint;
+        public int ReplyPort;
         public string Host;
         public uint Command;
         public string Body;
@@ -68,7 +70,7 @@ namespace FeiqLight
             } catch(FormatException) { }
             return null;
         }
-        public static byte[] Encode(long number, string login, string host, uint command, string body, string extra, string deviceId = null, string avatar = null)
+        public static byte[] Encode(long number, string login, string host, uint command, string body, string extra, string deviceId = null, string avatar = null, string fingerprint = null)
         {
             if (number < 0 || Field(login).Length > 128 || Field(host).Length > 128) throw new ArgumentException("无效的报文头。");
             if ((body ?? "").IndexOf('\0') >= 0 || (extra ?? "").IndexOf('\0') >= 0) throw new ArgumentException("消息不能包含空字符。");
@@ -80,6 +82,7 @@ namespace FeiqLight
                 string normalized = NormalizeAvatar(avatar); if(normalized == null) throw new ArgumentException("头像数据无效。");
                 wire += "FQAV=" + normalized + "\0";
             }
+            if (fingerprint != null) wire += "FQSEC=" + fingerprint + "\0";
             byte[] result;
             try { result = encoding.GetBytes(wire); }
             catch (EncoderFallbackException) { throw new ArgumentException((command & Utf8) != 0 ? "文本包含不完整的 Unicode 字符，请重新输入。" : "对方未声明 UTF-8 支持，当前文字或文件名无法无损发送，请刷新联系人或更换内容。"); }
@@ -104,6 +107,8 @@ namespace FeiqLight
             packet = new Packet { Number = number, Login = parts[2], Host = parts[3], Command = command, Body = body[0], Extra = body.Length > 1 ? body[1] : "" };
             packet.DeviceId = body.Length > 2 && body[2].StartsWith("FQID=", StringComparison.Ordinal) ? NormalizeDeviceId(body[2].Substring(5)) : null;
             for(int i = 2; i < body.Length; i++) if(body[i].StartsWith("FQAV=", StringComparison.Ordinal)) packet.Avatar = NormalizeAvatar(body[i].Substring(5));
+            for(int i = 2; i < body.Length; i++) if(body[i].StartsWith("FQSEC=", StringComparison.Ordinal)) { string value=body[i].Substring(6); if(value.Length==64&&value.All(c=>c>='0'&&c<='9'||c>='a'&&c<='f')) packet.Fingerprint=value; }
+            for(int i=2;i<body.Length;i++)if(body[i].StartsWith("FQPORT=",StringComparison.Ordinal)){int port;if(Int32.TryParse(body[i].Substring(7),out port)&&port>=1024&&port<=65535)packet.ReplyPort=port;}
             return packet.Login.Length <= 128 && packet.Host.Length <= 128;
         }
         public static bool SafeFileName(string name)
@@ -117,8 +122,9 @@ namespace FeiqLight
         }
         public static string FileList(IEnumerable<Attachment> files)
         {
-            return String.Join("", files.Select(f => f.Id.ToString(CultureInfo.InvariantCulture) + ":" + f.Name.Replace(":", "::") + ":" + f.Size.ToString("x") + ":" + f.Modified.ToString("x") + ":1:\a"));
+            return String.Join("", files.Select(f => f.Id.ToString(CultureInfo.InvariantCulture) + ":" + f.Name.Replace(":", "::") + ":" + f.Size.ToString("x") + ":" + f.Modified.ToString("x") + ":1:" + (f.Sha256??"") + ":"+(f.RelativePath==null?"":Convert.ToBase64String(StrictUtf8.GetBytes(f.RelativePath)))+":\a"));
         }
+        public static bool SafeRelativePath(string value){return value!=null&&value.Length<=2048&&value.Split('/').Length<=32&&value.Split('/').All(SafeFileName);}
         public static List<Attachment> ParseFiles(string text)
         {
             List<Attachment> result = new List<Attachment>();
@@ -130,7 +136,9 @@ namespace FeiqLight
                 if (!Int64.TryParse(f[3], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out time)) continue;
                 if (!UInt32.TryParse(f[4], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out attr) || (attr & 255) != 1) continue;
                 if (result.Any(x => x.Id == id)) continue;
-                result.Add(new Attachment { Id = id, Name = f[1], Size = size, Modified = time });
+                string hash=f.Length>5?f[5]:""; if(hash.Length>0&&(hash.Length!=64||!hash.All(c=>c>='0'&&c<='9'||c>='a'&&c<='f')))continue;
+                string relative=null;if(f.Length>6&&f[6].Length>0){try{relative=StrictUtf8.GetString(Convert.FromBase64String(f[6]));}catch(FormatException){continue;}catch(DecoderFallbackException){continue;}if(!SafeRelativePath(relative)||relative.Split('/').Last()!=f[1])continue;}
+                result.Add(new Attachment { Id = id, Name = f[1], Size = size, Modified = time, Sha256=hash.Length==0?null:hash,RelativePath=relative });
             }
             return result;
         }

@@ -4,6 +4,7 @@ using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
+using System.Linq;
 using System.Windows.Forms;
 
 namespace FeiqLight
@@ -18,6 +19,7 @@ namespace FeiqLight
             {
                 int port = 2425; bool loopback = false, autoStart = false;
                 string root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FeiqLight"), name = null, peerAddress = null;
+                string[] shared=null;
                 for (int i = 0; i < args.Length; i++)
                 {
                     if (args[i] == "--loopback") loopback = true;
@@ -26,14 +28,16 @@ namespace FeiqLight
                     else if (args[i] == "--profile" && i + 1 < args.Length) root = args[++i];
                     else if (args[i] == "--name" && i + 1 < args.Length) name = args[++i];
                     else if (args[i] == "--peer" && i + 1 < args.Length) peerAddress = args[++i];
+                    else if(args[i]=="--send"){shared=args.Skip(i+1).ToArray();break;}
                     else throw new ArgumentException("未知参数：" + args[i]);
                 }
                 bool created;
+                if(shared!=null)WindowsShare.Enqueue(root,shared);
                 string profileKey;
                 using (SHA256 sha = SHA256.Create()) profileKey = BitConverter.ToString(sha.ComputeHash(Encoding.UTF8.GetBytes(Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar).ToUpperInvariant()))).Replace("-", "");
                 using (Mutex instance = new Mutex(true, "Local\\FeiqLight-Port-" + port, out created))
                 {
-                    if (!created) { if (!autoStart) Notice("已在运行", "此端口已被占用，请从托盘打开现有窗口。"); return; }
+                    if (!created) { if (!autoStart&&shared==null) Notice("已在运行", "此端口已被占用，请从托盘打开现有窗口。"); return; }
                     bool profileCreated;
                     using (Mutex profileLock = new Mutex(true, "Local\\FeiqLight-Profile-" + profileKey, out profileCreated))
                     {
@@ -52,6 +56,7 @@ namespace FeiqLight
                             {
                                 // 通信生命周期不依赖窗口 Shown；隐藏启动或托盘运行也必须在线。
                                 main.PrepareNetworkCallbacks();
+                                network.ConfigureSecurity(store.Root, main.ConfirmSecurity);
                                 network.Start();
                                 if (peerAddress != null) network.Probe(AddressDialog.Parse(peerAddress));
                             }
