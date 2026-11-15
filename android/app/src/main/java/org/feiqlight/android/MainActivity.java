@@ -448,8 +448,8 @@ public final class MainActivity extends Activity implements ChatService.Observer
                     Uri sentUri=outgoingUri(m,fileIndex);
                     if(sentUri!=null&&MediaPreview.supported(f.name)&&previewCount++<24)
                         bubble.addView(media.thumbnail(sentUri,f.name,Math.min(dp(260),maxWidth-dp(35)),()->openFile(sentUri,f.name,false),()->sentFileActions(sentUri,f.name)),bubble.getChildCount()-1);
-                    attachment.setContentDescription(f.name+(sentUri==null?"，发送副本已清理":"，文件操作"));
-                    attachment.setOnClickListener(v->{if(sentUri!=null)sentFileActions(sentUri,f.name);else error("发送副本已清理，请重新选择原文件");});
+                    attachment.setContentDescription(f.name+(sentUri==null?"，文件已删除或不可用":"，文件操作"));
+                    attachment.setOnClickListener(v->sentFileActions(sentUri,f.name));
                     attachment.setOnLongClickListener(v->{sentFileActions(sentUri,f.name);return true;});
                 } else if(conversation!=null) {
                     File saved=service.receivedFile(conversation.peer,m.number,f);
@@ -510,6 +510,8 @@ public final class MainActivity extends Activity implements ChatService.Observer
     }
     private void addFileProgress(LinearLayout bubble,TextView attachment,LanNode.Message message,Protocol.Attachment file,ChatStore.Conversation conversation,int maxWidth) {
         String peer=selected;ChatService source=service;
+        int fileIndex=message.files.indexOf(file);
+        boolean outgoingUnavailable=message.outgoing&&fileIndex<message.localPaths.size()&&outgoingUri(message,fileIndex)==null;
         TextView label=text("",12,MUTED);label.setMaxLines(2);label.setMinHeight(dp(22));label.setEllipsize(android.text.TextUtils.TruncateAt.END);
         int width=Math.min(dp(260),maxWidth-dp(35));bubble.addView(label,new LinearLayout.LayoutParams(width,-2));
         ProgressBar bar=new ProgressBar(this,null,android.R.attr.progressBarStyleHorizontal);bar.setMax(100);bar.setIndeterminate(false);
@@ -522,6 +524,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
             if(!message.outgoing&&conversation!=null) {File local=source.receivedFile(conversation.peer,message.number,file);saved=local.isFile()||receivedStorage.saved(local)!=null;}
             int percent=progress!=null?progress.percent:saved?100:0;
             String state=progress!=null?progress.state:message.outgoing?(source.offering(peer,message.number,file.id)?"等待对方接收":"历史邀请 · 无活动传输"):saved?"已保存":"待接收 · 点击接收";
+            if(outgoingUnavailable)state="文件已删除或不可用";
             String rate=progress!=null&&(state.equals("发送中")||state.startsWith("接收中"))?" · "+size((long)progress.bytesPerSecond)+"/s":"";
             label.setText(percent+"%"+rate+" · "+state);bar.setProgress(percent);
             bar.setContentDescription(file.name+"，"+label.getText());
@@ -1165,6 +1168,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
     private void sentFileActions(Uri uri,String name) {
         LinearLayout options=column();Dialog dialog=sheet(name,options,null,null);
         if(uri!=null){fileAction(options,dialog,"打开文件",()->openFile(uri,name,false));fileAction(options,dialog,"打开方式…",()->openFileWith(uri,name,false,true));fileAction(options,dialog,"分享文件",()->openFile(uri,name,true));}
+        else options.addView(text("文件已删除或读取授权已失效，消息记录仍可删除。",14,MUTED));
         fileAction(options,dialog,"复制文件名",()->copyText("文件名",name));
     }
     // 先说明删什么、留什么再确认；没有可清理的文件直接提示，完成后报告实际结果，不让按钮“点了没反应”。
@@ -1190,6 +1194,8 @@ public final class MainActivity extends Activity implements ChatService.Observer
             fileAction(options,dialog,"打开方式…",()->openFileWith(uri,file.name,false,true));
             fileAction(options,dialog,"分享文件",()->openFile(uri,file.name,true));
             fileAction(options,dialog,"查看保存位置",()->showFileLocation(cached));
+            ChatService source=service;
+            fileAction(options,dialog,"删除本机文件",()->confirm("删除这个文件？",file.name+"\n将删除应用内副本"+(exported==null?"":"和保存目录中的对应文件")+"，聊天记录与对方文件保留。此操作无法撤销。","删除文件",()->{if(service==source)source.deleteReceivedFile(peer,packet,file);}));
             if(cached.isFile()) {
                 fileAction(options,dialog,"另存为…",()->export(cached,file.name));
                 if(receivedStorage.tree()!=null) fileAction(options,dialog,"保存到设置目录 / 重试",()->{ if(service!=null) service.saveToFolder(cached,file.name); });

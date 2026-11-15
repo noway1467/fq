@@ -35,6 +35,24 @@ final class ReceivedStorage {
         settings().edit().putString(TREE,uri.toString()).apply();
     }
     void useInternal() { settings().edit().remove(TREE).apply(); }
+    void delete(File file) throws IOException {
+        File received=new File(context.getFilesDir(),"received").getCanonicalFile();
+        if(!received.equals(file.getCanonicalFile().getParentFile())||file.isDirectory())throw new IOException("只能删除已接收的单个文件");
+        Uri document=saved(file),folder=savedTree(file);
+        if(document!=null) {
+            if(folder==null||!Objects.equals(folder.getAuthority(),document.getAuthority())||!DocumentsContract.isDocumentUri(context,document))throw new IOException("保存位置无效，未删除文件");
+            ContentResolver resolver=context.getContentResolver();
+            try(Cursor cursor=resolver.query(document,new String[]{DocumentsContract.Document.COLUMN_MIME_TYPE},null,null)) {
+                if(cursor==null)throw new IOException("无法检查保存目录中的文件，请重新授权后重试");
+                if(cursor.moveToFirst()) {
+                    if(DocumentsContract.Document.MIME_TYPE_DIR.equals(cursor.getString(0)))throw new IOException("不能通过附件入口删除文件夹");
+                    if(!DocumentsContract.deleteDocument(resolver,document))throw new IOException("保存目录中的文件未能删除，应用内副本已保留");
+                }
+            }catch(SecurityException e){throw new IOException("保存目录授权已失效，应用内副本已保留，请重新授权后重试",e);}
+            if(!locations().edit().remove(file.getName()).remove(file.getName()+".tree").commit())throw new IOException("保存目录中的文件已删除，但位置记录未能更新，请重试");
+        }
+        java.nio.file.Files.deleteIfExists(file.toPath());
+    }
     static String mime(String name) {
         String lower=name.toLowerCase(Locale.ROOT);
         if(lower.endsWith(".apk"))return "application/vnd.android.package-archive";

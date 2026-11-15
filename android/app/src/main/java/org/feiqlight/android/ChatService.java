@@ -84,8 +84,10 @@ public final class ChatService extends Service {
     static final class FileProgress {
         final int percent; final String state; final LanNode.Transfer task;
         final double bytesPerSecond;
-        FileProgress(int percent,String state,LanNode.Transfer task) {this(percent,state,0,task);}
-        FileProgress(int percent,String state,double bytesPerSecond,LanNode.Transfer task) {this.percent=percent;this.state=state;this.bytesPerSecond=bytesPerSecond;this.task=task;}
+        final boolean live;
+        FileProgress(int percent,String state,LanNode.Transfer task) {this(percent,state,0,task,false);}
+        FileProgress(int percent,String state,double bytesPerSecond,LanNode.Transfer task) {this(percent,state,bytesPerSecond,task,true);}
+        private FileProgress(int percent,String state,double bytesPerSecond,LanNode.Transfer task,boolean live) {this.percent=percent;this.state=state;this.bytesPerSecond=bytesPerSecond;this.task=task;this.live=live;}
     }
     private final LinkedHashMap<String,FileProgress> fileProgress=new LinkedHashMap<>();
     private boolean transferNotificationQueued;
@@ -271,7 +273,8 @@ public final class ChatService extends Service {
     void deleteMessages(String peer,List<LanNode.Message> messages,Consumer<Boolean> done) {
         boolean pending=messages.stream().anyMatch(message->waiting.values().stream().anyMatch(r->!message.outgoing&&r.peer.id().equals(peer)&&r.packet==message.number)||message.files.stream().anyMatch(file->{
             FileProgress progress=progress(peer,message.number,file.id,message.outgoing);
-            return (message.outgoing&&offering(peer,message.number,file.id)) || (progress!=null&&progress.state.contains("中")&&!progress.state.contains("中断")&&progress.percent<100);
+            return progress!=null&&progress.live&&progress.state.contains("中")&&!progress.state.contains("中断")&&progress.percent<100
+                &&(message.outgoing?offering(peer,message.number,file.id):progress.task!=null&&progress.task==transfer&&busy());
         }));
         if(pending){showError("请先完成或拒绝选中消息的文件任务，再删除记录");done.accept(false);return;}
         List<LanNode.Message> selected=new ArrayList<>(messages);
@@ -661,6 +664,13 @@ public final class ChatService extends Service {
         transferStatus=""; changed();
     }
     void saveToFolder(File file,String name) { transferJob(task->storage.save(file,name,task)); }
+    void deleteReceivedFile(LanNode.Peer peer,long packet,Protocol.Attachment file) {
+        File local=receivedFile(peer,packet,file);
+        transferJob(task->{
+            checkTransfer(task);storage.delete(local);
+            main.post(()->{if(!stopped){waiting.remove(local.getName());fileProgress(peer.id(),packet,file.id,false,0,"本机文件已删除",null);changed();}});
+        },()->{},"文件已删除，消息记录保留","已取消删除");
+    }
     void reject(LanNode.Peer peer,long packet) {
         if(busy()) { showError("请先取消当前文件任务"); return; }
         waiting.values().removeIf(r->r.peer.id().equals(peer.id())&&r.packet==packet);

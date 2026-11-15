@@ -85,6 +85,7 @@ namespace FeiqLight
             };
             history.ForwardRequested += delegate(ChatRecord record) { main.Forward(record); };
             history.DeleteRequested += DeleteMessages;
+            history.DeleteFileRequested += (record,path)=>main.DeleteReceivedFile(peer,record,path);
             history.Dock = DockStyle.Fill; history.Margin = Padding.Empty; middle.Controls.Add(history);
             dropOverlay.Dock = DockStyle.Fill; middle.Controls.Add(dropOverlay); dropOverlay.BringToFront();
             drawer = new TableLayoutPanel { Dock = DockStyle.Right, Width = 292, ColumnCount = 1, RowCount = 4, Padding = new Padding(16, 14, 16, 12), Margin = Padding.Empty, BackColor = Theme.Surface, Visible = false };
@@ -141,7 +142,7 @@ namespace FeiqLight
             try { var records = store.History(peer.Id, 150).Select(record => record.Outgoing ? network.OutgoingRecord(peer.Id, record.Packet) ?? record : record).ToList(); history.SetRecords(records); editor.Text = store.LoadDraft(peer.Id);
                 foreach(ChatRecord record in records.Where(r=>!r.Outgoing))foreach(FileTransferState file in record.Transfers??new FileTransferState[0]) {
                     if(files.Items.Count>=1000)break;
-                    if(file.Status=="已拒绝"||!String.IsNullOrEmpty(file.LocalPath)||!SecureIdentity.ValidFingerprint(file.Sha256))continue;
+                    if(file.Status=="已拒绝"||file.Status=="本机文件已删除"||!String.IsNullOrEmpty(file.LocalPath)||!SecureIdentity.ValidFingerprint(file.Sha256))continue;
                     file.Status="已恢复 · 点击续传";
                     files.Items.Add(new ReceivedFile{Packet=record.Packet,Record=record,File=new Attachment{Id=file.Id,Name=file.Name,Size=file.Size,Modified=file.Modified,Sha256=file.Sha256,RelativePath=file.RelativePath},AutomaticPending=false,Status="已恢复 · 点击续传"});
                 }

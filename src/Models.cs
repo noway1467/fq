@@ -488,6 +488,15 @@ namespace FeiqLight
                 finally { if (File.Exists(temporary)) File.Delete(temporary); }
             }
         }
+        internal void DeleteReceivedFile(ChatRecord record,string path)
+        {
+            if(record.Outgoing||!Path.IsPathRooted(path)||!record.GetLocalFiles().Any(p=>String.Equals(Path.GetFullPath(p),Path.GetFullPath(path),StringComparison.OrdinalIgnoreCase)))throw new IOException("只能删除这条消息中已接收的本机文件。");
+            if(Directory.Exists(path))throw new IOException("不能通过附件入口删除文件夹。");
+            File.Delete(path);
+            record.LocalFiles=record.GetLocalFiles().Where(p=>!String.Equals(Path.GetFullPath(p),Path.GetFullPath(path),StringComparison.OrdinalIgnoreCase)).ToArray();
+            foreach(FileTransferState file in record.Transfers??new FileTransferState[0])if(!String.IsNullOrEmpty(file.LocalPath)&&String.Equals(Path.GetFullPath(file.LocalPath),Path.GetFullPath(path),StringComparison.OrdinalIgnoreCase)){file.LocalPath=null;file.Status="本机文件已删除";file.Percent=0;}
+            Append(record);
+        }
         private static string RecordKey(ChatRecord record) { return record.Outgoing + ":" + record.Packet; }
         private HashSet<string> DeletedKeys(string peerId)
         {

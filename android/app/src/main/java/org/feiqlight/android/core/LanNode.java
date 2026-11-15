@@ -189,8 +189,14 @@ public final class LanNode implements AutoCloseable {
         File saved=new File(dataRoot,"transfer-offers.dat");if(!saved.isFile())return;if(saved.length()>8*1024*1024)throw new IOException("文件任务记录过大");
         try(DataInputStream in=new DataInputStream(new FileInputStream(saved))){int format=in.readInt();if(format!=1&&format!=2)throw new IOException("文件任务版本不支持");int count=in.readInt();if(count<0||count>1000)throw new IOException("文件任务数量无效");
             for(int i=0;i<count;i++){Offer o=new Offer();o.packet=in.readLong();o.id=in.readInt();String origin=in.readUTF();o.size=in.readLong();o.modified=in.readLong();long until=in.readLong();o.deviceId=in.readUTF();o.fingerprint=in.readUTF();o.sha256=in.readUTF();o.peer=new Peer(endpoint(in.readUTF()),in.readUTF(),in.readUTF(),in.readUTF(),in.readUTF());o.peer.conversationId=in.readUTF();o.peer.deviceId=o.deviceId;o.peer.fingerprint=o.fingerprint;o.address=o.peer.endpoint.getAddress();
-                if(format==2&&origin.startsWith("uri:")){if(sourceResolver==null)continue;try{o.source=sourceResolver.resolve(origin.substring(4));}catch(IOException e){listener.error("历史文件来源不可用："+e.getMessage());continue;}}else o.file=new File(origin);
-                if(until<=System.currentTimeMillis()||!security.isTrusted(o.deviceId,o.fingerprint)||!SecureIdentity.validFingerprint(o.sha256)||!sourceUnchanged(o))continue;
+                if(until<=System.currentTimeMillis()||!security.isTrusted(o.deviceId,o.fingerprint)||!SecureIdentity.validFingerprint(o.sha256))continue;
+                try {
+                    if(format==2&&origin.startsWith("uri:")){if(sourceResolver==null)continue;o.source=sourceResolver.resolve(origin.substring(4));}else o.file=new File(origin);
+                    if(!sourceUnchanged(o))throw new IOException("历史文件已改变或删除");
+                }catch(IOException e){
+                    // 历史附件失效只更新对应卡片，不能在每次启动时弹错或阻止其他任务恢复。
+                    listener.fileProgress(o.peer,o.packet,o.id,0,"文件已删除或不可用",0);continue;
+                }
                 o.expires=System.nanoTime()+TimeUnit.MILLISECONDS.toNanos(Math.min(TimeUnit.DAYS.toMillis(7),until-System.currentTimeMillis()));offers.put(o.packet+":"+o.id,o);sequence.accumulateAndGet(o.packet,Math::max);
             }
         }
@@ -835,12 +841,13 @@ public final class LanNode implements AutoCloseable {
         item.attemptStarted=System.nanoTime();
         item.directFailed=false;
         Socket raw=null;
-        ScheduledFuture<?> nudge=timer.schedule(()->{
-            if(!item.delivered&&item.connectingSocket!=null&&!closed) {
-                try{send(encode(Protocol.ENTRY|Protocol.CAP_UTF8|Protocol.FILE,Protocol.field(nickname),Protocol.field(group)),item.endpoint);}catch(IOException ignored){}
-            }
-        },150,TimeUnit.MILLISECONDS);
+        ScheduledFuture<?> nudge=null;
         try {
+            nudge=timer.schedule(()->{
+                if(!item.delivered&&item.connectingSocket!=null&&!closed) {
+                    try{send(encode(Protocol.ENTRY|Protocol.CAP_UTF8|Protocol.FILE,Protocol.field(nickname),Protocol.field(group)),item.endpoint);}catch(IOException ignored){}
+                }
+            },150,TimeUnit.MILLISECONDS);
             raw=secureConnect(item.endpoint,s->item.connectingSocket=s);
             if(item.delivered)return;
             try(SSLSocket socket=security.client(raw,item.fingerprint)) {
@@ -876,7 +883,7 @@ public final class LanNode implements AutoCloseable {
             }
             if(!closed&&!item.delivered)listener.error("加密发送未完成："+e.getMessage());
         } finally {
-            nudge.cancel(false);
+            if(nudge!=null)nudge.cancel(false);
             item.connectingSocket=null;
             if(raw!=null){try{raw.close();}catch(IOException ignored){}synchronized(gate){connections.remove(raw);}}
             item.last=System.nanoTime();

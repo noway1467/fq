@@ -143,6 +143,20 @@ public final class SecureUpgrade {
                 }
             }
         });
+        run("历史文件授权失效只更新附件卡片且不阻止连接",()->{
+            File folder=root.resolve("unavailable-source").toFile();String aid="05050505050505050505050505050505",bid="06060606060606060606060606060606";
+            try(Node a=new Node(folder,port(),aid);Node b=new Node(root.resolve("unavailable-peer").toFile(),port(),bid)) {
+                LanNode.Peer peer=find(a,b);a.node.verifyPeer(peer);
+                a.node.sendSources(peer,Collections.singletonList(new LanNode.Source(){public String key(){return "content://expired/document/old";}public String name(){return "旧文件.txt";}public long size(){return 3;}public long modified(){return 1000;}public InputStream open(long offset){return new ByteArrayInputStream(new byte[]{1,2,3});}}));
+            }
+            for(int i=0;i<2;i++) {
+                List<String> errors=new ArrayList<>(),states=new ArrayList<>();
+                try(LanNode restored=new LanNode(port(),true,"restored","host","恢复","",new LanNode.Listener(){public void peersChanged(){}public void error(String text){errors.add(text);}public void message(LanNode.Peer p,LanNode.Message m,boolean u){}public void fileProgress(LanNode.Peer p,long packet,long file,int percent,String state,double rate){states.add(state);}})) {
+                    restored.setDeviceId(aid);restored.setSourceResolver(key->{throw new IOException("来源没有持久只读授权");});restored.configureSecurity(folder,(name,code)->true);restored.start();
+                    check(errors.isEmpty(),"启动重复弹出旧附件错误");check(states.contains("文件已删除或不可用"),"没有更新失效附件状态");check(restored.networkAvailable(),"旧附件阻止了连接恢复");
+                }
+            }
+        });
         System.out.println("ANDROID SECURE: "+passed+" passed, "+failed+" failed");System.exit(failed==0?0:1);
     }
 }

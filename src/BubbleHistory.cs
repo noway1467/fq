@@ -92,6 +92,7 @@ namespace FeiqLight
         public event Action<ChatRecord> ForwardRequested;
         public event Action<ChatRecord,int> FileRequested;
         public event Action<ChatRecord[]> DeleteRequested;
+        public event Action<ChatRecord,string> DeleteFileRequested;
         public event Action SelectionChanged;
         public bool SelectionMode { get { return multiSelectMode; } }
         public int SelectionCount { get { return marked.Count; } }
@@ -132,6 +133,8 @@ namespace FeiqLight
             ToolStripItem path = menu.Items.Add("复制文件路径", null, delegate { ChatRecord record = SelectedRecord; if (record != null) CopyText(String.Join(Environment.NewLine, record.GetLocalFiles())); });
             menu.Items.Add(retryGroup);
             ToolStripItem retry=menu.Items.Add("重新发送（可能重复）",null,delegate {if(SelectedRecord!=null&&RetryRequested!=null)RetryRequested(SelectedRecord);});
+            ToolStripMenuItem deleteFile=new ToolStripMenuItem("删除本机文件");menu.Items.Add(deleteFile);
+            deleteFile.Click+=delegate {var target=deleteFile.Tag as Tuple<ChatRecord,string>;if(target!=null&&DeleteFileRequested!=null)DeleteFileRequested(target.Item1,target.Item2);};
             menu.Opening += delegate(object sender, System.ComponentModel.CancelEventArgs e)
             {
                 ChatRecord record = SelectedRecord;
@@ -145,6 +148,10 @@ namespace FeiqLight
                 delete.Enabled = !multiSelectMode || marked.Count > 0;
                 retry.Visible=retryGroup.Visible=RetryRequested!=null&&record.Outgoing&&(record.State??"").Contains("未确认"); copy.Enabled = !String.IsNullOrEmpty(record.Text);
                 string[] paths = record.GetLocalFiles();
+                deleteFile.Visible=DeleteFileRequested!=null&&!record.Outgoing&&!multiSelectMode&&paths.Length>0;
+                foreach(ToolStripItem child in deleteFile.DropDownItems.Cast<ToolStripItem>().ToArray())child.Dispose();deleteFile.DropDownItems.Clear();
+                deleteFile.Tag=paths.Length==1?Tuple.Create(record,paths[0]):null;
+                if(deleteFile.Visible&&paths.Length>1)foreach(string local in paths){string file=local;ToolStripItem action=deleteFile.DropDownItems.Add(Protocol.Prefix(Path.GetFileName(file),48).Replace("&","&&"),null,delegate{if(DeleteFileRequested!=null)DeleteFileRequested(record,file);});action.ToolTipText=file;}
                 fileGroup.Visible = folder.Visible = path.Visible = open.Visible = openWith.Visible = paths.Length > 0; folder.Tag = null;
                 foreach(ToolStripMenuItem action in new[]{open,openWith}){foreach(ToolStripItem child in action.DropDownItems.Cast<ToolStripItem>().ToArray())child.Dispose();action.DropDownItems.Clear();action.Tag=paths.Length==1?paths[0]:null;if(paths.Length>1)foreach(string local in paths){string file=local;bool choose=action==openWith;action.DropDownItems.Add(Protocol.Prefix(Path.GetFileName(file),48).Replace("&","&&"),null,delegate{MediaPreview.OpenFile(this,file,choose);});}}
                 foreach (ToolStripItem item in folder.DropDownItems.Cast<ToolStripItem>().ToArray()) item.Dispose();

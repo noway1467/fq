@@ -189,6 +189,42 @@ public final class FileFeaturesTest {
         docs.deny=false; docs.failOpen=true; fails(()->storage.save(file,"资料.txt",new LanNode.Transfer())); assertTrue(docs.files.isEmpty()); assertTrue(file.isFile());
         docs.failOpen=false; assertNotNull(storage.save(file,"资料.txt",new LanNode.Transfer()));
     }
+    @Test public void deletingReceivedFileRemovesOnlyItsPrivateAndSavedCopies()throws Exception {
+        Context c=RuntimeEnvironment.getApplication();Docs docs=provider(c);ReceivedStorage storage=new ReceivedStorage(c);storage.choose(TREE,FLAGS);
+        android.content.pm.ResolveInfo resolved=new android.content.pm.ResolveInfo();resolved.providerInfo=new ProviderInfo();resolved.providerInfo.authority="feiq.documents";shadowOf(c.getPackageManager()).addResolveInfoForIntent(new Intent(DocumentsContract.PROVIDER_INTERFACE),resolved);
+        File directory=new File(c.getFilesDir(),"received");assertTrue(directory.isDirectory()||directory.mkdirs());File file=new File(directory,"selected");Files.write(file.toPath(),new byte[]{1,2,3});
+        String other=docs.createDocument("root","text/plain","另一个文件.txt");Files.write(docs.files.get(other).toPath(),new byte[]{9});
+        Uri saved=storage.save(file,"已接收.txt",new LanNode.Transfer());storage.useInternal();
+        storage.delete(file);assertFalse(file.exists());assertNull(new ReceivedStorage(c).saved(file));assertFalse(docs.files.containsKey(DocumentsContract.getDocumentId(saved)));assertTrue(docs.files.containsKey(other));
+        File outside=source(c,"原文件保留");fails(()->storage.delete(outside));assertTrue(outside.isFile());
+    }
+    @Test public void deniedSavedFileDeletionPreservesPrivateCopyAndLocation()throws Exception {
+        Context c=RuntimeEnvironment.getApplication();Docs docs=provider(c);ReceivedStorage storage=new ReceivedStorage(c);storage.choose(TREE,FLAGS);
+        android.content.pm.ResolveInfo resolved=new android.content.pm.ResolveInfo();resolved.providerInfo=new ProviderInfo();resolved.providerInfo.authority="feiq.documents";shadowOf(c.getPackageManager()).addResolveInfoForIntent(new Intent(DocumentsContract.PROVIDER_INTERFACE),resolved);
+        File directory=new File(c.getFilesDir(),"received");assertTrue(directory.isDirectory()||directory.mkdirs());File file=new File(directory,"preserved");Files.write(file.toPath(),new byte[]{4,5,6});Uri saved=storage.save(file,"保留.txt",new LanNode.Transfer());
+        docs.deny=true;fails(()->storage.delete(file));assertTrue(file.isFile());assertEquals(saved,storage.saved(file));
+        docs.deny=false;docs.refuseDelete=true;fails(()->storage.delete(file));assertTrue(file.isFile());assertEquals(saved,storage.saved(file));
+        docs.refuseDelete=false;storage.delete(file);assertFalse(file.exists());assertNull(storage.saved(file));
+    }
+    @Test public void receivedFileMenuConfirmsDeletionAndKeepsMessage()throws Exception {
+        ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();service.getSharedPreferences("settings",0).edit().putBoolean(ReceivedStorage.AUTO,false).commit();
+        shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));
+        ActivityController<MainActivity> ac=Robolectric.buildActivity(MainActivity.class).setup();MainActivity activity=ac.get();
+        try {
+            LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:32425"),"saved","host","文件","");Protocol.Attachment attachment=new Protocol.Attachment(0,"已接收.txt",3,0);
+            File file=service.receivedFile(peer,1,attachment);assertTrue(file.getParentFile().isDirectory()||file.getParentFile().mkdirs());Files.write(file.toPath(),new byte[]{1,2,3});
+            LanNode.Message message=new LanNode.Message();message.number=1;message.text="保留消息";message.time=1;message.files=Collections.singletonList(attachment);service.incoming(peer,message,false);settle(service);
+            Method menu=MainActivity.class.getDeclaredMethod("fileActions",LanNode.Peer.class,long.class,Protocol.Attachment.class);menu.setAccessible(true);menu.invoke(activity,peer,1L,attachment);
+            android.app.Dialog dialog=org.robolectric.shadows.ShadowDialog.getLatestDialog();findButton(dialog.getWindow().getDecorView(),"删除本机文件").performClick();dialog=org.robolectric.shadows.ShadowDialog.getLatestDialog();dialog.dismiss();assertTrue(file.isFile());
+            menu.invoke(activity,peer,1L,attachment);findButton(org.robolectric.shadows.ShadowDialog.getLatestDialog().getWindow().getDecorView(),"删除本机文件").performClick();findButton(org.robolectric.shadows.ShadowDialog.getLatestDialog().getWindow().getDecorView(),"删除文件").performClick();
+            ((ExecutorService)field(service,"transferWorker")).submit(()->{}).get(5,TimeUnit.SECONDS);settle(service);
+            assertFalse(file.exists());assertEquals(1,((ChatStore)field(service,"store")).history(peer.id()).size());assertEquals("本机文件已删除",service.progress(peer.id(),1,0,false).state);
+        } finally {ac.pause().stop().destroy();sc.destroy();}
+    }
+    private static Button findButton(View view,String text) {
+        if(view instanceof Button&&text.contentEquals(((Button)view).getText()))return (Button)view;
+        if(view instanceof ViewGroup)for(int i=0;i<((ViewGroup)view).getChildCount();i++){Button found=findButton(((ViewGroup)view).getChildAt(i),text);if(found!=null)return found;}return null;
+    }
     @Test public void cancellationAndProviderReturningExistingDocumentAreSafe()throws Exception {
         Context c=RuntimeEnvironment.getApplication(); Docs docs=provider(c); ReceivedStorage storage=new ReceivedStorage(c); storage.choose(TREE,FLAGS); File file=source(c,"新内容");
         LanNode.Transfer cancelled=new LanNode.Transfer(); cancelled.close(); fails(()->storage.save(file,"文件.txt",cancelled)); assertTrue(docs.files.isEmpty());

@@ -131,6 +131,29 @@ namespace FeiqLight.Tests
                     host.Close();Theme.Configure(false,"blue");
                 }
             });
+            Run("删除已接收文件保留消息、其他文件并持久化状态",delegate {
+                LocalStore store=new LocalStore(Path.Combine(root,"delete-file-store"));string selected=Path.Combine(root,"已接收.txt"),other=Path.Combine(root,"另一个.txt");File.WriteAllText(selected,"selected");File.WriteAllText(other,"other");
+                ChatRecord record=new ChatRecord{PeerId="received-peer",Packet=1,Text="保留消息",State="已保存",Time=DateTime.Now,HasAttachments=true,LocalFiles=new[]{selected,other},Transfers=new[]{new FileTransferState{Id=0,Name="已接收.txt",LocalPath=selected,Status="已保存",Percent=100},new FileTransferState{Id=1,Name="另一个.txt",LocalPath=other,Status="已保存",Percent=100}}};store.Append(record);
+                bool rejected=false;try{store.DeleteReceivedFile(record,picture);}catch(IOException){rejected=true;}Check(rejected&&File.Exists(picture),"可删除消息之外的文件");
+                store.DeleteReceivedFile(record,selected);Check(!File.Exists(selected)&&File.Exists(other),"删除范围错误");ChatRecord saved=new LocalStore(store.Root).History(record.PeerId,10).Single();Check(saved.Text=="保留消息"&&saved.GetLocalFiles().SequenceEqual(new[]{other})&&saved.Transfers[0].Status=="本机文件已删除","重启丢失消息或删除状态");
+                saved.Outgoing=true;rejected=false;try{store.DeleteReceivedFile(saved,other);}catch(IOException){rejected=true;}Check(rejected&&File.Exists(other),"删除入口允许删除发送原文件");
+            });
+            Run("接收附件菜单区分删除文件与删除消息且发送原文件无删除入口",delegate {
+                foreach(bool dark in new[]{false,true}){
+                    Theme.Configure(dark,"blue");
+                    using(Form host=new Form{ClientSize=new Size(520,420)})using(BubbleHistory history=new BubbleHistory{Dock=DockStyle.Fill}){
+                        string file=Path.Combine(root,"另一个.txt");ChatRecord record=new ChatRecord{PeerId="menu-peer",Packet=1,Time=DateTime.Now,Text="已接收文件",State="已保存",LocalFiles=new[]{file}};
+                        string selected=null;history.DeleteRequested+=records=>{};history.DeleteFileRequested+=(message,path)=>selected=path;host.Controls.Add(history);host.Show();history.SetRecords(new[]{record});
+                        typeof(BubbleHistory).GetField("selected",BindingFlags.Instance|BindingFlags.NonPublic).SetValue(history,0);
+                        history.ContextMenuStrip.Show(history,new Point(20,40));Application.DoEvents();
+                        ToolStripMenuItem remove=history.ContextMenuStrip.Items.OfType<ToolStripMenuItem>().Single(item=>item.Text=="删除本机文件");Check(remove.Visible,"接收附件缺少删除文件入口");
+                        using(Bitmap image=new Bitmap(history.ContextMenuStrip.Width,history.ContextMenuStrip.Height)){history.ContextMenuStrip.DrawToBitmap(image,new Rectangle(Point.Empty,image.Size));image.Save(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"delete-file-menu-"+(dark?"dark":"light")+".png"),ImageFormat.Png);}
+                        remove.PerformClick();Check(selected==file&&File.Exists(file),"菜单选错文件或未确认就删文件");history.ContextMenuStrip.Close();
+                        record.Outgoing=true;history.ContextMenuStrip.Show(history,new Point(20,40));Application.DoEvents();Check(!remove.Visible,"发送原文件暴露删除入口");history.ContextMenuStrip.Close();host.Close();
+                    }
+                }
+                Theme.Configure(false,"blue");
+            });
             Console.WriteLine("RESULT passed="+passed+" failed="+failed);
             return failed==0?0:1;
         }

@@ -112,6 +112,36 @@ public final class SettingsMessageTest {
         try(ChatStore store=new ChatStore(context)) {store.message(peer,incoming,false,false);store.message(peer,outgoing,false,false);store.message(other,incoming,false,false);store.deleteMessages(peer.id(),Collections.singletonList(incoming));assertEquals("出站",store.history(peer.id()).get(0).text);assertFalse(store.message(peer,incoming,false,false));store.deleteMessages(peer.id(),Collections.singletonList(outgoing));}
         try(ChatStore store=new ChatStore(context)) {assertFalse(store.message(peer,incoming,false,false));assertFalse(store.message(peer,outgoing,true,false));assertTrue(store.history(peer.id()).isEmpty());assertEquals(1,store.history(other.id()).size());assertTrue(file.exists());assertEquals("保留草稿",new DraftStore(context).read(peer.id()));}
     }
+    @Test public void sentAttachmentRecordCanBeDeletedWhileOriginalAndOfferRemain() throws Exception {
+        ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();
+        try(java.net.ServerSocket port=new java.net.ServerSocket(0,1,java.net.InetAddress.getLoopbackAddress());java.net.DatagramSocket remote=new java.net.DatagramSocket(0,java.net.InetAddress.getLoopbackAddress())) {
+            int number=port.getLocalPort();port.close();
+            try(LanNode node=new LanNode(number,true,"delete-sender","host","发送方","",new LanNode.Listener(){public void peersChanged(){}public void error(String t){}public void message(LanNode.Peer p,LanNode.Message m,boolean u){}})) {
+                settle(service);node.start();Field current=ChatService.class.getDeclaredField("node");current.setAccessible(true);current.set(service,node);
+                File original=new File(service.getFilesDir(),"保留的发送原文件.txt");java.nio.file.Files.write(original.toPath(),new byte[]{1,2,3});
+                LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:"+remote.getLocalPort()),"receiver","host","接收方","");peer.utf8=true;
+                LanNode.Message sent=node.sendMessage(peer,"发送附件",Collections.singletonList(original));sent.state="已送达";service.incoming(peer,sent,false);settle(service);
+                assertTrue(node.offering(peer.id(),sent.number,0));List<Boolean> result=new ArrayList<>();service.deleteMessages(peer.id(),Collections.singletonList(sent),result::add);settle(service);
+                assertEquals(Collections.singletonList(true),result);assertTrue(original.isFile());assertTrue("删除本机消息不能破坏对方接收权限",node.offering(peer.id(),sent.number,0));
+                ChatStore store=(ChatStore)field(service,"store");assertTrue(store.history(peer.id()).isEmpty());service.incoming(peer,sent,true);settle(service);assertTrue(store.history(peer.id()).isEmpty());
+            }
+        } finally {sc.destroy();}
+    }
+    @Test public void unavailableHistoricalAttachmentShowsCardAndClickExplanationWithoutStartupToast() throws Exception {
+        for(boolean dark:new boolean[]{false,true}) {
+            Context context=RuntimeEnvironment.getApplication();context.getSharedPreferences("settings",0).edit().putBoolean("dark_mode",dark).putBoolean("auto_connect",false).commit();
+            ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));
+            ActivityController<MainActivity> ac=Robolectric.buildActivity(MainActivity.class).setup();MainActivity activity=ac.get();
+            try {
+                LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:32425"),"missing","host","历史附件","");LanNode.Message message=new LanNode.Message();message.number=10;message.time=1;message.outgoing=true;message.state="已送达";message.text="文件已失效";message.files=Collections.singletonList(new Protocol.Attachment(0,"历史文件.txt",3,0));message.localPaths=Collections.singletonList("uri:content://expired/document/missing");
+                service.incoming(peer,message,false);settle(service);invoke(activity,"open",new Class<?>[]{String.class},peer.id());settle(service);
+                assertTrue(views((View)field(activity,"messages")).stream().filter(v->v instanceof TextView).anyMatch(v->((TextView)v).getText().toString().contains("文件已删除或不可用")));
+                snapshot(activity.getWindow().getDecorView(),"android-unavailable-file-"+(dark?"dark":"light"));
+                View attachment=views((View)field(activity,"messages")).stream().filter(v->"历史文件.txt，文件已删除或不可用".contentEquals(v.getContentDescription()==null?"":v.getContentDescription())).findFirst().orElseThrow();attachment.performClick();
+                Dialog dialog=ShadowDialog.getLatestDialog();assertTrue(views(dialog.getWindow().getDecorView()).stream().filter(v->v instanceof TextView).anyMatch(v->((TextView)v).getText().toString().contains("消息记录仍可删除")));dialog.dismiss();
+            } finally {ac.pause().stop().destroy();sc.destroy();}
+        }
+    }
     @Test public void messageMenuSupportsCancelSingleDeleteAndMultiDeleteOnSmallScreen() throws Exception {
         ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));
         ActivityController<MainActivity> ac=Robolectric.buildActivity(MainActivity.class).create().start().resume().visible();MainActivity activity=ac.get();

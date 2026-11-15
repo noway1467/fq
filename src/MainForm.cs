@@ -228,6 +228,15 @@ public sealed class MainForm : ModernWindow
             }
             catch(Exception error) { using(NoticeDialog notice = new NoticeDialog("删除未完成", error.Message)) notice.ShowDialog(this); return false; }
         }
+        internal void DeleteReceivedFile(Peer peer,ChatRecord record,string path)
+        {
+            if(record.PeerId!=peer.Id||record.Outgoing)return;
+            ChatForm chat;chats.TryGetValue(peer.Id,out chat);
+            if(chat!=null&&chat.HasPendingMessages(new[]{record})){using(NoticeDialog notice=new NoticeDialog("请先处理文件","此消息仍有待接收或传输中的文件，请完成或取消后重试。"))notice.ShowDialog(this);return;}
+            using(ConfirmDialog confirm=new ConfirmDialog("删除这个文件？",path+"\n\n仅删除这个本机文件，聊天记录与对方文件保留。此操作无法撤销。","删除文件",true))if(confirm.ShowDialog(this)!=DialogResult.OK)return;
+            try{store.DeleteReceivedFile(record,path);if(chat!=null)chat.Delivery(record);}
+            catch(Exception error){using(NoticeDialog notice=new NoticeDialog("文件删除未完成",error.Message))notice.ShowDialog(this);}
+        }
         internal void Forward(ChatRecord original)
         {
             try
