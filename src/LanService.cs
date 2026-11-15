@@ -81,11 +81,11 @@ namespace FeiqLight
             if(udp!=null)throw new InvalidOperationException("安全身份必须在启动前配置。");
             dataRoot=root;Security=new SecureIdentity(root);Security.ConfirmPeer=confirmation;RestoreOffers();
         }
-        private void SaveOffers()
+        private void SaveOffers(Dictionary<string,Offer> snapshot = null)
         {
             if(dataRoot==null)return;
             lock(gate) {
-                var saved=offers.Where(o=>o.Value.Fingerprint!=null).Select(o=>new StoredOffer{Key=o.Key,Path=o.Value.Path,Address=o.Value.Address,DeviceId=o.Value.DeviceId,Fingerprint=o.Value.Fingerprint,Sha256=o.Value.Sha256,Size=o.Value.Size,ModifiedTicks=o.Value.Modified.Ticks,ExpiresTicks=o.Value.Expires.Ticks,FileId=o.Value.FileId,Record=o.Value.Record}).ToArray();
+                var saved=(snapshot??offers).Where(o=>o.Value.Fingerprint!=null).Select(o=>new StoredOffer{Key=o.Key,Path=o.Value.Path,Address=o.Value.Address,DeviceId=o.Value.DeviceId,Fingerprint=o.Value.Fingerprint,Sha256=o.Value.Sha256,Size=o.Value.Size,ModifiedTicks=o.Value.Modified.Ticks,ExpiresTicks=o.Value.Expires.Ticks,FileId=o.Value.FileId,Record=o.Value.Record}).ToArray();
                 SecureIdentity.AtomicBytes(Path.Combine(dataRoot,"transfer-offers.json"),System.Text.Encoding.UTF8.GetBytes(new System.Web.Script.Serialization.JavaScriptSerializer{MaxJsonLength=8*1024*1024}.Serialize(saved)));
             }
         }
@@ -242,6 +242,9 @@ namespace FeiqLight
                 }
                 // 仅升级端点和登录名均匹配、且尚无稳定身份的旧会话，不按昵称猜测设备。
                 if (peer == null) peer = peers.Values.FirstOrDefault(p => p.Endpoint.Equals(endpoint) && p.Login == packet.Login && (packet.DeviceId == null || p.DeviceId == null || p.DeviceId == packet.DeviceId));
+                // 旧格式可按地址匹配联系人，但省略身份不能绕过该会话已经保存的证书。
+                if (Security != null && peer != null && Security.TrustedFingerprint(peer.DeviceId) != null &&
+                    (packet.DeviceId != peer.DeviceId || packet.Fingerprint != Security.TrustedFingerprint(peer.DeviceId))) return null;
                 if (peer == null)
                 {
                     if (peers.Count >= 2000) return null;
@@ -332,7 +335,11 @@ namespace FeiqLight
         }
         public ChatRecord SendContent(Peer peer, string text, IList<string> paths, string dataRoot)
         {
-            if (!MessageText.AsFile(text)) return SendMessage(peer, text, paths);
+            return SendContent(peer, text, paths, dataRoot, null);
+        }
+        private ChatRecord SendContent(Peer peer, string text, IList<string> paths, string dataRoot, Dictionary<string,string> relatives)
+        {
+            if (!MessageText.AsFile(text)) return SendMessage(peer, text, paths, null, relatives);
             if (text.Length > MessageText.InputLimit || text.IndexOf('\0') >= 0) throw new ArgumentException("正文超过 1,048,576 个字符或含有空字符，请直接选择文件发送。");
             if (paths != null && paths.Count >= 20) throw new ArgumentException("超长正文需要一个 TXT 附件位置，请最多选择 19 个其他文件。");
             string folder = Path.Combine(dataRoot, "text-offers"); Directory.CreateDirectory(folder);
@@ -348,7 +355,8 @@ namespace FeiqLight
                 {
                     using (FileStream output = new FileStream(generated, FileMode.CreateNew, FileAccess.Write)) output.Write(bytes, 0, bytes.Length);
                     List<string> files = paths == null ? new List<string>() : new List<string>(paths); files.Add(generated);
-                    return SendMessage(peer, "长文本已转为 TXT，打开附件查看完整内容。", files);
+                    if (relatives != null) { relatives = new Dictionary<string,string>(relatives, StringComparer.OrdinalIgnoreCase); relatives[generated] = null; }
+                    return SendMessage(peer, "长文本已转为 TXT，打开附件查看完整内容。", files, null, relatives);
                 }
                 catch { if (File.Exists(generated)) File.Delete(generated); throw; }
             }
@@ -360,9 +368,15 @@ namespace FeiqLight
         public List<ChatRecord> SendBatchContent(Peer peer,string text,IEnumerable<string> paths,string root,Action<ChatRecord,int,int> sent)
         {
             List<SendBatch.Item> expanded=SendBatch.Expand(paths);if(expanded.Any(f=>f.Relative!=null)&&peer.Fingerprint==null)throw new IOException("文件夹发送需要新版加密协议。");
+            bool longText=MessageText.AsFile(text);
+            if(longText&&expanded.Count>=1000)throw new IOException("超长正文需要一个 TXT 附件位置，请最多选择 999 个文件。");
             if(Security!=null&&peer.Fingerprint!=null)VerifyPeer(peer);
             List<ChatRecord> records=new List<ChatRecord>();
-            for(int offset=0;offset<expanded.Count;offset+=20){var batch=expanded.Skip(offset).Take(20).ToList();ChatRecord record=SendMessage(peer,offset==0?text:"",batch.Select(f=>f.Path).ToArray(),null,batch.ToDictionary(f=>f.Path,f=>f.Relative,StringComparer.OrdinalIgnoreCase));records.Add(record);sent(record,offset+batch.Count,expanded.Count);}
+            for(int offset=0;offset<expanded.Count;){
+                var batch=expanded.Skip(offset).Take(offset==0&&longText?19:20).ToList();
+                ChatRecord record=SendContent(peer,offset==0?text:"",batch.Select(f=>f.Path).ToArray(),root,batch.ToDictionary(f=>f.Path,f=>f.Relative,StringComparer.OrdinalIgnoreCase));
+                records.Add(record);offset+=batch.Count;sent(record,offset,expanded.Count);
+            }
             return records;
         }
         public ChatRecord RetryMessage(Peer peer, ChatRecord original)
@@ -418,16 +432,25 @@ namespace FeiqLight
             lock (gate)
             {
                 if (pending.Count >= 256 || offers.Count + additions.Count > 1000) throw new InvalidOperationException("待处理消息或文件过多，请稍后再试。");
+                // 写盘成功后才加入重试和文件授权；否则调用方收到失败后仍可能被后台补发。
+                var nextOffers = new Dictionary<string,Offer>(offers);
+                foreach (var item in additions) nextOffers[item.Key] = item.Value;
+                SaveOffers(nextOffers);
                 record.State = "等待确认";
                 foreach (var item in additions) offers[item.Key] = item.Value;
                 delivery.Bytes = bytes; delivery.Record = record; delivery.Last = DateTime.UtcNow; delivery.Attempts = 1;
                 pending[number] = delivery;
-                SaveOffers();
             }
             try { if(delivery.Fingerprint!=null&&Security!=null)Task.Run(()=>SendSecurePending(delivery));else Send(bytes, delivery.Endpoint); }
             catch
             {
-                lock (gate) { pending.Remove(number); foreach (string key in additions.Keys) offers.Remove(key); }
+                lock (gate)
+                {
+                    pending.Remove(number);
+                    foreach (string key in additions.Keys) offers.Remove(key);
+                    // 首发失败后不能留下重启仍可读取的孤立文件授权。
+                    SaveOffers();
+                }
                 if (original != null) Complete(original, "发送失败，未确认送达");
                 throw;
             }

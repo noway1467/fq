@@ -123,12 +123,14 @@ namespace FeiqLight
             Theme.AttachEditMenu(editor, PasteClipboard);
             editor.KeyDown += delegate(object sender, KeyEventArgs e)
             {
+                if (editor.IsComposing) return;
                 if ((e.Control && e.KeyCode == Keys.V) || (e.Shift && e.KeyCode == Keys.Insert)) { e.SuppressKeyPress = true; PasteClipboard(); }
                 else if (e.KeyCode == Keys.Enter && !e.Shift) { e.SuppressKeyPress = true; SendMessage(); }
             }; inputShell.Controls.Add(editor); compose.Controls.Add(inputShell, 1, 0);
             draftTimer.Tick += delegate { draftTimer.Stop(); SaveDraft(); };
             editor.HandleCreated += delegate { ResizeComposer(); };
-            editor.TextChanged += delegate { draftTimer.Stop(); draftTimer.Start(); ResizeComposer(); UpdateQueued(); };
+            editor.TextChanged += delegate { draftTimer.Stop(); if (editor.IsComposing) return; draftTimer.Start(); ResizeComposer(); UpdateQueued(); };
+            editor.CompositionEnded += delegate { draftTimer.Stop(); draftTimer.Start(); ResizeComposer(); UpdateQueued(); };
             editor.Resize += delegate { ResizeComposer(); };
             attachButton = Theme.IconButton("clip", "发送文件", SelectFiles, false); attachButton.Anchor = AnchorStyles.None; attachButton.Size = new Size(40, 40); attachButton.Margin = Padding.Empty; compose.Controls.Add(attachButton, 2, 0);
             sendButton = Theme.IconButton("send", "发送消息", delegate { SendMessage(); }, true); sendButton.Anchor = AnchorStyles.None; sendButton.Size = new Size(52, 40); sendButton.Margin = Padding.Empty; compose.Controls.Add(sendButton, 3, 0); root.Controls.Add(compose, 0, 3);
@@ -140,6 +142,7 @@ namespace FeiqLight
                 foreach(ChatRecord record in records.Where(r=>!r.Outgoing))foreach(FileTransferState file in record.Transfers??new FileTransferState[0]) {
                     if(files.Items.Count>=1000)break;
                     if(file.Status=="已拒绝"||!String.IsNullOrEmpty(file.LocalPath)||!SecureIdentity.ValidFingerprint(file.Sha256))continue;
+                    file.Status="已恢复 · 点击续传";
                     files.Items.Add(new ReceivedFile{Packet=record.Packet,Record=record,File=new Attachment{Id=file.Id,Name=file.Name,Size=file.Size,Modified=file.Modified,Sha256=file.Sha256,RelativePath=file.RelativePath},AutomaticPending=false,Status="已恢复 · 点击续传"});
                 }
                 if(files.Items.Count>0){files.SelectedIndex=0;SetDrawer(true);}
@@ -151,7 +154,7 @@ namespace FeiqLight
         private float composeScale;
         private void ResizeComposer()
         {
-            if(resizingComposer || IsDisposed || Disposing || editor.IsDisposed || editor.Disposing || root==null || root.RowStyles.Count<4 || !editor.IsHandleCreated)return;
+            if(resizingComposer || IsDisposed || Disposing || editor.IsDisposed || editor.Disposing || editor.IsComposing || root==null || root.RowStyles.Count<4 || !editor.IsHandleCreated)return;
             resizingComposer=true;
             try {
                 float scale; using (Graphics g = editor.CreateGraphics()) scale = Math.Max(DeviceDpi, g.DpiX) / 96F;
@@ -175,7 +178,7 @@ namespace FeiqLight
                 if(Math.Abs(root.RowStyles[3].Height-nextHeight)>.5F) root.RowStyles[3].Height=nextHeight;
             } finally {resizingComposer=false;}
         }
-        public void SaveDraft() { draftTimer.Stop(); main.SaveDraft(peer.Id, editor.Text); }
+        public void SaveDraft() { draftTimer.Stop(); if (editor.IsComposing) { if (!Disposing) draftTimer.Start(); return; } main.SaveDraft(peer.Id, editor.Text); }
         public void RefreshPeer()
         {
             history.SetAvatars(peer.Id, peer.Avatar, "device:" + network.Settings.DeviceId, network.Settings.Avatar);
@@ -231,10 +234,10 @@ namespace FeiqLight
         private bool sending;
         private async void SendMessage()
         {
-            if (sending || String.IsNullOrWhiteSpace(editor.Text) && attachments.Count == 0) return;
+            if (sending || editor.IsComposing || String.IsNullOrWhiteSpace(editor.Text) && attachments.Count == 0) return;
             sending=true;sendButton.Enabled=false;string text=editor.Text;string[] selected=attachments.ToArray();
             try {
-                if(selected.Any(Directory.Exists)||selected.Length>20)await Task.Run(()=>network.SendBatchContent(peer,text,selected,store.Root,(record,count,total)=>main.BeginInvoke((Action)(()=>{main.Sent(peer,record);if(!IsDisposed){Append(record);Delivery(record);fileStatus.Text="邀请已发送 "+count+" / "+total;}}))));
+                if(selected.Any(Directory.Exists)||selected.Length>20||MessageText.AsFile(text)&&selected.Length>=20)await Task.Run(()=>network.SendBatchContent(peer,text,selected,store.Root,(record,count,total)=>main.BeginInvoke((Action)(()=>{main.Sent(peer,record);if(!IsDisposed){Append(record);Delivery(record);fileStatus.Text="邀请已发送 "+count+" / "+total;}}))));
                 else {ChatRecord record=await Task.Run(()=>network.SendContent(peer,text,selected,store.Root));main.Sent(peer,record);if(!IsDisposed){Append(record);Delivery(record);}}
                 if(IsDisposed)return;pastedImages.ExceptWith(selected);if(editor.Text==text)editor.Clear();SaveDraft();attachments.RemoveAll(p=>selected.Contains(p));UpdateQueued();editor.Focus();history.ScrollToLatest(); }
             catch (Exception e) { if(!IsDisposed)Error("发送失败", e.Message); }
@@ -245,7 +248,7 @@ namespace FeiqLight
             // 转发独立发送，不读取或清空目标会话正在编辑的草稿和附件。
             if(sending)return;sending=true;sendButton.Enabled=false;
             try {
-                if(paths.Any(Directory.Exists)||paths.Length>20)await Task.Run(()=>network.SendBatchContent(peer,text,paths,store.Root,(record,count,total)=>main.BeginInvoke((Action)(()=>{main.Sent(peer,record);if(!IsDisposed){Append(record);Delivery(record);history.ScrollToLatest();}}))));
+                if(paths.Any(Directory.Exists)||paths.Length>20||MessageText.AsFile(text)&&paths.Length>=20)await Task.Run(()=>network.SendBatchContent(peer,text,paths,store.Root,(record,count,total)=>main.BeginInvoke((Action)(()=>{main.Sent(peer,record);if(!IsDisposed){Append(record);Delivery(record);history.ScrollToLatest();}}))));
                 else {ChatRecord record=await Task.Run(()=>network.SendContent(peer,text,paths,store.Root));main.Sent(peer,record);if(!IsDisposed){Append(record);Delivery(record);history.ScrollToLatest();}}
             }catch(Exception error){if(!IsDisposed)Error("发送失败",error.GetBaseException().Message);}
             finally{sending=false;if(!IsDisposed)sendButton.Enabled=true;}

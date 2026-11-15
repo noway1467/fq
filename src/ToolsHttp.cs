@@ -50,7 +50,7 @@ namespace FeiqLight
             }
             internal void Bytes(byte[] bytes, string type, int code = 200, string extra = "") { Begin(code, type, bytes.LongLength, extra); Write(bytes, bytes.Length); }
             internal void Json(object value, string extra = "") { Bytes(Encoding.UTF8.GetBytes(new JavaScriptSerializer().Serialize(value)), "application/json; charset=utf-8", 200, extra); }
-            internal void Write(byte[] bytes, int count) { if (!head) { stream.Write(bytes, 0, count); remaining -= count; } }
+            internal void Write(byte[] bytes, int count) { if (!head && count > 0) { stream.Write(bytes, 0, count); remaining -= count; } }
         }
         internal sealed class HttpError : Exception
         {
@@ -83,11 +83,12 @@ namespace FeiqLight
         private void Handle(TcpClient client)
         {
             Response response = null;
+            Stream transport = null;
             try
             {
                 if(!loopback&&LanNetwork.Route(LanNetwork.Scan(),((IPEndPoint)client.Client.RemoteEndPoint).Address)==null)return;
                 client.ReceiveTimeout = 5000; client.SendTimeout = 10000; client.NoDelay = true; client.SendBufferSize = 262144;
-                Stream stream = security==null?(Stream)client.GetStream():security.Server(client,true);
+                Stream stream = transport = security==null?(Stream)client.GetStream():security.Server(client,true);
                 string fingerprint=security==null?null:SecureIdentity.RemoteFingerprint((System.Net.Security.SslStream)stream);
                 if(security!=null&&!security.IsTrustedFingerprint(fingerprint))throw new IOException("请先从联系人核对设备身份。");
                 // 请求头逐字解析，但不再为每个字节调用一次 socket 读取。
@@ -107,6 +108,7 @@ namespace FeiqLight
                     string origin = request.Header("Origin");
                     if (origin.Length > 0 && origin != (security==null?"http://":"https://") + expected) throw new HttpError(403, "不允许跨站请求");
                     handler(request, response);
+                    stream.Flush();
                     if (!reuse || !response.Complete) break;
                     client.ReceiveTimeout = 3000;
                 }
@@ -121,7 +123,7 @@ namespace FeiqLight
                 catch (IOException) { }
                 catch (ObjectDisposedException) { }
             }
-            finally { client.Close(); lock (gate) clients.Remove(client); }
+            finally { try { if (transport != null) transport.Dispose(); } finally { client.Close(); lock (gate) clients.Remove(client); } }
         }
         private static Request Read(Stream stream)
         {

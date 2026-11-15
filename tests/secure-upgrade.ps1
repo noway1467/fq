@@ -1,4 +1,4 @@
-param([switch]$WindowsOnly,[switch]$AndroidOnly)
+param([switch]$WindowsOnly,[switch]$AndroidOnly,[string]$Case)
 $ErrorActionPreference='Stop'
 $root=Split-Path -Parent $PSScriptRoot
 $out=Join-Path $root 'build/tmp/secure-upgrade/tests'
@@ -11,7 +11,7 @@ if(!$AndroidOnly){
     $sources=@(Get-ChildItem -LiteralPath "$root/src" -Filter '*.cs' | ForEach-Object FullName)
     & "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /utf8output /warn:4 /warnaserror+ /target:exe /main:FeiqLight.Tests.SecureUpgradeTests /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.Web.Extensions.dll "/out:$out\SecureUpgradeTests.exe" @sources "$root\tests\SecureUpgradeTests.cs"
     if($LASTEXITCODE -ne 0){throw 'Windows 安全回归编译失败'}
-    & "$out/SecureUpgradeTests.exe" "$data/windows" | Tee-Object -FilePath "$logs/windows-secure.log"
+    & "$out/SecureUpgradeTests.exe" "$data/windows" $Case | Tee-Object -FilePath "$logs/windows-secure.log"
     if($LASTEXITCODE -ne 0){throw 'Windows 安全回归失败'}
 }
 if(!$WindowsOnly){

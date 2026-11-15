@@ -111,6 +111,24 @@ public final class FileFeaturesTest {
             assertTrue(docs.files.values().stream().allMatch(File::isFile));
         } finally {controller.destroy();}
     }
+    @Test public void cancellingAfterFirstBatchPreservesPublishedFilesAndCleansUnsentCopies() throws Exception {
+        ServiceController<ChatService> controller=Robolectric.buildService(ChatService.class).create();ChatService service=controller.get();
+        java.util.concurrent.atomic.AtomicInteger published=new java.util.concurrent.atomic.AtomicInteger();List<LanNode.Message> received=new CopyOnWriteArrayList<>();
+        LanNode.Listener sending=new LanNode.Listener(){public void peersChanged(){}public void error(String text){}public void message(LanNode.Peer peer,LanNode.Message message,boolean update){if(message.outgoing&&!update&&published.incrementAndGet()==1)service.cancelTransfer();}};
+        LanNode.Listener receiving=new LanNode.Listener(){public void peersChanged(){}public void error(String text){}public void message(LanNode.Peer peer,LanNode.Message message,boolean update){if(!message.outgoing&&!update)received.add(message);}};
+        int a=port(),b=port();while(a==b)b=port();
+        try(LanNode sender=new LanNode(a,true,"cancel-sender","host","发送方","test",sending);LanNode receiver=new LanNode(b,true,"cancel-receiver","host","接收方","test",receiving)) {
+            settle(service);set(service,"node",sender);sender.start();receiver.start();sender.probe(LanNode.endpoint("127.0.0.1:"+b));waitFor(service,()->sender.peers().size()==1&&receiver.peers().size()==1);
+            Docs docs=provider(service);List<Uri> uris=new ArrayList<>();
+            for(int i=0;i<21;i++){String id=docs.createDocument("root","text/plain","文件"+i+".txt");Files.write(docs.files.get(id).toPath(),("原始文件"+i).getBytes(StandardCharsets.UTF_8));uris.add(DocumentsContract.buildDocumentUri("feiq.documents",id));}
+            service.sendFiles(sender.peers().get(0),uris);waitFor(service,()->!service.busy()&&!received.isEmpty());
+            assertEquals("取消后仍发出了下一批邀请",1,published.get());assertEquals(20,received.get(0).files.size());
+            File offers=new File(service.getFilesDir(),"offers");assertEquals("未发文件的缓存没有清理",20,Objects.requireNonNull(offers.list()).length);
+            assertTrue("清理误删了来源",docs.files.values().stream().allMatch(File::isFile));
+            File target=new File(service.getCacheDir(),"cancel-published-file.txt");LanNode.Message message=received.get(0);receiver.receiveFile(receiver.peers().get(0),message.number,message.files.get(0),target,new LanNode.Transfer(),null);
+            assertTrue(target.isFile());assertTrue(service.transferStatus().contains("已发邀请保留"));
+        } finally {controller.destroy();}
+    }
     @Test public void offeredFileProviderIsSingleFileReadOnlyAndRejectsTraversal() throws Exception {
         Context context=RuntimeEnvironment.getApplication();ReceivedFileProvider provider=new ReceivedFileProvider();ProviderInfo info=new ProviderInfo();info.authority=context.getPackageName()+".received";info.grantUriPermissions=true;provider.attachInfo(context,info);
         File folder=new File(context.getFilesDir(),"offers/"+UUID.randomUUID());assertTrue(folder.mkdirs());File file=new File(folder,"图片.png");Files.write(file.toPath(),new byte[]{1,2,3});

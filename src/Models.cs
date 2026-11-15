@@ -29,6 +29,7 @@ namespace FeiqLight
         public bool AutoReceiveFiles { get; set; }
         public bool AutoSendDroppedFiles { get; set; }
         public bool AllowLegacyProtocol { get; set; }
+        public int SettingsRevision { get; set; }
         public string ReceiveFolder { get; set; }
         public WindowPlacement Window { get; set; }
         public string[] KnownPeers { get; set; }
@@ -41,7 +42,7 @@ namespace FeiqLight
             Nickname = Environment.UserName; Group = "我的局域网";
             Signature = "在同一个局域网，简单聊一聊。";
             CloseToTray = true; Notifications = true; AutoReceiveFiles = true; ReceiveFolder = DefaultReceiveFolder;
-            StartWithWindows = false; AutoSendDroppedFiles = false; AllowLegacyProtocol = false; ChatFontSize=10; ChatBackground="orbits"; BackgroundImage="";
+            StartWithWindows = false; AutoSendDroppedFiles = false; AllowLegacyProtocol = true; ChatFontSize=10; ChatBackground="orbits"; BackgroundImage="";
             KnownPeers = new string[0];
             Conversations = new SavedConversation[0];
         }
@@ -307,6 +308,8 @@ namespace FeiqLight
                 s.Conversations = SavedConversation.Normalize(s.Conversations);
                 s.ChatFontSize=Math.Max(9,Math.Min(18,s.ChatFontSize));
                 if(s.ChatBackground!="none"&&s.ChatBackground!="lines"&&s.ChatBackground!="grid"&&s.ChatBackground!="aurora"&&s.ChatBackground!="image")s.ChatBackground="orbits";
+                // 0.7.0 没记录修订号，升级后无法区分默认关闭和用户主动关闭；只迁移这一次。
+                if (s.SettingsRevision < 1) { s.AllowLegacyProtocol = true; s.SettingsRevision = 1; }
                 return s;
             }
             catch (Exception e)
@@ -321,6 +324,7 @@ namespace FeiqLight
         {
             lock (gate)
             {
+                if (settings.SettingsRevision < 1) settings.SettingsRevision = 1;
                 string path = Path.Combine(Root, "settings.json"), tmp = path + ".tmp";
                 File.WriteAllText(tmp, json.Serialize(settings), new UTF8Encoding(false));
                 string backup=preserveUnreadableSettings&&File.Exists(path)?Path.Combine(Root,"settings-recovery-"+Guid.NewGuid().ToString("N").Substring(0,12)+".json"):null;

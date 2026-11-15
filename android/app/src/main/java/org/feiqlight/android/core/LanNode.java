@@ -131,15 +131,16 @@ public final class LanNode implements AutoCloseable {
     public void setSourceResolver(SourceResolver resolver){if(started)throw new IllegalStateException("需在启动前设置文件来源");sourceResolver=resolver;}
     private String hashSource(Source source)throws IOException {try(InputStream input=source.open(0)){java.security.MessageDigest hash=java.security.MessageDigest.getInstance("SHA-256");byte[] buffer=new byte[65536];int count;while((count=input.read(buffer))>=0)hash.update(buffer,0,count);StringBuilder result=new StringBuilder();for(byte b:hash.digest())result.append(String.format(Locale.ROOT,"%02x",b&255));return result.toString();}catch(java.security.NoSuchAlgorithmException e){throw new IllegalStateException(e);}}
     private File dataRoot;
-    public boolean allowLegacyProtocol;
+    public boolean allowLegacyProtocol=true;
     public SecureIdentity security(){return security;}
     public void configureSecurity(File root,SecureIdentity.Confirmation confirmation)throws IOException{if(started)throw new IllegalStateException("安全身份必须在启动前配置");dataRoot=root;security=new SecureIdentity(root);security.confirmation=confirmation;restoreOffers();}
     public void configureSecurity(File root,SecureIdentity identity,SecureIdentity.Confirmation confirmation)throws IOException{if(started)throw new IllegalStateException("安全身份必须在启动前配置");dataRoot=root;security=identity;security.confirmation=confirmation;restoreOffers();}
     public void forgetSecurity(Peer peer)throws IOException{try{security.forget(peer.deviceId);}finally{synchronized(gate){for(Pending item:new ArrayList<>(pending.values()))if(Objects.equals(item.deviceId,peer.deviceId)){pending.remove(item.message.number);item.message.state="设备信任已撤销，未确认送达";listener.message(item.peer,item.message.copy(),true);}offers.entrySet().removeIf(e->Objects.equals(e.getValue().deviceId,peer.deviceId));for(Socket socket:connections)socket.close();saveOffers();}}}
-    private void saveOffers()throws IOException {
+    private void saveOffers()throws IOException {saveOffers(offers);}
+    private void saveOffers(Map<String,Offer> snapshot)throws IOException {
         if(dataRoot==null)return;
         synchronized(gate){ByteArrayOutputStream buffer=new ByteArrayOutputStream();try(DataOutputStream out=new DataOutputStream(buffer)) {
-            out.writeInt(2);List<Offer> saved=new ArrayList<>();for(Offer o:offers.values())if(o.fingerprint!=null)saved.add(o);out.writeInt(saved.size());
+            out.writeInt(2);List<Offer> saved=new ArrayList<>();for(Offer o:snapshot.values())if(o.fingerprint!=null)saved.add(o);out.writeInt(saved.size());
             for(Offer o:saved){out.writeLong(o.packet);out.writeInt((int)o.id);out.writeUTF(o.source==null?o.file.getCanonicalPath():"uri:"+o.source.key());out.writeLong(o.size);out.writeLong(o.modified);out.writeLong(System.currentTimeMillis()+TimeUnit.NANOSECONDS.toMillis(o.expires-System.nanoTime()));out.writeUTF(o.deviceId);out.writeUTF(o.fingerprint);out.writeUTF(o.sha256);out.writeUTF(o.peer.endpoint.getAddress().getHostAddress()+":"+o.peer.endpoint.getPort());out.writeUTF(o.peer.login);out.writeUTF(o.peer.host);out.writeUTF(o.peer.name);out.writeUTF(o.peer.group);out.writeUTF(o.peer.id());}
         }SecureIdentity.atomic(new File(dataRoot,"transfer-offers.dat"),buffer.toByteArray());}
     }
@@ -340,6 +341,8 @@ public final class LanNode implements AutoCloseable {
             if(p.deviceId!=null) for(Peer candidate:peers.values()) if(p.deviceId.equals(candidate.deviceId)) { existing=candidate;break; }
             if(existing==null) for(Peer candidate:peers.values())
                 if(candidate.endpoint.equals(from) && candidate.login.equals(p.login) && (p.deviceId==null || candidate.deviceId==null || candidate.deviceId.equals(p.deviceId))) { existing=candidate;break; }
+            // 地址兼容只用于旧联系人，缺少身份的明文不能进入已配对会话。
+            if(security!=null&&existing!=null){String pin=security.trustedFingerprint(existing.deviceId);if(pin!=null&&(!Objects.equals(p.deviceId,existing.deviceId)||!pin.equals(p.fingerprint)))return;}
             peer.deviceId=p.deviceId;
             if (existing!=null) peer=existing;
             else { if (peers.size()>=1000) return; peers.put(peer.id(),peer); }
@@ -375,7 +378,7 @@ public final class LanNode implements AutoCloseable {
         Pending item=new Pending(peer);Message m=new Message();m.number=sequence.incrementAndGet();m.time=System.currentTimeMillis();m.outgoing=true;m.text="";m.state="等待确认";Map<String,Offer> additions=new HashMap<>();
         for(Source source:sources){if(!Protocol.safeName(source.name())||source.size()<0)throw new IOException("文件元数据无效");int id=m.files.size();String hash=hashSource(source);Protocol.Attachment file=new Protocol.Attachment(id,source.name(),source.size(),source.modified()/1000);file.sha256=hash;m.files.add(file);m.localPaths.add("uri:"+source.key());Offer o=new Offer();o.source=source;o.size=source.size();o.modified=source.modified();o.expires=System.nanoTime()+TimeUnit.DAYS.toNanos(7);o.peer=peer;o.packet=m.number;o.id=id;o.deviceId=item.deviceId;o.fingerprint=item.fingerprint;o.sha256=hash;o.address=item.endpoint.getAddress();additions.put(m.number+":"+id,o);}
         item.message=m;item.bytes=Protocol.encode(m.number,login,host,Protocol.MESSAGE|Protocol.CHECK|Protocol.UTF8|Protocol.FILE,"",Protocol.files(m.files),deviceId,null,security.fingerprint);item.last=System.nanoTime();
-        synchronized(gate){if(closed||udp==null||offers.size()+sources.size()>1000||pending.size()>=256)throw new IOException("未连接或待处理任务过多");offers.putAll(additions);pending.put(m.number,item);saveOffers();listener.message(peer,m.copy(),false);fileWorkers.execute(()->sendSecurePending(item));}return m.copy();
+        synchronized(gate){if(closed||udp==null||offers.size()+sources.size()>1000||pending.size()>=256)throw new IOException("未连接或待处理任务过多");Map<String,Offer> next=new HashMap<>(offers);next.putAll(additions);saveOffers(next);offers.putAll(additions);pending.put(m.number,item);listener.message(peer,m.copy(),false);fileWorkers.execute(()->sendSecurePending(item));}return m.copy();
     }
     private boolean sourceUnchanged(Offer o)throws IOException {if(o.source==null)return o.file.isFile()&&o.file.length()==o.size&&o.file.lastModified()==o.modified;Source current=sourceResolver==null?o.source:sourceResolver.resolve(o.source.key());return current.size()==o.size&&current.modified()==o.modified;}
     public Message retryMessage(Peer peer,Message original) throws IOException {
@@ -414,11 +417,18 @@ public final class LanNode implements AutoCloseable {
         synchronized (gate) {
             if (closed || udp==null) throw new IOException("尚未连接局域网");
             if (pending.size()>=256 || offers.size()+additions.size()>1000) throw new IOException("待处理任务过多，请稍后再试");
+            // 先持久化候选邀请，写入失败时不发布消息，也不留下可自动重试的内容。
+            Map<String,Offer> next=new HashMap<>(offers);next.putAll(additions);saveOffers(next);
             item.message=m; item.bytes=bytes; item.last=System.nanoTime(); pending.put(m.number,item); offers.putAll(additions);
             // 先发布记录再发送，避免本机 ACK 先到而被初始“等待确认”覆盖。
-            saveOffers();listener.message(peer,m.copy(),original!=null);
+            listener.message(peer,m.copy(),original!=null);
             try { if(security!=null&&item.fingerprint!=null)fileWorkers.execute(()->sendSecurePending(item));else send(bytes,item.endpoint); }
-            catch (IOException e) { pending.remove(m.number); offers.keySet().removeAll(additions.keySet()); m.state="发送失败"; listener.message(peer,m.copy(),true); throw e; }
+            catch (IOException e) {
+                pending.remove(m.number);offers.keySet().removeAll(additions.keySet());
+                // 首发失败后不能留下重启仍可读取的孤立文件授权。
+                saveOffers();
+                m.state="发送失败";listener.message(peer,m.copy(),true);throw e;
+            }
         }
         return m.copy();
     }
@@ -623,7 +633,7 @@ public final class LanNode implements AutoCloseable {
     private void endOffer(Offer offer,String state) {if(!"已发送（非保存确认）".equals(offer.state)&&!"对方已校验保存".equals(offer.state))progress(offer,++offer.progressVersion,offer.percent,state);}
     public void reject(Peer peer,long packet) throws IOException {
         if(security!=null&&peer.fingerprint!=null){Socket raw=secureConnect(peer.endpoint);try(SSLSocket tls=security.client(raw,peer.fingerprint)){authenticateSecureClient(tls,peer.deviceId,peer.fingerprint,peer.name);SecureIdentity.writeText(tls.getOutputStream(),"M\n"+port);SecureIdentity.writeFrame(tls.getOutputStream(),encode(Protocol.RELEASE,Long.toString(packet),null));if(!"OK".equals(SecureIdentity.readText(tls.getInputStream(),16)))throw new IOException("拒绝通知未送达");}finally{raw.close();synchronized(gate){connections.remove(raw);}}return;}
-        if(security!=null&&!allowLegacyProtocol)throw new IOException("未允许旧版明文协议");send(encode(Protocol.RELEASE,Long.toString(packet),null),peer.endpoint);
+        if(security!=null&&(!allowLegacyProtocol||security.trustedFingerprint(peer.deviceId)!=null))throw new IOException("未允许旧版明文协议");send(encode(Protocol.RELEASE,Long.toString(packet),null),peer.endpoint);
     }
     public boolean offering(String peer,long packet,long file) {
         synchronized(gate) {Offer offer=offers.get(packet+":"+file);return !closed&&offer!=null&&offer.peer.id().equals(peer)&&offer.expires>=System.nanoTime();}

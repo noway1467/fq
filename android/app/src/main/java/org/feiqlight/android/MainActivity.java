@@ -829,7 +829,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         port.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
         Switch autoConnect=settingSwitch("打开应用时恢复连接",prefs.getBoolean("auto_connect",true)); box.addView(autoConnect,new LinearLayout.LayoutParams(-1,-2));
         TextView reconnectHint=text("曾连接后，下次打开自动连接并查找历史联系人。主动断开后保持离线，需手动连接；不会开机自启。",12,MUTED); box.addView(reconnectHint);
-        Switch legacy=settingSwitch("允许旧版明文协议",prefs.getBoolean("allow_legacy_protocol",false));box.addView(legacy,new LinearLayout.LayoutParams(-1,-2));box.addView(text("默认关闭。仅旧设备聊天和附件使用明文；已配对设备不降级，共享和远控始终加密。",12,MUTED));
+        Switch legacy=settingSwitch("允许旧版明文协议",ChatService.allowLegacy(prefs));box.addView(legacy,new LinearLayout.LayoutParams(-1,-2));box.addView(text("默认开启，兼容旧版聊天和附件。旧设备使用明文；已配对设备不降级，共享和远控始终加密。",12,MUTED));
         settingHeading(box,"文件接收");
         Switch automatic=settingSwitch("自动接收文件",receivedStorage.automatic()); automatic.setContentDescription("自动接收文件"); box.addView(automatic,new LinearLayout.LayoutParams(-1,-2));
         TextView hint=text("开启后无需逐次确认，不会自动打开文件。仅用于可信局域网。\n目录选择立即生效，其他选项点击保存。",12,MUTED);hint.setLineSpacing(dp(3),1); box.addView(hint);
@@ -895,7 +895,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
             View backdrop=backgrounds.findViewById(backgrounds.getCheckedRadioButtonId());String backdropKey=backdrop==null?"orbits":backdrop.getTag().toString();
             if(backdropKey.equals("image")&&prefs.getString("background_image","").isEmpty()){dialog.getWindow().getDecorView().findViewWithTag("settings-tab:1").performClick();error("请先选择背景图片");return;}
             int nextSize=fontSize.getProgress()+14;boolean nextDark=follow.isChecked()?systemDark():dark.isChecked();String nextBgImage=prefs.getString("background_image","");
-            boolean saved=prefs.edit().putBoolean("allow_legacy_protocol",legacy.isChecked()).putString("avatar",avatarValue[0]).putString("name",n).putString("group",g).putInt("port",p).putBoolean("auto_connect",autoConnect.isChecked()).putBoolean("diagnostics",diagnosticSwitch.isChecked()).putBoolean(ReceivedStorage.AUTO,automatic.isChecked()).putBoolean("follow_system_theme",follow.isChecked()).putBoolean("dark_mode",dark.isChecked()).putString("accent",accentKey).putInt("chat_font_size",nextSize).putString("chat_background",backdropKey).commit();
+            boolean saved=prefs.edit().putBoolean("allow_legacy_protocol",legacy.isChecked()).putInt("legacy_protocol_policy",ChatService.LEGACY_POLICY_VERSION).putString("avatar",avatarValue[0]).putString("name",n).putString("group",g).putInt("port",p).putBoolean("auto_connect",autoConnect.isChecked()).putBoolean("diagnostics",diagnosticSwitch.isChecked()).putBoolean(ReceivedStorage.AUTO,automatic.isChecked()).putBoolean("follow_system_theme",follow.isChecked()).putBoolean("dark_mode",dark.isChecked()).putString("accent",accentKey).putInt("chat_font_size",nextSize).putString("chat_background",backdropKey).commit();
             if(!saved){error("设置未保存，请检查设备存储空间");return;}if(service!=null){service.receiveSettingsChanged();service.profileSettingsChanged();}dialog.dismiss();
             boolean visualChanged=nextDark!=DARK||!accentKey.equals(initialAccent)||nextSize!=initialFontSize||!backdropKey.equals(initialBackground)||!nextBgImage.equals(initialBackgroundImage);
             if(visualChanged) {

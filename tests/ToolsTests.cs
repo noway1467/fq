@@ -248,6 +248,36 @@ namespace FeiqLight.Tests
                     server.AllowRemote(); server.ForgetPairings(); server.AllowRemote(); Assert(Reconnect(server, "remote", pair).Code == 401, "绕过清除");
                 }
             });
+            run("关闭远控设置窗口和浮条只隐藏，手动停止才断开", () => {
+                string profile=Path.Combine(root,"hide-tools-"+Guid.NewGuid().ToString("N"));
+                using(ToolsWindow window=new ToolsWindow(-1,true,profile)) {
+                    var members=System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic;
+                    ToolsService service=(ToolsService)typeof(ToolsWindow).GetField("service",members).GetValue(window);
+                    service.Share(folder);service.AllowRemote();service.ConfirmRemoteDevice=address=>2;
+                    string shareCode=service.ShareCode,remoteCode=service.RemoteCode;window.Show();Application.DoEvents();window.Close();
+                    Assert(!window.IsDisposed&&!window.Visible&&service.RemoteEnabled,"关闭窗口停止了服务");
+                    Assert(service.ShareCode==shareCode&&service.RemoteCode==remoteCode,"关闭窗口更换了连接码");
+                    string cookie=Login(service,"remote");Assert(service.RemoteActive,"隐藏面板后无法连接");
+                    typeof(ToolsWindow).GetMethod("UpdateState",members).Invoke(window,null);Application.DoEvents();
+                    Form banner=(Form)typeof(ToolsWindow).GetField("banner",members).GetValue(window);Assert(banner!=null,"没有远控浮条");banner.Close();
+                    Assert(!banner.IsDisposed&&!banner.Visible&&service.RemoteActive,"关闭浮条断开了控制");
+                    window.Show();Descendants(window.Surface).OfType<Button>().Single(b=>b.Text=="立即停止远控").PerformClick();
+                    Assert(!service.RemoteEnabled&&!service.RemoteActive,"手动停止未生效");Assert(Request(service.Port,"/api/screen",cookie).Code==401,"手动停止后旧会话仍能操作");
+                }
+            });
+            run("锁屏或注销不清除远控恢复意愿，重启继续连接上次", () => {
+                string profile=Path.Combine(root,"session-restore-"+Guid.NewGuid().ToString("N")),pair;int port;
+                using(ToolsService first=new ToolsService(0,true,profile)) {
+                    first.AllowRemote();first.ConfirmRemoteDevice=address=>2;port=first.Port;
+                    Reply login=Request(port,"/api/login","","{\"mode\":\"remote\",\"code\":\""+first.RemoteCode+"\"}");Assert(login.Code==200,"首次配对失败");pair=PairCookie(login);
+                    first.SuspendRemote();Assert(!first.RemoteActive&&!first.RemoteEnabled,"系统暂停没有断开会话");Assert(new ToolsPreferences(profile).Value.RemoteEnabled,"注销清除了下次启动的开启状态");
+                    first.ResumeRemote();Assert(first.RemoteEnabled,"解锁后没有恢复等待连接");first.SuspendRemote();
+                }
+                using(ToolsService restarted=new ToolsService(port,true,profile)) {
+                    restarted.ConfirmRemoteDevice=address=>0;Assert(restarted.RestoreSettings()==null&&restarted.RemoteEnabled,"重启没有恢复远控");
+                    Assert(Reconnect(restarted,"remote",pair).Code==200,"重启后无法连接上次设备");restarted.StopRemote();restarted.ResumeRemote();Assert(!restarted.RemoteEnabled,"系统恢复绕过了用户手动停止");
+                }
+            });
             run("本机确认勾选始终允许，真实控件返回设备信任选项", () => {
                 using(ToolsWindow window=new ToolsWindow(-1,true))
                 using(System.Windows.Forms.Timer click=new System.Windows.Forms.Timer { Interval=100 })
@@ -415,7 +445,8 @@ namespace FeiqLight.Tests
             // 由旧成品的实际实现写出配置，不能用新源码生成数据冒充跨版本升级。
             Type oldService=System.Reflection.Assembly.LoadFile(previousExecutable).GetType("FeiqLight.ToolsService",true);
             const System.Reflection.BindingFlags members=System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic;
-            using(IDisposable setup=(IDisposable)Activator.CreateInstance(oldService,members,null,new object[]{port,true,profile},null))
+            object[] constructor=oldService.GetConstructor(members,null,new[]{typeof(int),typeof(bool),typeof(string)},null)!=null?new object[]{port,true,profile}:new object[]{port,true,profile,null};
+            using(IDisposable setup=(IDisposable)Activator.CreateInstance(oldService,members,null,constructor,null))
             {
                 oldService.GetMethod("Share",members).Invoke(setup,new object[]{folder});
                 string shareCode=(string)oldService.GetProperty("ShareCode",members).GetValue(setup,null);

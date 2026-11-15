@@ -37,6 +37,26 @@ public final class SettingsMessageTest {
         Bitmap image=Bitmap.createBitmap(view.getWidth(),view.getHeight(),Bitmap.Config.ARGB_8888);view.draw(new Canvas(image));File output=new File(System.getProperty("feiq.previewDir"),name+".png");
         try(OutputStream stream=new FileOutputStream(output)){assertTrue(image.compress(Bitmap.CompressFormat.PNG,100,stream));}image.recycle();
     }
+    @Test public void legacyProtocolDefaultsOnAndSavedChoicesReachServiceAndSettings() throws Exception {
+        ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();
+        SharedPreferences prefs=service.getSharedPreferences("settings",0);prefs.edit().remove("allow_legacy_protocol").putBoolean("auto_connect",false).putString("name","协议设置").commit();
+        prefs.edit().putBoolean("allow_legacy_protocol",false).remove("legacy_protocol_policy").commit();
+        assertTrue(ChatService.allowLegacy(prefs));assertTrue(prefs.getBoolean("allow_legacy_protocol",false));assertEquals(ChatService.LEGACY_POLICY_VERSION,prefs.getInt("legacy_protocol_policy",0));
+        prefs.edit().putBoolean("allow_legacy_protocol",false).putInt("legacy_protocol_policy",ChatService.LEGACY_POLICY_VERSION).commit();assertFalse(ChatService.allowLegacy(prefs));
+        prefs.edit().putBoolean("allow_legacy_protocol",true).commit();
+        shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));
+        LanNode.Listener quiet=new LanNode.Listener(){public void peersChanged(){}public void error(String text){}public void message(LanNode.Peer peer,LanNode.Message message,boolean update){}};
+        try(ActivityController<MainActivity> ac=Robolectric.buildActivity(MainActivity.class).setup();LanNode node=new LanNode(24350,true,"settings","host","设置","test",quiet)) {
+            MainActivity activity=ac.get();settle(service);Method apply=ChatService.class.getDeclaredMethod("applyProfile",LanNode.class,SharedPreferences.class);apply.setAccessible(true);
+            apply.invoke(null,node,prefs);assertTrue(node.allowLegacyProtocol);
+            for(boolean desired:new boolean[]{false,true}) {
+                invoke(activity,"settings",new Class<?>[0]);Dialog dialog=ShadowDialog.getLatestDialog();
+                Switch option=(Switch)views(dialog.getWindow().getDecorView()).stream().filter(v->v instanceof Switch&&"允许旧版明文协议".contentEquals(((Switch)v).getText())).findFirst().orElseThrow();
+                assertEquals(!desired,option.isChecked());option.setChecked(desired);click(dialog,"保存");assertEquals(desired,prefs.getBoolean("allow_legacy_protocol",!desired));
+                apply.invoke(null,node,prefs);assertEquals(desired,node.allowLegacyProtocol);
+            }
+        } finally {sc.destroy();}
+    }
     @Test public void avatarsUseSystemPickerKeepDefaultAndIgnoreOldResults() throws Exception {
         ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));
         ActivityController<MainActivity> ac=Robolectric.buildActivity(MainActivity.class).create().start().resume().visible();MainActivity activity=ac.get();Dialog settings=null,picker=null;

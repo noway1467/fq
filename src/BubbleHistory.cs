@@ -14,7 +14,7 @@ namespace FeiqLight
     // 同向、五分钟内的连续消息合为一组：组内圆角收窄，只有最后一条带尾角；跨天插入日期胶囊。
     public sealed class BubbleHistory : SmoothScrollView
     {
-        private sealed class Measure { internal string Key, Text; internal MessageLayout Layout; internal Size TextSize; internal int TextMax, ContentWidth, Width, Height; internal bool InlineStamp; }
+        private sealed class Measure { internal string Key, Text; internal MessageLayout Layout; internal Size TextSize; internal int TextMax, ContentWidth, Width, Height; }
         private sealed class Item { internal string DateLabel; internal Rectangle DateBounds; internal bool First, Last; internal Measure M; }
         private readonly List<ChatRecord> records = new List<ChatRecord>();
         private readonly List<Rectangle> bounds = new List<Rectangle>();
@@ -317,14 +317,6 @@ namespace FeiqLight
             if (time.Date == today.AddDays(-1)) return "昨天";
             return time.Year == today.Year ? time.ToString("M月d日") : time.ToString("yyyy年M月d日");
         }
-        private int spacerFontKey; private float spacerWidth;
-        private string Spacer(int width)
-        {
-            int key = Font.GetHashCode() ^ DeviceDpi;
-            if (spacerFontKey != key || spacerWidth <= 0) { spacerFontKey = key; spacerWidth = Math.Max(1F, TextRenderer.MeasureText(new string(' ', 20), Font, Size.Empty, Tight).Width / 20F); }
-            // 不换行空格把时间与状态的位置预留在最后一行末尾，放不下时连同末词一起换行。
-            return new string(' ', (int)Math.Ceiling(width / spacerWidth) + 1);
-        }
         private Measure MeasureRecord(ChatRecord r, int maxBubble)
         {
             string display = DisplayText(r);
@@ -334,25 +326,20 @@ namespace FeiqLight
             string key = display + "\u0001" + maxBubble + "\u0001" + Font.Name + Font.Size + "\u0001" + highlightText + "\u0001" + stamp + "\u0001" + (cards ? String.Join("|", r.Transfers.Select(f => CardMedia(f) ? "m" : "f")) : "-") + "\u0001" + media.Length + "\u0001" + DeviceDpi;
             Measure m; if (measures.TryGetValue(r, out m) && m.Key == key) return m;
             m = new Measure { Key = key, TextMax = Math.Max(Dp(40), maxBubble - PadX * 2) };
-            bool attachments = cards || media.Length > 0;
             if (display.Length > 0)
             {
                 if (highlightText.Length > 0 || MessageLinks.Find(display).Count > 0 || ColorEmoji.Contains(display))
                 {
                     m.Layout = new MessageLayout(display, Font, m.TextMax, highlightText);
                     m.TextSize = new Size(m.Layout.Width, m.Layout.Height);
-                    m.InlineStamp = !attachments && m.Layout.LastLineRight + Dp(8) + stamp <= m.TextMax;
                 }
                 else
                 {
-                    m.InlineStamp = !attachments;
-                    m.Text = m.InlineStamp ? display + Spacer(stamp + Dp(6)) : display;
+                    m.Text = display;
                     m.TextSize = TextRenderer.MeasureText(m.Text, Font, new Size(m.TextMax, Int32.MaxValue), MessageFormat);
                 }
             }
-            int content = m.TextSize.Width;
-            if (m.InlineStamp && m.Layout != null) content = Math.Max(content, m.Layout.LastLineRight + Dp(8) + stamp);
-            if (!m.InlineStamp) content = Math.Max(content, stamp);
+            int content = Math.Max(m.TextSize.Width, stamp);
             if (cards) content = Math.Max(content, r.Transfers.Any(CardMedia) ? Dp(288) : Dp(240));
             if (media.Length > 0) content = Math.Max(content, Dp(288));
             m.ContentWidth = Math.Min(Math.Max(content, Dp(24)), m.TextMax);
@@ -360,7 +347,8 @@ namespace FeiqLight
             if (cards) height += (display.Length > 0 ? Dp(6) : Dp(1)) + r.Transfers.Sum(f => CardMedia(f) ? MediaHeight + Caption + Dp(4) : FileRow) + Dp(4) * (r.Transfers.Length - 1);
             if(cards&&r.Transfers.Length>1)height+=Dp(20);
             if (media.Length > 0) height += (display.Length > 0 ? Dp(6) : Dp(1)) + media.Length * MediaHeight + Dp(6) * (media.Length - 1);
-            if (!m.InlineStamp) height += Dp(3) + StampHeight;
+            // 时间独占底部一行，短数字、单行链接也能清楚区分正文与状态。
+            height += Dp(4) + StampHeight;
             m.Height = height + PadBottom; m.Width = m.ContentWidth + PadX * 2;
             return m;
         }
@@ -386,7 +374,7 @@ namespace FeiqLight
                     Size pill = PillSize(item.DateLabel, Theme.Small); item.DateBounds = new Rectangle((width - pill.Width) / 2, y, pill.Width, pill.Height); y += pill.Height + Dp(10);
                 }
                 else y += i > 0 && Continues(records[i - 1], r) ? Dp(3) : Dp(10);
-                item.First = item.DateLabel != null || !Continues(records[i - 1], r);
+                item.First = i == 0 || item.DateLabel != null || !Continues(records[i - 1], r);
                 Measure m = MeasureRecord(r, maxBubble); next[r] = m; item.M = m;
                 int rowHeight = Math.Max(m.Height, avatarGutter > 0 ? AvatarSize : 0);
                 bounds.Add(new Rectangle(r.Outgoing ? width - side - tail - avatarGutter - m.Width : side + tail + avatarGutter, y + rowHeight - m.Height, m.Width, m.Height));
@@ -524,8 +512,7 @@ namespace FeiqLight
                 foreach (string path in media) { Rectangle preview = new Rectangle(origin.X, y, m.ContentWidth, MediaHeight); DrawPreview(g, preview, path, null); y = preview.Bottom + Dp(6); }
             }
             int stampWidth = StampWidth(record), stampHeight = StampHeight;
-            Rectangle stamp = m.InlineStamp ? new Rectangle(r.Right - PadX - stampWidth, origin.Y + m.TextSize.Height - stampHeight - Dp(1), stampWidth, stampHeight)
-                : new Rectangle(r.Right - PadX - stampWidth, r.Bottom - PadBottom - stampHeight + Dp(1), stampWidth, stampHeight);
+            Rectangle stamp = new Rectangle(r.Right - PadX - stampWidth, r.Bottom - PadBottom - stampHeight, stampWidth, stampHeight);
             DrawStamp(g, stamp, record, meta);
             stampHits.Add(Tuple.Create(stamp, record));
             if (outgoing && Failed(record))
@@ -780,7 +767,7 @@ namespace FeiqLight
         }
         protected override void OnGotFocus(EventArgs e) { base.OnGotFocus(e); Invalidate(); }
         protected override void OnLostFocus(EventArgs e) { CancelLongPress(); base.OnLostFocus(e); Invalidate(); }
-        protected override void OnFontChanged(EventArgs e) { base.OnFontChanged(e);if(records!=null&&bounds!=null&&textLayouts!=null){spacerWidth=0;Arrange();Invalidate();} }
+        protected override void OnFontChanged(EventArgs e) { base.OnFontChanged(e);if(records!=null&&bounds!=null&&textLayouts!=null){Arrange();Invalidate();} }
         protected override void OnKeyDown(KeyEventArgs e)
         {
             if(e.KeyCode == Keys.Escape && multiSelectMode) { EndSelection(); e.Handled = e.SuppressKeyPress = true; return; }

@@ -112,6 +112,9 @@ namespace FeiqLight
             lock (gate) { if (closed) throw new ObjectDisposedException("ToolsService"); if (save) preferences.SaveFolders(preferences.Value.Folders, preferences.Value.ShareEnabled, true); EndRemote(); remoteEnabled = true; remoteCode = ConnectionCode(); remoteUntil = clock.ElapsedMilliseconds + 600000; }
         }
         internal void StopRemote() { lock (gate) { EndRemote(); preferences.SaveFolders(preferences.Value.Folders, preferences.Value.ShareEnabled, false); } }
+        // 锁屏、注销和显示器切换只结束当前会话，不能把用户保存的开机恢复意愿改成关闭。
+        internal void SuspendRemote() { lock (gate) EndRemote(); }
+        internal void ResumeRemote() { lock (gate) { if (!closed && preferences.Value.RemoteEnabled && !remoteEnabled) StartRemote(false); } }
         private void EndRemote() { remoteEpoch++; remoteEnabled = false; remotePending = false; remoteCode = ""; remoteUntil = 0; sessions.RemoveAll(s => s.Mode == "remote"); if (ReleaseInput != null) ReleaseInput(); }
         internal void ForgetPairings() { lock (gate) { pairings.Clear(); shareEpoch++; StopRemote(); sessions.Clear(); } }
         private string Scope(string mode)

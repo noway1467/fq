@@ -1510,7 +1510,7 @@ namespace FeiqLight.Tests
                         var links=(List<Tuple<Rectangle,string>>)typeof(BubbleHistory).GetField("linkHits",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(history);
                         var stamps=(List<Tuple<Rectangle,ChatRecord>>)typeof(BubbleHistory).GetField("stampHits",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(history);
                         Rectangle linkRect=links.Last(l=>l.Item2.Contains("coarena.ai")).Item1,stampRect=stamps.Last(s=>s.Item2.Packet==900001).Item1;
-                        Check(!linkRect.IntersectsWith(stampRect)&&stampRect.Left>=linkRect.Right+4,"链接气泡文字与时间重叠：link="+linkRect+" stamp="+stampRect);
+                        Check(!linkRect.IntersectsWith(stampRect)&&stampRect.Top>=linkRect.Bottom+3,"链接气泡文字与时间重叠：link="+linkRect+" stamp="+stampRect);
                         input.Text="😀 发送消息";Render(mainA,"preview-compose-clean");input.Clear();
                     });
                     test("长提示可滚动、只读且确认按钮不被挤走",()=>{

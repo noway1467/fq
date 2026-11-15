@@ -20,6 +20,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
 public final class ChatService extends Service {
+    static final int LEGACY_POLICY_VERSION=1;
     public interface Observer { void changed(); void error(String text); default void transfersChanged() { changed(); } }
     public final class LocalBinder extends Binder { ChatService service() { return ChatService.this; } }
     private final Handler main=new Handler(Looper.getMainLooper());
@@ -164,7 +165,6 @@ public final class ChatService extends Service {
                 });
                 next.setDeviceId(deviceId);
                 applyProfile(next,prefs);
-                next.allowLegacyProtocol=prefs.getBoolean("allow_legacy_protocol",false);
                 next.setSourceResolver(key->new DocumentSource(this,Uri.parse(key)));
                 next.configureSecurity(new File(getFilesDir(),"security"),AppIdentity.get(this),(name,code)->securityConfirmation!=null&&securityConfirmation.confirm(name,code));
                 next.rememberPeers(store.conversations().stream().map(c->c.peer).collect(java.util.stream.Collectors.toList()));
@@ -245,7 +245,14 @@ public final class ChatService extends Service {
         target.setAvatar(avatar==null?"default":avatar);
         target.nickname=prefs.getString("name",Build.MODEL);
         target.group=prefs.getString("group","我的局域网");
-        target.allowLegacyProtocol=prefs.getBoolean("allow_legacy_protocol",false);
+        target.allowLegacyProtocol=allowLegacy(prefs);
+    }
+    static boolean allowLegacy(SharedPreferences prefs) {
+        if(!prefs.contains("legacy_protocol_policy")) {
+            // 0.7.0 没有记录该策略版本，升级时恢复旧版兼容；之后手动关闭会保留。
+            prefs.edit().putBoolean("allow_legacy_protocol",true).putInt("legacy_protocol_policy",LEGACY_POLICY_VERSION).apply();
+        }
+        return prefs.getBoolean("allow_legacy_protocol",true);
     }
     void profileSettingsChanged() {
         LanNode current=node;
@@ -549,7 +556,7 @@ public final class ChatService extends Service {
         if(uris==null||uris.isEmpty()||uris.size()>1000) { finished.run();showError("每批请选择 1–1000 个文件");return false; }
         List<Uri> batch=new ArrayList<>(new LinkedHashSet<>(uris));
         return transferJob(task->{
-            LanNode current=requireNode(); List<File> staged=new ArrayList<>();boolean sent=false;if(current.security()!=null&&peer.fingerprint!=null)current.verifyPeer(peer);
+            LanNode current=requireNode(); List<File> staged=new ArrayList<>();int published=0;if(current.security()!=null&&peer.fingerprint!=null)current.verifyPeer(peer);
             if(keyboardMime==null&&peer.fingerprint!=null){List<LanNode.Source> direct=new ArrayList<>();boolean stable=true;for(Uri uri:batch)try{direct.add(new DocumentSource(this,uri));}catch(IOException unavailable){stable=false;break;}
                 if(stable){for(int start=0;start<direct.size();start+=20){checkTransfer(task);current.sendSources(peer,direct.subList(start,Math.min(start+20,direct.size())));}return;}
             }
@@ -596,16 +603,16 @@ public final class ChatService extends Service {
                 }
             // 暂存完成后分组发送；已经发布的邀请保留，失败后可从对应记录处理。
             if(task.isCancelled()) throw new IOException("已取消发送");
-            for(int offset=0;offset<staged.size();offset+=20){current.sendMessage(peer,"",staged.subList(offset,Math.min(offset+20,staged.size())));sent=true;}
+            for(int offset=0;offset<staged.size();offset+=20){checkTransfer(task);int end=Math.min(offset+20,staged.size());current.sendMessage(peer,"",staged.subList(offset,end));published=end;}
             } finally {
-                if(!sent) {
+                if(published<staged.size()) {
                     IOException cleanupFailure=null;
-                    for(File file:staged) try {Files.deleteIfExists(file.toPath());Files.deleteIfExists(file.getParentFile().toPath());}
+                    for(File file:staged.subList(published,staged.size())) try {Files.deleteIfExists(file.toPath());Files.deleteIfExists(file.getParentFile().toPath());}
                     catch(IOException e) {if(cleanupFailure==null)cleanupFailure=new IOException("发送失败，部分暂存副本未清除，可在设置中清理发送缓存");cleanupFailure.addSuppressed(e);}
                     if(cleanupFailure!=null)throw cleanupFailure;
                 }
             }
-        },finished,"","已取消发送；请重新选择文件");
+        },finished,"","已取消，已发邀请保留；未发文件需重新选择");
     }
     File receivedFile(LanNode.Peer peer,long packet,Protocol.Attachment file) {
         try {

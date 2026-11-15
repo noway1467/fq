@@ -60,10 +60,17 @@ namespace FeiqLight
                 using(var tls=security.Client(remote,fingerprint)) {
                     fields["Host"]=remoteHost;fields["Connection"]="close";if(origin!=null)fields["Origin"]="https://"+remoteHost;
                     fields["Cookie"]=String.Join("; ",parts.Where(s=>s.StartsWith(cookiePrefix,StringComparison.Ordinal)).Select(s=>s.Substring(cookiePrefix.Length)));
-                    Write(tls,lines[0]+"\r\n"+String.Join("\r\n",fields.Select(p=>p.Key+": "+p.Value))+"\r\n\r\n");tls.Write(body,0,body.Length);tls.Flush();
+                    Write(tls,lines[0]+"\r\n"+String.Join("\r\n",fields.Select(p=>p.Key+": "+p.Value))+"\r\n\r\n");
+                    // Framework SslStream 的空写入仍会发 TLS 记录；GET 后多出的未读记录会令对端关闭时复位连接。
+                    if(body.Length>0)tls.Write(body,0,body.Length);tls.Flush();
                     string response=ReadHeader(tls);string[] responseLines=response.Split(new[]{"\r\n"},StringSplitOptions.None);
                     for(int i=1;i<responseLines.Length;i++)if(responseLines[i].StartsWith("Set-Cookie: ",StringComparison.OrdinalIgnoreCase))responseLines[i]="Set-Cookie: "+cookiePrefix+responseLines[i].Substring(12).Replace("; Secure","");
-                    Write(output,String.Join("\r\n",responseLines));tls.CopyTo(output,65536);
+                    string[] lengths=responseLines.Where(line=>line.StartsWith("Content-Length:",StringComparison.OrdinalIgnoreCase)).ToArray();long remaining;
+                    if(lengths.Length!=1||!Int64.TryParse(lengths[0].Substring(15).Trim(),System.Globalization.NumberStyles.None,System.Globalization.CultureInfo.InvariantCulture,out remaining)||remaining<0)throw new IOException("共享响应长度无效。");
+                    Write(output,String.Join("\r\n",responseLines));
+                    // 响应头逐字读取后仍可能留有已解密正文，按声明长度读取，不依赖通用流复制或连接关闭。
+                    byte[] buffer=new byte[65536];
+                    while(first[0]!="HEAD"&&remaining>0){int count=tls.Read(buffer,0,(int)Math.Min(buffer.Length,remaining));if(count==0)throw new EndOfStreamException("共享响应正文被截断。");output.Write(buffer,0,count);remaining-=count;}
                 }
             } catch(IOException){}catch(SocketException){}catch(ObjectDisposedException){}catch(System.Security.Authentication.AuthenticationException){}catch(AggregateException){}
             finally {client.Close();if(remote!=null)remote.Close();lock(clients){clients.Remove(client);if(remote!=null)clients.Remove(remote);}}

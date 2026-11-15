@@ -36,6 +36,13 @@ public final class KeyboardInputTest {
             assertEquals(PermissionShadow.requests-1,PermissionShadow.releases);assertEquals(1,completion.size());completion.get(0).run();completion.get(0).run();assertEquals(PermissionShadow.requests,PermissionShadow.releases);
         }
     }
+    @Test public void composingChineseSurvivesTextReadsAndCommitsWithoutResettingInput() {
+        ChatInput input=new ChatInput(RuntimeEnvironment.getApplication(),(uri,mime,release)->false);
+        InputConnection connection=input.onCreateInputConnection(new EditorInfo());
+        assertTrue(connection.setComposingText("zhong",1));assertEquals("zhong",input.getText().toString());
+        assertTrue(connection.setComposingText("zhongwen",1));assertEquals("zhongwen",input.getText().toString());
+        assertTrue(connection.commitText("中文",1));assertEquals("中文",input.getText().toString());assertEquals(2,input.getSelectionStart());
+    }
     @Test public void unsupportedSchemeMimeAndBusyReceiverDoNotLeakPermission() {
         ChatInput input=new ChatInput(RuntimeEnvironment.getApplication(),(uri,mime,release)->false);InputConnection connection=input.onCreateInputConnection(new EditorInfo());
         assertFalse(connection.commitContent(image("content","application/pdf"),1,null));

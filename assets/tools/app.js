@@ -5,7 +5,7 @@
   let token = '', generation = 0, frameTimer = 0, frameUrl = '', drag = false;
   let frameAbort=null;
   let display = 0, displayVersion = 0, zoomLevel = 0;
-  let phone = false, scale = 1;
+  let phone = false, scale = 1, fillHeight = true;
   let trail = [{id: '', name: '共享文件夹'}], items = [], listing = 0;
   let pending = [], sending = false, closing = Promise.resolve();
   const status = (text, error = false) => { $('status').textContent = text; $('status').hidden = !text; $('status').classList.toggle('error', error); };
@@ -232,10 +232,13 @@
   const screenPoints=new Map();let screenDown=null,pinch=null,screenMulti=false;
   function sizeScreen(){
     const wrap=$('screen-wrap'),image=$('screen');if(!image.naturalWidth||!wrap.clientWidth||!wrap.clientHeight)return;
-    const fit=Math.min(wrap.clientWidth/image.naturalWidth,wrap.clientHeight/image.naturalHeight);
+    const landscape=window.innerWidth>window.innerHeight&&!document.body.classList.contains('layout-stacked');
+    const fullHeight=fillHeight&&!phone&&landscape;
+    const fit=fullHeight?wrap.clientHeight/image.naturalHeight:Math.min(wrap.clientWidth/image.naturalWidth,wrap.clientHeight/image.naturalHeight);
     const width=image.naturalWidth*fit*scale,height=image.naturalHeight*fit*scale;
     image.style.width=width+'px';image.style.height=height+'px';$('screen-stage').style.width=Math.max(wrap.clientWidth,width)+'px';$('screen-stage').style.height=Math.max(wrap.clientHeight,height)+'px';
     wrap.classList.toggle('zoomed',scale>1.01);$('zoom').textContent=scale>1.01?'适应':'放大';
+    $('fit-screen').hidden=phone||!landscape;$('fit-screen').textContent=fullHeight?'完整':'满高';
   }
   const screenPosition=(x,y)=>{const r=$('screen').getBoundingClientRect();return {x:Math.max(0,clamp((x-r.left)/r.width*10000,10000)),y:Math.max(0,clamp((y-r.top)/r.height*10000,10000))};};
   const pair=()=>{const p=[...screenPoints.values()];return {x:(p[0].x+p[1].x)/2,y:(p[0].y+p[1].y)/2,d:Math.max(1,Math.hypot(p[0].x-p[1].x,p[0].y-p[1].y))};};
@@ -262,6 +265,7 @@
   };
   $('screen-wrap').onpointerup=screenUp;$('screen-wrap').onpointercancel=screenUp;$('screen-wrap').oncontextmenu=event=>event.preventDefault();
   $('zoom').onclick=()=>{scale=scale>1.01?1:2;sizeScreen();};
+  $('fit-screen').onclick=()=>{fillHeight=!fillHeight;scale=1;$('screen-wrap').scrollLeft=0;$('screen-wrap').scrollTop=0;sizeScreen();};
   $('keyboard').onclick = () => {
     const typing = document.body.classList.toggle('typing-mode'); $('keyboard').setAttribute('aria-pressed',String(typing)); $('keyboard').textContent = typing ? '鼠标' : '键盘';
     if (typing) $('remote-text').focus(); else $('remote-text').blur();

@@ -66,6 +66,7 @@ namespace FeiqLight
             Shown += delegate { using (Graphics graphics = folders.CreateGraphics()) folders.ItemHeight = (int)(60 * graphics.DpiX / 96F); UpdateState(); };
             SystemEvents.SessionSwitch += OnSessionSwitch;
             SystemEvents.DisplaySettingsChanging += OnDisplayChange;
+            SystemEvents.DisplaySettingsChanged += OnDisplayChanged;
             timer.Tick += delegate { if (!service.RemoteActive) desktop.Release(); UpdateState(); }; timer.Start(); UpdateState();
             PrepareRestoredWindow();
             try { restoreError = service.RestoreSettings(); }
@@ -130,23 +131,27 @@ namespace FeiqLight
             if (banner != null) return;
             banner = new RemoteBanner(service.RemoteAddress, StopRemote);
             Rectangle area = Screen.FromControl(this).WorkingArea; banner.Location = new Point(area.Right - banner.Width - 16, area.Top + 16);
-            banner.FormClosing += delegate { StopRemote(); }; banner.Show();
+            banner.Show();
         }
         private void StopRemote() { ChangeSettings(service.StopRemote); }
         private void OnSessionSwitch(object sender, SessionSwitchEventArgs e)
         {
             if (e.Reason == SessionSwitchReason.SessionLock || e.Reason == SessionSwitchReason.SessionLogoff || e.Reason == SessionSwitchReason.ConsoleDisconnect || e.Reason == SessionSwitchReason.RemoteDisconnect)
             {
-                StopForSystemChange();
+                systemSuspended = true; StopForSystemChange();
             }
+            else if (e.Reason == SessionSwitchReason.SessionUnlock || e.Reason == SessionSwitchReason.SessionLogon || e.Reason == SessionSwitchReason.ConsoleConnect || e.Reason == SessionSwitchReason.RemoteConnect)
+            { systemSuspended = false; ResumeForSystemChange(); }
         }
+        private bool systemSuspended;
         private void OnDisplayChange(object sender, EventArgs e) { StopForSystemChange(); }
+        private void OnDisplayChanged(object sender, EventArgs e) { if (!systemSuspended) ResumeForSystemChange(); }
         private void StopForSystemChange()
         {
-            try { service.StopRemote(); }
-            catch (Exception e) { if (!(e is System.IO.IOException || e is UnauthorizedAccessException)) throw; restoreError = "远控已停止，但设置未保存：" + e.Message; }
+            service.SuspendRemote();
             if (IsHandleCreated && !IsDisposed) BeginInvoke((Action)UpdateState);
         }
+        private void ResumeForSystemChange() { if (!IsDisposed && !Disposing) { service.ResumeRemote(); if (IsHandleCreated) BeginInvoke((Action)UpdateState); } }
         private void UpdateState()
         {
             bool active = service.RemoteActive;
@@ -165,13 +170,19 @@ namespace FeiqLight
             }
             removeFolder.Enabled = folders.SelectedItem != null; empty.Visible = saved.Length == 0; folders.Visible = saved.Length > 0;
             remote.Text = active ? "已连接 · " + service.RemoteAddress : !service.RemoteEnabled ? "未开启" : service.RemoteCode.Length == 6 ? "连接码  " + service.RemoteCode : "等待已配对设备";
-            connection.Text = restoreError ?? "TCP " + service.Port; connection.ForeColor = restoreError == null ? Theme.Muted : Theme.Danger; tips.SetToolTip(connection, restoreError ?? "仅限可信局域网使用");
+            connection.Text = restoreError ?? "TCP " + service.Port + " · 关闭窗口后继续运行"; connection.ForeColor = restoreError == null ? Theme.Muted : Theme.Danger; tips.SetToolTip(connection, restoreError ?? "关闭窗口只隐藏，需在此处或远控浮条手动停止。已配对设备可在电脑重启后连接上次。");
             if (!active && banner != null) { Form old = banner; banner = null; old.Dispose(); }
         }
         protected override void WndProc(ref Message message) { if (message.Msg == 0x312 && message.WParam.ToInt32() == 941) StopRemote(); base.WndProc(ref message); }
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            base.OnFormClosing(e);
+            // 这是常驻服务的设置窗口；关闭面板不应撤销连接码或中断当前控制。
+            if (e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; Hide(); }
+        }
         protected override void Dispose(bool disposing)
         {
-            if (disposing) { timer.Stop(); timer.Dispose(); tips.Dispose(); codeFont.Dispose(); SystemEvents.SessionSwitch -= OnSessionSwitch; SystemEvents.DisplaySettingsChanging -= OnDisplayChange; if (hotkey) UnregisterHotKey(Handle, 941); service.Dispose(); if (banner != null) { banner.Dispose(); banner = null; } }
+            if (disposing) { timer.Stop(); timer.Dispose(); tips.Dispose(); codeFont.Dispose(); SystemEvents.SessionSwitch -= OnSessionSwitch; SystemEvents.DisplaySettingsChanging -= OnDisplayChange; SystemEvents.DisplaySettingsChanged -= OnDisplayChanged; if (hotkey) UnregisterHotKey(Handle, 941); service.Dispose(); if (banner != null) { banner.Dispose(); banner = null; } }
             base.Dispose(disposing);
         }
     }
@@ -196,6 +207,7 @@ namespace FeiqLight
             row.Controls.Add(info, 1, 0); Button stop = Theme.Button("断开", delegate { disconnect(); }, true); stop.Dock = DockStyle.Fill; stop.Margin = new Padding(4, 0, 0, 0); row.Controls.Add(stop, 2, 0); Controls.Add(row);
         }
         protected override void OnPaint(PaintEventArgs e) { base.OnPaint(e); using (Pen border = new Pen(Theme.Line)) e.Graphics.DrawRectangle(border, 0, 0, Width - 1, Height - 1); }
+        protected override void OnFormClosing(FormClosingEventArgs e) { base.OnFormClosing(e); if (e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; Hide(); } }
         protected override void WndProc(ref Message message) { if (message.Msg == 0x21) { message.Result = new IntPtr(3); return; } base.WndProc(ref message); }
     }
 }

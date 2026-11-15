@@ -25,7 +25,7 @@ namespace FeiqLight
                 string next=relative+"/"+Path.GetFileName(child);if(Directory.Exists(child))Walk(child,next,result);else Add(child,next,result);
             }
         }
-        private static void Add(string path,string relative,List<Item> result){if(result.Count>=1000)throw new IOException("单批最多 1000 个文件，请分批发送。");if(!Protocol.SafeFileName(Path.GetFileName(path))||relative!=null&&!Protocol.SafeRelativePath(relative)||(File.GetAttributes(path)&FileAttributes.ReparsePoint)!=0)throw new IOException("附件路径不安全或包含链接。");result.Add(new Item{Path=path,Relative=relative});}
+        private static void Add(string path,string relative,List<Item> result){if(result.Any(item=>String.Equals(item.Path,path,StringComparison.OrdinalIgnoreCase)))return;if(result.Count>=1000)throw new IOException("单批最多 1000 个文件，请分批发送。");if(!Protocol.SafeFileName(Path.GetFileName(path))||relative!=null&&!Protocol.SafeRelativePath(relative)||(File.GetAttributes(path)&FileAttributes.ReparsePoint)!=0)throw new IOException("附件路径不安全或包含链接。");result.Add(new Item{Path=path,Relative=relative});}
         internal static string Destination(string root,Attachment file)
         {
             if(file.RelativePath==null)return ReceiveStorage.Destination(root,file.Name);

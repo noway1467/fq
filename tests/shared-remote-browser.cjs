@@ -56,6 +56,7 @@ const check = (name, value) => {assert.ok(value, name);results.push(name);};
       check(`remote no horizontal overflow ${width}x${height}`, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
       check(`desktop fits ${width}x${height}`, await page.locator('#screen').evaluate(image => {const r=image.getBoundingClientRect(),p=image.parentElement.getBoundingClientRect();return r.width<=p.width+.5 && r.height<=p.height+.5;}));
       if(width>height){check(`pure desktop and 7:3 layout ${width}`,await page.evaluate(()=>{const r=document.querySelector('#screen-wrap').getBoundingClientRect();return r.x===0 && r.y===0 && Math.abs(r.width/innerWidth-.7)<.01 && Math.abs(r.height-innerHeight)<1;}));}
+      if(width>height){check(`desktop fills height without letterboxing ${width}`,await page.locator('#screen').evaluate(image=>{const r=image.getBoundingClientRect(),wrap=image.parentElement.parentElement.getBoundingClientRect();return Math.abs(r.top-wrap.top)<1&&Math.abs(r.height-wrap.height)<1&&Math.abs(r.width/r.height-image.naturalWidth/image.naturalHeight)<.001;}));}
       await page.screenshot({path:path.join(output,`remote-${width}x${height}.png`),fullPage:true});
     }
     await page.emulateMedia({colorScheme:'dark'}); await page.screenshot({path:path.join(output,'remote-dark.png'),fullPage:true});
@@ -63,9 +64,12 @@ const check = (name, value) => {assert.ok(value, name);results.push(name);};
     await resize({width:800,height:360});
     await page.evaluate(() => {document.documentElement.dataset.native='true';});
     check('native container does not show unsupported browser fullscreen', await page.locator('#fullscreen').isHidden());
-    const normalWidth=(await page.locator('#screen').boundingBox()).width;
+    await page.locator('#fit-screen').click();
+    check('complete desktop remains available',await page.locator('#screen').evaluate(image=>{const r=image.getBoundingClientRect(),wrap=image.parentElement.parentElement.getBoundingClientRect();return r.width<=wrap.width+.5&&r.height<=wrap.height+.5;}));
+    await page.locator('#fit-screen').click();
+    const normalWidth=(await page.locator('#screen-wrap').boundingBox()).width;
     await page.locator('#panels').click();
-    check('focus mode expands desktop', (await page.locator('#screen').boundingBox()).width>normalWidth);
+    check('focus mode expands visible desktop area', (await page.locator('#screen-wrap').boundingBox()).width>normalWidth);
     await page.screenshot({path:path.join(output,'remote-landscape-focus.png'),fullPage:true});
     await page.locator('#restore-panel').click();
     await page.locator('#layout').click();
@@ -87,7 +91,8 @@ const check = (name, value) => {assert.ok(value, name);results.push(name);};
     check('text does not auto submit', !events.some(event => event.type==='key' && event.key==='enter'));
     await page.getByRole('button',{name:'Enter',exact:true}).click();
     await page.locator('#display').selectOption('1');
-    await page.locator('#screen').click({position:{x:60,y:50}});
+    const visible = await page.locator('#screen-wrap').boundingBox();
+    await page.mouse.click(visible.x + Math.min(60, visible.width - 2), visible.y + Math.min(50, visible.height - 2));
     await page.waitForTimeout(400);
     events = inputEvents();
     check('explicit Enter delivered', events.some(event => event.type==='key' && event.key==='enter'));

@@ -141,14 +141,34 @@ namespace FeiqLight
         // 固定从系统目录加载，避免同目录的同名 DLL 被当作系统 RichEdit 执行。
         private static readonly IntPtr RichEdit50 = LoadLibrary(System.IO.Path.Combine(Environment.SystemDirectory, "msftedit.dll"));
         private bool hadSelection;
+        internal bool IsComposing { get; private set; }
+        internal event Action CompositionEnded;
         [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
         private struct TextArea { internal int Left, Top, Right, Bottom; }
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        private struct GetTextOptions { internal uint Bytes, Flags, CodePage; internal IntPtr DefaultChar, UsedDefaultChar; }
         [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)] private static extern IntPtr LoadLibrary(string path);
         [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr handle, int message, IntPtr wparam, ref TextArea area);
         [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr handle, int message, IntPtr wparam, IntPtr lparam);
+        [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)] private static extern IntPtr SendMessage(IntPtr handle, int message, ref GetTextOptions options, System.Text.StringBuilder text);
         [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern bool HideCaret(IntPtr handle);
         [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern bool ShowCaret(IntPtr handle);
         protected override CreateParams CreateParams { get { CreateParams cp = base.CreateParams; if (RichEdit50 != IntPtr.Zero) cp.ClassName = "RICHEDIT50W"; return cp; } }
+        public override string Text
+        {
+            get
+            {
+                if (!IsHandleCreated || IsDisposed || Disposing) return base.Text;
+                // .NET Framework 的 Text getter 使用 EM_STREAMOUT，会结束 RichEdit 5 的拼音组合。
+                // EM_GETTEXTEX 只读取正文；段落统一为 \n，与 RichTextBox 原有 Text 语义保持一致。
+                int capacity = TextLength + 1;
+                var text = new System.Text.StringBuilder(capacity);
+                var options = new GetTextOptions { Bytes = checked((uint)capacity * 2), Flags = 0, CodePage = 1200, DefaultChar = IntPtr.Zero, UsedDefaultChar = IntPtr.Zero };
+                SendMessage(Handle, 0x045E, ref options, text);
+                return text.ToString().Replace('\r', '\n');
+            }
+            set { base.Text = value; }
+        }
         private Rectangle textArea;
         internal int FirstVisibleLine { get { return IsHandleCreated ? (int)SendMessage(Handle, 0x00CE, IntPtr.Zero, IntPtr.Zero) : 0; } }
         private int LastLineTop()
@@ -160,7 +180,7 @@ namespace FeiqLight
         }
         private void AlignText()
         {
-            if (!IsHandleCreated || IsDisposed || Disposing || ClientSize.Width < 4) return;
+            if (!IsHandleCreated || IsDisposed || Disposing || IsComposing || ClientSize.Width < 4) return;
             // RichEdit 的正文和提示语共用排版框；单行居中，多行从顶部开始，避免输入后文字跳位。
             int top = GetLineFromCharIndex(TextLength) == 0 ? Math.Max(0, (ClientSize.Height - Font.Height) / 2) : 0;
             Rectangle next = Rectangle.FromLTRB(1, top, ClientSize.Width - 1, ClientSize.Height);
@@ -209,6 +229,7 @@ namespace FeiqLight
             base.OnMouseWheel(e);
         }
         protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); textArea = Rectangle.Empty; AlignText(); }
+        protected override void OnHandleDestroyed(EventArgs e) { IsComposing = false; base.OnHandleDestroyed(e); }
         protected override void OnResize(EventArgs e) { base.OnResize(e); AlignText(); }
         protected override void OnFontChanged(EventArgs e) { base.OnFontChanged(e); textArea = Rectangle.Empty; AlignText(); }
         protected override void OnTextChanged(EventArgs e) { base.OnTextChanged(e); AlignText(); if (TextLength <= 1) Invalidate(); }
@@ -275,6 +296,7 @@ namespace FeiqLight
         }
         protected override void WndProc(ref Message m)
         {
+            if (m.Msg == 0x010D) IsComposing = true;
             if (m.Msg == 0x020A)
             {
                 int delta = (short)((m.WParam.ToInt64() >> 16) & 0xFFFF);
@@ -283,6 +305,17 @@ namespace FeiqLight
                 return;
             }
             base.WndProc(ref m);
+            if (m.Msg == 0x010E)
+            {
+                IsComposing = false;
+                // 选词结果可能在结束通知后才进入编辑器，等本轮原生消息处理完再更新布局和草稿。
+                if (!IsDisposed && !Disposing && IsHandleCreated) BeginInvoke((Action)delegate {
+                    if (IsDisposed || Disposing || IsComposing) return;
+                    AlignText(); Invalidate();
+                    if (CompositionEnded != null) CompositionEnded();
+                });
+            }
+            if (IsComposing) return;
             if ((m.Msg == 0x000F || m.Msg == 0x0318) && IsHandleCreated)
             {
                 if (TextLength == 0)

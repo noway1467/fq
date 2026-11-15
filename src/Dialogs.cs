@@ -382,7 +382,7 @@ namespace FeiqLight
             ToggleSwitch auto = new ToggleSwitch { Text = "自动接收文件", AccessibleName = "自动接收文件", Description = "收到文件邀请时直接保存到接收文件夹；关闭后需手动点击接收。", Checked = current.AutoReceiveFiles, BackColor = Theme.Surface }; auto.SetBounds(26, 316, 458, 54); body.Controls.Add(auto);
             Label hint = Theme.Label("仅用于可信局域网；不会自动运行文件。", Theme.Small, Theme.Muted); hint.SetBounds(26, 360, 458, 24); body.Controls.Add(hint);
             ToggleSwitch autoDrop=new ToggleSwitch {Text="拖入文件自动发送",AccessibleName="拖入文件自动发送",Description="默认关闭：拖入后先加入待发送列表。开启后仅发送本次拖入的文件，不夹带草稿或已排队附件。",Checked=current.AutoSendDroppedFiles,BackColor=Theme.Surface};autoDrop.SetBounds(26,520,458,68);body.Controls.Add(autoDrop);
-            ToggleSwitch legacy=new ToggleSwitch {Text="允许旧版明文协议",AccessibleName="允许旧版明文协议",Description="默认关闭。旧设备聊天和附件使用明文；已配对设备不降级，共享和远控始终加密。",Checked=current.AllowLegacyProtocol,BackColor=Theme.Surface};legacy.SetBounds(26,280,458,68);body.Controls.Add(legacy);
+            ToggleSwitch legacy=new ToggleSwitch {Text="允许旧版明文协议",AccessibleName="允许旧版明文协议",Description="默认开启，兼容旧版聊天和附件。旧设备使用明文；已配对设备不降级，共享和远控始终加密。",Checked=current.AllowLegacyProtocol,BackColor=Theme.Surface};legacy.SetBounds(26,280,458,68);body.Controls.Add(legacy);
             Label dropHint=Theme.Label("文件只在点击发送或开启自动发送后传输。",Theme.Small,Theme.Muted);dropHint.SetBounds(26,521,458,24);body.Controls.Add(dropHint);
             TextBox folder = Input("文件保存文件夹", current.ReceiveFolder ?? AppSettings.DefaultReceiveFolder, 404, 240); folder.Parent.Width = 350;
             Button browse = Theme.Button("选择文件夹", delegate
