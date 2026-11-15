@@ -49,6 +49,8 @@ final class SharedFiles implements AutoCloseable {
     private synchronized boolean valid(Session session){return !closed&&sessions.contains(session)&&SystemClock.elapsedRealtime()-session.last<1800000;}
     private synchronized Session authorize(ToolsHttp.Request request) throws ToolsHttp.Failure {
         String token="";for(String cookie:request.header("Cookie").split(";"))if(cookie.trim().startsWith("fq_share="))token=cookie.trim().substring(9);
+        if(token.isEmpty())token=request.header("X-FQ-Token");
+        if(token.isEmpty()&&(request.method.equals("GET")||request.method.equals("HEAD"))&&request.path.equals("/file"))try{token=request.parameter("token");}catch(IOException ignored){}
         for(Session session:sessions)if(session.token.equals(token)&&session.address.equals(request.address)&&Objects.equals(session.fingerprint,request.fingerprint)&&valid(session)) {
             if(request.method.equals("POST")&&!request.header("X-FQ-Token").equals(token))throw new ToolsHttp.Failure(403,"请求校验失败");
             session.last=SystemClock.elapsedRealtime();return session;

@@ -83,10 +83,35 @@ public final class SecureUpgrade {
             try(ToolsHttp http=new ToolsHttp(0,true,(request,response)->{if(request.path.equals("/api/login")){response.waitingForUser();Thread.sleep(16000);}response.bytes(200,"text/plain","protected".getBytes(java.nio.charset.StandardCharsets.UTF_8),"");},server)){
                 LanNode.Peer peer=new LanNode.Peer(new InetSocketAddress("127.0.0.1",2425),"peer","host","name","group");peer.deviceId="eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";peer.fingerprint=server.fingerprint;
                 try(ToolsGateway gateway=new ToolsGateway(client,peer,http.port(),null)){
-                    URI uri=URI.create(gateway.url());check(http(uri.getPort(),"/","").contains("403"),"未授权进入网关");String response=http(uri.getPort(),uri.getRawPath()+"?"+uri.getRawQuery(),"");String cookie=Arrays.stream(response.split("\r\n")).filter(s->s.startsWith("Set-Cookie: ")).findFirst().orElseThrow().substring(12).split(";")[0];check(http(uri.getPort(),"/",cookie).contains("protected"),"TLS 转发失败");
+                    URI uri=URI.create(gateway.url());check(http(uri.getPort(),"/","").contains("403"),"未授权进入网关");String response=http(uri.getPort(),uri.getRawPath()+"?"+uri.getRawQuery(),"");
+                    check(response.contains("Location: /?gateway=")&&response.contains("SameSite=Lax"),"外部浏览器跳转未携带网关参数或 SameSite=Lax");
+                    String location=Arrays.stream(response.split("\r\n")).filter(s->s.startsWith("Location: ")).findFirst().orElseThrow().substring(10).trim();
+                    String withoutCookie=http(uri.getPort(),location,"");
+                    check(withoutCookie.contains("protected")&&withoutCookie.contains("Set-Cookie: "),"外部浏览器丢弃重定向 Cookie 后无法打开共享页");
+                    String cookie=Arrays.stream(response.split("\r\n")).filter(s->s.startsWith("Set-Cookie: ")).findFirst().orElseThrow().substring(12).split(";")[0];check(http(uri.getPort(),"/",cookie).contains("protected"),"TLS 转发失败");
                     check(delayedLogin(uri.getPort(),cookie).contains("protected"),"网关在人工确认期间提前断开");
                     server.forget("ffffffffffffffffffffffffffffffff");check(!server.isTrustedFingerprint(client.fingerprint),"撤销未移除指纹");check(!http(uri.getPort(),"/",cookie).contains("protected"),"撤销后仍可读取共享");
                 }
+            }
+        });
+        run("VPN 单向连接受阻时通过反向同步送达消息与推送文件",()->{
+            String aid="abababababababababababababababab",bid="cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
+            byte[] payload=new byte[256*1024+19];for(int i=0;i<payload.length;i++)payload[i]=(byte)(i*31+7);
+            File source=root.resolve("vpn-push-source.bin").toFile();Files.write(source.toPath(),payload);
+            try(Node a=new Node(root.resolve("vpn-a").toFile(),port(),aid);Node b=new Node(root.resolve("vpn-b").toFile(),port(),bid)){
+                LanNode.Peer peerB=find(a,b),peerA=find(b,a);
+                a.node.verifyPeer(peerB);
+                // 关闭 B 的 TCP 监听与 UDP 套接字，模拟 VPN 拦截所有入站连接（A 无法直连 B，仅 B 可主动连 A）。
+                ((ServerSocket)field(b.node,"tcp")).close();
+                a.node.sendMessage(peerB,"VPN反向同步文本",Collections.emptyList());
+                LanNode.Message gotText=b.incoming.poll(6,TimeUnit.SECONDS);
+                check(gotText!=null&&"VPN反向同步文本".equals(gotText.text),"单向受阻时反向同步未送达文本消息");
+                b.node.sendMessage(peerA,"VPN文件邀请",Collections.singletonList(source));
+                LanNode.Message offerMsg=a.incoming.poll(6,TimeUnit.SECONDS);
+                check(offerMsg!=null&&offerMsg.files.size()==1,"单向受阻时文件邀请未送达");
+                File destination=root.resolve("vpn-pushed.bin").toFile();
+                a.node.receiveFile(peerB,offerMsg.number,offerMsg.files.get(0),destination,new LanNode.Transfer(),null);
+                check(Arrays.equals(payload,Files.readAllBytes(destination.toPath())),"单向受阻时反向推送文件内容不一致");
             }
         });
         System.out.println("ANDROID SECURE: "+passed+" passed, "+failed+" failed");System.exit(failed==0?0:1);

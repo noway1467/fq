@@ -2,6 +2,8 @@
 (() => {
   const $ = id => document.getElementById(id);
   const mode = location.hash === '#remote' ? 'remote' : 'share';
+  const queryParams = new URLSearchParams(location.search);
+  const gatewayAccess = queryParams.get('gateway') || queryParams.get('access') || '';
   let token = '', generation = 0, frameTimer = 0, frameUrl = '', drag = false;
   let frameAbort=null;
   let display = 0, displayVersion = 0, zoomLevel = 0;
@@ -24,7 +26,9 @@
     if(path.startsWith('/api/screen?'))frameAbort=abort;
     try {
       const options = {signal: abort.signal, cache: 'no-store', credentials: 'same-origin', headers: {}};
-      if (data !== undefined) { options.method = 'POST'; options.headers = {'Content-Type': 'application/json', 'X-FQ-Token': currentToken, 'X-FQ-Reconnect': '1'}; options.body = JSON.stringify(data); }
+      if (gatewayAccess) options.headers['X-FQ-Gateway'] = gatewayAccess;
+      if (currentToken) options.headers['X-FQ-Token'] = currentToken;
+      if (data !== undefined) { options.method = 'POST'; options.headers['Content-Type'] = 'application/json'; options.headers['X-FQ-Token'] = currentToken; options.headers['X-FQ-Reconnect'] = '1'; options.body = JSON.stringify(data); }
       const response = await fetch(path, options);
       if (!response.ok) {
         let error; try { error = (await response.json()).error; } catch (_) { error = ''; }
@@ -130,6 +134,12 @@
     $('search').value = '';
     loadDirectory();
   }
+  function fileUrl(id, dl) {
+    let u = '/file?id=' + encodeURIComponent(id) + (dl ? '&download=1' : '');
+    if (token) u += '&token=' + encodeURIComponent(token);
+    if (gatewayAccess) u += '&gateway=' + encodeURIComponent(gatewayAccess);
+    return u;
+  }
   function renderFiles() {
     const filter = $('search').value.toLocaleLowerCase(), list = items.filter(item => item.name.toLocaleLowerCase().includes(filter)).sort((a,b) => Number(b.dir) - Number(a.dir) || a.name.localeCompare(b.name));
     $('count').textContent = `${list.length} 项`; $('file-list').replaceChildren();
@@ -151,13 +161,13 @@
         open.textContent = item.dir ? '进入' : '播放'; open.setAttribute('aria-label', open.textContent + ' ' + item.name);
         open.onclick = () => { if (item.dir) enterDirectory(item); else play(item); }; actions.append(open);
       }
-      if (!item.dir) { const download = document.createElement('a'); download.className = 'btn-download'; download.textContent = '下载'; download.href = '/file?id=' + encodeURIComponent(item.id) + '&download=1'; download.download = item.name; download.setAttribute('aria-label', '下载 ' + item.name); actions.append(download); }
+      if (!item.dir) { const download = document.createElement('a'); download.className = 'btn-download'; download.textContent = '下载'; download.href = fileUrl(item.id, true); download.download = item.name; download.setAttribute('aria-label', '下载 ' + item.name); actions.append(download); }
       row.append(actions); $('file-list').append(row);
     });
   }
   function play(item) {
     closePlayer(); $('player-panel').hidden = false; $('player-title').textContent = item.name; $('player-error').textContent = '';
-    $('player').src = '/file?id=' + encodeURIComponent(item.id); $('player').play().catch(() => { $('player-error').textContent = '请点播放按钮；若仍无法播放，可下载后用本机播放器打开。'; });
+    $('player').src = fileUrl(item.id, false); $('player').play().catch(() => { $('player-error').textContent = '请点播放按钮；若仍无法播放，可下载后用本机播放器打开。'; });
     $('close-player').focus();
   }
   $('player').onerror = () => { $('player-error').textContent = '播放失败：格式不支持、共享已关闭，或来源不支持跳转读取。请检查连接或下载后播放。'; };

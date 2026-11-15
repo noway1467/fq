@@ -135,6 +135,8 @@ namespace FeiqLight
         {
             string cookie = request.Header("Cookie").Split(';').Select(s => s.Trim()).FirstOrDefault(s => s.StartsWith("fq_" + mode + "=", StringComparison.Ordinal));
             string token = cookie == null ? "" : cookie.Substring(cookie.IndexOf('=') + 1);
+            if (token.Length == 0) token = request.Header("X-FQ-Token");
+            if (token.Length == 0 && (request.Method == "GET" || request.Method == "HEAD") && request.Path == "/file") token = request.Parameter("token");
             lock (gate)
             {
                 Session session = sessions.FirstOrDefault(s => s.Mode == mode && s.Token == token && s.Address == request.Address && s.Fingerprint==request.Fingerprint);

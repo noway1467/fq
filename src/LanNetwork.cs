@@ -25,7 +25,7 @@ namespace FeiqLight
         {
             if(type!=NetworkInterfaceType.Ethernet && type!=NetworkInterfaceType.Wireless80211 && type!=NetworkInterfaceType.GigabitEthernet && type!=NetworkInterfaceType.FastEthernetFx && type!=NetworkInterfaceType.FastEthernetT)return false;
             string text=(description??"").ToLowerInvariant();
-            return !new[]{"vpn","wireguard","wintun","tap-windows","tunnel","vmware","virtualbox","hyper-v"}.Any(text.Contains);
+            return !new[]{"vpn","wireguard","wintun","tap-windows","tunnel","vmware","virtualbox","hyper-v","clash","meta","mihomo","sing-box","v2ray","nekoray","tailscale","zerotier","utun"}.Any(text.Contains);
         }
         internal static List<Link> Scan()
         {

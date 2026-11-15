@@ -78,7 +78,7 @@ public final class ToolsHttp implements AutoCloseable {
         AtomicLong progress=new AtomicLong(System.nanoTime());
         ScheduledFuture<?> timeout=null;
         try {
-            if(binding!=null&&!binding.allows(socket.getInetAddress()))return;
+            if(binding!=null){if(!binding.allows(socket.getInetAddress()))return;try{binding.bindAccepted(socket);}catch(IOException ignored){}}
             timeout=timeouts.scheduleWithFixedDelay(()->{if(System.nanoTime()-progress.get()>TimeUnit.SECONDS.toNanos(15))try{socket.close();}catch(IOException ignored){}},1,1,TimeUnit.SECONDS);
             socket.setSoTimeout(5000);socket.setTcpNoDelay(true);socket.setSendBufferSize(262144);
             Socket transport=security==null?socket:security.server(socket,true);

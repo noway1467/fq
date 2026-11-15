@@ -28,12 +28,14 @@ public final class ToolsGateway implements AutoCloseable {
     private void relay(ToolsHttp.Request request,ToolsHttp.Response response)throws IOException {
         if(!security.isTrusted(deviceId,fingerprint))throw new ToolsHttp.Failure(403,"设备信任已撤销");
         String guard="fq_gateway_"+http.port();
-        if(request.method.equals("GET")&&request.path.equals("/")&&request.query.equals("access="+access)){
-            response.bytes(303,"text/plain",new byte[0],"Location: /\r\nSet-Cookie: "+guard+"="+access+"; Path=/; HttpOnly; SameSite=Strict\r\n");return;
+        if((request.method.equals("GET")||request.method.equals("HEAD"))&&request.path.equals("/")&&request.parameter("access").equals(access)){
+            response.bytes(303,"text/plain",new byte[0],"Location: /?gateway="+access+"\r\nSet-Cookie: "+guard+"="+access+"; Path=/; HttpOnly; SameSite=Lax\r\n");return;
         }
-        List<String> cookies=new ArrayList<>();boolean allowed=false;
-        for(String item:request.header("Cookie").split(";")){String cookie=item.trim();if(cookie.equals(guard+"="+access))allowed=true;if(cookie.startsWith(prefix))cookies.add(cookie.substring(prefix.length()));}
-        if(!allowed)throw new ToolsHttp.Failure(403,"请从飞Q联系人重新打开");
+        List<String> cookies=new ArrayList<>();boolean cookieAllowed=false;
+        for(String item:request.header("Cookie").split(";")){String cookie=item.trim();if(cookie.equals(guard+"="+access))cookieAllowed=true;if(cookie.startsWith(prefix))cookies.add(cookie.substring(prefix.length()));}
+        boolean tokenAllowed=request.parameter("gateway").equals(access)||request.parameter("access").equals(access)||request.header("X-FQ-Gateway").equals(access)||request.header("Referer").contains("gateway="+access)||request.header("Referer").contains("access="+access);
+        boolean staticShell=(request.method.equals("GET")||request.method.equals("HEAD"))&&(request.path.equals("/app.css")||request.path.equals("/app.js")||request.path.equals("/favicon.ico"));
+        if(!cookieAllowed&&!tokenAllowed&&!staticShell)throw new ToolsHttp.Failure(403,"请从飞Q联系人重新打开");
         // 远控登录可能等待对端本机确认，回环入口须保留相同的人工等待窗口。
         if(request.method.equals("POST")&&(request.path.equals("/api/login")||request.path.equals("/api/reconnect")))response.waitingForUser();
         Socket raw=new Socket(Proxy.NO_PROXY);synchronized(sockets){if(closed){raw.close();throw new IOException("连接已关闭");}sockets.add(raw);}
@@ -42,13 +44,15 @@ public final class ToolsGateway implements AutoCloseable {
             try(SSLSocket tls=security.client(raw,fingerprint)) {
                 String host=endpoint.getAddress().getHostAddress()+":"+endpoint.getPort();Map<String,String> headers=new TreeMap<>(String.CASE_INSENSITIVE_ORDER);headers.putAll(request.headers);
                 headers.put("Host",host);headers.put("Connection","close");headers.put("Cookie",String.join("; ",cookies));if(headers.containsKey("Origin"))headers.put("Origin","https://"+host);
-                StringBuilder text=new StringBuilder(request.method+" "+request.path+(request.query.isEmpty()?"":"?"+request.query)+" HTTP/1.1\r\n");for(Map.Entry<String,String> item:headers.entrySet())text.append(item.getKey()).append(": ").append(item.getValue()).append("\r\n");text.append("\r\n");
+                String forwardedQuery=request.path.equals("/")&&(request.parameter("gateway").equals(access)||request.parameter("access").equals(access))?"":request.query;
+                StringBuilder text=new StringBuilder(request.method+" "+request.path+(forwardedQuery.isEmpty()?"":"?"+forwardedQuery)+" HTTP/1.1\r\n");for(Map.Entry<String,String> item:headers.entrySet())text.append(item.getKey()).append(": ").append(item.getValue()).append("\r\n");text.append("\r\n");
                 OutputStream out=tls.getOutputStream();out.write(text.toString().getBytes(StandardCharsets.US_ASCII));out.write(request.body);out.flush();
                 InputStream input=tls.getInputStream();String[] lines=readHeader(input).split("\r\n");String[] status=lines[0].split(" ",3);int code=Integer.parseInt(status[1]);long length=-1;String type="application/octet-stream";StringBuilder extra=new StringBuilder();
+                if(!cookieAllowed&&tokenAllowed)extra.append("Set-Cookie: ").append(guard).append("=").append(access).append("; Path=/; HttpOnly; SameSite=Lax\r\n");
                 for(int i=1;i<lines.length;i++){int colon=lines[i].indexOf(':');if(colon<1)throw new IOException("响应头无效");String name=lines[i].substring(0,colon),value=lines[i].substring(colon+1).trim();
                     if(name.equalsIgnoreCase("Content-Length"))length=Long.parseLong(value);
                     else if(name.equalsIgnoreCase("Content-Type"))type=value;
-                    else if(name.equalsIgnoreCase("Set-Cookie"))extra.append("Set-Cookie: ").append(prefix).append(value.replace("; Secure","")).append("\r\n");
+                    else if(name.equalsIgnoreCase("Set-Cookie"))extra.append("Set-Cookie: ").append(prefix).append(value.replace("; Secure","").replace("SameSite=Strict","SameSite=Lax")).append("\r\n");
                     else if(name.equalsIgnoreCase("Content-Range")||name.equalsIgnoreCase("Accept-Ranges")||name.equalsIgnoreCase("Content-Disposition"))extra.append(name).append(": ").append(value).append("\r\n");
                 }
                 if(length<0)throw new IOException("响应长度无效");response.begin(code,type,length,extra.toString());if(request.method.equals("HEAD"))return;

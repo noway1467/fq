@@ -109,12 +109,32 @@ namespace FeiqLight.Tests
                 using(ToolsHttp http=new ToolsHttp(0,true,(request,response)=>response.Bytes(Encoding.UTF8.GetBytes(request.Path=="/large"?payload:"protected"),"text/plain"),server))
                 using(ToolsGateway gateway=new ToolsGateway(client,new Peer{DeviceId="dddddddddddddddddddddddddddddddd",Fingerprint=server.Fingerprint,Endpoint=new IPEndPoint(IPAddress.Loopback,2425)},http.Port,true)){
                     using(TcpClient direct=new TcpClient()) {direct.Connect(IPAddress.Loopback,http.Port);using(var transport=client.Client(direct,server.Fingerprint)) {byte[] request=Encoding.ASCII.GetBytes("GET / HTTP/1.1\r\nHost: 127.0.0.1:"+http.Port+"\r\nConnection: close\r\n\r\n");transport.Write(request,0,request.Length);using(StreamReader reader=new StreamReader(transport)) {string directResponse=reader.ReadToEnd();Check(directResponse.Contains("protected"),"直接 HTTPS 响应没有正文，长度="+directResponse.Length);}}}
-                    Uri uri=new Uri(gateway.Url);Check(Http(uri.Port,"/","")=="","无令牌进入网关");string first=Http(uri.Port,uri.PathAndQuery,"");Check(first.Contains("303"),"网关入口未跳转");string cookie=first.Split(new[]{"\r\n"},StringSplitOptions.None).First(s=>s.StartsWith("Set-Cookie: ")).Substring(12).Split(';')[0];
+                    Uri uri=new Uri(gateway.Url);Check(Http(uri.Port,"/","")=="","无令牌进入网关");string first=Http(uri.Port,uri.PathAndQuery,"");Check(first.Contains("303")&&first.Contains("Location: /?gateway=")&&first.Contains("SameSite=Lax"),"网关入口未携带跳转参数或 SameSite=Lax");
+                    string location=first.Split(new[]{"\r\n"},StringSplitOptions.None).First(s=>s.StartsWith("Location: ")).Substring(10).Trim();
+                    string withoutCookie=Http(uri.Port,location,"");Check(withoutCookie.EndsWith("protected")&&withoutCookie.Contains("Set-Cookie: "),"外部浏览器丢弃重定向 Cookie 后无法打开共享页");
+                    string cookie=first.Split(new[]{"\r\n"},StringSplitOptions.None).First(s=>s.StartsWith("Set-Cookie: ")).Substring(12).Split(';')[0];
                     string forwarded=Http(uri.Port,"/",cookie);Check(forwarded.EndsWith("protected"),"HTTPS 网关正文丢失，响应长度="+forwarded.Length);Check(Http(uri.Port,"/",cookie,"http://evil.invalid")=="","跨站请求被放行");
                     Check(Http(uri.Port,"/large",cookie).EndsWith(payload,StringComparison.Ordinal),"HTTPS 网关截断了多段正文");
                     string head=Http(uri.Port,"/",cookie,null,"HEAD");Check(head.Contains("Content-Length: 9")&&head.EndsWith("\r\n\r\n"),"HEAD 请求带上了正文或长度错误");
                     server.Forget("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");Check(!server.IsTrustedFingerprint(client.Fingerprint),"撤销未移除指纹");Check(!Http(uri.Port,"/",cookie).Contains("protected"),"撤销后仍可访问共享");
                 }
+                }
+            });
+            Run("VPN 单向连接受阻时通过反向同步送达消息与推送文件",()=>{
+                const string aid="dededededededededededededededede",bid="efefefefefefefefefefefefefefefef";
+                string source=Path.Combine(root,"vpn-push-source.bin"),destination=Path.Combine(root,"vpn-pushed.bin");
+                byte[] payload=Enumerable.Range(0,256*1024+19).Select(i=>(byte)(i*31+7)).ToArray();File.WriteAllBytes(source,payload);
+                using(LanService a=Node(Path.Combine(root,"vpn-a"),Port(),aid))using(LanService b=Node(Path.Combine(root,"vpn-b"),Port(),bid)){
+                    Peer peerB=Find(a,b),peerA=Find(b,a);a.VerifyPeer(peerB);
+                    IncomingMessage bGot=null,aGot=null;b.MessageReceived+=m=>bGot=m;a.MessageReceived+=m=>aGot=m;
+                    // 停止 B 的 TCP 监听模拟 VPN 阻断入站 TCP（A 无法直连 B，仅 B 可主动连 A）。
+                    ((TcpListener)typeof(LanService).GetField("tcp",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic).GetValue(b)).Stop();
+                    ChatRecord sentText=a.SendMessage(peerB,"VPN反向同步文本",null);
+                    Wait(()=>bGot!=null&&bGot.Record.Text=="VPN反向同步文本"&&sentText.State=="已送达","单向受阻时反向同步未送达文本消息");
+                    ChatRecord sentFile=b.SendMessage(peerA,"VPN文件邀请",new[]{source});
+                    Wait(()=>aGot!=null&&aGot.Files!=null&&aGot.Files.Count==1&&sentFile.State=="已送达","单向受阻时文件邀请未送达");
+                    a.ReceiveFileAsync(peerB,aGot.Record.Packet,aGot.Files[0],destination,null,CancellationToken.None).GetAwaiter().GetResult();
+                    Check(File.ReadAllBytes(destination).SequenceEqual(payload),"单向受阻时反向推送文件内容不一致");
                 }
             });
             Console.WriteLine("WINDOWS SECURE: "+passed+" passed, "+failed+" failed");return failed==0?0:1;

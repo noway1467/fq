@@ -25,7 +25,7 @@ final class LanNetwork implements LanNode.SocketBinding {
     }
     interface InterfaceLookup { List<LocalInterface> list() throws IOException; }
     private static final String[] HOTSPOT_PREFIXES={"ap","swlan","softap","wlan","wifi","hotspot","tether","rndis","usb","ncm","p2p","eth"};
-    private static final String[] BLOCKED_PREFIXES={"rmnet","ccmni","pdp","wwan","clat","v4-","tun","tap","ppp","ipsec","wg","sit","ip6tnl","gre","dummy","lo","svnet","seth","qmi"};
+    private static final String[] BLOCKED_PREFIXES={"rmnet","ccmni","pdp","wwan","clat","v4-","tun","tap","ppp","ipsec","wg","sit","ip6tnl","gre","dummy","lo","svnet","seth","qmi","clash","meta","mihomo","sing","v2ray","neko","tailscale","zerotier","utun"};
     private final ConnectivityManager manager;
     private final InterfaceLookup interfaceLookup;
     private final Map<DatagramSocket,Network> bound=new WeakHashMap<>();
@@ -202,7 +202,15 @@ final class LanNetwork implements LanNode.SocketBinding {
             if(cachedLocal) return;
             throw new IOException(DISCONNECTED_STATUS);
         }
-        try {network.bindSocket(socket);} catch(IOException e) {changed();throw blocked(e);}
+        try {network.bindSocket(socket);} catch(IOException e) {
+            if(!cachedLocalLinks.isEmpty())return;
+            changed();throw blocked(e);
+        }
+    }
+    @Override public synchronized void bindAccepted(Socket socket) {
+        try {
+            Network network=select();if(network!=null)network.bindSocket(socket);
+        } catch(Throwable ignored) { }
     }
     @Override public synchronized void bind(Socket socket,InetAddress destination) throws IOException {
         Network network=select();
