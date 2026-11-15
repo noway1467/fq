@@ -24,10 +24,12 @@ final class LanNetwork implements LanNode.SocketBinding {
         }
     }
     interface InterfaceLookup { List<LocalInterface> list() throws IOException; }
+    interface DatagramFactory { DatagramSocket create(InetSocketAddress source) throws SocketException; }
     private static final String[] HOTSPOT_PREFIXES={"ap","swlan","softap","wlan","wifi","hotspot","tether","rndis","usb","ncm","p2p","eth"};
     private static final String[] BLOCKED_PREFIXES={"rmnet","ccmni","pdp","wwan","clat","v4-","tun","tap","ppp","ipsec","wg","sit","ip6tnl","gre","dummy","lo","svnet","seth","qmi","clash","meta","mihomo","sing","v2ray","neko","tailscale","zerotier","utun"};
     private final ConnectivityManager manager;
     private final InterfaceLookup interfaceLookup;
+    private final DatagramFactory datagramFactory;
     private final Map<DatagramSocket,Network> bound=new WeakHashMap<>();
     private Network cachedNetwork;
     private LinkProperties cachedLinks;
@@ -40,7 +42,8 @@ final class LanNetwork implements LanNode.SocketBinding {
     private long checkedAt;
     private IOException cachedFailure;
     LanNetwork(ConnectivityManager manager) { this(manager,LanNetwork::systemInterfaces); }
-    LanNetwork(ConnectivityManager manager,InterfaceLookup interfaceLookup) { this.manager=manager; this.interfaceLookup=interfaceLookup; }
+    LanNetwork(ConnectivityManager manager,InterfaceLookup interfaceLookup) { this(manager,interfaceLookup,DatagramSocket::new); }
+    LanNetwork(ConnectivityManager manager,InterfaceLookup interfaceLookup,DatagramFactory datagramFactory) { this.manager=manager; this.interfaceLookup=interfaceLookup;this.datagramFactory=datagramFactory; }
     @Override public void changed() {revision.incrementAndGet();}
     static boolean physical(NetworkCapabilities capabilities) {
         return capabilities!=null && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
@@ -192,7 +195,8 @@ final class LanNetwork implements LanNode.SocketBinding {
         }
         if(network.equals(bound.get(socket)))return;
         try {network.bindSocket(socket);bound.put(socket,network);} catch(IOException e) {
-            if(!cachedLocalLinks.isEmpty()){cachedNetwork=null;cachedLocal=true;return;}
+            bound.remove(socket);
+            if(!cachedLocalLinks.isEmpty())return;
             changed();throw blocked(e);
         }
     }
@@ -228,10 +232,12 @@ final class LanNetwork implements LanNode.SocketBinding {
         socket.bind(new InetSocketAddress(link.address,0));
     }
     @Override public synchronized void send(DatagramSocket receiver,byte[] bytes,InetSocketAddress destination)throws IOException {
-        if(select()!=null){receiver.send(new DatagramPacket(bytes,bytes.length,destination));return;}
+        Network network=select();
+        // 扫描缓存刷新不能把之前绑定失败的 socket 误认为已绑定，导致广播重新走 VPN。
+        if(network!=null&&network.equals(bound.get(receiver))){receiver.send(new DatagramPacket(bytes,bytes.length,destination));return;}
         LocalLink link=localLink(destination.getAddress());if(link==null)throw new IOException("目标不在当前热点或共享子网内");
         // 发送 socket 绑定热点本地地址，应用只使用当前共享子网；回复端口由发现报文明确提供。
-        try(DatagramSocket sender=new DatagramSocket(new InetSocketAddress(link.address,0))){sender.setBroadcast(true);sender.send(new DatagramPacket(bytes,bytes.length,destination));}
+        try(DatagramSocket sender=datagramFactory.create(new InetSocketAddress(link.address,0))){sender.setBroadcast(true);sender.send(new DatagramPacket(bytes,bytes.length,destination));}
         catch(IOException e){throw blocked(e);}
     }
     private IOException blocked(IOException cause) { return new IOException("局域网直连被系统限制，请检查 VPN 的允许局域网/应用排除与阻止非 VPN 连接设置。",cause); }

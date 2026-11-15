@@ -7,7 +7,7 @@
   let token = '', generation = 0, frameTimer = 0, frameUrl = '', drag = false;
   let frameAbort=null;
   let display = 0, displayVersion = 0, zoomLevel = 0;
-  let phone = false, scale = 1, fillHeight = true;
+  let phone = false, scale = 1, fillHeight = false;
   let trail = [{id: '', name: '共享文件夹'}], items = [], listing = 0;
   let pending = [], sending = false, closing = Promise.resolve();
   const status = (text, error = false) => { $('status').textContent = text; $('status').hidden = !text; $('status').classList.toggle('error', error); };
@@ -55,7 +55,7 @@
     $('type-text').disabled = false;
     document.body.classList.remove('remote-active','controls-hidden','typing-mode'); $('restore-panel').hidden = true; $('remote-text').blur(); $('keyboard').textContent = '键盘'; $('keyboard').setAttribute('aria-pressed','false');
     zoomLevel=0; $('screen-wrap').classList.remove('zoomed','zoom-large'); $('zoom').textContent='放大';
-    scale=1; screenPoints.clear(); screenDown=null; pinch=null;
+    scale=1; fillHeight=false; screenPoints.clear(); screenDown=null; pinch=null;
     $('remote-error').hidden=true;
     closePlayer(); if (frameUrl) URL.revokeObjectURL(frameUrl); frameUrl = ''; $('screen').removeAttribute('src'); status(message, error);
     if (previousToken) {

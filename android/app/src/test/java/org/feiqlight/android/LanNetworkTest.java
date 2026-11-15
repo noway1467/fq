@@ -282,4 +282,23 @@ public final class LanNetworkTest {
             catch(IOException expected){assertTrue(expected.getMessage().contains("子网")||expected.getMessage().contains("局域网"));}
         }
     }
+    @Test @Config(shadows=BlockingBindNetwork.class)
+    public void vpnUdpFallbackSurvivesNetworkCacheRefreshWithoutUsingDefaultRoute() throws Exception {
+        ConnectivityManager cm=(ConnectivityManager)RuntimeEnvironment.getApplication().getSystemService(Context.CONNECTIVITY_SERVICE);shadowOf(cm).clearAllNetworks();
+        add(cm,970,NetworkCapabilities.TRANSPORT_VPN,"198.18.0.1",16);
+        add(cm,971,NetworkCapabilities.TRANSPORT_WIFI,"192.168.10.25",24);
+        List<InetSocketAddress> sources=new ArrayList<>();List<SocketAddress> destinations=new ArrayList<>();
+        LanNetwork route=new LanNetwork(cm,NO_LOCAL,source->{
+            sources.add(source);
+            return new DatagramSocket((SocketAddress)null){@Override public void send(DatagramPacket packet){destinations.add(packet.getSocketAddress());}};
+        });
+        try(DatagramSocket receiver=new DatagramSocket((SocketAddress)null){@Override public void send(DatagramPacket packet){fail("未绑定的接收 socket 走了默认 VPN 路由");}}) {
+            route.bind(receiver);Object key=route.networkKey();InetSocketAddress destination=new InetSocketAddress("192.168.10.255",2425);
+            route.send(receiver,new byte[]{1},destination);
+            route.changed();assertEquals(key,route.networkKey());
+            route.send(receiver,new byte[]{2},destination);
+            assertEquals(Arrays.asList(new InetSocketAddress("192.168.10.25",0),new InetSocketAddress("192.168.10.25",0)),sources);
+            assertEquals(Arrays.asList(destination,destination),destinations);
+        }
+    }
 }

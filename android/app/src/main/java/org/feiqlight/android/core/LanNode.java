@@ -208,7 +208,6 @@ public final class LanNode implements AutoCloseable {
     private volatile DatagramSocket udp;
     private ServerSocket tcp;
     private volatile boolean closed,started,networkAvailable;
-    private boolean initialRefresh=true;
     private volatile String networkStatus="网络已断开，等待 Wi-Fi、热点或以太网恢复";
     private Object networkKey;
     private volatile long refreshAt;
@@ -227,13 +226,21 @@ public final class LanNode implements AutoCloseable {
         if (closed || started) throw new IOException("服务已启动或关闭");
         started=true;
         try {
-            InetAddress address=InetAddress.getByName(loopback?"127.0.0.1":"0.0.0.0");
-            tcp=new ServerSocket(); tcp.setReuseAddress(false); tcp.bind(new InetSocketAddress(address,port),4);
             refresh();
-            initialRefresh=false;
-            Thread accept=new Thread(this::acceptLoop,"feiq-files");accept.setDaemon(true);accept.start();
             timer.scheduleWithFixedDelay(this::tick,1,1,TimeUnit.SECONDS);
         } catch (IOException | RuntimeException e) { close(); throw e; }
+    }
+    private void ensureListener() throws IOException {
+        synchronized(gate) {
+            if(closed||tcp!=null)return;
+            ServerSocket next=new ServerSocket();
+            try {
+                next.setReuseAddress(false);
+                next.bind(new InetSocketAddress(InetAddress.getByName(loopback?"127.0.0.1":"0.0.0.0"),port),4);
+                tcp=next;
+            }catch(IOException|RuntimeException error){next.close();throw error;}
+            Thread accept=new Thread(this::acceptLoop,"feiq-files");accept.setDaemon(true);accept.start();
+        }
     }
     private void networkState(boolean available,String reason) {
         if(closed || (networkAvailable==available && networkStatus.equals(reason)))return;
@@ -342,12 +349,12 @@ public final class LanNode implements AutoCloseable {
             try {key=socketBinding.networkKey();}
             catch(IOException e){switchNetwork(null);networkState(false,e.getMessage());return;}
         }
-        try { switchNetwork(key); }
+        try { ensureListener();switchNetwork(key); }
         catch(IOException e) {
-            if(initialRefresh) throw e;
             switchNetwork(null);
             fastRefreshUntil=System.nanoTime()+TimeUnit.SECONDS.toNanos(10);
-            networkState(false,"局域网暂不可用，正在重试："+e.getMessage());
+            // 升级后的端口释放、切网和 VPN 初始化可能短暂失败，保留服务等待恢复。
+            networkState(false,(e instanceof BindException?"本地端口 "+port+" 暂不可用，正在重试：":"局域网暂不可用，正在重试：")+e.getMessage());
             return;
         }
         if(key==null){networkState(false,"网络已断开，等待 Wi-Fi、热点或以太网恢复");return;}

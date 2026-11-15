@@ -129,8 +129,15 @@ public final class ToolsHttp implements AutoCloseable {
         }catch(NumberFormatException e){return null;}
     }
     @Override public void close() {
-        if(security!=null){security.removeRevocationObserver(revoked);security.unregisterReverseListener(port());}
-        synchronized(clients){if(closed)return;closed=true;try{server.close();}catch(IOException ignored){}for(Socket socket:clients)try{socket.close();}catch(IOException ignored){}workers.shutdownNow();timeouts.shutdownNow();}
+        synchronized(clients){
+            if(closed)return;
+            closed=true;
+            // accept 退出也会关闭本实例；注销必须只执行一次，并早于端口释放。
+            if(security!=null){security.removeRevocationObserver(revoked);security.unregisterReverseListener(port());}
+            try{server.close();}catch(IOException ignored){}
+            for(Socket socket:clients)try{socket.close();}catch(IOException ignored){}
+            workers.shutdownNow();timeouts.shutdownNow();
+        }
     }
     public void disconnectClients(){synchronized(clients){for(Socket socket:clients)try{socket.close();}catch(IOException ignored){}}}
 }

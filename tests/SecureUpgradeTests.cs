@@ -161,6 +161,16 @@ namespace FeiqLight.Tests
                     a.ForgetSecurity(peerB);Check(Entries(a,"reverseRequests")==0,"撤销后残留回连请求");
                 }
             });
+            Run("重复关闭旧共享服务不能移除重建后的回连入口",()=>{
+                using(LanService a=Node(Path.Combine(root,"lifecycle-a"),Port(),"03030303030303030303030303030303"))using(LanService b=Node(Path.Combine(root,"lifecycle-b"),ToolPorts(),"04040404040404040404040404040404")){
+                    Peer peer=Find(a,b);a.VerifyPeer(peer);a.PeerConnector=(socket,target)=>{throw new SocketException((int)SocketError.ConnectionRefused);};
+                    int port=b.Port+1;ToolsHttp old=new ToolsHttp(port,true,(request,response)=>response.Json(new{}),b.Security);old.Dispose();
+                    using(ToolsHttp current=new ToolsHttp(port,true,(request,response)=>response.Bytes(Encoding.UTF8.GetBytes("rebuilt"),"text/plain"),b.Security))using(ToolsGateway gateway=new ToolsGateway(a.Security,peer,port,true,a)){
+                        old.Dispose();Uri uri=new Uri(gateway.Url);string redirect=Http(uri.Port,uri.PathAndQuery,"");string cookie=redirect.Split(new[]{"\r\n"},StringSplitOptions.None).First(s=>s.StartsWith("Set-Cookie: ")).Substring(12).Split(';')[0];
+                        Check(Http(uri.Port,"/",cookie).EndsWith("rebuilt"),"新服务无法通过回连接收真实 HTTP 请求");
+                    }
+                }
+            });
             Console.WriteLine("WINDOWS SECURE: "+passed+" passed, "+failed+" failed");return failed==0?0:1;
         }
     }

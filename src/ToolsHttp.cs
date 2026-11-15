@@ -171,6 +171,17 @@ namespace FeiqLight
             else if (!Int64.TryParse(parts[1], NumberStyles.None, CultureInfo.InvariantCulture, out end)) return null;
             return end < start ? null : new[] { start, Math.Min(end, size - 1) };
         }
-        public void Dispose() { if(security!=null){security.TrustRevoked-=OnTrustRevoked;security.UnregisterReverseListener(Port);}lock (gate) { if (closed) return; closed = true; listener.Stop(); foreach (TcpClient client in clients) client.Close(); } }
+        public void Dispose()
+        {
+            lock (gate)
+            {
+                if (closed) return;
+                closed = true;
+                // 先注销本实例，再释放端口；旧实例重复关闭不能误删新实例的回连入口。
+                if(security!=null){security.TrustRevoked-=OnTrustRevoked;security.UnregisterReverseListener(Port);}
+                listener.Stop();
+                foreach (TcpClient client in clients) client.Close();
+            }
+        }
     }
 }

@@ -68,6 +68,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
     private String sendingPeer="";
     private TextView sendStatus;
     private boolean restoreAttempted;
+    private boolean resumed;
     private Bitmap backgroundBitmap;
     private String loadedBackground="";
     private int messageSize(){return Math.max(14,Math.min(24,getSharedPreferences("settings",MODE_PRIVATE).getInt("chat_font_size",16)));}
@@ -135,6 +136,8 @@ public final class MainActivity extends Activity implements ChatService.Observer
     }
     // 熄屏期间对端可能已切网离开，亮屏回到页面时立即复核头像在线光晕。
     @Override protected void onStart() { super.onStart(); visible=true; if(SystemBars.isDark(this)!=DARK)rerenderPreservingState(); if(service!=null) { service.observe(this); service.active(selected); service.verifyPresence(); } restoreConnection(); }
+    @Override protected void onResume() { super.onResume();resumed=true;restoreConnection(); }
+    @Override protected void onPause() { resumed=false;super.onPause(); }
     @Override public void onWindowFocusChanged(boolean hasFocus) { super.onWindowFocusChanged(hasFocus); if(hasFocus) SystemBars.appearance(getWindow(),DARK); }
     @Override protected void onStop() { historyAppliedVersion=++historyRequestVersion; closeHistory(); finishSelection(); saveDraft(); visible=false; if(service!=null) { service.remove(this); service.active(""); } super.onStop(); }
     @Override protected void onDestroy() { avatarLoader.shutdownNow();avatarImageRequest=null;if(avatarSelection!=null&&avatarSelection.dialog!=null)avatarSelection.dialog.dismiss();if(media!=null) media.close(); if(backgroundBitmap!=null){backgroundBitmap.recycle();backgroundBitmap=null;} if(service!=null){service.remove(this);if(service.securityConfirmation==securityPrompt)service.securityConfirmation=null;} if(bound) unbindService(connection); if(Build.VERSION.SDK_INT>=33&&backCallback!=null) getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(backCallback); super.onDestroy(); }
@@ -634,11 +637,10 @@ public final class MainActivity extends Activity implements ChatService.Observer
         try { startForegroundService(new Intent(this,ChatService.class)); } catch(RuntimeException e) { error("无法启动连接："+e.getMessage()); }
     }
     private void restoreConnection() {
-        if(!visible || service==null || restoreAttempted) return;
-        restoreAttempted=true;
+        if(!resumed || !visible || service==null || restoreAttempted) return;
         if(!ChatService.shouldRestoreConnection(this) || service.connectionActive()) return;
-        // 只在用户打开页面后恢复，不开机自启，不重复弹通知权限。
-        try { startForegroundService(new Intent(this,ChatService.class).setAction("restore")); }
+        // 安装器返回和服务绑定可能早于 onResume；页面真正回到前台后再启动前台服务。
+        try { startForegroundService(new Intent(this,ChatService.class).setAction("restore"));restoreAttempted=true; }
         catch(RuntimeException e) { error("自动连接失败，可在菜单中重试："+e.getMessage()); }
     }
     private void showMenu(View anchor) {

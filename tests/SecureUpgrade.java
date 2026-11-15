@@ -132,6 +132,17 @@ public final class SecureUpgrade {
                 a.node.forgetSecurity(peerB);check(((Map<?,?>)field(a.node,"reverseRequests")).isEmpty(),"撤销后残留回连请求");
             }
         });
+        run("重复关闭旧共享服务不能移除重建后的回连入口",()->{
+            try(Node a=new Node(root.resolve("lifecycle-a").toFile(),port(),"03030303030303030303030303030303");Node b=new Node(root.resolve("lifecycle-b").toFile(),toolPorts(),"04040404040404040404040404040404")){
+                LanNode.Peer peer=find(a,b);a.node.verifyPeer(peer);java.lang.reflect.Field connector=LanNode.class.getDeclaredField("peerConnector");connector.setAccessible(true);
+                connector.set(a.node,java.lang.reflect.Proxy.newProxyInstance(LanNode.class.getClassLoader(),new Class<?>[]{connector.getType()},(proxy,method,values)->{throw new ConnectException("模拟单向阻断");}));
+                int port=b.node.port()+1;ToolsHttp old=new ToolsHttp(port,true,(request,response)->response.json("{}",""),b.node.security());old.close();
+                try(ToolsHttp current=new ToolsHttp(port,true,(request,response)->response.bytes(200,"text/plain","rebuilt".getBytes(java.nio.charset.StandardCharsets.UTF_8),""),b.node.security());ToolsGateway gateway=new ToolsGateway(a.node.security(),peer,port,null,a.node)){
+                    old.close();URI uri=URI.create(gateway.url());String redirect=http(uri.getPort(),uri.getRawPath()+"?"+uri.getRawQuery(),"");String cookie=Arrays.stream(redirect.split("\r\n")).filter(s->s.startsWith("Set-Cookie: ")).findFirst().orElseThrow().substring(12).split(";")[0];
+                    check(http(uri.getPort(),"/",cookie).endsWith("rebuilt"),"新服务无法通过回连接收真实 HTTP 请求");
+                }
+            }
+        });
         System.out.println("ANDROID SECURE: "+passed+" passed, "+failed+" failed");System.exit(failed==0?0:1);
     }
 }

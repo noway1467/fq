@@ -327,7 +327,10 @@ public final class CoreTest {
     @Test public void loopbackIsolationAndPortConflict() throws Exception {
         int p=port(); try(LanNode a=node(new Inbox(),p,"a")) {
             try { a.probe(LanNode.endpoint("192.168.1.2")); fail(); } catch(IOException expected) { }
-            try(LanNode b=new LanNode(p,true,"b","host","b","",new Inbox())) { try { b.start(); fail(); } catch(IOException expected) { } }
+            try(LanNode b=new LanNode(p,true,"b","host","b","",new Inbox())) {
+                b.start();assertFalse("端口被占用时不能假报已连接",b.networkAvailable());assertTrue(b.networkStatus().contains("端口"));
+                assertTrue("原节点不应受等待中的节点影响",a.networkAvailable());
+            }
         }
     }
 }

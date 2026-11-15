@@ -35,6 +35,32 @@ public final class NetworkRecoveryTest {
         byte[] bytes=Protocol.encode(1,"peer","host",Protocol.ANSWER|Protocol.UTF8,"设备","组");
         raw.send(new DatagramPacket(bytes,bytes.length,InetAddress.getLoopbackAddress(),port));
     }
+    @Test public void initialTcpAndUdpBindingFailuresRecoverWithoutRestartOrManualRefresh()throws Exception {
+        for(boolean blockTcp:new boolean[]{true,false}) {
+            int port=port();Events events=new Events();
+            try(ServerSocket tcp=blockTcp?new ServerSocket(port,1,InetAddress.getLoopbackAddress()):null;
+                DatagramSocket udp=blockTcp?null:new DatagramSocket(port,InetAddress.getLoopbackAddress());
+                LanNode node=new LanNode(port,true,"startup","host","启动恢复","组",events);
+                DatagramSocket remote=new DatagramSocket(0,InetAddress.getLoopbackAddress())) {
+                node.start();assertFalse(node.networkAvailable());assertTrue(node.networkStatus().contains("正在重试"));
+                if(tcp!=null)tcp.close();if(udp!=null)udp.close();
+                await(node::networkAvailable);
+                announce(remote,port);await(()->!node.peers().isEmpty());assertTrue(node.peers().get(0).online);
+                assertTrue(events.errors.toString(),events.errors.isEmpty());
+            }
+        }
+    }
+    @Test public void closingWhileWaitingForPortCancelsAutomaticRecovery()throws Exception {
+        int port=port();Events events=new Events();
+        try(ServerSocket occupied=new ServerSocket(port,1,InetAddress.getLoopbackAddress());
+            LanNode node=new LanNode(port,true,"cancel-start","host","启动取消","组",events)) {
+            node.start();assertFalse(node.networkAvailable());node.close();occupied.close();node.networkChanged();node.refresh();
+            assertTrue(((ScheduledExecutorService)field(node,"timer")).isShutdown());
+            try(ServerSocket available=new ServerSocket(port,1,InetAddress.getLoopbackAddress());DatagramSocket udp=new DatagramSocket(port,InetAddress.getLoopbackAddress())) {
+                assertFalse(node.networkAvailable());
+            }
+        }
+    }
     @Test public void routeReplacementNeverWaitsForOldReceiveMonitorAndRejectsOldOnlineEvidence()throws Exception {
         Events events=new Events();int port=port();ExecutorService worker=Executors.newSingleThreadExecutor();
         CountDownLatch locked=new CountDownLatch(1),release=new CountDownLatch(1);

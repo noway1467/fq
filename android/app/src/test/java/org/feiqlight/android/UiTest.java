@@ -479,6 +479,19 @@ public final class UiTest {
         } finally { if(ac!=null)ac.pause().stop().destroy();sc.destroy(); }
         assertFalse(ChatService.shouldRestoreConnection(context));
     }
+    @Test public void upgradedInstallRestoresOnlyAfterActivityResumes() throws Exception {
+        android.app.Application context=RuntimeEnvironment.getApplication();
+        context.getSharedPreferences("settings",0).edit().putString("login","upgraded-install").putBoolean("auto_connect",true).putBoolean("connection_enabled",true).commit();
+        ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();ActivityController<MainActivity> ac=null;
+        try {
+            shadowOf(context).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));
+            while(shadowOf(context).getNextStartedService()!=null) { }
+            ac=Robolectric.buildActivity(MainActivity.class).create().start();settle(service);
+            assertEquals("安装器返回、尚未恢复到前台时不能启动前台服务",0,restoreStarts(context));
+            ac.resume();settle(service);assertEquals(1,restoreStarts(context));
+            ac.pause().resume();settle(service);assertEquals("成功请求后不能重复启动",0,restoreStarts(context));
+        } finally {if(ac!=null)ac.pause().stop().destroy();sc.destroy();}
+    }
     private static Object field(Object object,String name) throws Exception { Field f=object.getClass().getDeclaredField(name); f.setAccessible(true); return f.get(object); }
     private static Object invoke(Object object,String name,Class<?> type,Object value) throws Exception { Method m=object.getClass().getDeclaredMethod(name,type); m.setAccessible(true); return m.invoke(object,value); }
     private static void settle(ChatService service) throws Exception {

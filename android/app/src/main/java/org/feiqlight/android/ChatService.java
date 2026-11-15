@@ -329,7 +329,7 @@ public final class ChatService extends Service {
     }
     boolean busy() { return busy.get(); }
     String status() { return status; }
-    String connectionDetails(){LanNode current=node;return (current==null?status:current.networkDescription()+"\nUDP / TCP "+current.port()+" 已监听")+"\n未发现设备：确认对方已连接、端口一致，检查防火墙和热点的设备隔离。VPN 需允许局域网，可在“添加联系人”中输入对方 IPv4。";}
+    String connectionDetails(){LanNode current=node;return (current==null?status:current.networkDescription()+"\n"+(current.networkAvailable()?"UDP / TCP "+current.port()+" 已监听":"端口 "+current.port()+" · "+current.networkStatus()))+"\n未发现设备：确认对方已连接、端口一致，检查防火墙和热点的设备隔离。VPN 需允许局域网，可在“添加联系人”中输入对方 IPv4。";}
     // 工作线程结束到主线程终态回调之间，不能继续显示“尚未发送”的旧准备提示。
     String transferStatus() { return busy()?transferStatus:transferOutcome; }
     void active(String peer) {
