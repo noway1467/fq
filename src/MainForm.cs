@@ -413,10 +413,11 @@ public sealed class MainForm : ModernWindow
         }
         private async void OpenSecureTool(Peer peer,int port,string mode)
         {
+            int epoch=network.TransportEpoch;
             try
             {
-                await System.Threading.Tasks.Task.Run(()=>network.VerifyPeer(peer));if(IsDisposed)return;
-                ToolsGateway gateway=new ToolsGateway(network.Security,peer,port,network.LoopbackOnly);gateways.Add(gateway);
+                await System.Threading.Tasks.Task.Run(()=>network.VerifyPeer(peer));if(IsDisposed||epoch!=network.TransportEpoch)return;
+                ToolsGateway gateway=new ToolsGateway(network.Security,peer,port,network.LoopbackOnly,network);gateways.Add(gateway);
                 System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(gateway.Url+"#"+mode){UseShellExecute=true});
             }
             catch (Exception e) { if (!IsDisposed) using (NoticeDialog notice = new NoticeDialog("连接未完成", e.GetBaseException().Message)) notice.ShowDialog(this); }

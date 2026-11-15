@@ -107,6 +107,14 @@ namespace FeiqLight
             Action<string> revoked=TrustRevoked;if(fingerprint!=null&&revoked!=null)revoked(fingerprint);
         }
         public void CancelConfirmations(){lock(gate)revision++;}
+        private readonly Dictionary<int, Action<TcpClient>> reverseListeners = new Dictionary<int, Action<TcpClient>>();
+        internal void RegisterReverseListener(int port, Action<TcpClient> accept) { lock(gate)reverseListeners.Add(port,accept); }
+        internal void UnregisterReverseListener(int port) { lock(gate)reverseListeners.Remove(port); }
+        internal bool AcceptReverse(int port, TcpClient client)
+        {
+            Action<TcpClient> accept;lock(gate)if(!reverseListeners.TryGetValue(port,out accept))return false;
+            accept(client);return true;
+        }
         public SslStream Client(TcpClient client, string expectedFingerprint)
         {
             if (!ValidFingerprint(expectedFingerprint)) throw new IOException("未取得对方设备证书，不能建立加密连接。");

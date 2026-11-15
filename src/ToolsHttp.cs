@@ -69,7 +69,12 @@ namespace FeiqLight
         {
             this.security=security;this.loopback=loopback;this.handler = handler; listener = new TcpListener(loopback ? IPAddress.Loopback : IPAddress.Any, port); listener.Start(16);
             Port = ((IPEndPoint)listener.LocalEndpoint).Port; Task.Run((Action)Accept);
-            if(security!=null)security.TrustRevoked+=OnTrustRevoked;
+            if(security!=null){security.TrustRevoked+=OnTrustRevoked;security.RegisterReverseListener(Port,AcceptReverse);}
+        }
+        private void AcceptReverse(TcpClient client)
+        {
+            lock(gate){if(closed||clients.Count>=12){client.Close();return;}clients.Add(client);}
+            Handle(client);
         }
         private void OnTrustRevoked(string fingerprint){DisconnectClients();}
         internal void DisconnectClients(){lock(gate)foreach(TcpClient client in clients)client.Close();}
@@ -103,7 +108,7 @@ namespace FeiqLight
                     bool reuse = index < 15 && request.Path == "/file" && (request.Method == "GET" || request.Method == "HEAD") && request.Header("Connection").Equals("keep-alive", StringComparison.OrdinalIgnoreCase);
                     response = new Response(stream, request.Method == "HEAD", reuse);
                     request.Address = ((IPEndPoint)client.Client.RemoteEndPoint).Address.ToString();
-                    string expected = client.Client.LocalEndPoint.ToString();
+                    string expected = ((IPEndPoint)client.Client.LocalEndPoint).Address+":"+Port;
                     if (request.Header("Host") != expected) throw new HttpError(403, "请使用设备的 IPv4 地址访问");
                     string origin = request.Header("Origin");
                     if (origin.Length > 0 && origin != (security==null?"http://":"https://") + expected) throw new HttpError(403, "不允许跨站请求");
@@ -166,6 +171,6 @@ namespace FeiqLight
             else if (!Int64.TryParse(parts[1], NumberStyles.None, CultureInfo.InvariantCulture, out end)) return null;
             return end < start ? null : new[] { start, Math.Min(end, size - 1) };
         }
-        public void Dispose() { if(security!=null)security.TrustRevoked-=OnTrustRevoked;lock (gate) { if (closed) return; closed = true; listener.Stop(); foreach (TcpClient client in clients) client.Close(); } }
+        public void Dispose() { if(security!=null){security.TrustRevoked-=OnTrustRevoked;security.UnregisterReverseListener(Port);}lock (gate) { if (closed) return; closed = true; listener.Stop(); foreach (TcpClient client in clients) client.Close(); } }
     }
 }

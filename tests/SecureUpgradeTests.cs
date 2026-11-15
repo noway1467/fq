@@ -19,6 +19,7 @@ namespace FeiqLight.Tests
         private static void Check(bool value,string message){if(!value)throw new Exception(message);}
         private static void Run(string name,Action test){if(!String.IsNullOrEmpty(only)&&!name.Contains(only))return;try{test();passed++;Console.WriteLine("PASS "+name);}catch(Exception e){failed++;Console.WriteLine("FAIL "+name+": "+e.GetBaseException().Message);Console.WriteLine(e.StackTrace);}}
         private static int Port(){using(TcpListenerSocket socket=new TcpListenerSocket())return socket.Port;}
+        private static int ToolPorts(){for(int port=18000;port<45000;port+=3){var listeners=new List<TcpListener>();try{for(int i=0;i<3;i++){var listener=new TcpListener(IPAddress.Loopback,port+i);listeners.Add(listener);listener.Start();}return port;}catch(SocketException){}finally{foreach(var listener in listeners)listener.Stop();}}throw new IOException("没有可用测试端口");}
         private sealed class TcpListenerSocket:IDisposable {private readonly TcpListener listener=new TcpListener(IPAddress.Loopback,0);public TcpListenerSocket(){listener.Start();}public int Port{get{return ((IPEndPoint)listener.LocalEndpoint).Port;}}public void Dispose(){listener.Stop();}}
         private static void Wait(Func<bool> condition,string message){for(int i=0;i<500;i++){if(condition())return;Thread.Sleep(10);}throw new Exception(message);}
         private static LanService Node(string root,int port,string id){var node=new LanService(new AppSettings{DeviceId=id,Nickname=id},port,true,id);node.ConfigureSecurity(root,(name,code)=>true);node.Start();return node;}
@@ -112,6 +113,7 @@ namespace FeiqLight.Tests
                     Uri uri=new Uri(gateway.Url);Check(Http(uri.Port,"/","")=="","无令牌进入网关");string first=Http(uri.Port,uri.PathAndQuery,"");Check(first.Contains("303")&&first.Contains("Location: /?gateway=")&&first.Contains("SameSite=Lax"),"网关入口未携带跳转参数或 SameSite=Lax");
                     string location=first.Split(new[]{"\r\n"},StringSplitOptions.None).First(s=>s.StartsWith("Location: ")).Substring(10).Trim();
                     string withoutCookie=Http(uri.Port,location,"");Check(withoutCookie.EndsWith("protected")&&withoutCookie.Contains("Set-Cookie: "),"外部浏览器丢弃重定向 Cookie 后无法打开共享页");
+                    Check(Http(uri.Port,location+"suffix","")=="","网关接受非完整令牌");
                     string cookie=first.Split(new[]{"\r\n"},StringSplitOptions.None).First(s=>s.StartsWith("Set-Cookie: ")).Substring(12).Split(';')[0];
                     string forwarded=Http(uri.Port,"/",cookie);Check(forwarded.EndsWith("protected"),"HTTPS 网关正文丢失，响应长度="+forwarded.Length);Check(Http(uri.Port,"/",cookie,"http://evil.invalid")=="","跨站请求被放行");
                     Check(Http(uri.Port,"/large",cookie).EndsWith(payload,StringComparison.Ordinal),"HTTPS 网关截断了多段正文");
@@ -135,6 +137,28 @@ namespace FeiqLight.Tests
                     Wait(()=>aGot!=null&&aGot.Files!=null&&aGot.Files.Count==1&&sentFile.State=="已送达","单向受阻时文件邀请未送达");
                     a.ReceiveFileAsync(peerB,aGot.Record.Packet,aGot.Files[0],destination,null,CancellationToken.None).GetAwaiter().GetResult();
                     Check(File.ReadAllBytes(destination).SequenceEqual(payload),"单向受阻时反向推送文件内容不一致");
+                }
+            });
+            Run("VPN 回连身份核验、共享远控端口、流式正文与附件拒绝",()=>{
+                const string aid="01010101010101010101010101010101",bid="02020202020202020202020202020202";
+                using(LanService a=Node(Path.Combine(root,"reverse-a"),Port(),aid))using(LanService b=Node(Path.Combine(root,"reverse-b"),ToolPorts(),bid)){
+                    Peer peerB=Find(a,b),peerA=Find(b,a);a.VerifyPeer(peerB);
+                    a.PeerConnector=(socket,target)=>{throw new SocketException((int)SocketError.ConnectionRefused);};
+                    a.VerifyPeer(peerB);Check(peerB.Online,"反向身份核验未完成");
+                    string payload=new string('z',256*1024+13);
+                    foreach(int servicePort in new[]{b.Port==65535?65534:b.Port+1,b.Port>=65534?b.Port-2:b.Port+2})
+                    using(ToolsHttp http=new ToolsHttp(servicePort,true,(request,response)=>{
+                        Check(request.Fingerprint==a.Security.Fingerprint,"回连丢失客户端身份");
+                        if(request.Path=="/api/input")response.Bytes(request.Body,"application/json");
+                        else response.Bytes(Encoding.UTF8.GetBytes(payload),"text/plain");
+                    },b.Security))using(ToolsGateway gateway=new ToolsGateway(a.Security,peerB,servicePort,true,a)){
+                        Uri uri=new Uri(gateway.Url);string redirect=Http(uri.Port,uri.PathAndQuery,"");string cookie=redirect.Split(new[]{"\r\n"},StringSplitOptions.None).First(s=>s.StartsWith("Set-Cookie: ")).Substring(12).Split(';')[0];Console.WriteLine("CHECK 回连 GET");
+                        Check(Http(uri.Port,"/",cookie).EndsWith(payload,StringComparison.Ordinal),"共享/远控回连正文不完整");
+                        Check(Http(uri.Port,"/",cookie,null,"HEAD").EndsWith("\r\n\r\n"),"回连 HEAD 响应错误");
+                    }
+                    string source=Path.Combine(root,"reverse-reject.txt");File.WriteAllText(source,"拒绝文件");IncomingMessage offer=null;a.MessageReceived+=m=>offer=m;
+                    ChatRecord sent=b.SendMessage(peerA,"拒绝",new[]{source});Wait(()=>offer!=null,"文件邀请丢失");a.RejectFiles(peerB,sent.Packet);Wait(()=>b.OutgoingRecord(peerA.Id,sent.Packet)==null,"回连拒绝未撤销文件授权");
+                    a.ForgetSecurity(peerB);Check(Entries(a,"reverseRequests")==0,"撤销后残留回连请求");
                 }
             });
             Console.WriteLine("WINDOWS SECURE: "+passed+" passed, "+failed+" failed");return failed==0?0:1;

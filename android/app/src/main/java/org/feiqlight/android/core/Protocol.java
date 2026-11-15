@@ -20,6 +20,7 @@ public final class Protocol {
         public long number;
         public int command;
         public int replyPort;
+        public boolean reverseConnections;
         public String login, host, body, extra, deviceId, avatar, fingerprint;
         public int mode() { return command & 255; }
     }
@@ -116,6 +117,7 @@ public final class Protocol {
             for(int i=2;i<content.length;i++) if(content[i].startsWith("FQAV=")) p.avatar=normalizeAvatar(content[i].substring(5));
             for(int i=2;i<content.length;i++) if(content[i].startsWith("FQSEC=")) {String value=content[i].substring(6);if(value.matches("[0-9a-f]{64}"))p.fingerprint=value;}
             for(int i=2;i<content.length;i++)if(content[i].startsWith("FQPORT=")){int port=Integer.parseInt(content[i].substring(7));if(port>=1024&&port<=65535)p.replyPort=port;}
+            for(int i=2;i<content.length;i++)if(content[i].equals("FQREV=1"))p.reverseConnections=true;
             return p;
         } catch (IllegalArgumentException | IndexOutOfBoundsException | CharacterCodingException e) { return null; }
     }

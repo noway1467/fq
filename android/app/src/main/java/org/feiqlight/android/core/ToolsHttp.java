@@ -64,10 +64,11 @@ public final class ToolsHttp implements AutoCloseable {
         this.handler=handler;server=new ServerSocket();
         try {server.bind(new InetSocketAddress(loopback?InetAddress.getByName("127.0.0.1"):InetAddress.getByName("0.0.0.0"),port),16);}
         catch(IOException e){server.close();workers.shutdownNow();timeouts.shutdownNow();throw e;}
-        if(security!=null)security.observeRevocation(revoked);
+        if(security!=null){security.observeRevocation(revoked);security.registerReverseListener(port(),this::acceptReverse);}
         Thread accept=new Thread(this::accept,"shared-files-listener");accept.setDaemon(true);accept.start();
     }
     public int port() {return server.getLocalPort();}
+    private void acceptReverse(Socket socket){synchronized(clients){if(closed||clients.size()>=12){try{socket.close();}catch(IOException ignored){}return;}clients.add(socket);}handle(socket);}
     public static int portFor(int chatPort) {return chatPort==65535?65534:chatPort+1;}
     private void accept() {
         try {while(true) {Socket socket=server.accept();synchronized(clients){if(closed||clients.size()>=12){socket.close();if(closed)return;continue;}clients.add(socket);workers.execute(()->handle(socket));}}}
@@ -128,7 +129,7 @@ public final class ToolsHttp implements AutoCloseable {
         }catch(NumberFormatException e){return null;}
     }
     @Override public void close() {
-        if(security!=null)security.removeRevocationObserver(revoked);
+        if(security!=null){security.removeRevocationObserver(revoked);security.unregisterReverseListener(port());}
         synchronized(clients){if(closed)return;closed=true;try{server.close();}catch(IOException ignored){}for(Socket socket:clients)try{socket.close();}catch(IOException ignored){}workers.shutdownNow();timeouts.shutdownNow();}
     }
     public void disconnectClients(){synchronized(clients){for(Socket socket:clients)try{socket.close();}catch(IOException ignored){}}}

@@ -48,11 +48,11 @@ public final class ChatService extends Service {
         return new Intent(context,RemoteActivity.class).setData(url).putExtra("phone",phone).putExtra("peer_id",peerId).putExtra("tool_mode",mode);
     }
     void openTool(LanNode.Peer peer,int port,String mode,boolean phone,Consumer<Intent> ready) {
-        LanNode current=node;long epoch=connectionEpoch;
+        LanNode current=node;long epoch=connectionEpoch;int transport=current==null?0:current.transportEpoch();
         queue(()->{try {
             if(current==null)throw new IOException("请先连接局域网");current.verifyPeer(peer);
-            ToolsGateway gateway=new ToolsGateway(current.security(),peer,port,new LanNetwork(getSystemService(ConnectivityManager.class)));
-            main.post(()->{if(!currentConnection(epoch)||node!=current){gateway.close();return;}gateways.add(gateway);
+            ToolsGateway gateway=new ToolsGateway(current.security(),peer,port,new LanNetwork(getSystemService(ConnectivityManager.class)),current);
+            main.post(()->{if(!currentConnection(epoch)||node!=current||transport!=current.transportEpoch()){gateway.close();return;}gateways.add(gateway);
                 ready.accept(toolIntent(this,Uri.parse(gateway.url()+"#"+mode),peer.id(),mode,phone));});
         }catch(Exception error){fail(error);}});
     }

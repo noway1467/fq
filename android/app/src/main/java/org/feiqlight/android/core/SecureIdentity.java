@@ -83,6 +83,10 @@ public final class SecureIdentity {
     }
     public void forget(String id)throws IOException{String value;synchronized(this){revision++;value=trusted.getProperty(id);Properties next=new Properties();next.putAll(trusted);next.remove(id);saveTrusted(next);}if(value!=null)for(java.util.function.Consumer<String> observer:revocations)observer.accept(value);}
     public synchronized void cancelConfirmations(){revision++;}
+    private final Map<Integer,java.util.function.Consumer<Socket>> reverseListeners=new HashMap<>();
+    synchronized void registerReverseListener(int port,java.util.function.Consumer<Socket> accept){if(reverseListeners.putIfAbsent(port,accept)!=null)throw new IllegalStateException("端口已注册");}
+    synchronized void unregisterReverseListener(int port){reverseListeners.remove(port);}
+    boolean acceptReverse(int port,Socket socket){java.util.function.Consumer<Socket> accept;synchronized(this){accept=reverseListeners.get(port);}if(accept==null)return false;accept.accept(socket);return true;}
     private void saveTrusted(Properties next)throws IOException{ByteArrayOutputStream bytes=new ByteArrayOutputStream();next.store(bytes,"Feiq trusted devices");atomic(new File(root,"trusted-devices.properties"),bytes.toByteArray());trusted.clear();trusted.putAll(next);}
     private SSLContext context(String expected)throws GeneralSecurityException{
         TrustManager trust=new X509TrustManager(){

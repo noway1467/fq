@@ -11,6 +11,7 @@ public final class SecureUpgrade {
     private static void run(String name,Test test){try{test.run();passed++;System.out.println("PASS "+name);}catch(Exception|AssertionError e){failed++;System.out.println("FAIL "+name+": "+e);e.printStackTrace(System.out);}}
     private static void check(boolean value,String message){if(!value)throw new AssertionError(message);}
     private static int port()throws IOException{try(ServerSocket socket=new ServerSocket(0,1,InetAddress.getLoopbackAddress())){return socket.getLocalPort();}}
+    private static int toolPorts()throws IOException{for(int port=21000;port<45000;port+=3){List<ServerSocket> sockets=new ArrayList<>();try{for(int i=0;i<3;i++)sockets.add(new ServerSocket(port+i,1,InetAddress.getLoopbackAddress()));return port;}catch(IOException ignored){}finally{for(ServerSocket socket:sockets)socket.close();}}throw new IOException("没有可用测试端口");}
     private static final class Node implements AutoCloseable {
         final LanNode node;final BlockingQueue<LanNode.Message> incoming=new LinkedBlockingQueue<>();
         Node(File root,int port,String id)throws IOException{
@@ -112,6 +113,23 @@ public final class SecureUpgrade {
                 File destination=root.resolve("vpn-pushed.bin").toFile();
                 a.node.receiveFile(peerB,offerMsg.number,offerMsg.files.get(0),destination,new LanNode.Transfer(),null);
                 check(Arrays.equals(payload,Files.readAllBytes(destination.toPath())),"单向受阻时反向推送文件内容不一致");
+            }
+        });
+        run("VPN 回连身份核验、共享远控端口、正文与拒绝",()->{
+            String aid="01010101010101010101010101010101",bid="02020202020202020202020202020202";
+            try(Node a=new Node(root.resolve("reverse-a").toFile(),port(),aid);Node b=new Node(root.resolve("reverse-b").toFile(),toolPorts(),bid)){
+                LanNode.Peer peerB=find(a,b),peerA=find(b,a);a.node.verifyPeer(peerB);
+                java.lang.reflect.Field connector=LanNode.class.getDeclaredField("peerConnector");connector.setAccessible(true);
+                connector.set(a.node,java.lang.reflect.Proxy.newProxyInstance(LanNode.class.getClassLoader(),new Class<?>[]{connector.getType()},(proxy,method,values)->{throw new ConnectException("模拟单向入站阻断");}));
+                a.node.verifyPeer(peerB);check(peerB.online,"反向身份核验未完成");
+                String payload="z".repeat(256*1024+13);
+                for(int servicePort:new int[]{b.node.port()==65535?65534:b.node.port()+1,b.node.port()>=65534?b.node.port()-2:b.node.port()+2})
+                try(ToolsHttp http=new ToolsHttp(servicePort,true,(request,response)->{check(request.fingerprint.equals(a.node.security().fingerprint),"回连丢失客户端身份");response.bytes(200,"text/plain",payload.getBytes(java.nio.charset.StandardCharsets.UTF_8),"");},b.node.security());ToolsGateway gateway=new ToolsGateway(a.node.security(),peerB,servicePort,null,a.node)){
+                    URI uri=URI.create(gateway.url());String redirect=http(uri.getPort(),uri.getRawPath()+"?"+uri.getRawQuery(),"");String cookie=Arrays.stream(redirect.split("\r\n")).filter(s->s.startsWith("Set-Cookie: ")).findFirst().orElseThrow().substring(12).split(";")[0];
+                    check(http(uri.getPort(),"/",cookie).endsWith(payload),"共享/远控回连正文不完整");
+                }
+                File source=root.resolve("reverse-reject.txt").toFile();Files.writeString(source.toPath(),"拒绝文件");LanNode.Message sent=b.node.sendMessage(peerA,"拒绝",Collections.singletonList(source));check(a.incoming.poll(5,TimeUnit.SECONDS)!=null,"文件邀请未到达");a.node.reject(peerB,sent.number);check(!b.node.offering(peerA.id(),sent.number,0),"回连拒绝未撤销文件授权");
+                a.node.forgetSecurity(peerB);check(((Map<?,?>)field(a.node,"reverseRequests")).isEmpty(),"撤销后残留回连请求");
             }
         });
         System.out.println("ANDROID SECURE: "+passed+" passed, "+failed+" failed");System.exit(failed==0?0:1);

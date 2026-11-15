@@ -14,6 +14,7 @@ namespace FeiqLight
         public string DeviceId;
         public string Avatar;
         public string Fingerprint;
+        public bool ReverseConnections;
         public int ReplyPort;
         public string Host;
         public uint Command;
@@ -109,6 +110,7 @@ namespace FeiqLight
             for(int i = 2; i < body.Length; i++) if(body[i].StartsWith("FQAV=", StringComparison.Ordinal)) packet.Avatar = NormalizeAvatar(body[i].Substring(5));
             for(int i = 2; i < body.Length; i++) if(body[i].StartsWith("FQSEC=", StringComparison.Ordinal)) { string value=body[i].Substring(6); if(value.Length==64&&value.All(c=>c>='0'&&c<='9'||c>='a'&&c<='f')) packet.Fingerprint=value; }
             for(int i=2;i<body.Length;i++)if(body[i].StartsWith("FQPORT=",StringComparison.Ordinal)){int port;if(Int32.TryParse(body[i].Substring(7),out port)&&port>=1024&&port<=65535)packet.ReplyPort=port;}
+            packet.ReverseConnections = body.Skip(2).Contains("FQREV=1");
             return packet.Login.Length <= 128 && packet.Host.Length <= 128;
         }
         public static bool SafeFileName(string name)
