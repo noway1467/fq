@@ -18,6 +18,7 @@ namespace FeiqLight
         // 空列表提示：无联系人与搜索无结果使用不同文案。
         public string EmptyText = "暂无会话", EmptyHint = "同一局域网内启动飞Q的设备会自动出现";
         private int hover = -1;
+        private readonly ToolTip rowHint = new ToolTip();
         private int RowHeight { get { return Dp(68); } }
         private int ListTop { get { return Dp(4); } }
         public ConversationList() { BackColor = Theme.Surface; TabStop = true; AccessibleName = "会话列表"; AccessibleRole = AccessibleRole.List; }
@@ -31,9 +32,10 @@ namespace FeiqLight
         {
             base.OnMouseMove(e);
             int next = ScrollbarMouseMove(e) ? -1 : IndexAt(e.Y); if (next >= items.Count) next = -1;
-            if (next != hover) { hover = next; Invalidate(); }
+            if (next != hover) { hover = next; rowHint.SetToolTip(this, hover < 0 ? null : items[hover].Peer.DisplayName + "\n" + items[hover].Preview); Invalidate(); }
         }
-        protected override void OnMouseLeave(EventArgs e) { hover = -1; Invalidate(); base.OnMouseLeave(e); }
+        protected override void OnMouseLeave(EventArgs e) { hover = -1; rowHint.SetToolTip(this, null); Invalidate(); base.OnMouseLeave(e); }
+        protected override void Dispose(bool disposing) { if (disposing) rowHint.Dispose(); base.Dispose(disposing); }
         protected override void OnMouseUp(MouseEventArgs e) { base.OnMouseUp(e); ScrollbarMouseUp(e); }
         protected override void OnMouseDown(MouseEventArgs e)
         {
@@ -73,7 +75,8 @@ namespace FeiqLight
         protected override void OnPaint(PaintEventArgs e)
         {
             Graphics g = e.Graphics; g.Clear(Theme.Surface); g.SmoothingMode = SmoothingMode.AntiAlias;
-            int avatar = Dp(50), pad = Dp(10), halo = Theme.AvatarHalo(avatar);
+            bool compact = ClientSize.Width < Dp(280);
+            int avatar = Dp(compact ? 40 : 50), pad = Dp(compact ? 6 : 10), halo = Theme.AvatarHalo(avatar);
             if (items.Count == 0)
             {
                 int icon = Dp(46); Rectangle mark = new Rectangle((ClientSize.Width - icon) / 2, ClientSize.Height / 2 - icon - Dp(18), icon, icon);
@@ -102,15 +105,15 @@ namespace FeiqLight
                     using (SolidBrush b = new SolidBrush(selected ? Color.White : Theme.Online)) g.FillEllipse(b, RectangleF.Inflate(ring, -Dp(2.5), -Dp(2.5)));
                 }
                 int left = face.Right + Dp(12), right = row.Right - Dp(16);
-                string time = item.Time == default(DateTime) ? "" : RowTime(item.Time);
+                string time = compact || item.Time == default(DateTime) ? "" : RowTime(item.Time);
                 int timeWidth = time.Length == 0 ? 0 : TextRenderer.MeasureText(g, time, Theme.Small, Size.Empty, Tight).Width;
                 Rectangle name = new Rectangle(left, row.Top + Dp(13), Math.Max(Dp(20), right - left - timeWidth - Dp(8)), Dp(22));
                 // 为编号单独留宽，长昵称省略时仍能分清同名会话。
                 string caption = item.Peer.BaseDisplayName, suffix = item.Peer.NameSuffix;
-                int suffixWidth = String.IsNullOrEmpty(suffix) ? 0 : TextRenderer.MeasureText(g, suffix, Theme.Small, Size.Empty, Line).Width + Dp(4);
+                int suffixWidth = String.IsNullOrEmpty(suffix) ? 0 : Math.Min(name.Width - 1, TextRenderer.MeasureText(g, suffix, Theme.Small, Size.Empty, Line).Width + Dp(4));
                 Rectangle captionBounds = name; captionBounds.Width = Math.Max(1, name.Width - suffixWidth);
                 ColorEmoji.DrawSingleLine(g, caption, Theme.Strong, captionBounds, ink, Line);
-                if (suffixWidth > 0) { int offset = Math.Min(captionBounds.Width, ColorEmoji.MeasureSingleLine(g, caption, Theme.Strong)) + Dp(4); TextRenderer.DrawText(g, suffix, Theme.Small, new Rectangle(name.X + offset, name.Y + Dp(1), suffixWidth, name.Height), muted, Line); }
+                if (suffixWidth > 0) { int offset = Math.Min(captionBounds.Width, ColorEmoji.MeasureSingleLine(g, caption, Theme.Strong)) + Dp(4); TextRenderer.DrawText(g, suffix, Theme.Small, new Rectangle(name.X + offset, name.Y + Dp(1), Math.Max(1, name.Width - offset), name.Height), muted, Line); }
                 if (timeWidth > 0) TextRenderer.DrawText(g, time, Theme.Small, new Rectangle(right - timeWidth - Dp(2), name.Y, timeWidth + Dp(2), name.Height), item.Unread > 0 && !selected ? Theme.Blue : muted, Tight | TextFormatFlags.VerticalCenter);
                 int badgeWidth = 0;
                 if (item.Unread > 0)

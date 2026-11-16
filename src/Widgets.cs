@@ -6,6 +6,57 @@ using System.Windows.Forms;
 
 namespace FeiqLight
 {
+    internal sealed class BufferedLayoutTable : TableLayoutPanel
+    {
+        internal BufferedLayoutTable() { DoubleBuffered = true; ResizeRedraw = true; }
+    }
+    internal sealed class SidebarDivider : Control
+    {
+        internal event Action<int> WidthRequested;
+        internal event Action ResetRequested;
+        private bool dragging, hover;
+        private int dragOrigin;
+        private readonly ToolTip hint = new ToolTip();
+        internal SidebarDivider()
+        {
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
+            Cursor = Cursors.VSplit; TabStop = true; BackColor = Theme.Surface;
+            AccessibleName = "调整联系人栏宽度"; AccessibleRole = AccessibleRole.Grip;
+            AccessibleDescription = "左右拖动或按方向键调整宽度，双击或按 Home 恢复默认宽度";
+            hint.SetToolTip(this, AccessibleDescription);
+        }
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            if (e.Button != MouseButtons.Left) return;
+            Focus(); dragOrigin = PointToScreen(e.Location).X - Left; dragging = true; Capture = true; Invalidate();
+        }
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            if (dragging && WidthRequested != null) WidthRequested(PointToScreen(e.Location).X - dragOrigin);
+        }
+        protected override void OnMouseUp(MouseEventArgs e) { base.OnMouseUp(e); if (e.Button == MouseButtons.Left) { dragging = false; Capture = false; Invalidate(); } }
+        protected override void OnMouseCaptureChanged(EventArgs e) { if (!Capture) dragging = false; base.OnMouseCaptureChanged(e); Invalidate(); }
+        protected override void OnMouseDoubleClick(MouseEventArgs e) { base.OnMouseDoubleClick(e); if (e.Button == MouseButtons.Left && ResetRequested != null) ResetRequested(); }
+        protected override bool IsInputKey(Keys keyData) { Keys key = keyData & Keys.KeyCode; return key == Keys.Left || key == Keys.Right || key == Keys.Home || base.IsInputKey(keyData); }
+        protected override void OnKeyDown(KeyEventArgs e)
+        {
+            base.OnKeyDown(e);
+            if ((e.KeyCode == Keys.Left || e.KeyCode == Keys.Right) && WidthRequested != null) { WidthRequested(Left + (e.KeyCode == Keys.Left ? -1 : 1) * (int)Math.Round(8 * DeviceDpi / 96F)); e.Handled = e.SuppressKeyPress = true; }
+            else if (e.KeyCode == Keys.Home && ResetRequested != null) { ResetRequested(); e.Handled = e.SuppressKeyPress = true; }
+        }
+        protected override void OnMouseEnter(EventArgs e) { hover = true; base.OnMouseEnter(e); Invalidate(); }
+        protected override void OnMouseLeave(EventArgs e) { hover = false; base.OnMouseLeave(e); Invalidate(); }
+        protected override void OnGotFocus(EventArgs e) { base.OnGotFocus(e); Invalidate(); }
+        protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); Invalidate(); }
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            e.Graphics.Clear(Theme.Surface);
+            using (Pen line = new Pen(hover || dragging || Focused ? Theme.Blue : Theme.Line, hover || dragging || Focused ? 2 : 1)) e.Graphics.DrawLine(line, Width / 2, 0, Width / 2, Height);
+        }
+        protected override void Dispose(bool disposing) { if (disposing) hint.Dispose(); base.Dispose(disposing); }
+    }
     // 带放大镜与清除键的搜索框：清除键为绘制区域而非额外按钮，不改变窗口的按钮与输入框结构。
     public sealed class SearchBox : RoundedInputBase
     {
@@ -68,9 +119,13 @@ namespace FeiqLight
         {
             if (tabs.Count == 0) return;
             float scale = DeviceDpi / 96F; int gap = (int)(2 * scale), height = Math.Max(1, ClientSize.Height - (int)(3 * scale)), x = Padding.Left;
-            foreach (RoundedButton tab in tabs)
+            int[] widths = tabs.ConvertAll(tab => Math.Max((int)(52 * scale), TextRenderer.MeasureText(tab.Text, tab.Font).Width + (int)(26 * scale) + (tab.Badge > 0 ? (int)(26 * scale) : 0))).ToArray();
+            int total = 0; foreach (int width in widths) total += width;
+            int available = Math.Max(1, ClientSize.Width - Padding.Horizontal - gap * (tabs.Count - 1));
+            for (int i = 0; i < tabs.Count; i++)
             {
-                int width = Math.Max((int)(52 * scale), TextRenderer.MeasureText(tab.Text, tab.Font).Width + (int)(26 * scale) + (tab.Badge > 0 ? (int)(26 * scale) : 0));
+                RoundedButton tab = tabs[i];
+                int width = total <= available ? widths[i] : Math.Max(1, widths[i] * available / total);
                 tab.SetBounds(x, 0, width, height); tab.Margin = Padding.Empty; x += width + gap;
             }
         }

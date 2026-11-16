@@ -849,7 +849,8 @@ namespace FeiqLight
         {
             bool horizontal = (edge & (ResizeEdges.Left | ResizeEdges.Right)) != 0;
             bool vertical = (edge & (ResizeEdges.Top | ResizeEdges.Bottom)) != 0;
-            return horizontal && vertical ? ((edge & ResizeEdges.Left) != 0 ? Cursors.SizeNWSE : Cursors.SizeNESW) : horizontal ? Cursors.SizeWE : vertical ? Cursors.SizeNS : Cursors.Default;
+            bool sameDiagonal = ((edge & ResizeEdges.Left) != 0) == ((edge & ResizeEdges.Top) != 0);
+            return horizontal && vertical ? (sameDiagonal ? Cursors.SizeNWSE : Cursors.SizeNESW) : horizontal ? Cursors.SizeWE : vertical ? Cursors.SizeNS : Cursors.Default;
         }
         private void ResizeTo(Point cursor)
         {
@@ -864,7 +865,17 @@ namespace FeiqLight
             if (bottom - top < minimumHeight) {
                 if ((manualResize & ResizeEdges.Top) != 0) top = bottom - minimumHeight; else bottom = top + minimumHeight;
             }
-            Bounds = Rectangle.FromLTRB(left, top, right, bottom);
+            Rectangle next = Rectangle.FromLTRB(left, top, right, bottom);
+            if (Bounds == next) return;
+            Bounds = next;
+            RedrawLayout(this);
+        }
+        internal static void RedrawLayout(Control control)
+        {
+            // 连续鼠标消息会推迟 WM_PAINT；布局后同步刷新全部子窗口，避免搬移的旧像素滞留到松手。
+            // 保留原生编辑器各自的缓冲，不开启会影响输入与遮挡恢复的整窗 WS_EX_COMPOSITED。
+            if (control.IsHandleCreated && control.Visible)
+                RedrawWindow(control.Handle, IntPtr.Zero, IntPtr.Zero, 0x0001 | 0x0004 | 0x0080 | 0x0100 | 0x0400);
         }
         protected override void OnMouseDown(MouseEventArgs e)
         {
@@ -891,6 +902,11 @@ namespace FeiqLight
             ResizeTo(PointToScreen(e.Location)); manualResize = ResizeEdges.None; Capture = false;
             Cursor = ResizeCursor(ResizeEdgeAt(PointToClient(Cursor.Position)));
         }
+        protected override void OnMouseCaptureChanged(EventArgs e)
+        {
+            if (!Capture) { manualResize = ResizeEdges.None; Cursor = Cursors.Default; }
+            base.OnMouseCaptureChanged(e);
+        }
         protected override void OnResize(EventArgs e) { UpdateResizePadding(); base.OnResize(e); }
         protected override void OnPaint(PaintEventArgs e) {
             base.OnPaint(e);
@@ -901,6 +917,7 @@ namespace FeiqLight
         [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr w, IntPtr l);
         [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern bool EnableWindow(IntPtr hWnd, bool bEnable);
         [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern IntPtr SetActiveWindow(IntPtr hWnd);
+        [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern bool RedrawWindow(IntPtr window, IntPtr rect, IntPtr region, uint flags);
     }
     public sealed class SkyPanel : Panel
     {

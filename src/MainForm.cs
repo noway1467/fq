@@ -19,6 +19,9 @@ public sealed class MainForm : ModernWindow
         private readonly Dictionary<string, DateTime> times = new Dictionary<string, DateTime>();
         private readonly List<string> recent = new List<string>();
         private readonly ConversationList contacts = new ConversationList();
+        private readonly TableLayoutPanel layout;
+        private readonly SidebarDivider sidebarDivider = new SidebarDivider { Dock = DockStyle.Fill, Margin = Padding.Empty };
+        private const int MinimumWindowWidth = 720, MinimumWindowHeight = 520;
         private readonly TextBox search;
         private readonly Label status = Theme.Label("连接中", Theme.Small, Theme.Muted);
         private readonly ChatHost chatHost = new ChatHost { Dock = DockStyle.Fill, BackColor = Theme.Wallpaper };
@@ -46,7 +49,7 @@ public sealed class MainForm : ModernWindow
         {
             this.startup = startup; this.startInTray = startInTray;
             diagnostics=new Diagnostics(store.Root,()=>network.Settings.DiagnosticsEnabled);
-            this.network = network; this.store = store; Text = "飞Q"; ClientSize = new Size(1120, 760); MinimumSize = new Size(880, 580);
+            this.network = network; this.store = store; Text = "飞Q"; ClientSize = new Size(1120, 760); MinimumSize = new Size(MinimumWindowWidth, MinimumWindowHeight);
             HashSet<string> restored=new HashSet<string>(network.Peers.Select(p=>p.Id));
             foreach(SavedConversation item in SavedConversation.Normalize(network.Settings.Conversations).OrderByDescending(c=>c.MessageUtcTicks))
             {
@@ -57,16 +60,26 @@ public sealed class MainForm : ModernWindow
             }
             windowSaveTimer.Tick += delegate { windowSaveTimer.Stop(); SaveWindowPlacement(); };
             LocationChanged += TrackWindowPlacement; SizeChanged += TrackWindowPlacement;
-            TableLayoutPanel layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1, Margin = Padding.Empty, BackColor = Theme.Surface };
-            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 336)); layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 1)); layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); Surface.Controls.Add(layout);
+            layout = new BufferedLayoutTable { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1, Margin = Padding.Empty, BackColor = Theme.Surface };
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 336)); layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 8)); layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); Surface.Controls.Add(layout);
             TableLayoutPanel sidebar = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 4, ColumnCount = 1, BackColor = Theme.Surface, Margin = Padding.Empty };
             sidebar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); sidebar.RowStyles.Add(new RowStyle(SizeType.Absolute, 64)); sidebar.RowStyles.Add(new RowStyle(SizeType.Absolute, 50)); sidebar.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); sidebar.RowStyles.Add(new RowStyle(SizeType.Absolute, 50));
-            layout.Controls.Add(sidebar, 0, 0); layout.Controls.Add(new Panel { Dock = DockStyle.Fill, BackColor = Theme.Line, Margin = Padding.Empty }, 1, 0); chatHost.Margin = Padding.Empty; layout.Controls.Add(chatHost, 2, 0);
+            layout.Controls.Add(sidebar, 0, 0); layout.Controls.Add(sidebarDivider, 1, 0); chatHost.Margin = Padding.Empty; layout.Controls.Add(chatHost, 2, 0);
+            sidebarDivider.WidthRequested += SetSidebarWidth;
+            sidebarDivider.ResetRequested += delegate { SetSidebarWidth((int)Math.Round(336 * SidebarScale)); };
+            layout.SizeChanged += delegate { ApplySidebarWidth(); };
             TableLayoutPanel top = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1, Padding = new Padding(8, 10, 10, 8), Margin = Padding.Empty, BackColor = Theme.Surface };
             top.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 44)); top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); top.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 42)); top.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             Button menu = Theme.IconButton("menu", "菜单", ShowMenu, false); menu.Dock = DockStyle.Fill; menu.Margin = Padding.Empty; top.Controls.Add(menu, 0, 0);
             SearchBox query = new SearchBox { Dock = DockStyle.Fill, Margin = new Padding(4, 2, 6, 2) }; search = query.Input; search.AccessibleName = "查找联系人"; search.MaxLength = 100; query.Placeholder = "搜索联系人或消息"; search.TextChanged += delegate { RefreshPeers(); };
             top.Controls.Add(query, 1, 0);
+            sidebar.SizeChanged += delegate {
+                bool compact = sidebar.Width < 280 * SidebarScale;
+                top.Padding = compact ? new Padding(4, 10, 4, 8) : new Padding(8, 10, 10, 8);
+                top.ColumnStyles[0].Width = compact ? 36 : 44; top.ColumnStyles[2].Width = compact ? 36 : 42;
+                query.Placeholder = compact ? "搜索" : "搜索联系人或消息"; query.Invalidate();
+                tabs.Padding = compact ? new Padding(4, 0, 4, 0) : new Padding(14, 0, 8, 0);
+            };
             Button add = Theme.IconButton("plus", "添加联系人", delegate { AddPeer(); }, false); add.Dock = DockStyle.Fill; add.Margin = Padding.Empty; top.Controls.Add(add, 2, 0); sidebar.Controls.Add(top, 0, 0);
             string[] names = { "全部", "未读", "在线" };
             for (int i = 0; i < names.Length; i++) { int value = i; RoundedButton button = (RoundedButton)Theme.Button(names[i], delegate { filter = value; RefreshFilters(); RefreshPeers(); }, false); button.Size = new Size(88, 44); button.Margin = Padding.Empty; filters.Add(button); tabs.Add(button); }
@@ -387,6 +400,7 @@ public sealed class MainForm : ModernWindow
             }
             if (restoreFront && !IsDisposed) Activate();
             next.Window = previous.Window;
+            next.SidebarWidth = previous.SidebarWidth;
             next.KnownPeers = previous.KnownPeers;
             next.Conversations = previous.Conversations;
             next.DeviceId = previous.DeviceId;
@@ -487,13 +501,14 @@ public sealed class MainForm : ModernWindow
                 // 拔掉显示器或改变分辨率后，至少把整个窗口约束回可见工作区。
                 Rectangle requested = new Rectangle(Math.Max(-100000, Math.Min(100000, saved.X)), Math.Max(-100000, Math.Min(100000, saved.Y)), Math.Min(100000, saved.Width), Math.Min(100000, saved.Height));
                 Rectangle area = Screen.FromRectangle(requested).WorkingArea;
-                MinimumSize = new Size(Math.Min(880, area.Width), Math.Min(580, area.Height));
+                MinimumSize = new Size(Math.Min(MinimumWindowWidth, area.Width), Math.Min(MinimumWindowHeight, area.Height));
                 int width = Math.Min(area.Width, Math.Max(MinimumSize.Width, requested.Width));
                 int height = Math.Min(area.Height, Math.Max(MinimumSize.Height, requested.Height));
                 StartPosition = FormStartPosition.Manual;
                 Bounds = new Rectangle(Math.Max(area.Left, Math.Min(requested.X, area.Right - width)), Math.Max(area.Top, Math.Min(requested.Y, area.Bottom - height)), width, height);
                 if (saved.Maximized) WindowState = FormWindowState.Maximized;
             }
+            ApplySidebarWidth();
             windowLoaded = true;
             TrackWindowPlacement(this, EventArgs.Empty);
         }
@@ -513,6 +528,24 @@ public sealed class MainForm : ModernWindow
             Rectangle normal = WindowState == FormWindowState.Normal ? Bounds : RestoreBounds;
             if (normal.Width <= 0 || normal.Height <= 0) return;
             network.Settings.Window = new WindowPlacement { X = normal.X, Y = normal.Y, Width = normal.Width, Height = normal.Height, Maximized = WindowState == FormWindowState.Maximized };
+            windowSaveTimer.Stop(); windowSaveTimer.Start();
+        }
+        private float SidebarScale { get { return DeviceDpi / 96F; } }
+        private void ApplySidebarWidth()
+        {
+            float scale = SidebarScale;
+            int requested = network.Settings.SidebarWidth > 0 ? network.Settings.SidebarWidth : 336;
+            int minimum = (int)Math.Round(200 * scale);
+            int maximum = Math.Max(minimum, Math.Min((int)Math.Round(480 * scale), layout.ClientSize.Width - (int)Math.Round(428 * scale)));
+            layout.ColumnStyles[1].Width = (int)Math.Round(8 * scale);
+            layout.ColumnStyles[0].Width = Math.Max(minimum, Math.Min(maximum, (int)Math.Round(Math.Max(200, Math.Min(480, requested)) * scale)));
+        }
+        private void SetSidebarWidth(int width)
+        {
+            int maximum = Math.Max(200, Math.Min(480, (int)(layout.ClientSize.Width / SidebarScale) - 428));
+            network.Settings.SidebarWidth = Math.Max(200, Math.Min(maximum, (int)Math.Round(width / SidebarScale)));
+            ApplySidebarWidth();
+            ModernWindow.RedrawLayout(layout);
             windowSaveTimer.Stop(); windowSaveTimer.Start();
         }
         private void SaveWindowPlacement()

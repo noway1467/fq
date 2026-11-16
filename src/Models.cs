@@ -32,6 +32,7 @@ namespace FeiqLight
         public int SettingsRevision { get; set; }
         public string ReceiveFolder { get; set; }
         public WindowPlacement Window { get; set; }
+        public int SidebarWidth { get; set; }
         public string[] KnownPeers { get; set; }
         public SavedConversation[] Conversations { get; set; }
         public static string DefaultReceiveFolder { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "飞Q接收文件"); } }
@@ -45,6 +46,7 @@ namespace FeiqLight
             StartWithWindows = false; AutoSendDroppedFiles = false; AllowLegacyProtocol = true; ChatFontSize=10; ChatBackground="orbits"; BackgroundImage="";
             KnownPeers = new string[0];
             Conversations = new SavedConversation[0];
+            SidebarWidth = 336;
         }
         public static IPEndPoint ParseKnownPeer(string value)
         {
