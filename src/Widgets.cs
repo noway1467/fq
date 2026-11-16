@@ -163,8 +163,8 @@ namespace FeiqLight
         public ChatHost() { DoubleBuffered = true; ResizeRedraw = true; BackColor = Theme.Wallpaper; }
         protected override void OnPaintBackground(PaintEventArgs e)
         {
-            ChatWallpaper.Draw(e.Graphics, ClientRectangle, Pattern == "image" ? "orbits" : Pattern, null, DeviceDpi / 96F);
-            if (Controls.Count > 0 && HasVisibleChild()) return;
+            if (Controls.Count > 0 && HasVisibleChild()) { e.Graphics.Clear(BackColor); return; }
+            ChatWallpaper.Draw(e.Graphics, ClientRectangle, Pattern == "image" ? "orbits" : Pattern, null, DeviceDpi / 96F, ModernWindow.IsResizing(this));
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias; float scale = DeviceDpi / 96F;
             Size text = TextRenderer.MeasureText(Hint, Theme.Body); Rectangle pill = new Rectangle((Width - text.Width - (int)(28 * scale)) / 2, (Height - (int)(32 * scale)) / 2, text.Width + (int)(28 * scale), (int)(32 * scale));
             using (GraphicsPath path = Theme.Rounded(pill, pill.Height / 2)) using (SolidBrush b = new SolidBrush(Theme.ServiceFill)) e.Graphics.FillPath(b, path);

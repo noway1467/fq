@@ -57,9 +57,9 @@ namespace FeiqLight
         {
             this.peer = peer; this.network = network; this.store = store; this.main = main;
             Theme.Apply(this); DoubleBuffered = true; Text = peer.Nickname; FormBorderStyle = FormBorderStyle.None; ClientSize = new Size(760, 720); MinimumSize = Size.Empty;
-            root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, Margin = Padding.Empty, BackColor = Theme.Surface };
+            root = new BufferedLayoutTable { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, Margin = Padding.Empty, BackColor = Theme.Surface };
             root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); root.RowStyles.Add(new RowStyle(SizeType.Absolute, 74)); root.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); root.RowStyles.Add(new RowStyle(SizeType.Absolute, 0)); root.RowStyles.Add(new RowStyle(SizeType.Absolute, 82)); Controls.Add(root);
-            head = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 5, RowCount = 1, Padding = new Padding(16, 8, 12, 8), Margin = Padding.Empty, BackColor = Theme.Surface };
+            head = new BufferedLayoutTable { Dock = DockStyle.Fill, ColumnCount = 5, RowCount = 1, Padding = new Padding(16, 8, 12, 8), Margin = Padding.Empty, BackColor = Theme.Surface };
             head.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 58)); head.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); for (int i = 0; i < 3; i++) head.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 44)); head.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             avatar = new PictureBox { Image = Theme.ContactAvatar(46, peer.Id, peer.Online, peer.Avatar), AccessibleName = "聊天联系人头像", Size = new Size(56, 56), Margin = Padding.Empty, SizeMode = PictureBoxSizeMode.Zoom, Anchor = AnchorStyles.Left }; head.Controls.Add(avatar, 0, 0);
             TableLayoutPanel identity = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 2, ColumnCount = 1, Margin = Padding.Empty }; identity.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); identity.RowStyles.Add(new RowStyle(SizeType.Percent, 56)); identity.RowStyles.Add(new RowStyle(SizeType.Percent, 44));
@@ -113,7 +113,7 @@ namespace FeiqLight
             root.Controls.Add(middle, 0, 1);
             queue = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Padding = new Padding(18, 1, 10, 1), Margin = Padding.Empty, Visible = false }; queue.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); queue.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 38)); queue.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             queued.Dock = DockStyle.Fill; queued.AutoEllipsis = true; queue.Controls.Add(queued, 0, 0); Button remove = Theme.IconButton("close", "移除附件", delegate { ClearPastedImages(); attachments.Clear(); UpdateQueued(); }, false); remove.Dock = DockStyle.Fill; remove.Margin = Padding.Empty; queue.Controls.Add(remove, 1, 0); root.Controls.Add(queue, 0, 2);
-            compose = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, RowCount = 1, Padding = new Padding(10, 9, 14, 9), Margin = Padding.Empty, BackColor = Theme.Surface };
+            compose = new BufferedLayoutTable { Dock = DockStyle.Fill, ColumnCount = 4, RowCount = 1, Padding = new Padding(10, 9, 14, 9), Margin = Padding.Empty, BackColor = Theme.Surface };
             compose.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 44)); compose.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); compose.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 44)); compose.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 58)); compose.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             emojiButton = Theme.IconButton("smile", "表情", ShowEmoji, false); emojiButton.Anchor = AnchorStyles.None; emojiButton.Size = new Size(40, 40); emojiButton.Margin = Padding.Empty; compose.Controls.Add(emojiButton, 0, 0);
             inputShell.Dock = DockStyle.Fill; inputShell.Margin = new Padding(2, 1, 4, 1); inputShell.Cursor = Cursors.IBeam;
@@ -378,7 +378,25 @@ namespace FeiqLight
         }
         // 弹出菜单由会话持有；隐藏会话仍保留它，最终在 Dispose 中统一释放。
         private static void ShowPopup(ContextMenuStrip menu, Control source) { menu.Show(source, new Point(source.Width, source.Height + 4), ToolStripDropDownDirection.BelowLeft); }
-        private void ShowHistory(object sender, EventArgs e) { using (HistoryDialog dialog = new HistoryDialog(store, peer, main)) dialog.ShowDialog(main); }
+        private void ShowHistory(object sender, EventArgs e)
+        {
+            using (HistoryDialog dialog = new HistoryDialog(store, peer, main))
+                if(dialog.ShowDialog(main)==DialogResult.OK&&dialog.LocatedRecord!=null) {
+                    main.OpenChat(peer);
+                    try {if(!LocateMessage(dialog.LocatedRecord))Error("无法定位","该消息已删除或不在当前可加载的聊天记录中。");}
+                    catch(IOException error){Error("读取聊天记录失败",error.Message);}
+                    catch(UnauthorizedAccessException error){Error("读取聊天记录失败",error.Message);}
+                }
+        }
+        internal bool LocateMessage(ChatRecord target)
+        {
+            if(target.PeerId!=peer.Id)return false;
+            // 搜索窗口可读 500 条，定位时补齐同一范围，仍保留到最新消息的连续上下文。
+            var records=store.History(peer.Id,500).Select(record=>record.Outgoing?network.OutgoingRecord(peer.Id,record.Packet)??record:record).ToList();
+            if(!records.Any(record=>record.Packet==target.Packet&&record.Outgoing==target.Outgoing))return false;
+            history.RecordLimit=500;history.CharacterLimit=Int32.MaxValue;history.SetRecords(records);
+            return history.RevealRecord(target);
+        }
         private void Error(string title, string text) { using (NoticeDialog dialog = new NoticeDialog(title, text)) dialog.ShowDialog(main); }
         public int PendingFileCount { get { return files.Items.Count; } }
         public bool HasAutomaticFile { get { return receiving == null && files.Items.Cast<ReceivedFile>().Any(f => f.AutomaticPending); } }

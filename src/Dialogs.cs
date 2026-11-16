@@ -563,6 +563,7 @@ namespace FeiqLight
     }
     public sealed class HistoryDialog : ModernWindow
     {
+        internal ChatRecord LocatedRecord { get; private set; }
         public HistoryDialog(LocalStore store, Peer peer, MainForm main = null)
         {
             Text = "聊天记录 · " + peer.DisplayName; UseSecondaryChrome();ShowInTaskbar=false; ClientSize = new Size(760, 720); MinimumSize = new Size(520, 460); StartPosition = FormStartPosition.CenterParent;
@@ -571,6 +572,7 @@ namespace FeiqLight
             Label summary=Theme.Label("",Theme.Small,Theme.Muted);summary.Dock=DockStyle.Bottom;summary.Height=26;summary.AccessibleName="聊天记录搜索结果";top.Controls.Add(summary);
             SearchBox input = new SearchBox { Dock = DockStyle.Fill }; input.Input.AccessibleName = "搜索聊天记录"; input.Input.MaxLength=200;input.Placeholder = "搜索消息或文件名"; top.Controls.Add(input);input.BringToFront();
             BubbleHistory body = new BubbleHistory { Dock = DockStyle.Fill, Margin = new Padding(10), BackColor = Theme.Wallpaper, RecordLimit=500, CharacterLimit=Int32.MaxValue };
+            body.RecordActivated += delegate(ChatRecord record) {LocatedRecord=record;DialogResult=DialogResult.OK;};
             Panel frame = new Panel { Dock = DockStyle.Fill, Padding = new Padding(10, 0, 10, 10), BackColor = Theme.Wallpaper }; frame.Controls.Add(body); Surface.Controls.Add(frame); Surface.Controls.Add(top);
             try { var records = store.History(peer.Id, 500); Action render = () => {
                 string query=input.Input.Text;

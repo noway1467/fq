@@ -800,6 +800,19 @@ namespace FeiqLight
         private ResizeEdges manualResize;
         private Point manualResizeOrigin;
         private Rectangle manualResizeBounds;
+        private Timer resizeTimer;
+        private Point pendingResizePoint;
+        private bool resizePending;
+        private double resizeFrameAt;
+        internal static bool IsResizing(Control control)
+        {
+            for (Control parent = control; parent != null; parent = parent.Parent)
+            {
+                ModernWindow window = parent as ModernWindow;
+                if (window != null) return window.manualResize != ResizeEdges.None;
+            }
+            return false;
+        }
         protected void UseSecondaryChrome()
         {
             secondaryWindow=true;UpdateResizePadding();chrome.Height=56;caption.Font=Theme.Section;caption.ForeColor=Theme.Ink;
@@ -901,18 +914,38 @@ namespace FeiqLight
             Bounds = next;
             RedrawLayout(this);
         }
+        private void QueueResize(Point point)
+        {
+            pendingResizePoint = point; resizePending = true;
+            if (Motion.Now - resizeFrameAt >= 16) { ApplyPendingResize(); return; }
+            if (resizeTimer == null) { resizeTimer = new Timer { Interval = 15 }; resizeTimer.Tick += delegate { ApplyPendingResize(); }; }
+            resizeTimer.Start();
+        }
+        private void ApplyPendingResize()
+        {
+            if (resizeTimer != null) resizeTimer.Stop();
+            if (!resizePending || manualResize == ResizeEdges.None) return;
+            resizePending = false;
+            ResizeTo(pendingResizePoint);
+            resizeFrameAt = Motion.Now;
+        }
+        private void CancelPendingResize()
+        {
+            resizePending = false;
+            if (resizeTimer != null) resizeTimer.Stop();
+        }
         internal static void RedrawLayout(Control control)
         {
-            // 连续鼠标消息会推迟 WM_PAINT；布局后同步刷新全部子窗口，避免搬移的旧像素滞留到松手。
-            // 保留原生编辑器各自的缓冲，不开启会影响输入与遮挡恢复的整窗 WS_EX_COMPOSITED。
+            // 同步处理布局实际弄脏的区域，避免连续鼠标消息推迟 WM_PAINT；不再强制擦除整棵控件树。
             if (control.IsHandleCreated && control.Visible)
-                RedrawWindow(control.Handle, IntPtr.Zero, IntPtr.Zero, 0x0001 | 0x0004 | 0x0080 | 0x0100 | 0x0400);
+                RedrawWindow(control.Handle, IntPtr.Zero, IntPtr.Zero, 0x0080 | 0x0100);
         }
         protected override void OnMouseDown(MouseEventArgs e)
         {
             ResizeEdges edge = e.Button == MouseButtons.Left ? ResizeEdgeAt(e.Location) : ResizeEdges.None;
             if (edge != ResizeEdges.None) {
                 manualResize = edge; manualResizeOrigin = PointToScreen(e.Location); manualResizeBounds = Bounds;
+                CancelPendingResize(); resizeFrameAt = Motion.Now - 16;
                 Capture = true; Cursor.Current = ResizeCursor(edge); return;
             }
             base.OnMouseDown(e);
@@ -920,7 +953,7 @@ namespace FeiqLight
         protected override void OnMouseMove(MouseEventArgs e)
         {
             if (manualResize != ResizeEdges.None) {
-                ResizeTo(PointToScreen(e.Location)); Cursor.Current = ResizeCursor(manualResize); return;
+                QueueResize(PointToScreen(e.Location)); Cursor.Current = ResizeCursor(manualResize); return;
             }
             Cursor.Current = ResizeCursor(ResizeEdgeAt(e.Location));
             base.OnMouseMove(e);
@@ -935,12 +968,17 @@ namespace FeiqLight
             if (manualResize == ResizeEdges.None) {
                 base.OnMouseUp(e); return;
             }
-            ResizeTo(PointToScreen(e.Location)); manualResize = ResizeEdges.None; Capture = false;
+            CancelPendingResize(); ResizeTo(PointToScreen(e.Location)); manualResize = ResizeEdges.None; Capture = false;
+            Invalidate(true); RedrawLayout(this);
             Cursor.Current = ResizeCursor(ResizeEdgeAt(PointToClient(Cursor.Position)));
         }
         protected override void OnMouseCaptureChanged(EventArgs e)
         {
-            if (!Capture) { manualResize = ResizeEdges.None; Cursor.Current = Cursors.Default; }
+            if (!Capture) {
+                bool wasResizing = manualResize != ResizeEdges.None;
+                CancelPendingResize(); manualResize = ResizeEdges.None; Cursor.Current = Cursors.Default;
+                if (wasResizing) { Invalidate(true); RedrawLayout(this); }
+            }
             base.OnMouseCaptureChanged(e);
         }
         protected override void WndProc(ref Message m)
@@ -953,7 +991,13 @@ namespace FeiqLight
             }
             base.WndProc(ref m);
         }
-        protected override void OnResize(EventArgs e) { UpdateResizePadding(); base.OnResize(e); }
+        protected override void OnResize(EventArgs e)
+        {
+            if (WindowState != FormWindowState.Normal && manualResize != ResizeEdges.None) { CancelPendingResize(); manualResize=ResizeEdges.None; Capture=false; }
+            UpdateResizePadding(); base.OnResize(e);
+        }
+        protected override void OnVisibleChanged(EventArgs e) { if (!Visible) { CancelPendingResize(); manualResize = ResizeEdges.None; } base.OnVisibleChanged(e); }
+        protected override void Dispose(bool disposing) { if (disposing && resizeTimer != null) resizeTimer.Dispose(); base.Dispose(disposing); }
         protected override void OnPaint(PaintEventArgs e) {
             base.OnPaint(e);
             using(Pen p=new Pen(secondaryWindow?Theme.Blend(Theme.Blue,Theme.Line,.55F):Theme.Blend(Theme.Ink,Theme.Surface,Theme.Dark?.22F:.16F),secondaryWindow?2:1))e.Graphics.DrawRectangle(p,secondaryWindow?1:0,secondaryWindow?1:0,Width-(secondaryWindow?3:1),Height-(secondaryWindow?3:1));

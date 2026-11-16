@@ -132,6 +132,43 @@ namespace FeiqLight.Tests
                     Render(dialog,"settings-"+available); All(dialog).OfType<Button>().Single(b=>b.Text=="保存").PerformClick(); Check(dialog.Value!=null&&!dialog.Value.StartWithWindows,"保存后的启动项状态错误"); dialog.Close();
                 }
             });
+            Run("搜索结果点击定位旧消息，同号收发分开且保留草稿",()=>{
+                LocalStore store=new LocalStore(Path.Combine(root,"search-navigation"));Peer peer=Contact("peer");
+                ChatRecord[] records=Enumerable.Range(0,360).Select(index=>new ChatRecord {PeerId=peer.Id,Packet=index/2+1,Outgoing=index%2==0,Time=DateTime.Now.AddMinutes(index-360),State="已送达",Text=index==40||index==41?"定位目标关键词":("上下文消息 "+index)}).ToArray();
+                foreach(ChatRecord record in records)store.Append(record);
+                using(LanService node=Node(store))using(MainForm main=new MainForm(node,store)) {
+                    main.Show();main.OpenChat(peer);Pump(30);ChatEditor editor=All(main.ActiveChat).OfType<ChatEditor>().Single();editor.Text="搜索定位保留的草稿";
+                    foreach(ChatRecord expected in records.Where(record=>record.Packet==21)) {
+                        Exception callbackError=null;
+                        using(System.Windows.Forms.Timer timer=new System.Windows.Forms.Timer {Interval=30}) {
+                            timer.Tick+=delegate {
+                                HistoryDialog dialog=Application.OpenForms.OfType<HistoryDialog>().FirstOrDefault();if(dialog==null)return;timer.Stop();
+                                try {
+                                    All(dialog).OfType<TextBox>().Single(control=>control.AccessibleName=="搜索聊天记录").Text="定位目标关键词";
+                                    BubbleHistory results=All(dialog).OfType<BubbleHistory>().Single();results.Refresh();
+                                    var found=(List<ChatRecord>)typeof(BubbleHistory).GetField("records",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(results);
+                                    int index=found.FindIndex(record=>record.Packet==expected.Packet&&record.Outgoing==expected.Outgoing);
+                                    var areas=(List<Rectangle>)typeof(BubbleHistory).GetField("bounds",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(results);
+                                    Point point=new Point(areas[index].Left+12,areas[index].Top+results.AutoScrollPosition.Y+12);
+                                    Mouse(results,0x201,point);Mouse(results,0x202,point);
+                                    Check(dialog.LocatedRecord!=null&&dialog.LocatedRecord.Outgoing==expected.Outgoing,"结果点击没有返回准确的消息身份");
+                                }catch(Exception error){callbackError=error;dialog.Close();}
+                            };
+                            timer.Start();All(main.ActiveChat).OfType<Button>().Single(button=>button.AccessibleName=="聊天记录").PerformClick();
+                        }
+                        if(callbackError!=null)throw callbackError;
+                        BubbleHistory history=All(main.ActiveChat).OfType<BubbleHistory>().Single();
+                        ChatRecord located=(ChatRecord)typeof(BubbleHistory).GetProperty("SelectedRecord",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(history,null);
+                        Check(located!=null&&located.Packet==expected.Packet&&located.Outgoing==expected.Outgoing,"定位跳错消息或收发方向");
+                        int selected=(int)typeof(BubbleHistory).GetField("selected",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(history);
+                        Rectangle target=((List<Rectangle>)typeof(BubbleHistory).GetField("bounds",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(history))[selected];target.Offset(history.AutoScrollPosition);
+                        Check(target.IntersectsWith(history.ClientRectangle),"目标没有出现在聊天视口");Check(history.Text.Contains("上下文消息 359"),"定位丢失了后面的聊天上下文");
+                        Check(editor.Text=="搜索定位保留的草稿","定位改写草稿");Render(main,"search-navigation-"+expected.Outgoing);
+                    }
+                    ChatRecord wrongPeer=new ChatRecord {PeerId="other",Packet=21};Check(!main.ActiveChat.LocateMessage(wrongPeer),"跨会话相同编号被错误定位");
+                    main.ExitApplication();Check(store.History(peer.Id,500).Count==360,"定位修改了历史记录");Check(store.LoadDraft(peer.Id)=="搜索定位保留的草稿","退出未保留草稿");
+                }
+            });
             foreach(bool dark in new[]{false,true}) Run("渲染与布局："+(dark?"深色":"浅色")+"、最小/常用/最大化与空数据",()=>{
                 Theme.Configure(dark,"rose"); LocalStore store=new LocalStore(Path.Combine(root,"render-"+dark));
                 using(LanService node=Node(store)) using(MainForm main=new MainForm(node,store)) {

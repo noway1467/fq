@@ -14,13 +14,14 @@ namespace FeiqLight
     // 同向、五分钟内的连续消息合为一组：组内圆角收窄，只有最后一条带尾角；跨天插入日期胶囊。
     public sealed class BubbleHistory : SmoothScrollView
     {
-        private sealed class Measure { internal string Key, Text; internal MessageLayout Layout; internal Size TextSize; internal int TextMax, ContentWidth, Width, Height; }
+        private sealed class Measure { internal string Key, ContentKey, Text; internal MessageLayout Layout; internal Size TextSize; internal int TextMax, ContentWidth, Width, Height; }
         private sealed class Item { internal string DateLabel; internal Rectangle DateBounds; internal bool First, Last; internal Measure M; }
         private readonly List<ChatRecord> records = new List<ChatRecord>();
         private readonly List<Rectangle> bounds = new List<Rectangle>();
         private readonly List<MessageLayout> textLayouts=new List<MessageLayout>();
         private readonly List<Item> items=new List<Item>();
         private Dictionary<ChatRecord,Measure> measures=new Dictionary<ChatRecord,Measure>();
+        private int arrangedBubbleWidth;
         private string peerIdentity, peerAvatar, ownIdentity, ownAvatar;
         internal void SetAvatars(string incomingIdentity, string incomingAvatar, string outgoingIdentity, string outgoingAvatar)
         {
@@ -89,6 +90,7 @@ namespace FeiqLight
         private int previousHeight;
         public event Action<ChatRecord> RetryRequested;
         public event Action<bool> AvatarClicked;
+        public event Action<ChatRecord> RecordActivated;
         public event Action<ChatRecord> ForwardRequested;
         public event Action<ChatRecord,int> FileRequested;
         public event Action<ChatRecord[]> DeleteRequested;
@@ -196,6 +198,15 @@ namespace FeiqLight
         public bool HasDelivery(string state) { return records.Any(r => r.State == state); }
         // 自己发送后回到最新：近处平滑滚动，远处先贴近再滑行；逻辑位置立即落到底部。
         public void ScrollToLatest() { unseen = 0; SmoothTo(AutoScrollMinSize.Height); }
+        internal bool RevealRecord(ChatRecord record)
+        {
+            int index=records.FindIndex(item=>item.PeerId==record.PeerId&&item.Packet==record.Packet&&item.Outgoing==record.Outgoing);
+            if(index<0)return false;
+            CancelLongPress();EndSelection();selected=index;appearFrom=0;
+            Rectangle target=bounds[index];
+            JumpTo(target.Top-Math.Max(Dp(12),(ClientSize.Height-Math.Min(target.Height,ClientSize.Height-Dp(24)))/2));
+            Focus();Invalidate();return true;
+        }
         // 批量载入：只排版一次，打开会话或搜索几百条记录不再逐条重排。
         public void SetRecords(IEnumerable<ChatRecord> values) { SetRecords(values, highlightText); }
         public void SetRecords(IEnumerable<ChatRecord> values, string highlight)
@@ -274,7 +285,7 @@ namespace FeiqLight
         {
             bool bottom = previousHeight == 0 || -AutoScrollPosition.Y + previousHeight >= AutoScrollMinSize.Height - Dp(55);
             Tuple<ChatRecord,int> anchor = bottom ? null : TopAnchor();
-            base.OnResize(e); Arrange(); previousHeight = ClientSize.Height;
+            base.OnResize(e); Arrange(true); previousHeight = ClientSize.Height;
             if (bottom) JumpTo(AutoScrollMinSize.Height); else Restore(anchor); Invalidate();
         }
         // MeasureText 默认会为最长单词扩宽矩形；编辑控件规则才能在长 URL/路径内部换行。
@@ -330,14 +341,16 @@ namespace FeiqLight
             bool cards = r.Transfers != null && r.Transfers.Length > 0;
             string[] media = cards ? new string[0] : r.GetLocalFiles().Where(MediaPreview.Supported).ToArray();
             int stamp = StampWidth(r);
-            string key = display + "\u0001" + maxBubble + "\u0001" + Font.Name + Font.Size + "\u0001" + highlightText + "\u0001" + stamp + "\u0001" + (cards ? String.Join("|", r.Transfers.Select(f => CardMedia(f) ? "m" : "f")) : "-") + "\u0001" + media.Length + "\u0001" + DeviceDpi;
+            string contentKey = display + "\u0001" + Font.Name + Font.Size + Font.Style + Font.Unit + "\u0001" + highlightText + "\u0001" + stamp + "\u0001" + (cards ? String.Join("|", r.Transfers.Select(f => CardMedia(f) ? "m" : "f")) : "-") + "\u0001" + media.Length + "\u0001" + DeviceDpi;
+            string key = contentKey + "\u0001" + maxBubble;
             Measure m; if (measures.TryGetValue(r, out m) && m.Key == key) return m;
-            m = new Measure { Key = key, TextMax = Math.Max(Dp(40), maxBubble - PadX * 2) };
+            MessageLayout previous = m != null && m.ContentKey == contentKey ? m.Layout : null;
+            m = new Measure { Key = key, ContentKey = contentKey, TextMax = Math.Max(Dp(40), maxBubble - PadX * 2) };
             if (display.Length > 0)
             {
-                if (highlightText.Length > 0 || MessageLinks.Find(display).Count > 0 || ColorEmoji.Contains(display))
+                if (previous != null || highlightText.Length > 0 || MessageLinks.Find(display).Count > 0 || ColorEmoji.Contains(display))
                 {
-                    m.Layout = new MessageLayout(display, Font, m.TextMax, highlightText);
+                    m.Layout = previous == null ? new MessageLayout(display, Font, m.TextMax, highlightText) : previous.Reflow(m.TextMax);
                     m.TextSize = new Size(m.Layout.Width, m.Layout.Height);
                 }
                 else
@@ -360,7 +373,7 @@ namespace FeiqLight
             return m;
         }
         private Size PillSize(string text, Font font) { Size size = TextRenderer.MeasureText(text, font, Size.Empty, Tight); return new Size(size.Width + Dp(20), size.Height + Dp(8)); }
-        private void Arrange()
+        private void Arrange(bool resizing = false)
         {
             if (ClientSize.Width < 50) return;
             int width = ClientSize.Width, side = Dp(14), tail = Dp(7);
@@ -382,13 +395,15 @@ namespace FeiqLight
                 }
                 else y += i > 0 && Continues(records[i - 1], r) ? Dp(3) : Dp(10);
                 item.First = i == 0 || item.DateLabel != null || !Continues(records[i - 1], r);
-                Measure m = MeasureRecord(r, maxBubble); next[r] = m; item.M = m;
+                Measure m;
+                if(!resizing || arrangedBubbleWidth!=maxBubble || !measures.TryGetValue(r,out m))m=MeasureRecord(r,maxBubble);
+                next[r] = m; item.M = m;
                 int rowHeight = Math.Max(m.Height, avatarGutter > 0 ? AvatarSize : 0);
                 bounds.Add(new Rectangle(r.Outgoing ? width - side - tail - avatarGutter - m.Width : side + tail + avatarGutter, y + rowHeight - m.Height, m.Width, m.Height));
                 textLayouts.Add(m.Layout); items.Add(item); y += rowHeight;
             }
             for (int i = 0; i < items.Count; i++) items[i].Last = i == items.Count - 1 || !items[i + 1].First;
-            measures = next; y += Dp(14);
+            measures = next; arrangedBubbleWidth=maxBubble; y += Dp(14);
             // 内容不足一屏时贴底显示，与聊天输入区相邻。
             int pad = Math.Max(0, ClientSize.Height - y);
             if (pad > 0) for (int i = 0; i < bounds.Count; i++) { Rectangle r = bounds[i]; r.Offset(0, pad); bounds[i] = r; if (items[i].DateLabel != null) { Rectangle d = items[i].DateBounds; d.Offset(0, pad); items[i].DateBounds = d; } }
@@ -431,7 +446,7 @@ namespace FeiqLight
         protected override void OnPaint(PaintEventArgs e)
         {
             Graphics g = e.Graphics;
-            ChatWallpaper.Draw(g, ClientRectangle, wallpaperPattern, wallpaperImage, DpiScale);
+            ChatWallpaper.Draw(g, ClientRectangle, wallpaperPattern, wallpaperImage, DpiScale, ModernWindow.IsResizing(this));
             mediaHits.Clear(); linkHits.Clear(); fileHits.Clear(); stampHits.Clear(); retryHits.Clear(); avatarHits.Clear();
             g.SmoothingMode = SmoothingMode.AntiAlias; g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
             int dy = -ScrollOffset + Shift, first = FirstVisible(-dy - Math.Max(Dp(48), AvatarSize));
@@ -702,6 +717,12 @@ namespace FeiqLight
                 pressedAction = delegate { AvatarClicked(avatar.Item2); };
                 return;
             }
+            int activate=HitBubble(e.Location);
+            if(RecordActivated!=null&&activate>=0&&e.Button==MouseButtons.Left&&!multiSelectMode)
+            {
+                ChatRecord target=records[activate];selected=activate;dragStart=e.Location;Capture=true;
+                pressedAction=delegate {RecordActivated(target);};Invalidate();return;
+            }
             var retry = retryHits.FirstOrDefault(item => item.Item1.Contains(e.Location));
             if (retry != null && !multiSelectMode && ModifierKeys == Keys.None) { selected = retry.Item2; Invalidate(); ContextMenuStrip.Show(this, e.Location); return; }
             int hit = HitBubble(e.Location);
@@ -761,7 +782,7 @@ namespace FeiqLight
             base.OnMouseMove(e);
             if (pressedRecord != null && MovedPastDragThreshold(e.Location)) CancelLongPress();
             if (ScrollbarMouseMove(e) && e.Button == MouseButtons.Left && dragFilePath == null) { Cursor = Cursors.Default; return; }
-            bool hand = linkHits.Any(h=>h.Item1.Contains(e.Location))||fileHits.Any(h=>h.Item1.Contains(e.Location))||mediaHits.Any(h=>h.Item1.Contains(e.Location))||retryHits.Any(h=>h.Item1.Contains(e.Location))||(AvatarClicked!=null&&avatarHits.Any(h=>h.Item1.Contains(e.Location)))||(JumpVisible&&JumpBounds().Contains(e.Location));
+            bool hand = (RecordActivated!=null&&HitBubble(e.Location)>=0)||linkHits.Any(h=>h.Item1.Contains(e.Location))||fileHits.Any(h=>h.Item1.Contains(e.Location))||mediaHits.Any(h=>h.Item1.Contains(e.Location))||retryHits.Any(h=>h.Item1.Contains(e.Location))||(AvatarClicked!=null&&avatarHits.Any(h=>h.Item1.Contains(e.Location)))||(JumpVisible&&JumpBounds().Contains(e.Location));
             Cursor=hand?Cursors.Hand:Cursors.Default;
             var stamp = stampHits.FirstOrDefault(h => h.Item1.Contains(e.Location));
             string tip = stamp == null ? null : stamp.Item2.Time.ToString("yyyy-MM-dd HH:mm:ss") + (String.IsNullOrEmpty(stamp.Item2.State) ? "" : " · " + StateDescription(stamp.Item2));

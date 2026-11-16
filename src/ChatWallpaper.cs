@@ -32,17 +32,31 @@ namespace FeiqLight
             }
         }
         // 渲染结果按尺寸、图案、主题版本缓存：同一窗口的多个会话、滚动与动画帧只做一次位图拷贝。
-        private sealed class Rendered { internal Bitmap Image; internal string Key; internal long Used; }
+        private sealed class Rendered { internal Bitmap Image; internal string Key, Style; internal long Used; }
         private static readonly List<Rendered> rendered=new List<Rendered>();
         private static long useCounter;
-        internal static void Draw(Graphics g,Rectangle area,string pattern,Asset image,float scale)
+        internal static void Draw(Graphics g,Rectangle area,string pattern,Asset image,float scale,bool resizing = false)
         {
             if(area.Width<=0||area.Height<=0)return;
-            string key=area.Width+"x"+area.Height+"|"+pattern+"|"+Theme.Version+"|"+scale+"|"+(image==null?"":image.Key);
+            string style=pattern+"|"+Theme.Version+"|"+scale+"|"+(image==null?"":image.Key);
+            string key=area.Width+"x"+area.Height+"|"+style;
             Rendered hit=null;foreach(Rendered item in rendered)if(item.Key==key){hit=item;break;}
+            if(hit==null&&resizing) {
+                foreach(Rendered item in rendered)if(item.Style==style&&(hit==null||item.Used>hit.Used))hit=item;
+                if(hit!=null) {
+                    // 拖动时只复用背景，正文仍按实际尺寸排版；松手后生成最终尺寸的清晰背景。
+                    hit.Used=++useCounter;GraphicsState state=g.Save();
+                    g.InterpolationMode=InterpolationMode.Bilinear;g.PixelOffsetMode=PixelOffsetMode.Half;
+                    using(ImageAttributes attributes=new ImageAttributes()) {
+                        attributes.SetWrapMode(WrapMode.TileFlipXY);
+                        g.DrawImage(hit.Image,area,0,0,hit.Image.Width,hit.Image.Height,GraphicsUnit.Pixel,attributes);
+                    }
+                    g.Restore(state);return;
+                }
+            }
             if(hit==null) {
                 // 先记使用序号再淘汰，刚插入的条目不会被当成最久未用而当场释放。
-                hit=new Rendered {Key=key,Image=Render(area.Size,pattern,image==null?null:image.Image,scale),Used=++useCounter};rendered.Add(hit);
+                hit=new Rendered {Key=key,Style=style,Image=Render(area.Size,pattern,image==null?null:image.Image,scale),Used=++useCounter};rendered.Add(hit);
                 // 最多保留四份（多显示器、历史窗口与主窗口），按最久未用淘汰。
                 while(rendered.Count>4){Rendered oldest=rendered[0];foreach(Rendered item in rendered)if(item.Used<oldest.Used)oldest=item;rendered.Remove(oldest);if(!Object.ReferenceEquals(oldest,hit))oldest.Image.Dispose();}
             }

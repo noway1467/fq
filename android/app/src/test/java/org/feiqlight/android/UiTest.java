@@ -53,6 +53,34 @@ public final class UiTest {
             invoke(activity,"showHistory",ChatStore.Conversation.class,service.conversations().get(0));dialog=(android.app.Dialog)field(activity,"historyDialog");invoke(activity,"open",String.class,"");settle(service);assertFalse(dialog.isShowing());assertNull(field(activity,"historyDialog"));
         } finally {if(dialog!=null)dialog.dismiss();ac.pause().stop().destroy();sc.destroy();}
     }
+    @Test public void historyResultLocatesExactDirectionPreservesDraftAndRejectsStaleClick() throws Exception {
+        ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();
+        shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));
+        ActivityController<MainActivity> ac=Robolectric.buildActivity(MainActivity.class).create().start().resume().visible();MainActivity activity=ac.get();android.app.Dialog dialog=null;
+        try {
+            settle(service);ExecutorService io=(ExecutorService)field(service,"io");ChatStore store=(ChatStore)field(service,"store");
+            LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:32425"),"locate-history","host","搜索定位","");
+            io.submit(()->{for(int index=0;index<60;index++){
+                LanNode.Message message=new LanNode.Message();message.number=index/2+1;message.outgoing=index%2==0;message.time=index+1;message.state="已送达";message.text=index==4||index==5?"定位目标关键词":"上下文消息 "+index;store.message(peer,message,false,false);
+            }}).get();service.active(peer.id());settle(service);invoke(activity,"open",String.class,peer.id());settle(service);
+            EditText editor=(EditText)field(activity,"editor");editor.setText("搜索定位保留草稿");View root=(View)field(activity,"root");measure(root,786,1704,true);
+            for(boolean outgoing:new boolean[]{true,false}) {
+                invoke(activity,"showHistory",ChatStore.Conversation.class,service.conversations().get(0));settle(service);dialog=(android.app.Dialog)field(activity,"historyDialog");
+                View decor=dialog.getWindow().getDecorView();EditText input=(EditText)descendants(decor).stream().filter(view->"搜索聊天记录".contentEquals(view.getContentDescription()==null?"":view.getContentDescription())).findFirst().get();input.setText("定位目标关键词");
+                ListView results=(ListView)descendants(decor).stream().filter(view->view instanceof ListView).findFirst().get();assertEquals(2,results.getCount());
+                View item=results.getAdapter().getView(outgoing?0:1,null,results);assertTrue(item.performClick());assertFalse(dialog.isShowing());settle(service);
+                measure(root,786,1704,true);ScrollView scroll=(ScrollView)field(activity,"scroll");scroll.getViewTreeObserver().dispatchOnPreDraw();
+                assertEquals("3:"+outgoing,field(activity,"locatedMessage"));assertNull(field(activity,"pendingMessageLocation"));assertEquals("搜索定位保留草稿",editor.getText().toString());
+                Map<?,?> views=(Map<?,?>)field(activity,"messageViews");View target=(View)views.get("3:"+outgoing);assertNotNull(target.getForeground());assertNull(((View)views.get("3:"+!outgoing)).getForeground());
+                int[] messagePosition=new int[2],viewportPosition=new int[2];target.getLocationInWindow(messagePosition);scroll.getLocationInWindow(viewportPosition);
+                assertTrue("定位消息未滚进视口",messagePosition[1]+target.getHeight()>viewportPosition[1]&&messagePosition[1]<viewportPosition[1]+scroll.getHeight());
+                screenshot(activity,"android-search-location-"+outgoing);
+            }
+            invoke(activity,"showHistory",ChatStore.Conversation.class,service.conversations().get(0));settle(service);dialog=(android.app.Dialog)field(activity,"historyDialog");
+            ListView oldResults=(ListView)descendants(dialog.getWindow().getDecorView()).stream().filter(view->view instanceof ListView).findFirst().get();View stale=oldResults.getAdapter().getView(0,null,oldResults);
+            invoke(activity,"open",String.class,"");stale.performClick();settle(service);assertEquals("",field(activity,"selected"));assertNull(field(activity,"pendingMessageLocation"));assertFalse(dialog.isShowing());
+        } finally {if(dialog!=null)dialog.dismiss();ac.pause().stop().destroy();sc.destroy();}
+    }
     @Test public void settingsTabsShowOnlySelectedPageAndKeepUnsavedChanges() throws Exception {
         ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));
         ActivityController<MainActivity> ac=Robolectric.buildActivity(MainActivity.class).create().start().resume().visible();MainActivity activity=ac.get();android.app.Dialog dialog=null;

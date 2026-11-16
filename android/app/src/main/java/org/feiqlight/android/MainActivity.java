@@ -85,6 +85,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
     private ActionMode selectionMode;
     private TextView selectionOwner;
     private String selected="", pickerPeer="", exportPath="", historySignature="";
+    private String pendingMessageLocation, locatedMessage;
     private boolean shareHandled;
     private final SecureIdentity.Confirmation securityPrompt=this::confirmSecurity;
     private final Set<Long> displayedOutgoing=new HashSet<>();
@@ -139,7 +140,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
     @Override protected void onResume() { super.onResume();resumed=true;restoreConnection(); }
     @Override protected void onPause() { resumed=false;super.onPause(); }
     @Override public void onWindowFocusChanged(boolean hasFocus) { super.onWindowFocusChanged(hasFocus); if(hasFocus) SystemBars.appearance(getWindow(),DARK); }
-    @Override protected void onStop() { historyAppliedVersion=++historyRequestVersion; closeHistory(); finishSelection(); saveDraft(); visible=false; if(service!=null) { service.remove(this); service.active(""); } super.onStop(); }
+    @Override protected void onStop() { pendingMessageLocation=null;scrollPositionVersion++;historyAppliedVersion=++historyRequestVersion; closeHistory(); finishSelection(); saveDraft(); visible=false; if(service!=null) { service.remove(this); service.active(""); } super.onStop(); }
     @Override protected void onDestroy() { avatarLoader.shutdownNow();avatarImageRequest=null;if(avatarSelection!=null&&avatarSelection.dialog!=null)avatarSelection.dialog.dismiss();if(media!=null) media.close(); if(backgroundBitmap!=null){backgroundBitmap.recycle();backgroundBitmap=null;} if(service!=null){service.remove(this);if(service.securityConfirmation==securityPrompt)service.securityConfirmation=null;} if(bound) unbindService(connection); if(Build.VERSION.SDK_INT>=33&&backCallback!=null) getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(backCallback); super.onDestroy(); }
     @Override protected void onSaveInstanceState(Bundle state) { saveDraft(); state.putString("peer",selected); state.putString("picker",pickerPeer); state.putString("export",exportPath);state.putBoolean("share_handled",shareHandled); super.onSaveInstanceState(state); }
     @Override public void onConfigurationChanged(android.content.res.Configuration configuration) {
@@ -192,6 +193,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         });
     }
     private void renderPage() {
+        pendingMessageLocation=null;locatedMessage=null;
         selectingMessages=false;messageMarks.clear();messageViews.clear();messageRows.clear();messageAvatarViews.clear();messageAvatarSignature="";messageSelectionBar=null;
         closeHistory();
         historyAppliedVersion=++historyRequestVersion;
@@ -387,7 +389,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         }
         for(LanNode.Message m:rows) { fingerprint.append(m.number).append(m.outgoing).append(m.state); if(conversation!=null) for(int i=0;i<m.files.size();i++) { File local=service.receivedFile(conversation.peer,m.number,m.files.get(i)); fingerprint.append(m.outgoing?outgoingUri(m,i):local.isFile()).append(m.outgoing?null:receivedStorage.saved(local)); } }
         boolean newOutgoing=!historySignature.isEmpty()&&rows.stream().anyMatch(m->m.outgoing&&!displayedOutgoing.contains(m.number));
-        if(fingerprint.toString().equals(historySignature)) { transfersChanged(); if(forceLatest) {forceLatest=false;scrollToLatest();} return; }
+        if(fingerprint.toString().equals(historySignature)) { transfersChanged(); if(pendingMessageLocation!=null)positionBeforeDraw(false,scroll.getScrollY());else if(forceLatest) {forceLatest=false;scrollToLatest();} return; }
         fileProgressViews.clear(); progressPeer=selected;
         displayedOutgoing.clear(); for(LanNode.Message m:rows) if(m.outgoing) displayedOutgoing.add(m.number);
         int previousY=scroll.getScrollY();
@@ -533,6 +535,12 @@ public final class MainActivity extends Activity implements ChatService.Observer
         fileProgressViews.add(update);update.run();
     }
     private long scrollPositionVersion;
+    private void locateHistoryMessage(String peer,LanNode.Message message) {
+        if(!selected.equals(peer))open(peer);
+        finishSelection();endMessageSelection();forceLatest=false;
+        pendingMessageLocation=messageKey(message);
+        changed();
+    }
     private void positionBeforeDraw(boolean latest,int previousY) {
         final ScrollView target=scroll; final String peer=selected;
         if(target==null) return;
@@ -541,8 +549,16 @@ public final class MainActivity extends Activity implements ChatService.Observer
         target.getViewTreeObserver().addOnPreDrawListener(new ViewTreeObserver.OnPreDrawListener() {
             @Override public boolean onPreDraw() {
                 if(target.getViewTreeObserver().isAlive()) target.getViewTreeObserver().removeOnPreDrawListener(this);
-                if(!isDestroyed()&&scroll==target&&selected.equals(peer)&&version==scrollPositionVersion)
-                    target.scrollTo(0,latest?target.getChildAt(0).getHeight():previousY);
+                if(!isDestroyed()&&scroll==target&&selected.equals(peer)&&version==scrollPositionVersion) {
+                    if(pendingMessageLocation!=null) {
+                        String key=pendingMessageLocation;pendingMessageLocation=null;View message=messageViews.get(key);
+                        if(message==null){error("该消息已删除或不在当前可加载的聊天记录中。");return true;}
+                        Rect bounds=new Rect(0,0,message.getWidth(),message.getHeight());messages.offsetDescendantRectToMyCoords(message,bounds);
+                        int available=target.getHeight()-target.getPaddingTop()-target.getPaddingBottom();
+                        target.scrollTo(0,messages.getTop()+bounds.top-Math.max(dp(12),(available-Math.min(bounds.height(),available-dp(24)))/2));
+                        locatedMessage=key;updateMessageSelection();
+                    } else target.scrollTo(0,latest?target.getChildAt(0).getHeight():previousY);
+                }
                 return true;
             }
         });
@@ -608,7 +624,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
     private void updateMessageSelection() {
         if(messageSelectionBar!=null){messageSelectionBar.setVisibility(selectingMessages?View.VISIBLE:View.GONE);messageSelectionCount.setText("已选 "+messageMarks.size()+" 条");deleteSelectedMessages.setEnabled(!messageMarks.isEmpty());}
         for(Map.Entry<String,View> entry:messageViews.entrySet()) {
-            if(selectingMessages&&messageMarks.contains(entry.getKey())){GradientDrawable border=shape(Color.TRANSPARENT,CONTROL_RADIUS);border.setStroke(dp(2),BLUE);entry.getValue().setForeground(border);}
+            if(selectingMessages?messageMarks.contains(entry.getKey()):entry.getKey().equals(locatedMessage)){GradientDrawable border=shape(Color.TRANSPARENT,CONTROL_RADIUS);border.setStroke(dp(2),BLUE);entry.getValue().setForeground(border);}
             else entry.getValue().setForeground(null);
         }
     }
@@ -849,13 +865,20 @@ public final class MainActivity extends Activity implements ChatService.Observer
             public int getCount(){return matches.size();} public Object getItem(int position){return matches.get(position);} public long getItemId(int position){return position;}
             public View getView(int position,View recycled,ViewGroup parent) {
                 LanNode.Message message=matches.get(position);String query=input.getText().toString();
+                View.OnClickListener locate=v->{
+                    if(historyDialog!=dialog||!dialog.isShowing()||!visible||isDestroyed()||service!=source||generation!=editorGeneration||!page.equals(selected))return;
+                    dialog.dismiss();locateHistoryMessage(conversation.peer.id(),message);
+                };
                 LinearLayout item=column();item.setPadding(dp(10),dp(8),dp(10),dp(8));LinearLayout bubble=column();bubble.setPadding(dp(14),dp(10),dp(14),dp(10));bubble.setBackground(shape(message.outgoing?OUTGOING:SURFACE,CONTROL_RADIUS));item.addView(bubble);
+                item.setOnClickListener(locate);item.setFocusable(true);item.setContentDescription("定位到聊天消息");bubble.setOnClickListener(locate);
                 TextView stamp=text(new SimpleDateFormat("M月d日 HH:mm",Locale.CHINA).format(new Date(message.time))+" · "+(message.outgoing?"我":conversation.displayName()),12,MUTED);bubble.addView(stamp);
+                stamp.setOnClickListener(locate);
                 if(!message.text.isEmpty()) {
                     TextView content=text("",messageSize(),INK);content.setText(searchHighlight(searchPreview(message.text,query),query));selectable(content);MessageLinks.apply(content,BLUE);content.setLineSpacing(dp(3),1);content.setPadding(0,dp(6),0,dp(4));bubble.addView(content);
+                    content.setOnClickListener(locate);
                     TextView full=text("查看全文 / 选段复制",13,BLUE);full.setMinHeight(dp(44));full.setGravity(Gravity.CENTER_VERTICAL);full.setOnClickListener(v->showFullText(message.text));bubble.addView(full);
                 }
-                for(Protocol.Attachment file:message.files){TextView name=text("",14,INK);name.setText(searchHighlight(file.name,query));selectable(name);name.setPadding(0,dp(6),0,dp(4));bubble.addView(name);}
+                for(Protocol.Attachment file:message.files){TextView name=text("",14,INK);name.setText(searchHighlight(file.name,query));selectable(name);name.setOnClickListener(locate);name.setPadding(0,dp(6),0,dp(4));bubble.addView(name);}
                 return item;
             }
         };results.setAdapter(adapter);
