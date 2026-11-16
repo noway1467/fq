@@ -758,6 +758,7 @@ namespace FeiqLight
     }
     public class ModernWindow : Form
     {
+        [Flags] private enum ResizeEdges { None = 0, Left = 1, Right = 2, Top = 4, Bottom = 8 }
         private sealed class BufferedPanel : Panel { public BufferedPanel() { DoubleBuffered=true; ResizeRedraw=true; } }
         private sealed class BufferedTable : TableLayoutPanel { public BufferedTable() { DoubleBuffered=true; ResizeRedraw=true; } }
         public readonly Panel Surface = new BufferedPanel { Dock = DockStyle.Fill, BackColor = Theme.Surface };
@@ -765,6 +766,9 @@ namespace FeiqLight
         private readonly Label caption = Theme.Label("", Theme.Small, Theme.Muted);
         private readonly Button minimize, maximize;
         private bool secondaryWindow;
+        private ResizeEdges manualResize;
+        private Point manualResizeOrigin;
+        private Rectangle manualResizeBounds;
         protected void UseSecondaryChrome()
         {
             secondaryWindow=true;UpdateResizePadding();chrome.Height=56;caption.Font=Theme.Section;caption.ForeColor=Theme.Ink;
@@ -832,14 +836,62 @@ namespace FeiqLight
             base.SetVisibleCore(value);
         }
         private void Drag(object sender, MouseEventArgs e) { if (e.Button == MouseButtons.Left) { ReleaseCapture(); SendMessage(Handle, 0xA1, new IntPtr(2), IntPtr.Zero); } }
-        protected override void OnResize(EventArgs e) { UpdateResizePadding(); base.OnResize(e); }
-        protected override void WndProc(ref Message m)
+        private ResizeEdges ResizeEdgeAt(Point point)
         {
-            base.WndProc(ref m); if (m.Msg != 0x84 || !ResizeWindow || WindowState != FormWindowState.Normal) return;
-            long v = m.LParam.ToInt64(); Point p = PointToClient(new Point(unchecked((short)(v & 65535)), unchecked((short)((v >> 16) & 65535))));
-            int edge = ResizeBorder; bool l = p.X < edge, r = p.X >= ClientSize.Width - edge, t = p.Y < edge, b = p.Y >= ClientSize.Height - edge;
-            if (l || r || t || b) m.Result = new IntPtr(t ? (l ? 13 : r ? 14 : 12) : b ? (l ? 16 : r ? 17 : 15) : l ? 10 : 11);
+            if (!ResizeWindow || WindowState != FormWindowState.Normal) return ResizeEdges.None;
+            int edge = ResizeBorder;
+            ResizeEdges result = ResizeEdges.None;
+            if (point.X < edge) result |= ResizeEdges.Left; else if (point.X >= ClientSize.Width - edge) result |= ResizeEdges.Right;
+            if (point.Y < edge) result |= ResizeEdges.Top; else if (point.Y >= ClientSize.Height - edge) result |= ResizeEdges.Bottom;
+            return result;
         }
+        private static Cursor ResizeCursor(ResizeEdges edge)
+        {
+            bool horizontal = (edge & (ResizeEdges.Left | ResizeEdges.Right)) != 0;
+            bool vertical = (edge & (ResizeEdges.Top | ResizeEdges.Bottom)) != 0;
+            return horizontal && vertical ? ((edge & ResizeEdges.Left) != 0 ? Cursors.SizeNWSE : Cursors.SizeNESW) : horizontal ? Cursors.SizeWE : vertical ? Cursors.SizeNS : Cursors.Default;
+        }
+        private void ResizeTo(Point cursor)
+        {
+            int dx = cursor.X - manualResizeOrigin.X, dy = cursor.Y - manualResizeOrigin.Y;
+            int left = manualResizeBounds.Left, top = manualResizeBounds.Top, right = manualResizeBounds.Right, bottom = manualResizeBounds.Bottom;
+            if ((manualResize & ResizeEdges.Left) != 0) left += dx; else if ((manualResize & ResizeEdges.Right) != 0) right += dx;
+            if ((manualResize & ResizeEdges.Top) != 0) top += dy; else if ((manualResize & ResizeEdges.Bottom) != 0) bottom += dy;
+            int minimumWidth = Math.Max(1, MinimumSize.Width), minimumHeight = Math.Max(1, MinimumSize.Height);
+            if (right - left < minimumWidth) {
+                if ((manualResize & ResizeEdges.Left) != 0) left = right - minimumWidth; else right = left + minimumWidth;
+            }
+            if (bottom - top < minimumHeight) {
+                if ((manualResize & ResizeEdges.Top) != 0) top = bottom - minimumHeight; else bottom = top + minimumHeight;
+            }
+            Bounds = Rectangle.FromLTRB(left, top, right, bottom);
+        }
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            ResizeEdges edge = e.Button == MouseButtons.Left ? ResizeEdgeAt(e.Location) : ResizeEdges.None;
+            if (edge != ResizeEdges.None) {
+                manualResize = edge; manualResizeOrigin = PointToScreen(e.Location); manualResizeBounds = Bounds;
+                Capture = true; Cursor = ResizeCursor(edge); return;
+            }
+            base.OnMouseDown(e);
+        }
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            if (manualResize != ResizeEdges.None) {
+                ResizeTo(PointToScreen(e.Location)); Cursor = ResizeCursor(manualResize); return;
+            }
+            Cursor = ResizeCursor(ResizeEdgeAt(e.Location));
+            base.OnMouseMove(e);
+        }
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            if (manualResize == ResizeEdges.None) {
+                base.OnMouseUp(e); return;
+            }
+            ResizeTo(PointToScreen(e.Location)); manualResize = ResizeEdges.None; Capture = false;
+            Cursor = ResizeCursor(ResizeEdgeAt(PointToClient(Cursor.Position)));
+        }
+        protected override void OnResize(EventArgs e) { UpdateResizePadding(); base.OnResize(e); }
         protected override void OnPaint(PaintEventArgs e) {
             base.OnPaint(e);
             using(Pen p=new Pen(secondaryWindow?Theme.Blend(Theme.Blue,Theme.Line,.55F):Theme.Blend(Theme.Ink,Theme.Surface,Theme.Dark?.22F:.16F),secondaryWindow?2:1))e.Graphics.DrawRectangle(p,secondaryWindow?1:0,secondaryWindow?1:0,Width-(secondaryWindow?3:1),Height-(secondaryWindow?3:1));

@@ -27,17 +27,16 @@ namespace FeiqLight.Tests
             root=Path.GetFullPath(args[0]);output=Path.GetFullPath(args[1]);label=args[2];
             Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);
             Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);
-            Run("窗口：四边四角真实命中区域、最大化还原及固定对话框",()=>{
+            Run("窗口：边缘保留客户区鼠标事件、最大化还原及固定对话框",()=>{
                 using(ModernWindow window=new ModernWindow {ClientSize=new Size(640,480)}) {
                     window.Show();Application.DoEvents();
                     int w=window.ClientSize.Width,h=window.ClientSize.Height;
                     Point[] points={new Point(3,h/2),new Point(w-4,h/2),new Point(w/2,3),new Point(w/2,h-4),new Point(3,3),new Point(w-4,3),new Point(3,h-4),new Point(w-4,h-4)};
-                    int[] hits={10,11,12,15,13,14,16,17};
                     for(int i=0;i<points.Length;i++) {
                         Check(ChildWindowFromPointEx(window.Handle,points[i],5)==window.Handle,"子控件遮住缩放区域："+points[i]);
                         Point screen=window.PointToScreen(points[i]);
                         int result=(int)SendMessage(window.Handle,0x84,IntPtr.Zero,new IntPtr(unchecked((screen.Y<<16)|(screen.X&65535))));
-                        Check(result==hits[i],"边缘缩放命中不正确："+result+" != "+hits[i]);
+                        Check(result==1,"边缘未返回客户区鼠标事件："+points[i]+" -> "+result);
                     }
                     Size normal=window.Size;
                     SendMessage(window.Handle,0x112,new IntPtr(0xF030),IntPtr.Zero);Application.DoEvents();
@@ -47,6 +46,29 @@ namespace FeiqLight.Tests
                     Check(window.Size==normal,"最大化还原改变了普通窗口尺寸");
                     window.ResizeWindow=false;Application.DoEvents();
                     Check((GetWindowLong(window.Handle,-16)&0x40000)==0,"固定对话框仍可被系统缩放");window.Close();
+                }
+            });
+            Run("窗口：按住边缘和角落实际改变尺寸并遵守最小尺寸",()=>{
+                using(ModernWindow window=new ModernWindow {ClientSize=new Size(640,480),MinimumSize=new Size(420,320)}) {
+                    window.Show();Application.DoEvents();Size original=window.Size;
+                    Point right=new Point(window.ClientSize.Width-1,window.ClientSize.Height/2);
+                    IntPtr point=new IntPtr(unchecked((right.Y<<16)|(right.X&65535)));
+                    SendMessage(window.Handle,0x0201,new IntPtr(1),point);
+                    SendMessage(window.Handle,0x0200,new IntPtr(1),new IntPtr(unchecked((right.Y<<16)|((right.X+48)&65535))));
+                    SendMessage(window.Handle,0x0202,IntPtr.Zero,new IntPtr(unchecked((right.Y<<16)|((right.X+48)&65535))));
+                    Application.DoEvents();Check(window.Width==original.Width+48&&window.Height==original.Height,"拖动右边框没有改变窗口尺寸");
+                    Point corner=new Point(window.ClientSize.Width-1,window.ClientSize.Height-1);
+                    point=new IntPtr(unchecked((corner.Y<<16)|(corner.X&65535)));
+                    SendMessage(window.Handle,0x0201,new IntPtr(1),point);
+                    SendMessage(window.Handle,0x0200,new IntPtr(1),new IntPtr(unchecked(((corner.Y+32)<<16)|((corner.X+40)&65535))));
+                    SendMessage(window.Handle,0x0202,IntPtr.Zero,new IntPtr(unchecked(((corner.Y+32)<<16)|((corner.X+40)&65535))));
+                    Application.DoEvents();Check(window.Width==original.Width+88&&window.Height==original.Height+32,"拖动右下角没有同时改变宽高");
+                    Point bottom=new Point(window.ClientSize.Width/2,window.ClientSize.Height-1);
+                    point=new IntPtr(unchecked((bottom.Y<<16)|(bottom.X&65535)));
+                    SendMessage(window.Handle,0x0201,new IntPtr(1),point);
+                    SendMessage(window.Handle,0x0200,new IntPtr(1),new IntPtr(unchecked(((bottom.Y-2000)<<16)|(bottom.X&65535))));
+                    SendMessage(window.Handle,0x0202,IntPtr.Zero,new IntPtr(unchecked(((bottom.Y-2000)<<16)|(bottom.X&65535))));
+                    Application.DoEvents();Check(window.Height==window.MinimumSize.Height,"手动缩放未遵守最小高度");window.Close();
                 }
             });
             foreach(bool dark in new[]{false,true}) foreach(int size in new[]{9,10,14,18}) {
