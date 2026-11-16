@@ -120,7 +120,7 @@ namespace FeiqLight
             inputShell.Dock = DockStyle.Fill; inputShell.Margin = new Padding(2, 1, 4, 1); inputShell.Cursor = Cursors.IBeam;
             inputShell.MouseDown += delegate { editor.Focus(); };
             inputShell.MouseWheel += delegate(object sender, MouseEventArgs e) { editor.ScrollByWheel(e.Delta); };
-            editor.BorderStyle = BorderStyle.None; editor.Dock = DockStyle.Fill; editor.BackColor = Theme.Ice; editor.Font = new Font(Theme.Body.FontFamily, 10F); editor.MaxLength = MessageText.InputLimit; editor.AccessibleName = "消息输入框"; editor.DetectUrls = false; editor.ScrollBars = RichTextBoxScrollBars.None; editor.Placeholder = "输入消息…";
+            editor.BorderStyle = BorderStyle.None; editor.Dock = DockStyle.Fill; editor.BackColor = Theme.Ice; editor.ForeColor = Theme.Ink; editor.Font = new Font(Theme.Body.FontFamily, 10F); editor.MaxLength = MessageText.InputLimit; editor.AccessibleName = "消息输入框"; editor.DetectUrls = false; editor.ScrollBars = RichTextBoxScrollBars.None; editor.Placeholder = "输入消息…";
             Theme.AttachEditMenu(editor, PasteClipboard);
             editor.KeyDown += delegate(object sender, KeyEventArgs e)
             {
@@ -130,6 +130,7 @@ namespace FeiqLight
             }; inputShell.Controls.Add(editor); compose.Controls.Add(inputShell, 1, 0);
             draftTimer.Tick += delegate { draftTimer.Stop(); SaveDraft(); };
             editor.HandleCreated += delegate { ResizeComposer(); };
+            editor.ContentsResized += delegate { ResizeComposer(); };
             editor.TextChanged += delegate { draftTimer.Stop(); if (editor.IsComposing) return; draftTimer.Start(); ResizeComposer(); UpdateQueued(); };
             editor.CompositionEnded += delegate { draftTimer.Stop(); draftTimer.Start(); ResizeComposer(); UpdateQueued(); };
             editor.Resize += delegate { ResizeComposer(); };
@@ -173,8 +174,11 @@ namespace FeiqLight
                     sendButton.Size = new Size(sendWidth, sendHeight);
                 }
                 int lines=Math.Max(1,editor.GetLineFromCharIndex(editor.TextLength)+1);
-                // 短消息不显示原生滚动箭头；输入区随内容增长，长文本仍能用光标和滚轮滚动。
-                int height=Math.Max((int)Math.Round(82*scale),Math.Min(5,lines)*editor.Font.Height+(int)Math.Round(40*scale));
+                // Font.Height 不包含 RichEdit 实际 DPI/字体回退的行高；高度不足会让每次输入先滚走首行再被拉回。
+                int contentHeight=editor.ContentHeight;
+                if(lines>5)contentHeight=editor.GetPositionFromCharIndex(editor.GetFirstCharIndexFromLine(5)).Y-editor.GetPositionFromCharIndex(0).Y;
+                int padding=compose.Padding.Vertical+inputShell.Margin.Vertical+inputShell.Padding.Vertical;
+                int height=Math.Max((int)Math.Round(82*scale),contentHeight+padding);
                 float nextHeight=Math.Min(height,Math.Max((int)Math.Round(82*scale),ClientSize.Height/3));
                 if(Math.Abs(root.RowStyles[3].Height-nextHeight)>.5F) root.RowStyles[3].Height=nextHeight;
             } finally {resizingComposer=false;}

@@ -170,6 +170,7 @@ namespace FeiqLight
             set { base.Text = value; }
         }
         private Rectangle textArea;
+        internal int ContentHeight { get; private set; }
         internal int FirstVisibleLine { get { return IsHandleCreated ? (int)SendMessage(Handle, 0x00CE, IntPtr.Zero, IntPtr.Zero) : 0; } }
         private int LastLineTop()
         {
@@ -190,12 +191,10 @@ namespace FeiqLight
                 TextArea area = new TextArea { Left = next.Left, Top = next.Top, Right = next.Right, Bottom = next.Bottom };
                 SendMessage(Handle, 0x00B3, IntPtr.Zero, ref area); Invalidate();
             }
-            // 输入框增高或删字后若底部仍有余量，自动把被滚出顶部的首行拉回可视区。
-            while (TextLength > 0 && FirstVisibleLine > 0 && LastLineTop() + Font.Height * 2 <= ClientSize.Height)
+            // RichEdit 可滚动不足一整行，此时 FirstVisibleLine 仍为 0；内容放得下时连同像素偏移一起恢复。
+            if (ContentHeight > 0 && ContentHeight <= next.Height && GetPositionFromCharIndex(0).Y < next.Top)
             {
-                int before = FirstVisibleLine;
-                SendMessage(Handle, 0x0115, new IntPtr(0), IntPtr.Zero);
-                if (FirstVisibleLine >= before) break;
+                SendMessage(Handle, 0x0115, new IntPtr(6), IntPtr.Zero);
             }
         }
         internal void ScrollByWheel(int delta)
@@ -231,6 +230,7 @@ namespace FeiqLight
         protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); textArea = Rectangle.Empty; AlignText(); }
         protected override void OnHandleDestroyed(EventArgs e) { IsComposing = false; base.OnHandleDestroyed(e); }
         protected override void OnResize(EventArgs e) { base.OnResize(e); AlignText(); }
+        protected override void OnContentsResized(ContentsResizedEventArgs e) { ContentHeight = e.NewRectangle.Height; base.OnContentsResized(e); }
         protected override void OnFontChanged(EventArgs e) { base.OnFontChanged(e); textArea = Rectangle.Empty; AlignText(); }
         protected override void OnTextChanged(EventArgs e) { base.OnTextChanged(e); AlignText(); if (TextLength <= 1) Invalidate(); }
         protected override void OnGotFocus(EventArgs e) { base.OnGotFocus(e); Invalidate(); }

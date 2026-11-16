@@ -767,7 +767,7 @@ namespace FeiqLight
         private bool secondaryWindow;
         protected void UseSecondaryChrome()
         {
-            secondaryWindow=true;Padding=new Padding(3);chrome.Height=56;caption.Font=Theme.Section;caption.ForeColor=Theme.Ink;
+            secondaryWindow=true;UpdateResizePadding();chrome.Height=56;caption.Font=Theme.Section;caption.ForeColor=Theme.Ink;
             Control actions=chrome.GetControlFromPosition(1,0);if(actions!=null)actions.Padding=new Padding(0,10,0,0);
             chrome.Paint+=delegate(object sender,PaintEventArgs e){using(Pen line=new Pen(Theme.Line))e.Graphics.DrawLine(line,0,chrome.Height-1,chrome.Width,chrome.Height-1);};
             Invalidate();
@@ -776,7 +776,13 @@ namespace FeiqLight
         public bool ResizeWindow
         {
             get { return resizeWindow; }
-            set { resizeWindow = value; if (minimize != null) { minimize.Visible = maximize.Visible = value; chrome.ColumnStyles[1].Width = value ? 138 : 46; chrome.Height = value ? 36 : 54; caption.Font = value ? Theme.Small : Theme.Title; caption.ForeColor = value ? Theme.Muted : Theme.Ink; caption.Padding = new Padding(value ? 15 : 24, 0, 0, 0); Control actions = chrome.GetControlFromPosition(1, 0); if (actions != null) actions.Padding = new Padding(0, value ? 0 : 11, 0, 0); } if(IsHandleCreated)UpdateStyles(); }
+            set { resizeWindow = value; UpdateResizePadding(); if (minimize != null) { minimize.Visible = maximize.Visible = value; chrome.ColumnStyles[1].Width = value ? 138 : 46; chrome.Height = value ? 36 : 54; caption.Font = value ? Theme.Small : Theme.Title; caption.ForeColor = value ? Theme.Muted : Theme.Ink; caption.Padding = new Padding(value ? 15 : 24, 0, 0, 0); Control actions = chrome.GetControlFromPosition(1, 0); if (actions != null) actions.Padding = new Padding(0, value ? 0 : 11, 0, 0); } if(IsHandleCreated)UpdateStyles(); }
+        }
+        private int ResizeBorder { get { return Math.Max(6, (int)Math.Ceiling(6 * DeviceDpi / 96F)); } }
+        private void UpdateResizePadding()
+        {
+            // 子控件会先收到命中测试；让四边属于顶层窗口，系统才能显示缩放光标并开始拖拽。
+            Padding = new Padding(ResizeWindow && WindowState == FormWindowState.Normal ? ResizeBorder : secondaryWindow ? 3 : 1);
         }
         protected override CreateParams CreateParams
         {
@@ -789,7 +795,7 @@ namespace FeiqLight
         }
         public ModernWindow()
         {
-            Theme.Apply(this); DoubleBuffered = true; SetStyle(ControlStyles.ResizeRedraw, true); FormBorderStyle = FormBorderStyle.None; Padding = new Padding(1); StartPosition = FormStartPosition.CenterScreen; MinimumSize = new Size(400, 300);
+            Theme.Apply(this); DoubleBuffered = true; SetStyle(ControlStyles.ResizeRedraw, true); FormBorderStyle = FormBorderStyle.None; UpdateResizePadding(); StartPosition = FormStartPosition.CenterScreen; MinimumSize = new Size(400, 300);
             Controls.Add(Surface); Controls.Add(chrome); chrome.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); chrome.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 138)); chrome.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); caption.Dock = DockStyle.Fill; caption.Padding = new Padding(15, 0, 0, 0); caption.Margin = Padding.Empty; chrome.Controls.Add(caption, 0, 0);
             FlowLayoutPanel actions = new FlowLayoutPanel { Dock = DockStyle.Right, Width = 138, FlowDirection = FlowDirection.LeftToRight, WrapContents = false, Margin = Padding.Empty };
             minimize = Theme.IconButton("min", "最小化", delegate { WindowState = FormWindowState.Minimized; }, false);
@@ -809,6 +815,7 @@ namespace FeiqLight
         protected override void OnHandleCreated(EventArgs e)
         {
             base.OnHandleCreated(e);
+            UpdateResizePadding();
             // 交给 DWM 处理圆角，不能在每个 WM_SIZE 重建 Region（会强制全窗重绘）。
             // 旧系统不支持此属性时保留方角，不影响缩放与输入。
             Theme.RoundWindow(Handle, 2);
@@ -825,11 +832,12 @@ namespace FeiqLight
             base.SetVisibleCore(value);
         }
         private void Drag(object sender, MouseEventArgs e) { if (e.Button == MouseButtons.Left) { ReleaseCapture(); SendMessage(Handle, 0xA1, new IntPtr(2), IntPtr.Zero); } }
+        protected override void OnResize(EventArgs e) { UpdateResizePadding(); base.OnResize(e); }
         protected override void WndProc(ref Message m)
         {
             base.WndProc(ref m); if (m.Msg != 0x84 || !ResizeWindow || WindowState != FormWindowState.Normal) return;
             long v = m.LParam.ToInt64(); Point p = PointToClient(new Point(unchecked((short)(v & 65535)), unchecked((short)((v >> 16) & 65535))));
-            int edge = 6; bool l = p.X < edge, r = p.X >= Width - edge, t = p.Y < edge, b = p.Y >= Height - edge;
+            int edge = ResizeBorder; bool l = p.X < edge, r = p.X >= ClientSize.Width - edge, t = p.Y < edge, b = p.Y >= ClientSize.Height - edge;
             if (l || r || t || b) m.Result = new IntPtr(t ? (l ? 13 : r ? 14 : 12) : b ? (l ? 16 : r ? 17 : 15) : l ? 10 : 11);
         }
         protected override void OnPaint(PaintEventArgs e) {

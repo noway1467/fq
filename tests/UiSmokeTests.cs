@@ -678,7 +678,7 @@ namespace FeiqLight.Tests
                 MessageLayout layout=new MessageLayout("xx ABCabc 😊\nabc",Theme.Body,45,"abc");Check(String.Join("",layout.Runs.Where(r=>r.Highlight).Select(r=>r.Text))=="ABCabcabc","换行或大小写高亮不完整");Check(new MessageLayout("😊😊",Theme.Body,100,"😊").Runs.All(r=>r.Highlight),"表情未高亮");
                 try {foreach(bool dark in new[]{false,true}) {Theme.Change(dark,"blue");using(HistoryDialog dialog=new HistoryDialog(store,peer)) {
                     dialog.Show();Application.DoEvents();TextBox input=Find<TextBox>(dialog,"搜索聊天记录");BubbleHistory body=Find<BubbleHistory>(dialog,"聊天记录");input.Text="关键词";body.Refresh();
-                    Check(body.HighlightText=="关键词"&&Find<Label>(dialog,"聊天记录搜索结果").Text.Contains("2 条"),"搜索数量或高亮未绑定");Check(dialog.Padding.Left==3&&dialog.Text.Contains(peer.DisplayName),"记录窗口与主窗未区分");
+                    Check(body.HighlightText=="关键词"&&Find<Label>(dialog,"聊天记录搜索结果").Text.Contains("2 条"),"搜索数量或高亮未绑定");Check(dialog.Padding.Left>=6&&dialog.Text.Contains(peer.DisplayName)&&(bool)typeof(ModernWindow).GetField("secondaryWindow",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(dialog),"记录窗口缺少缩放区域或独立边框");
                     Render(dialog,"preview-history-highlight-"+(dark?"dark":"light"));input.Text="摘要尾部";body.Refresh();Check(body.Text.Contains("摘要尾部"),"摘要外结果消失");
                     var layouts=(List<MessageLayout>)typeof(BubbleHistory).GetField("textLayouts",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(body);Check(layouts.Single().Runs.Any(r=>r.Highlight),"摘要外命中未展示高亮");input.Text="不存在";Check(Find<Label>(dialog,"聊天记录搜索结果").Text.Contains("0 条"),"空结果未提示");dialog.Close();
                 }}}finally {Theme.Change(false,"blue");}
@@ -705,7 +705,7 @@ namespace FeiqLight.Tests
                     List<string> queued=(List<string>)typeof(ChatForm).GetField("attachments",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(chat);Check(queued.SequenceEqual(new[]{first}),"输入区没有排队");
                     drop(editor.Parent,new[]{first});drop(Find<Button>(chat,"发送消息"),new[]{first});drop(All(chat).OfType<BubbleHistory>().Single(),new[]{first});Check(queued.Count==1&&editor.Text=="不应自动发出的草稿","原生拖放重复入队或改动草稿");
                     IncomingMessage incoming=null;b.MessageReceived+=message=>incoming=message;a.Settings.AutoSendDroppedFiles=true;drop(editor,new[]{second,second});Pump(()=>incoming!=null,"自动拖入未发送");
-                    Check(incoming.Files.Count==1&&incoming.Files[0].Name=="automatic.txt"&&!incoming.Record.Text.Contains("草稿"),"自动发送夹带草稿或已有附件");Check(editor.Text=="不应自动发出的草稿"&&queued.SequenceEqual(new[]{first}),"自动发送清空草稿或已有附件");
+                    Check(incoming.Files.Count==1&&incoming.Files[0].Name=="automatic.txt"&&!incoming.Record.Text.Contains("草稿"),"自动发送夹带草稿或已有附件");Check(editor.Text=="不应自动发出的草稿"&&queued.SequenceEqual(new[]{first}),"自动发送清空草稿或已有附件：text=["+editor.Text+"] queued="+queued.Count);
                     string received=Path.Combine(folder,"received.txt");Task<string> transfer=b.ReceiveFileAsync(incoming.Peer,incoming.Record.Packet,incoming.Files[0],received,null,CancellationToken.None);Pump(()=>transfer.IsCompleted,"拖入文件下载未完成");Check(File.ReadAllText(transfer.Result)==File.ReadAllText(second),"拖入附件实际内容错误");
                     Pump(()=>Find<Button>(chat,"发送消息").Enabled,"自动发送动作未结束");a.Settings.AutoSendDroppedFiles=false;drop(chat,new[]{second});Check(queued.Count==2,"关闭开关后未恢复排队");Find<Button>(chat,"发送消息").PerformClick();Pump(()=>store.History(peer.Id,20).Count==2&&Find<Button>(chat,"发送消息").Enabled,"手动发送未成功");Check(editor.TextLength==0&&queued.Count==0,"手动发送后未清空");main.ExitApplication();
                 }
@@ -996,7 +996,7 @@ namespace FeiqLight.Tests
                 using (MainForm window = new MainForm(node, placementStore))
                 {
                     window.Show(); Application.DoEvents(); Check(window.WindowState == FormWindowState.Maximized, "重启未恢复最大化");
-                    window.WindowState = FormWindowState.Normal; Application.DoEvents(); Check(window.Bounds == wanted, "重启后普通窗口尺寸丢失"); window.ExitApplication();
+                    window.WindowState = FormWindowState.Normal; Application.DoEvents(); Check(window.Bounds == wanted, "重启后普通窗口尺寸丢失：actual="+window.Bounds+" wanted="+wanted); window.ExitApplication();
                 }
                 settings.Window = new WindowPlacement { X = 90000, Y = 90000, Width = 1200, Height = 800 };
                 using (LanService node = new LanService(settings, Port(), true, "window-offscreen"))
