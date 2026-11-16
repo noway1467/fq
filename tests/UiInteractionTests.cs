@@ -132,6 +132,48 @@ namespace FeiqLight.Tests
                     Render(dialog,"settings-"+available); All(dialog).OfType<Button>().Single(b=>b.Text=="保存").PerformClick(); Check(dialog.Value!=null&&!dialog.Value.StartWithWindows,"保存后的启动项状态错误"); dialog.Close();
                 }
             });
+            Run("搜索框：提示与输入垂直居中，字体和高度变化后保持对齐",()=>{
+                foreach(bool dark in new[]{false,true}) {
+                    Theme.Configure(dark,"rose");
+                    using(Form form=new Form {ClientSize=new Size(640,240)})using(SearchBox search=new SearchBox {Width=600,Height=58,Location=new Point(20,30)}) {
+                        Theme.Apply(form);form.Controls.Add(search);search.Placeholder="搜索消息或文件名";form.Show();Pump(20);Render(form,"search-placeholder-"+dark);
+                        foreach(int fontSize in new[]{9,12,15})using(Font font=new Font(Theme.Body.FontFamily,fontSize)) {
+                            search.Input.Font=font;
+                            foreach(int height in new[]{32,44,58,72}) {
+                                search.Height=height;form.PerformLayout();
+                                foreach(string text in new[]{"","666","中文 English 很长的搜索内容"}) {
+                                    search.Input.Text=text;Pump(10);
+                                    Check(Math.Abs(search.Input.Top+search.Input.Height/2.0-search.ClientSize.Height/2.0)<=1,"搜索正文未垂直居中：height="+height+" font="+fontSize+" input="+search.Input.Bounds);
+                                    Check(search.Input.Left>=search.Padding.Left&&search.Input.Right<=search.Width-search.Padding.Right,"搜索正文覆盖图标或清除键");
+                                }
+                            }
+                            search.Input.Font=Theme.Body;
+                        }
+                        search.Height=58;search.Input.Text="666";Render(form,"search-text-"+dark);
+                        Event(search.Input,"OnKeyDown",new KeyEventArgs(Keys.Escape));Check(search.Input.TextLength==0,"Escape 清除搜索失效");form.Close();
+                    }
+                }
+            });
+            Run("聊天记录窗口：四边等粗、同色且标题分隔线完整",()=>{
+                foreach(bool dark in new[]{false,true}) {
+                    Theme.Configure(dark,"blue");LocalStore store=new LocalStore(Path.Combine(root,"border-"+dark));
+                    using(HistoryDialog dialog=new HistoryDialog(store,Contact("peer"))) {
+                        dialog.Show();Pump(30);
+                        foreach(Size size in new[]{dialog.MinimumSize,new Size(760,720)}) {
+                            dialog.Size=size;dialog.Refresh();Render(dialog,"window-border-"+dark+"-"+size.Width);
+                            using(Bitmap image=Snapshot(dialog)) {
+                                Color top=image.GetPixel(image.Width/2,0),left=image.GetPixel(0,image.Height/2),right=image.GetPixel(image.Width-1,image.Height/2),bottom=image.GetPixel(image.Width/2,image.Height-1);
+                                Check(top.ToArgb()==left.ToArgb()&&left.ToArgb()==right.ToArgb()&&right.ToArgb()==bottom.ToArgb(),"窗口四边颜色或位置不一致");
+                                Check(top.ToArgb()!=Theme.Surface.ToArgb(),"边框与背景无法区分");
+                                Check(image.GetPixel(image.Width/2,1).ToArgb()!=top.ToArgb()&&image.GetPixel(1,image.Height/2).ToArgb()!=top.ToArgb()&&image.GetPixel(image.Width-2,image.Height/2).ToArgb()!=top.ToArgb()&&image.GetPixel(image.Width/2,image.Height-2).ToArgb()!=top.ToArgb(),"窗口边框粗细不一致或超过一像素");
+                                TableLayoutPanel chrome=(TableLayoutPanel)typeof(ModernWindow).GetField("chrome",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(dialog);Point location=dialog.PointToClient(chrome.PointToScreen(Point.Empty));int y=location.Y+chrome.Height-1;
+                                Check(image.GetPixel(location.X+8,y).ToArgb()==image.GetPixel(location.X+chrome.Width-8,y).ToArgb(),"标题分隔线在窗口按钮下断开");
+                            }
+                        }
+                        dialog.Close();
+                    }
+                }
+            });
             Run("搜索结果点击定位旧消息，同号收发分开且保留草稿",()=>{
                 LocalStore store=new LocalStore(Path.Combine(root,"search-navigation"));Peer peer=Contact("peer");
                 ChatRecord[] records=Enumerable.Range(0,360).Select(index=>new ChatRecord {PeerId=peer.Id,Packet=index/2+1,Outgoing=index%2==0,Time=DateTime.Now.AddMinutes(index-360),State="已送达",Text=index==40||index==41?"定位目标关键词":("上下文消息 "+index)}).ToArray();

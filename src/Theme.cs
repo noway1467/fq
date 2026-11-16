@@ -650,9 +650,19 @@ namespace FeiqLight
         public RoundedInputBase()
         {
             DoubleBuffered = true; ResizeRedraw = true; BackColor = Theme.Surface; Padding = new Padding(15, 11, 15, 9); Height = 44;
-            Input.BorderStyle = BorderStyle.None; Input.BackColor = Theme.Ice; Input.ForeColor = Theme.Ink; Input.Dock = DockStyle.Fill; Input.Font = Theme.Body; Controls.Add(Input); Theme.AttachEditMenu(Input);
+            Input.BorderStyle = BorderStyle.None; Input.BackColor = Theme.Ice; Input.ForeColor = Theme.Ink; Input.Font = Theme.Body; Controls.Add(Input); Theme.AttachEditMenu(Input);
             focus = new Tween(this, 160, 0);
             Input.Enter += delegate { focus.Set(1); }; Input.Leave += delegate { focus.Set(0); };
+            Input.FontChanged += delegate { PerformLayout(); };
+        }
+        protected override void OnLayout(LayoutEventArgs e)
+        {
+            base.OnLayout(e);
+            if (Input == null || Input.Parent != this) return;
+            // 原生单行 TextBox 的高度由字体决定；只把外框拉高不会让正文和提示语居中。
+            int height = Input.PreferredHeight;
+            Rectangle bounds = new Rectangle(Padding.Left, Math.Max(0, (ClientSize.Height - height) / 2), Math.Max(0, ClientSize.Width - Padding.Horizontal), height);
+            if (Input.Bounds != bounds) Input.Bounds = bounds;
         }
         protected override void OnPaintBackground(PaintEventArgs e)
         {
@@ -816,6 +826,7 @@ namespace FeiqLight
         protected void UseSecondaryChrome()
         {
             secondaryWindow=true;UpdateResizePadding();chrome.Height=56;caption.Font=Theme.Section;caption.ForeColor=Theme.Ink;
+            chrome.Padding=new Padding(0,0,0,1);
             Control actions=chrome.GetControlFromPosition(1,0);if(actions!=null)actions.Padding=new Padding(0,10,0,0);
             chrome.Paint+=delegate(object sender,PaintEventArgs e){using(Pen line=new Pen(Theme.Line))e.Graphics.DrawLine(line,0,chrome.Height-1,chrome.Width,chrome.Height-1);};
             Invalidate();
@@ -1000,8 +1011,8 @@ namespace FeiqLight
         protected override void Dispose(bool disposing) { if (disposing && resizeTimer != null) resizeTimer.Dispose(); base.Dispose(disposing); }
         protected override void OnPaint(PaintEventArgs e) {
             base.OnPaint(e);
-            using(Pen p=new Pen(secondaryWindow?Theme.Blend(Theme.Blue,Theme.Line,.55F):Theme.Blend(Theme.Ink,Theme.Surface,Theme.Dark?.22F:.16F),secondaryWindow?2:1))e.Graphics.DrawRectangle(p,secondaryWindow?1:0,secondaryWindow?1:0,Width-(secondaryWindow?3:1),Height-(secondaryWindow?3:1));
-            if(secondaryWindow)using(SolidBrush accent=new SolidBrush(Theme.Blue))e.Graphics.FillRectangle(accent,0,0,Width,3);
+            Color border=Theme.Blend(Theme.Ink,Theme.Surface,secondaryWindow?.5F:Theme.Dark?.22F:.16F);
+            using(Pen p=new Pen(border))e.Graphics.DrawRectangle(p,0,0,Width-1,Height-1);
         }
         [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern bool ReleaseCapture();
         [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr w, IntPtr l);
