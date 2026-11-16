@@ -81,7 +81,7 @@ namespace FeiqLight.Tests
                     Point[] starts={new Point(1,240),new Point(638,240),new Point(320,1),new Point(320,478),new Point(1,1),new Point(638,1),new Point(1,478),new Point(638,478)};
                     Cursor[] cursors={Cursors.SizeWE,Cursors.SizeWE,Cursors.SizeNS,Cursors.SizeNS,Cursors.SizeNWSE,Cursors.SizeNESW,Cursors.SizeNESW,Cursors.SizeNWSE};
                     for(int i=0;i<starts.Length;i++) {
-                        window.Bounds=original;Point start=window.PointToScreen(starts[i]);Mouse(window,0x200,start);Check(window.Cursor==cursors[i],"方向光标错误："+i);
+                        window.Bounds=original;Point start=window.PointToScreen(starts[i]);Mouse(window,0x200,start);Check(Cursor.Current==cursors[i],"方向光标错误："+i);
                         Mouse(window,0x201,start);Point end=new Point(start.X+20,start.Y+16);Mouse(window,0x200,end);Mouse(window,0x202,end);
                         bool left=starts[i].X==1,right=starts[i].X==638,top=starts[i].Y==1,bottom=starts[i].Y==478;
                         Check(window.Bounds==Rectangle.FromLTRB(original.Left+(left?20:0),original.Top+(top?16:0),original.Right+(right?20:0),original.Bottom+(bottom?16:0)),"拖动未固定对边："+i);

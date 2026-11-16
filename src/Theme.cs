@@ -522,7 +522,7 @@ namespace FeiqLight
         public int Badge;
         // 窗口关闭键等特殊悬停色；为空时按底色自动加深。
         public Color HoverBack = Color.Empty, HoverFore = Color.Empty;
-        private readonly Tween hover;
+        private readonly Tween hover, press;
         private Point ripple;
         private double rippleStart = -100000, rippleEnd = -100000;
         private bool pressed;
@@ -531,17 +531,47 @@ namespace FeiqLight
         {
             SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true); FlatStyle = FlatStyle.Flat; FlatAppearance.BorderSize = 0;
             hover = new Tween(this, 150, 0);
-            rippleStep = delegate { if (IsDisposed) return false; Invalidate(); return pressed || Motion.Now - rippleEnd < 420; };
+            press = new Tween(this, 160, 0);
+            rippleStep = delegate {
+                if (IsDisposed || !Visible || !Enabled) return false;
+                Invalidate();
+                // 长按扩散完成后画面不再变化，松开时再启动退场，避免一直占用 UI 线程。
+                return pressed ? Motion.Now - rippleStart < 240 : Motion.Now - rippleEnd < 220;
+            };
         }
-        protected override void OnMouseEnter(EventArgs e) { hover.Set(1); base.OnMouseEnter(e); }
-        protected override void OnMouseLeave(EventArgs e) { hover.Set(0); base.OnMouseLeave(e); }
+        protected override void OnMouseEnter(EventArgs e) { hover.Set(1); if (pressed) press.Set(1); base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { hover.Set(0); if (pressed) press.Set(0); base.OnMouseLeave(e); }
+        private void BeginPress(Point point)
+        {
+            if (!Enabled || pressed || !Motion.Enabled) return;
+            ripple = point; rippleStart = Motion.Now; rippleEnd = Double.MaxValue; pressed = true;
+            press.Set(1); Motion.Run(rippleStep);
+        }
+        private void EndPress()
+        {
+            if (!pressed) return;
+            pressed = false; rippleEnd = Math.Max(Motion.Now, rippleStart + 80);
+            press.Set(0); Motion.Run(rippleStep);
+        }
+        private void ResetFeedback()
+        {
+            pressed = false; rippleStart = rippleEnd = -100000;
+            if (hover != null) hover.Set(0, false);
+            if (press != null) press.Set(0, false);
+            Invalidate();
+        }
         protected override void OnMouseDown(MouseEventArgs e)
         {
-            if (e.Button == MouseButtons.Left && Enabled && Motion.Enabled) { ripple = e.Location; rippleStart = Motion.Now; rippleEnd = Double.MaxValue; pressed = true; Motion.Run(rippleStep); }
+            if (e.Button == MouseButtons.Left) BeginPress(e.Location);
             base.OnMouseDown(e);
         }
-        protected override void OnMouseUp(MouseEventArgs e) { if (pressed) { pressed = false; rippleEnd = Math.Max(Motion.Now, rippleStart + 180); } base.OnMouseUp(e); }
-        protected override void OnEnabledChanged(EventArgs e) { base.OnEnabledChanged(e); Invalidate(); }
+        protected override void OnMouseUp(MouseEventArgs e) { if (e.Button == MouseButtons.Left) EndPress(); base.OnMouseUp(e); }
+        protected override void OnMouseCaptureChanged(EventArgs e) { if (!Capture) EndPress(); base.OnMouseCaptureChanged(e); }
+        protected override void OnKeyDown(KeyEventArgs e) { if (e.KeyCode == Keys.Space) BeginPress(new Point(Width / 2, Height / 2)); base.OnKeyDown(e); }
+        protected override void OnKeyUp(KeyEventArgs e) { if (e.KeyCode == Keys.Space) EndPress(); base.OnKeyUp(e); }
+        protected override void OnLostFocus(EventArgs e) { EndPress(); base.OnLostFocus(e); }
+        protected override void OnEnabledChanged(EventArgs e) { if (!Enabled) ResetFeedback(); base.OnEnabledChanged(e); Invalidate(); }
+        protected override void OnVisibleChanged(EventArgs e) { if (!Visible) ResetFeedback(); base.OnVisibleChanged(e); }
         private Color ParentBack() { Control parent = Parent; while (parent != null && parent.BackColor.A < 255) parent = parent.Parent; return parent == null ? Theme.Surface : parent.BackColor; }
         protected override void OnPaint(PaintEventArgs e)
         {
@@ -552,20 +582,21 @@ namespace FeiqLight
             Color hovered = !HoverBack.IsEmpty ? HoverBack : primary ? Theme.Blend(Color.Black, fill, .12F) : Theme.Blend(Theme.Ink, fill, Theme.Dark ? .10F : .06F);
             // 禁用态与容器底色混合而不是统一刷成灰块，按钮轮廓仍可辨认。
             if (Enabled) fill = Motion.Mix(fill, hovered, (Tab || PlainHover) ? 0 : h); else if (!Tab) fill = Theme.Blend(fill, back, primary ? .45F : .6F);
-            RectangleF area = new RectangleF(.5F, .5F, Width - 1, Height - 1);
+            float inset = Radius > 0 ? (float)press.Value * scale : 0;
+            RectangleF area = new RectangleF(.5F + inset, .5F + inset, Width - 1 - inset * 2, Height - 1 - inset * 2);
             float radius = Math.Min(Radius * scale, Math.Min(area.Width, area.Height) / 2);
             using (GraphicsPath path = Theme.RoundedF(area, radius))
             {
                 if (fill.ToArgb() != back.ToArgb()) using (SolidBrush b = new SolidBrush(fill)) g.FillPath(b, path);
                 double since = Motion.Now - rippleStart;
-                if (!PlainHover && since >= 0 && since < 100000 && (pressed || Motion.Now - rippleEnd < 420))
+                if (!PlainHover && since >= 0 && since < 100000 && (pressed || Motion.Now - rippleEnd < 220))
                 {
-                    double grow = Motion.EaseOut(Math.Min(1, since / 380)), fade = pressed ? 1 : Math.Max(0, 1 - (Motion.Now - rippleEnd) / 420);
-                    float reach = (float)(Math.Sqrt(Width * Width + Height * Height) * (.25 + .85 * grow));
-                    Region clip = g.Clip; g.SetClip(path, CombineMode.Intersect);
+                    double grow = Motion.EaseOut(Math.Min(1, since / 240)), fade = pressed ? 1 : Math.Max(0, 1 - Math.Max(0, Motion.Now - rippleEnd) / 220);
+                    float reach = (float)(Math.Sqrt(Width * Width + Height * Height) * grow);
+                    GraphicsState clip = g.Save(); g.SetClip(path, CombineMode.Intersect);
                     using (SolidBrush wave = new SolidBrush(Color.FromArgb((int)(fade * (primary || !HoverBack.IsEmpty ? 46 : Theme.Dark ? 34 : 22)), primary || !HoverBack.IsEmpty ? Color.White : Theme.Ink)))
                         g.FillEllipse(wave, ripple.X - reach, ripple.Y - reach, reach * 2, reach * 2);
-                    g.Clip = clip;
+                    g.Restore(clip);
                 }
                 if (Focused && ShowFocusCues) using (Pen ring = new Pen(Theme.Blend(Theme.Blue, back, .7F), 2 * scale)) using (GraphicsPath inner = Theme.RoundedF(RectangleF.Inflate(area, -1.5F * scale, -1.5F * scale), Math.Max(1, radius - 1.5F * scale))) g.DrawPath(ring, inner);
             }
@@ -575,7 +606,7 @@ namespace FeiqLight
             else if (PlainHover && Enabled) color = Motion.Mix(ForeColor, Theme.Ink, h);
             if (Glyph.Length > 0)
             {
-                float icon = Math.Min(22 * scale, Math.Min(Width, Height) - 10 * scale);
+                float icon = Math.Min(22 * scale, Math.Min(Width, Height) - 10 * scale) * (float)(1 - .06 * press.Value);
                 Theme.Glyph(g, Glyph, new RectangleF((Width - icon) / 2F, (Height - icon) / 2F, icon, icon), color);
                 return;
             }
@@ -838,7 +869,7 @@ namespace FeiqLight
         private void Drag(object sender, MouseEventArgs e) { if (e.Button == MouseButtons.Left) { ReleaseCapture(); SendMessage(Handle, 0xA1, new IntPtr(2), IntPtr.Zero); } }
         private ResizeEdges ResizeEdgeAt(Point point)
         {
-            if (!ResizeWindow || WindowState != FormWindowState.Normal) return ResizeEdges.None;
+            if (!ResizeWindow || WindowState != FormWindowState.Normal || !ClientRectangle.Contains(point)) return ResizeEdges.None;
             int edge = ResizeBorder;
             ResizeEdges result = ResizeEdges.None;
             if (point.X < edge) result |= ResizeEdges.Left; else if (point.X >= ClientSize.Width - edge) result |= ResizeEdges.Right;
@@ -882,17 +913,22 @@ namespace FeiqLight
             ResizeEdges edge = e.Button == MouseButtons.Left ? ResizeEdgeAt(e.Location) : ResizeEdges.None;
             if (edge != ResizeEdges.None) {
                 manualResize = edge; manualResizeOrigin = PointToScreen(e.Location); manualResizeBounds = Bounds;
-                Capture = true; Cursor = ResizeCursor(edge); return;
+                Capture = true; Cursor.Current = ResizeCursor(edge); return;
             }
             base.OnMouseDown(e);
         }
         protected override void OnMouseMove(MouseEventArgs e)
         {
             if (manualResize != ResizeEdges.None) {
-                ResizeTo(PointToScreen(e.Location)); Cursor = ResizeCursor(manualResize); return;
+                ResizeTo(PointToScreen(e.Location)); Cursor.Current = ResizeCursor(manualResize); return;
             }
-            Cursor = ResizeCursor(ResizeEdgeAt(e.Location));
+            Cursor.Current = ResizeCursor(ResizeEdgeAt(e.Location));
             base.OnMouseMove(e);
+        }
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            if (manualResize == ResizeEdges.None) Cursor.Current = Cursors.Default;
+            base.OnMouseLeave(e);
         }
         protected override void OnMouseUp(MouseEventArgs e)
         {
@@ -900,12 +936,22 @@ namespace FeiqLight
                 base.OnMouseUp(e); return;
             }
             ResizeTo(PointToScreen(e.Location)); manualResize = ResizeEdges.None; Capture = false;
-            Cursor = ResizeCursor(ResizeEdgeAt(PointToClient(Cursor.Position)));
+            Cursor.Current = ResizeCursor(ResizeEdgeAt(PointToClient(Cursor.Position)));
         }
         protected override void OnMouseCaptureChanged(EventArgs e)
         {
-            if (!Capture) { manualResize = ResizeEdges.None; Cursor = Cursors.Default; }
+            if (!Capture) { manualResize = ResizeEdges.None; Cursor.Current = Cursors.Default; }
             base.OnMouseCaptureChanged(e);
+        }
+        protected override void WndProc(ref Message m)
+        {
+            // Cursor 属性会被子控件继承；缩放光标只设置当前指针，且只接管本窗口自己的客户区。
+            if (m.Msg == 0x0020 && m.WParam == Handle && (m.LParam.ToInt64() & 0xFFFF) == 1)
+            {
+                Cursor.Current = ResizeCursor(manualResize != ResizeEdges.None ? manualResize : ResizeEdgeAt(PointToClient(Cursor.Position)));
+                m.Result = new IntPtr(1); return;
+            }
+            base.WndProc(ref m);
         }
         protected override void OnResize(EventArgs e) { UpdateResizePadding(); base.OnResize(e); }
         protected override void OnPaint(PaintEventArgs e) {

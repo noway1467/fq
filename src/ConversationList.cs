@@ -14,7 +14,32 @@ namespace FeiqLight
         public IList<Item> Items { get { return items.AsReadOnly(); } }
         public event Action<Peer> PeerActivated;
         public event Action<Peer> PeerMenuRequested;
-        public string SelectedId;
+        private sealed class RowMotion
+        {
+            internal readonly Tween Hover, Selected;
+            internal RowMotion(Control owner, bool selected) { Hover = new Tween(owner, 150, 0); Selected = new Tween(owner, 180, selected ? 1 : 0); }
+        }
+        private readonly Dictionary<string, RowMotion> rowMotion = new Dictionary<string, RowMotion>(StringComparer.Ordinal);
+        private string selectedId;
+        public string SelectedId
+        {
+            get { return selectedId; }
+            set {
+                if (selectedId == value) return;
+                RowMotion previous = MotionFor(selectedId), next = MotionFor(value);
+                selectedId = value;
+                if (previous != null) previous.Selected.Set(0);
+                if (next != null) next.Selected.Set(1);
+                Invalidate();
+            }
+        }
+        private RowMotion MotionFor(string id)
+        {
+            if (id == null) return null;
+            RowMotion state;
+            if (!rowMotion.TryGetValue(id, out state)) rowMotion.Add(id, state = new RowMotion(this, id == selectedId));
+            return state;
+        }
         // 空列表提示：无联系人与搜索无结果使用不同文案。
         public string EmptyText = "暂无会话", EmptyHint = "同一局域网内启动飞Q的设备会自动出现";
         private int hover = -1;
@@ -22,7 +47,22 @@ namespace FeiqLight
         private int RowHeight { get { return Dp(68); } }
         private int ListTop { get { return Dp(4); } }
         public ConversationList() { BackColor = Theme.Surface; TabStop = true; AccessibleName = "会话列表"; AccessibleRole = AccessibleRole.List; }
-        public void SetItems(IEnumerable<Item> value) { items = value.ToList(); AutoScrollMinSize = new Size(0, items.Count * RowHeight + ListTop * 2); if (hover >= items.Count) hover = -1; Invalidate(); }
+        public void SetItems(IEnumerable<Item> value)
+        {
+            SetHovered(-1); items = value.ToList();
+            // 重排和筛选时按联系人身份保留过渡，不让旧行号的动画落到另一个联系人上。
+            HashSet<string> ids = new HashSet<string>(items.Select(i => i.Peer.Id), StringComparer.Ordinal);
+            foreach (string id in rowMotion.Keys.Where(id => !ids.Contains(id)).ToArray()) rowMotion.Remove(id);
+            AutoScrollMinSize = new Size(0, items.Count * RowHeight + ListTop * 2); Invalidate();
+        }
+        private void SetHovered(int index)
+        {
+            if (hover == index) return;
+            if (hover >= 0) MotionFor(items[hover].Peer.Id).Hover.Set(0);
+            hover = index;
+            if (hover >= 0) MotionFor(items[hover].Peer.Id).Hover.Set(1);
+            rowHint.SetToolTip(this, hover < 0 ? null : items[hover].Peer.DisplayName + "\n" + items[hover].Preview); Invalidate();
+        }
         public void ActivatePeer(int index)
         {
             if (index < 0 || index >= items.Count) return; SelectedId = items[index].Peer.Id; Invalidate(); if (PeerActivated != null) PeerActivated(items[index].Peer);
@@ -32,9 +72,9 @@ namespace FeiqLight
         {
             base.OnMouseMove(e);
             int next = ScrollbarMouseMove(e) ? -1 : IndexAt(e.Y); if (next >= items.Count) next = -1;
-            if (next != hover) { hover = next; rowHint.SetToolTip(this, hover < 0 ? null : items[hover].Peer.DisplayName + "\n" + items[hover].Preview); Invalidate(); }
+            SetHovered(next);
         }
-        protected override void OnMouseLeave(EventArgs e) { hover = -1; rowHint.SetToolTip(this, null); Invalidate(); base.OnMouseLeave(e); }
+        protected override void OnMouseLeave(EventArgs e) { SetHovered(-1); base.OnMouseLeave(e); }
         protected override void Dispose(bool disposing) { if (disposing) rowHint.Dispose(); base.Dispose(disposing); }
         protected override void OnMouseUp(MouseEventArgs e) { base.OnMouseUp(e); ScrollbarMouseUp(e); }
         protected override void OnMouseDown(MouseEventArgs e)
@@ -91,10 +131,13 @@ namespace FeiqLight
                 Item item = items[i]; Rectangle row = new Rectangle(0, ListTop + i * RowHeight - ScrollOffset, ClientSize.Width, RowHeight);
                 if (row.Top > ClientSize.Height) break; if (row.Bottom < 0) continue;
                 bool selected = item.Peer.Id == SelectedId;
-                Color back = selected ? Theme.Blue : i == hover ? Theme.Hover : Theme.Surface;
+                RowMotion motion; rowMotion.TryGetValue(item.Peer.Id, out motion);
+                double selection = motion == null ? (selected ? 1 : 0) : motion.Selected.Value;
+                double highlightAmount = motion == null ? 0 : motion.Hover.Value;
+                Color back = Motion.Mix(Motion.Mix(Theme.Surface, Theme.Hover, highlightAmount), Theme.Blue, selection);
                 Rectangle highlight = new Rectangle(row.Left + Dp(6), row.Top + Dp(1), Math.Max(1, row.Width - Dp(12)), row.Height - Dp(2));
                 if (back != Theme.Surface) using (GraphicsPath path = Theme.Rounded(highlight, Dp(10))) using (SolidBrush b = new SolidBrush(back)) g.FillPath(b, path);
-                Color ink = selected ? Color.White : Theme.Ink, muted = selected ? Color.FromArgb(225, 255, 255, 255) : Theme.Muted;
+                Color ink = Motion.Mix(Theme.Ink, Color.White, selection), muted = Motion.Mix(Theme.Muted, Color.FromArgb(225, 255, 255, 255), selection);
                 Rectangle face = new Rectangle(pad + Dp(4), row.Top + (RowHeight - avatar) / 2, avatar, avatar);
                 g.DrawImageUnscaled(Theme.CachedAvatar(avatar, item.Peer.Id, false, item.Peer.Avatar), face.X - halo, face.Y - halo);
                 if (item.Peer.Online)

@@ -66,9 +66,8 @@ namespace FeiqLight
             peerName.Dock = DockStyle.Fill; peerName.AutoEllipsis = true; peerName.AccessibleName = "聊天联系人昵称"; identity.Controls.Add(peerName, 0, 0);
             peerStatus.Dock = DockStyle.Fill; peerStatus.AccessibleName = "聊天联系人状态"; identity.Controls.Add(peerStatus, 0, 1); head.Controls.Add(identity, 1, 0);
             avatarIdentity = peer.Id; avatarValue = peer.Avatar; avatarOnline = peer.Online; RefreshPeer();
-            avatar.Cursor = peerName.Cursor = Cursors.Hand;
+            avatar.Cursor = Cursors.Hand;
             avatar.Click += delegate { main.ShowContactProfile(peer); };
-            peerName.Click += delegate { main.ShowContactProfile(peer); };
             Button search = Theme.IconButton("search", "聊天记录", ShowHistory, false); search.Dock = DockStyle.Fill; search.Margin = Padding.Empty; head.Controls.Add(search, 2, 0);
             fileButton = Theme.IconButton("inbox", "收到的文件", delegate { SetDrawer(!drawerOpen); }, false); fileButton.Dock = DockStyle.Fill; fileButton.Margin = Padding.Empty; head.Controls.Add(fileButton, 3, 0);
             Button menu = Theme.IconButton("more", "会话菜单", ShowMenu, false); menu.Dock = DockStyle.Fill; menu.Margin = Padding.Empty; head.Controls.Add(menu, 4, 0);

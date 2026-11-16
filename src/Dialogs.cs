@@ -378,7 +378,6 @@ namespace FeiqLight
             ToggleSwitch close = new ToggleSwitch { Text = "关闭时收起到托盘", Description = "关闭窗口后仍在后台接收消息，可从托盘图标恢复。", Checked = current.CloseToTray, BackColor = Theme.Surface }; close.SetBounds(26, 232, 458, 54); body.Controls.Add(close);
             ToggleSwitch notifications = new ToggleSwitch { Text = "消息通知", Description = "窗口不在前台时用系统气泡提示新消息。", Checked = current.Notifications, BackColor = Theme.Surface }; notifications.SetBounds(26, 274, 458, 54); body.Controls.Add(notifications);
             ToggleSwitch startup = new ToggleSwitch { Text = "开机自启动", AccessibleName = "开机自启动", Description = "登录 Windows 后自动连接并收起到托盘。", Checked = startupAvailable ? startupEnabled : current.StartWithWindows, Enabled = startupAvailable, BackColor = Theme.Surface }; startup.SetBounds(26, 275, 458, 54); body.Controls.Add(startup);
-            Label startupHint = Theme.Label(startupAvailable ? "无需管理员权限；移动程序后请重新开启。\n系统禁用的启动项需在任务管理器恢复。" : "当前运行环境无法配置系统启动项（如回环测试或系统限制）。\n其他设置仍可正常保存。", Theme.Small, Theme.Muted); startupHint.SetBounds(26, 276, 458, 52); body.Controls.Add(startupHint);
             ToggleSwitch auto = new ToggleSwitch { Text = "自动接收文件", AccessibleName = "自动接收文件", Description = "收到文件邀请时直接保存到接收文件夹；关闭后需手动点击接收。", Checked = current.AutoReceiveFiles, BackColor = Theme.Surface }; auto.SetBounds(26, 316, 458, 54); body.Controls.Add(auto);
             Label hint = Theme.Label("仅用于可信局域网；不会自动运行文件。", Theme.Small, Theme.Muted); hint.SetBounds(26, 360, 458, 24); body.Controls.Add(hint);
             ToggleSwitch autoDrop=new ToggleSwitch {Text="拖入文件自动发送",AccessibleName="拖入文件自动发送",Description="默认关闭：拖入后先加入待发送列表。开启后仅发送本次拖入的文件，不夹带草稿或已排队附件。",Checked=current.AutoSendDroppedFiles,BackColor=Theme.Surface};autoDrop.SetBounds(26,520,458,68);body.Controls.Add(autoDrop);
@@ -505,7 +504,7 @@ namespace FeiqLight
                     if(layout.Controls.Count>0) { Panel divider=new Panel { Height=1, BackColor=Theme.Line, Margin=new Padding(0,12,0,12) };layout.Controls.Add(divider); }
                     Label heading = Theme.Label(section, Theme.Section, Theme.Ink); heading.Height = 26; heading.Margin = new Padding(0, 0, 0, 6); layout.Controls.Add(heading);
                 }
-                if(field is Label && field != hint && field != info && field != startupHint && field != privacy && field != dropHint) field.Height=22;
+                if(field is Label && field != hint && field != info && field != privacy && field != dropHint) field.Height=22;
                 if(field is ToggleSwitch) field.Height=((ToggleSwitch)field).PreferredHeightFor(458);
                 field.Margin = new Padding(0, 0, 0, field is Label ? 4 : 8); layout.Controls.Add(field);
             }
@@ -527,7 +526,7 @@ namespace FeiqLight
                         field.Width = width;
                         ToggleSwitch toggle = field as ToggleSwitch;
                         if(toggle != null) field.Height = toggle.PreferredHeightFor(width);
-                        else if(field == startupHint || field == hint || field == dropHint || field == privacy || field == info)
+                        else if(field == hint || field == dropHint || field == privacy || field == info)
                             field.Height = TextRenderer.MeasureText(field.Text, field.Font, new Size(width, Int32.MaxValue), TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl | TextFormatFlags.NoPrefix).Height + 4;
                     }
                     layout.ResumeLayout(true);
