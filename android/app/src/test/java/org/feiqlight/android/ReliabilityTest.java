@@ -135,6 +135,48 @@ public final class ReliabilityTest {
             try(java.net.ServerSocket tcp=new java.net.ServerSocket(port,1,InetAddress.getLoopbackAddress());DatagramSocket udp=new DatagramSocket(port,InetAddress.getLoopbackAddress())) { assertNull("销毁后仍发布了节点",field(service,"node")); }
         } finally { release.countDown();if(!destroyed)sc.destroy();LanNode n=created.get();if(n!=null)n.close(); }
     }
+    @Test public void destroyedServiceReleasesPortsBeforeQueuedIoCompletes() throws Exception {
+        int port=freePort();CountDownLatch entered=new CountDownLatch(1),release=new CountDownLatch(1);
+        ServiceController<ChatService> oldController=Robolectric.buildService(ChatService.class).create();ChatService old=oldController.get();
+        ServiceController<ChatService> nextController=null;ChatService next=null;boolean destroyed=false;
+        try {
+            settle(old);old.connectionFactory=(prefs,listener)->new LanNode(port,true,"old-service","host","旧服务","",listener);
+            old.onStartCommand(new Intent(),0,1);settle(old);assertTrue(old.online());
+            LanNode oldNode=(LanNode)field(old,"node");block(io(old),entered,release);assertTrue(entered.await(3,TimeUnit.SECONDS));
+            oldController.destroy();destroyed=true;
+            nextController=Robolectric.buildService(ChatService.class).create();next=nextController.get();settle(next);
+            next.connectionFactory=(prefs,listener)->new LanNode(port,true,"new-service","host","新服务","",listener);
+            next.onStartCommand(new Intent(),0,2);settle(next);
+            assertTrue("旧服务的数据库/I/O 队列不能继续占着聊天端口："+next.status(),next.online());
+            assertEquals("验证新连接无需等待旧队列",1,release.getCount());assertFalse(oldNode.networkAvailable());
+            release.countDown();assertTrue(io(old).awaitTermination(5,TimeUnit.SECONDS));oldNode.close();settle(next);
+            assertTrue("旧服务延迟清理不能关闭新监听",next.online());
+        } finally {
+            release.countDown();if(!destroyed)oldController.destroy();if(nextController!=null)nextController.destroy();
+            assertTrue(io(old).awaitTermination(5,TimeUnit.SECONDS));if(next!=null)assertTrue(io(next).awaitTermination(5,TimeUnit.SECONDS));
+        }
+    }
+    @Test public void portWaitLogsActualReadinessAndRepeatedRestoreKeepsOneNode() throws Exception {
+        ServiceController<ChatService> controller=Robolectric.buildService(ChatService.class).create();ChatService service=controller.get();
+        java.util.concurrent.atomic.AtomicInteger created=new java.util.concurrent.atomic.AtomicInteger();
+        try(ServerSocket occupied=new ServerSocket(0,1,InetAddress.getLoopbackAddress())) {
+            int port=occupied.getLocalPort();settle(service);
+            service.getSharedPreferences("settings",0).edit().putBoolean("diagnostics",true).commit();Diagnostics log=new Diagnostics(service);log.clear();
+            service.connectionFactory=(prefs,listener)->{created.incrementAndGet();return new LanNode(port,true,"port-wait","host","测试","",listener);};
+            service.onStartCommand(new Intent(),0,1);settle(service);assertFalse(service.online());
+            assertFalse("端口占用时不能记录已连接",log.read().contains(" Connected\n"));
+            assertTrue(service.status(),service.status().contains("TCP"));assertTrue(log.read().contains(" NetworkWaiting\n"));
+            for(int i=0;i<20;i++)service.onStartCommand(new Intent().setAction("restore"),0,i+2);
+            settle(service);assertEquals(1,created.get());
+            occupied.close();LanNode node=(LanNode)field(service,"node");node.networkChanged();
+            long until=System.nanoTime()+TimeUnit.SECONDS.toNanos(5);
+            while(!node.networkAvailable()&&System.nanoTime()<until)Thread.sleep(10);
+            assertTrue(node.networkStatus(),node.networkAvailable());settle(service);assertTrue(service.online());
+            assertEquals("监听就绪后只记录一次连接",1,Arrays.stream(log.read().split("\n")).filter(line->line.endsWith(" Connected")).count());
+            assertTrue(ChatService.shouldRestoreConnection(service));
+            service.disconnect();settle(service);assertFalse(ChatService.shouldRestoreConnection(service));
+        } finally {controller.destroy();assertTrue(io(service).awaitTermination(5,TimeUnit.SECONDS));}
+    }
     @Test public void staleDisconnectCompletionCannotStopReconnectedService() throws Exception {
         ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();List<LanNode> created=new CopyOnWriteArrayList<>();int port=freePort();
         try {

@@ -8,7 +8,7 @@ import java.time.Instant;
 
 /** 白名单事件码：禁止传入异常原文、消息、URI、IP、联系人及文件名。 */
 final class Diagnostics {
-    enum Event { Connecting, Connected, Disconnected, NetworkChanged, Error, TaskStarted, TaskCompleted, TaskFailed, TaskCancelled, Stopped }
+    enum Event { Connecting, Connected, Disconnected, NetworkChanged, NetworkWaiting, Error, TaskStarted, TaskCompleted, TaskFailed, TaskCancelled, Stopped }
     static final int LIMIT=65536;
     private static final Object GATE=new Object();
     private final Context context;

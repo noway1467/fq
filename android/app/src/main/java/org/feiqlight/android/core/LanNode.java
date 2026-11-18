@@ -212,8 +212,9 @@ public final class LanNode implements AutoCloseable {
     }
     public volatile String nickname, group;
     private volatile DatagramSocket udp;
-    private ServerSocket tcp;
+    private volatile ServerSocket tcp;
     private volatile boolean closed,started,networkAvailable;
+    private boolean cleanupStarted;
     private volatile String networkStatus="网络已断开，等待 Wi-Fi、热点或以太网恢复";
     private Object networkKey;
     private volatile long refreshAt;
@@ -240,11 +241,14 @@ public final class LanNode implements AutoCloseable {
         synchronized(gate) {
             if(closed||tcp!=null)return;
             ServerSocket next=new ServerSocket();
+            tcp=next;
             try {
-                next.setReuseAddress(false);
+                if(closed){next.close();tcp=null;return;}
+                // Android/Linux 会保留已关闭 TCP 的 TIME_WAIT；允许重开原端口，不启用 UDP 端口共享。
+                next.setReuseAddress(true);
                 next.bind(new InetSocketAddress(InetAddress.getByName(loopback?"127.0.0.1":"0.0.0.0"),port),4);
-                tcp=next;
-            }catch(IOException|RuntimeException error){next.close();throw error;}
+                if(closed){next.close();tcp=null;return;}
+            }catch(IOException|RuntimeException error){tcp=null;next.close();throw error;}
             Thread accept=new Thread(this::acceptLoop,"feiq-files");accept.setDaemon(true);accept.start();
         }
     }
@@ -273,15 +277,19 @@ public final class LanNode implements AutoCloseable {
                 networkState(false,"网络已断开，等待 Wi-Fi、热点或以太网恢复");
                 if(key==null)return;
                 DatagramSocket next=new DatagramSocket(null);
+                // 先登记正在绑定的 socket，服务销毁时也能立即释放它；发送仍由 udpSendGate 串行。
+                udp=next;
                 try {
+                    if(closed){next.close();udp=null;return;}
                     next.setReuseAddress(false);next.setBroadcast(!loopback);
                     next.bind(new InetSocketAddress(InetAddress.getByName(loopback?"127.0.0.1":"0.0.0.0"),port));
                     // Network.bindSocket 会访问 socket 监视器，必须在 receive 开始前完成，不能重绑阻塞中的旧 socket。
                     if(!loopback && socketBinding!=null)try{socketBinding.bind(next);}
-                    catch(IOException e){next.close();networkState(false,e.getMessage());return;}
-                    udp=next;networkKey=key;
+                    catch(IOException e){udp=null;next.close();networkState(false,e.getMessage());return;}
+                    if(closed){next.close();udp=null;return;}
+                    networkKey=key;
                     Thread rx=new Thread(()->receiveLoop(next),"feiq-udp");rx.setDaemon(true);rx.start();
-                } catch(IOException | RuntimeException e) {next.close();throw e;}
+                } catch(IOException | RuntimeException e) {udp=null;next.close();throw e;}
             }
         }
     }
@@ -360,12 +368,13 @@ public final class LanNode implements AutoCloseable {
             try {key=socketBinding.networkKey();}
             catch(IOException e){switchNetwork(null);networkState(false,e.getMessage());return;}
         }
-        try { ensureListener();switchNetwork(key); }
+        String transport="TCP";
+        try { ensureListener();transport="UDP";switchNetwork(key); }
         catch(IOException e) {
             switchNetwork(null);
             fastRefreshUntil=System.nanoTime()+TimeUnit.SECONDS.toNanos(10);
             // 升级后的端口释放、切网和 VPN 初始化可能短暂失败，保留服务等待恢复。
-            networkState(false,(e instanceof BindException?"本地端口 "+port+" 暂不可用，正在重试：":"局域网暂不可用，正在重试：")+e.getMessage());
+            networkState(false,(e instanceof BindException?"本地 "+transport+" 端口 "+port+" 暂不可用，正在重试：":"局域网暂不可用，正在重试：")+e.getMessage());
             return;
         }
         if(key==null){networkState(false,"网络已断开，等待 Wi-Fi、热点或以太网恢复");return;}
@@ -1187,11 +1196,18 @@ public final class LanNode implements AutoCloseable {
     public static void requireSpace(File directory,long extra) throws IOException {
         if(extra<0 || extra>availableSpace(directory)) throw new IOException("存储空间不足（保留 16 MiB 安全余量），请清理文件或更换存储位置");
     }
+    /** 服务销毁先释放监听端口，数据库及任务清理仍可在后台队列完成。 */
+    public void stopListening() {
+        closed=true;
+        DatagramSocket receiver=udp;if(receiver!=null)receiver.close();
+        ServerSocket listener=tcp;if(listener!=null)try{listener.close();}catch(IOException ignored){ }
+    }
     @Override public void close() {
         synchronized (gate) {
-            if (closed) return;
-            for (Peer p:peers.values()) try { send(encode(Protocol.EXIT,nickname,null),p.endpoint); } catch (IOException ignored) { }
-            closed=true; if (udp!=null) udp.close(); if (tcp!=null) try { tcp.close(); } catch (IOException ignored) { }
+            if (cleanupStarted) return;
+            cleanupStarted=true;
+            if(!closed)for (Peer p:peers.values()) try { send(encode(Protocol.EXIT,nickname,null),p.endpoint); } catch (IOException ignored) { }
+            stopListening();
             for (Socket socket:connections) try { socket.close(); } catch (IOException ignored) { }
             for (Socket socket:probeSockets) try { socket.close(); } catch (IOException ignored) { }
             for (PendingDownload pd:pendingDownloads) { pd.ready.countDown(); pd.done.countDown(); } pendingDownloads.clear();

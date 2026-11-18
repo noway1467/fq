@@ -71,6 +71,27 @@ public final class LanNetworkTest {
             }
         }
     }
+    @Test public void ipv6VpnCallbacksKeepCurrentWifiTcpAndUdpListeners() throws Exception {
+        ConnectivityManager cm=RuntimeEnvironment.getApplication().getSystemService(ConnectivityManager.class);shadowOf(cm).clearAllNetworks();
+        // 注入回环 /32，执行正式绑定路径但不向宿主真实局域网广播。
+        Network wifi=add(cm,906,NetworkCapabilities.TRANSPORT_WIFI,"127.0.0.1",32);LanNetwork route=new LanNetwork(cm,NO_LOCAL);
+        int port;try(ServerSocket free=new ServerSocket(0,1,InetAddress.getLoopbackAddress())){port=free.getLocalPort();}
+        org.feiqlight.android.core.LanNode.Listener listener=new org.feiqlight.android.core.LanNode.Listener() {
+            public void peersChanged(){}public void message(org.feiqlight.android.core.LanNode.Peer peer,org.feiqlight.android.core.LanNode.Message message,boolean update){}public void error(String text){fail(text);}
+        };
+        try(org.feiqlight.android.core.LanNode node=new org.feiqlight.android.core.LanNode(port,false,"ipv6-vpn","host","测试","",listener)) {
+            node.setSocketBinding(route);node.start();assertTrue(node.networkAvailable());Object key=route.networkKey();
+            java.lang.reflect.Field tcp=org.feiqlight.android.core.LanNode.class.getDeclaredField("tcp"),udp=org.feiqlight.android.core.LanNode.class.getDeclaredField("udp");tcp.setAccessible(true);udp.setAccessible(true);
+            Object originalTcp=tcp.get(node),originalUdp=udp.get(node);
+            for(int i=0;i<3;i++) {
+                Network vpn=add(cm,907+i,NetworkCapabilities.TRANSPORT_VPN,"fd12:3456::2",64);
+                node.networkChanged();node.refresh();assertEquals(wifi,route.select());assertEquals(key,route.networkKey());
+                assertSame(originalTcp,tcp.get(node));assertSame(originalUdp,udp.get(node));assertEquals(0,shadowOf(vpn).boundSocketCount());
+                shadowOf(cm).removeNetwork(vpn);node.networkChanged();node.refresh();
+                assertSame(originalTcp,tcp.get(node));assertSame(originalUdp,udp.get(node));assertTrue(node.networkAvailable());
+            }
+        }
+    }
     @Test public void noLanNeverFallsBackToCellularOrDefaultBroadcast() throws Exception {
         ConnectivityManager cm=(ConnectivityManager)RuntimeEnvironment.getApplication().getSystemService(Context.CONNECTIVITY_SERVICE);shadowOf(cm).clearAllNetworks();
         add(cm,910,NetworkCapabilities.TRANSPORT_CELLULAR,"192.0.2.8",24);LanNetwork route=new LanNetwork(cm,NO_LOCAL);
@@ -253,7 +274,7 @@ public final class LanNetworkTest {
         LanNetwork route=new LanNetwork(cm,()->Collections.singletonList(iface("ap0",true,false,false,false,"192.168.43.1",24)));
         Object hotspot=route.networkKey();assertNotNull(hotspot);
         shadowOf(cm).removeNetwork(vpn);route.changed();assertEquals("仅关闭 VPN 不应清除热点会话",hotspot,route.networkKey());
-        vpn=add(cm,953,NetworkCapabilities.TRANSPORT_VPN,"10.99.0.2",24);route.changed();assertEquals(hotspot,route.networkKey());
+        vpn=add(cm,953,NetworkCapabilities.TRANSPORT_VPN,"fd12:3456::2",64);route.changed();assertEquals(hotspot,route.networkKey());
         assertTrue(route.allows(InetAddress.getByName("192.168.43.2")));
         assertFalse(route.allows(InetAddress.getByName("10.99.0.3")));
         try(RecordingSocket tcp=new RecordingSocket()){route.bind(tcp,InetAddress.getByName("192.168.43.2"));assertEquals(new InetSocketAddress("192.168.43.1",0),tcp.source);}

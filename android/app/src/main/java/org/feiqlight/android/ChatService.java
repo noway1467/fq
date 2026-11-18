@@ -110,6 +110,7 @@ public final class ChatService extends Service {
     void cancelFile(String peer,long packet,long file) {FileProgress p=progress(peer,packet,file,false);if(p!=null&&p.task!=null&&p.task==transfer)p.task.close();}
     boolean offering(String peer,long packet,long file) {LanNode current=node;return current!=null&&current.offering(peer,packet,file);}
     private boolean notificationQueued;
+    private boolean networkReady;
     private final Runnable notifyChanges=()->{notificationQueued=false;for (Observer observer:new ArrayList<>(observers)) observer.changed();};
     @Override public void onCreate() {
         super.onCreate(); store=new ChatStore(this); storage=new ReceivedStorage(this);diagnostics=new Diagnostics(this);
@@ -142,9 +143,9 @@ public final class ChatService extends Service {
         return b.build();
     }
     private void connect() {
-        diagnostics.record(Diagnostics.Event.Connecting);
         synchronized(connectionLock) {
             if(stopped || node!=null || connecting) return;
+            diagnostics.record(Diagnostics.Event.Connecting);networkReady=false;
             long epoch=++connectionEpoch; disconnecting=false; connecting=true; status="正在连接…";
             io.execute(()->connectInBackground(epoch));
         }
@@ -216,7 +217,7 @@ public final class ChatService extends Service {
                     } catch (RuntimeException e) { showError("自动发现可能受限，可尝试手动 IP："+e.getMessage()); }
                     // 建连期间设置仍可保存；发布节点时补上最新资料，端口则以实际监听值为准。
                     applyProfile(connected,prefs);
-                    diagnostics.record(Diagnostics.Event.Connected);connecting=false;
+                    connecting=false;
                     connectedPort=connected.port();
                     updateNetworkStatus(connected.networkAvailable(),connected.networkStatus());
                     connected.networkChanged();
@@ -310,6 +311,9 @@ public final class ChatService extends Service {
         boolean normal=available && reason.isEmpty();
         String next=normal?"已连接 · UDP / TCP "+connectedPort:reason;
         if(next.equals(status))return;
+        if(available&&!networkReady)diagnostics.record(Diagnostics.Event.Connected);
+        else if(!available)diagnostics.record(Diagnostics.Event.NetworkWaiting);
+        networkReady=available;
         status=next;changed();
         getSystemService(NotificationManager.class).notify(1,notification("connection","飞Q正在运行",normal?"可接收局域网消息 · 点击返回":status,true));
         if(available && online()){if(sharedFiles==null)restoreSharing();drainReceives();}
@@ -511,7 +515,7 @@ public final class ChatService extends Service {
         getSharedPreferences("settings",MODE_PRIVATE).edit().putBoolean("connection_enabled",false).apply();
         synchronized(connectionLock) {
             if(stopped) return;
-            long epoch=++connectionEpoch; LanNode old=node; node=null; disconnecting=true; connecting=false; status="正在断开…";
+            long epoch=++connectionEpoch; LanNode old=node; node=null; disconnecting=true; connecting=false; networkReady=false;status="正在断开…";
             // 与建连共用串行队列；旧完成回调不得停止随后发起的新连接。
             io.execute(()->{ if(old!=null) old.close(); try { publish(); } catch(Exception e) { fail(e); }
                 main.post(()->{ if(!currentConnection(epoch)) return; disconnecting=false; status="已断开"; stopForeground(STOP_FOREGROUND_REMOVE); stopSelf(); changed(); }); });
@@ -792,8 +796,10 @@ public final class ChatService extends Service {
         closeSharing();
         diagnostics.record(Diagnostics.Event.Stopped);
         synchronized(connectionLock) {
-            stopped=true; connectionEpoch++; connecting=false; disconnecting=true;
+            stopped=true; connectionEpoch++; connecting=false; disconnecting=true;networkReady=false;
             LanNode old=node; node=null;
+            // 文档 I/O 可能仍在等待，监听端口不能跟着排队，否则新服务会撞上旧服务的 2425。
+            if(old!=null)old.stopListening();
             // 先使全部旧任务失效，再在队列末尾关闭节点/数据库；不能先读取 null 再让排队任务打开端口。
             io.execute(()->{ try { if(old!=null) old.close(); } finally { try { store.recoverPending(); } finally { store.close(); } } }); io.shutdown();
         }

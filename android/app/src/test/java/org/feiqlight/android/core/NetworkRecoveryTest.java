@@ -47,6 +47,7 @@ public final class NetworkRecoveryTest {
                 LanNode node=new LanNode(port,true,"startup","host","启动恢复","组",events);
                 DatagramSocket remote=new DatagramSocket(0,InetAddress.getLoopbackAddress())) {
                 node.start();assertFalse(node.networkAvailable());assertTrue(node.networkStatus().contains("正在重试"));
+                assertTrue("端口错误应标明失败协议："+node.networkStatus(),node.networkStatus().contains(blockTcp?"TCP":"UDP"));
                 if(tcp!=null)tcp.close();if(udp!=null)udp.close();
                 await(node::networkAvailable);
                 announce(remote,port);await(()->!node.peers().isEmpty());assertTrue(node.peers().get(0).online);
@@ -62,6 +63,52 @@ public final class NetworkRecoveryTest {
             assertTrue(((ScheduledExecutorService)field(node,"timer")).isShutdown());
             try(ServerSocket available=new ServerSocket(port,1,InetAddress.getLoopbackAddress());DatagramSocket udp=new DatagramSocket(port,InetAddress.getLoopbackAddress())) {
                 assertFalse(node.networkAvailable());
+            }
+        }
+    }
+    @Test public void shutdownDuringUdpBindingReleasesPortsBeforeBackgroundCleanup()throws Exception {
+        Events events=new Events();int port=port();ExecutorService worker=Executors.newSingleThreadExecutor();
+        CountDownLatch binding=new CountDownLatch(1),release=new CountDownLatch(1);
+        try(LanNode node=new LanNode(port,false,"closing-bind","host","关闭绑定","",events)) {
+            node.setSocketBinding(new LanNode.SocketBinding() {
+                public void bind(DatagramSocket socket)throws IOException {
+                    binding.countDown();
+                    try{if(!release.await(5,TimeUnit.SECONDS))throw new IOException("测试绑定未放行");}
+                    catch(InterruptedException error){Thread.currentThread().interrupt();throw new IOException(error);}
+                }
+                public void bind(Socket socket){fail("测试不能连接真实网卡");}
+                public boolean allows(InetAddress address){return address.isLoopbackAddress();}
+                public Collection<InetAddress> broadcasts(){return Collections.emptyList();}
+            });
+            Future<?> startup=worker.submit(()->{node.start();return null;});assertTrue(binding.await(3,TimeUnit.SECONDS));
+            DatagramSocket old=(DatagramSocket)field(node,"udp");node.stopListening();
+            try(ServerSocket replacement=new ServerSocket(port,1,InetAddress.getLoopbackAddress());
+                DatagramSocket udp=new DatagramSocket(port,InetAddress.getLoopbackAddress())) {
+                assertEquals("释放端口不能等待旧网络 Binder 返回",1,release.getCount());assertTrue(old.isClosed());
+                release.countDown();startup.get(3,TimeUnit.SECONDS);node.close();node.close();
+                assertFalse(node.networkAvailable());assertFalse(replacement.isClosed());assertFalse(udp.isClosed());
+                assertTrue(((ScheduledExecutorService)field(node,"timer")).isShutdown());
+                assertTrue(((ExecutorService)field(node,"fileWorkers")).isShutdown());
+                assertTrue(events.errors.toString(),events.errors.isEmpty());
+            }
+        } finally {release.countDown();worker.shutdownNow();}
+    }
+    @Test public void tcpDiscoveryCanRestartImmediatelyOnSamePort()throws Exception {
+        int port=port();InetAddress loop=InetAddress.getLoopbackAddress();
+        try(DatagramSocket remote=new DatagramSocket(0,loop)) {
+            for(int i=0;i<3;i++)try(LanNode node=new LanNode(port,true,"restart","host","重开测试","",new Events())) {
+                node.start();assertTrue(node.networkStatus(),node.networkAvailable());
+                ((ScheduledExecutorService)field(node,"timer")).shutdownNow();
+                try(Socket client=new Socket(loop,port)) {
+                    client.setSoTimeout(2000);client.getOutputStream().write(new byte[]{'F','Q','D','\n'});
+                    ByteArrayOutputStream wire=new ByteArrayOutputStream();
+                    wire.write(Protocol.encode(1,"remote","host",Protocol.ENTRY|Protocol.UTF8,"远端",""));
+                    wire.write(("FQPORT="+remote.getLocalPort()+"\0").getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+                    SecureIdentity.writeFrame(client.getOutputStream(),wire.toByteArray());
+                    assertEquals(Protocol.ANSWER,Protocol.parse(SecureIdentity.readFrame(client.getInputStream(),60000)).mode());
+                    // 接收服务端先关闭的 FIN，Linux 上会留下占用监听地址的 TIME_WAIT。
+                    assertEquals(-1,client.getInputStream().read());
+                }
             }
         }
     }
