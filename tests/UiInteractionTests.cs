@@ -208,6 +208,19 @@ namespace FeiqLight.Tests
                         Check(editor.Text=="搜索定位保留的草稿","定位改写草稿");Render(main,"search-navigation-"+expected.Outgoing);
                     }
                     ChatRecord wrongPeer=new ChatRecord {PeerId="other",Packet=21};Check(!main.ActiveChat.LocateMessage(wrongPeer),"跨会话相同编号被错误定位");
+                    using(HistoryDialog pages=new HistoryDialog(store,peer)) {
+                        pages.Show();Pump(50);
+                        Label count=All(pages).OfType<Label>().Single(label=>label.AccessibleName=="聊天记录搜索结果");
+                        Check(count.Text.Contains("第 1 / 4 页"),"没有显示当前页与总页数");
+                        All(pages).OfType<Button>().Single(button=>button.AccessibleName=="第 3 页").PerformClick();
+                        Check(count.Text.Contains("第 3 / 4 页"),"点击页码没有直达第 3 页");
+                        NumericUpDown destination=All(pages).OfType<NumericUpDown>().Single();destination.Value=4;
+                        All(pages).OfType<Button>().Single(button=>button.Text=="跳转").PerformClick();
+                        Check(count.Text.Contains("第 4 / 4 页"),"输入页码没有直达末页");
+                        pages.Size=pages.MinimumSize;Pump(30);Render(pages,"numbered-history-pages");
+                        All(pages).OfType<TextBox>().Single(control=>control.AccessibleName=="搜索聊天记录").Text="定位目标关键词";
+                        Check(count.Text.Contains("第 1 / 1 页"),"更换关键词后没有回到第 1 页");pages.Close();
+                    }
                     for(int number=1000;number<1600;number++)store.Append(new ChatRecord {PeerId=peer.Id,Packet=number,Text=new string('a',7400),State="已收到"});
                     ChatRecord oldest=records.First();
                     var matches=store.ReadArchive(peer.Id,"定位目标关键词",0,null,System.Threading.CancellationToken.None);

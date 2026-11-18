@@ -38,10 +38,16 @@ public final class SettingsMessageTest {
             assertEquals(10006,android.database.DatabaseUtils.queryNumEntries(store.getReadableDatabase(),"messages"));
             LanNode.Message first=store.findMessage(peer.id(),1,false);assertNotNull(first);
             assertEquals(1,store.historyAround(peer.id(),first).get(0).number);
-            ChatStore.HistoryPage recent=store.search(peer.id(),"分页",null,()->true);
-            ChatStore.HistoryPage older=store.search(peer.id(),"分页",recent.older,()->true);
+            ChatStore.HistoryPage recent=store.search(peer.id(),"分页",1,null,()->true);
+            ChatStore.HistoryPage older=store.search(peer.id(),"分页",2,recent.index,()->true);
             assertEquals(100,recent.rows.size());assertEquals(100,older.rows.size());
             assertEquals(10005,recent.rows.get(99).number);assertEquals(9905,older.rows.get(99).number);
+            assertEquals(101,recent.index.pageCount());assertEquals(10005,recent.index.total);
+            ChatStore.HistoryPage last=store.search(peer.id(),"分页",101,recent.index,()->true);
+            assertEquals(5,last.rows.size());assertEquals(1,last.rows.get(0).number);assertSame(recent.index,last.index);
+            ChatStore.HistoryPage middle=store.search(peer.id(),"",37,null,()->true);
+            assertEquals(10006,middle.index.total);assertTrue(middle.index.matches.isEmpty());assertEquals(6406,middle.rows.get(99).number);
+            ChatStore.HistoryPage empty=store.search(peer.id(),"没有命中的关键词",1,null,()->true);assertEquals(0,empty.index.pageCount());assertTrue(empty.rows.isEmpty());
             store.deleteMessages(peer.id(),Collections.singletonList(first));assertTrue(store.historyAround(peer.id(),first).isEmpty());
         }
     }

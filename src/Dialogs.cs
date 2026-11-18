@@ -575,15 +575,22 @@ namespace FeiqLight
             BubbleHistory body = new BubbleHistory { Dock = DockStyle.Fill, Margin = new Padding(10), BackColor = Theme.Wallpaper, RecordLimit=500, CharacterLimit=Int32.MaxValue };
             body.RecordActivated += delegate(ChatRecord record) {LocatedRecord=record;DialogResult=DialogResult.OK;};
             Panel frame = new Panel { Dock = DockStyle.Fill, Padding = new Padding(10, 0, 10, 10), BackColor = Theme.Wallpaper }; frame.Controls.Add(body); Surface.Controls.Add(frame); Surface.Controls.Add(top);
-            FlowLayoutPanel pages=new FlowLayoutPanel {Dock=DockStyle.Bottom, Height=44, Visible=false, BackColor=Theme.Surface};
-            int page=0;Action render=null;
-            Button older=Theme.Button("更早记录",delegate {page++;render();},false);
-            Button newer=Theme.Button("更新记录",delegate {page--;render();},false);
-            pages.Controls.Add(older);pages.Controls.Add(newer);Surface.Controls.Add(pages);
+            FlowLayoutPanel pages=new FlowLayoutPanel {Dock=DockStyle.Bottom, Height=48, Padding=new Padding(16,4,0,4), WrapContents=false, Visible=false, BackColor=Theme.Surface};
+            FlowLayoutPanel numbers=new FlowLayoutPanel {AutoSize=true,WrapContents=false,Margin=Padding.Empty};pages.Controls.Add(numbers);
+            int page=0,totalPages=0;Action render=null;
+            NumericUpDown destination=new NumericUpDown {Minimum=1,Maximum=1,Value=1,Width=72,Font=Theme.Body,TextAlign=HorizontalAlignment.Center,AccessibleName="跳转页码",Margin=new Padding(12,7,4,0),BackColor=Theme.Surface,ForeColor=Theme.Ink};
+            Action jump=delegate {
+                int requested;
+                if(!Int32.TryParse(destination.Text,out requested)||requested<1||requested>totalPages){summary.Text="请输入 1 至 "+totalPages+" 的页码";destination.Focus();destination.Select(0,destination.Text.Length);return;}
+                page=requested-1;render();
+            };
+            Button go=Theme.Button("跳转",delegate {jump();},false);go.Width=64;go.Height=32;
+            destination.KeyDown+=delegate(object sender,KeyEventArgs key){if(key.KeyCode==Keys.Enter){key.SuppressKeyPress=true;jump();}};
+            pages.Controls.Add(destination);pages.Controls.Add(go);Surface.Controls.Add(pages);
             render=async delegate {
                 if(reading!=null)reading.Cancel();
                 var request=new System.Threading.CancellationTokenSource();reading=request;
-                string query=input.Input.Text;int wanted=page;older.Enabled=newer.Enabled=false;
+                string query=input.Input.Text;int wanted=page;pages.Enabled=false;
                 try {
                     LocalStore.ArchivePage found;
                     if(store.LargeHistory(peer.Id)) {
@@ -592,9 +599,16 @@ namespace FeiqLight
                     } else found=store.ReadArchive(peer.Id,query,wanted,null,request.Token);
                     if(request.IsCancellationRequested || IsDisposed)return;
                     page=found.Page;body.SetRecords(found.Records,query);
-                    newer.Enabled=page>0;older.Enabled=((long)page+1)*LocalStore.ArchivePage.Size<found.Total;
-                    pages.Visible=older.Enabled||newer.Enabled;
-                    summary.Text=(query.Length==0?"共 ":"找到 ")+found.Total+" 条"+(query.Length==0?"记录":"匹配记录")+(pages.Visible?" · 第 "+(page+1)+" 页":"");
+                    totalPages=found.Total==0?0:(found.Total-1)/LocalStore.ArchivePage.Size+1;
+                    while(numbers.Controls.Count>0)numbers.Controls[0].Dispose();
+                    int first=Math.Max(1,Math.Min(page,totalPages-2));
+                    for(int number=first;number<=Math.Min(totalPages,first+2);number++) {
+                        int chosen=number;
+                        Button pick=Theme.Button(number.ToString(),delegate {if(page!=chosen-1){page=chosen-1;render();}},chosen==page+1);
+                        pick.AccessibleName="第 "+number+" 页";pick.Width=Math.Max(40,TextRenderer.MeasureText(pick.Text,pick.Font).Width+12);pick.Height=32;numbers.Controls.Add(pick);
+                    }
+                    destination.Maximum=Math.Max(1,totalPages);destination.Value=page+1;pages.Enabled=true;pages.Visible=totalPages>1;
+                    summary.Text=(query.Length==0?"共 ":"找到 ")+found.Total+" 条"+(query.Length==0?"记录":"匹配记录")+(totalPages==0?"":" · 第 "+(page+1)+" / "+totalPages+" 页");
                 } catch(OperationCanceledException) { }
                 catch(Exception error){if(!request.IsCancellationRequested && !IsDisposed){body.SetRecords(new ChatRecord[0]);summary.Text="读取失败："+error.Message;}}
                 finally{if(reading==request)reading=null;request.Dispose();}

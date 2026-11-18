@@ -66,8 +66,18 @@ public final class UiTest {
             EditText editor=(EditText)field(activity,"editor");editor.setText("搜索定位保留草稿");View root=(View)field(activity,"root");measure(root,786,1704,true);
             for(boolean outgoing:new boolean[]{true,false}) {
                 invoke(activity,"showHistory",ChatStore.Conversation.class,service.conversations().get(0));settle(service);dialog=(android.app.Dialog)field(activity,"historyDialog");
-                View decor=dialog.getWindow().getDecorView();EditText input=(EditText)descendants(decor).stream().filter(view->"搜索聊天记录".contentEquals(view.getContentDescription()==null?"":view.getContentDescription())).findFirst().get();input.setText("定位目标关键词");settle(service);
-                ListView results=(ListView)descendants(decor).stream().filter(view->view instanceof ListView).findFirst().get();assertEquals(2,results.getCount());
+                View decor=dialog.getWindow().getDecorView();EditText input=(EditText)descendants(decor).stream().filter(view->"搜索聊天记录".contentEquals(view.getContentDescription()==null?"":view.getContentDescription())).findFirst().get();
+                ListView results=(ListView)descendants(decor).stream().filter(view->view instanceof ListView).findFirst().get();
+                EditText pageNumber=(EditText)descendants(decor).stream().filter(view->"跳转页码".equals(view.getContentDescription())).findFirst().get();
+                Button jump=(Button)descendants(decor).stream().filter(view->view instanceof Button && "跳转".contentEquals(((Button)view).getText())).findFirst().get();
+                TextView summary=(TextView)descendants(decor).stream().filter(view->"聊天记录搜索结果".equals(view.getContentDescription())).findFirst().get();
+                assertTrue(summary.getText().toString().contains("第 1 / 6 页"));
+                descendants(decor).stream().filter(view->"第 3 页".equals(view.getContentDescription())).findFirst().get().performClick();settle(service);
+                assertTrue(summary.getText().toString().contains("第 3 / 6 页"));assertEquals(160,((LanNode.Message)results.getItemAtPosition(99)).number);
+                pageNumber.setText("7");jump.performClick();assertNotNull(pageNumber.getError());
+                pageNumber.setText("6");jump.performClick();settle(service);assertTrue(summary.getText().toString().contains("第 6 / 6 页"));assertEquals(20,results.getCount());
+                dialogScreenshot(dialog,"android-numbered-pages-"+outgoing);
+                input.setText("定位目标关键词");settle(service);assertEquals(2,results.getCount());assertTrue(summary.getText().toString().contains("第 1 / 1 页"));
                 measure(decor,786,1440,true);View item=results.getChildAt(outgoing?0:1);assertNotNull(item);
                 long down=android.os.SystemClock.uptimeMillis();float tapX=results.getWidth()*.7f,tapY=item.getBottom()-2;
                 for(int action:new int[]{MotionEvent.ACTION_DOWN,MotionEvent.ACTION_UP}) {

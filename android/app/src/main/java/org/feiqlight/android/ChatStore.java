@@ -154,13 +154,18 @@ final class ChatStore extends SQLiteOpenHelper {
     }
     private static final String MESSAGE_COLUMNS="packet,outgoing,time,text,state,files,local_files,id";
     static final int HISTORY_PAGE_SIZE=100;
-    static final class HistoryCursor {
-        final long time,id;
-        HistoryCursor(long time,long id){this.time=time;this.id=id;}
+    static final class HistoryIndex {
+        final long lastId,sourceCount;
+        long total;
+        final List<long[]> matches=new ArrayList<>();
+        HistoryIndex(long lastId,long sourceCount){this.lastId=lastId;this.sourceCount=sourceCount;}
+        int pageCount(){return total==0?0:(int)((total-1)/HISTORY_PAGE_SIZE+1);}
     }
     static final class HistoryPage {
+        final HistoryIndex index;
+        final int number;
         final List<LanNode.Message> rows=new ArrayList<>();
-        HistoryCursor older;
+        HistoryPage(HistoryIndex index,int number){this.index=index;this.number=number;}
     }
     private static LanNode.Message messageAt(Cursor cursor) {
         LanNode.Message message=new LanNode.Message();
@@ -202,25 +207,45 @@ final class ChatStore extends SQLiteOpenHelper {
         }
         return rows;
     }
-    HistoryPage search(String peer,String query,HistoryCursor before,java.util.function.BooleanSupplier current) {
-        HistoryPage page=new HistoryPage();
-        HistoryCursor oldestMatch=null,scan=before;
-        final int batchSize=HISTORY_PAGE_SIZE+1;
-        while(current.getAsBoolean()) {
-            String where=scan==null?"peer=?":"peer=? AND (time,id)<(?,?)";
-            String[] arguments=scan==null?new String[]{peer}:new String[]{peer,Long.toString(scan.time),Long.toString(scan.id)};
-            String sql="SELECT "+MESSAGE_COLUMNS+" FROM messages WHERE "+where+" ORDER BY time DESC,id DESC LIMIT "+batchSize;
-            int scanned=0;
-            try(Cursor cursor=getReadableDatabase().rawQuery(sql,arguments)) {
-                while(current.getAsBoolean() && cursor.moveToNext()) {
-                    scanned++;
-                    scan=new HistoryCursor(cursor.getLong(2),cursor.getLong(7));
-                    if(!contains(cursor.getString(3),query) && Protocol.parseStoredFiles(cursor.getString(5)).stream().noneMatch(file->contains(file.name,query)))continue;
-                    if(page.rows.size()==HISTORY_PAGE_SIZE){page.older=oldestMatch;break;}
-                    page.rows.add(messageAt(cursor));oldestMatch=scan;
+    HistoryPage search(String peer,String query,int wanted,HistoryIndex index,java.util.function.BooleanSupplier current) {
+        SQLiteDatabase database=getReadableDatabase();
+        long lastId=index==null?DatabaseUtils.longForQuery(database,"SELECT coalesce(max(id),0) FROM messages",null):index.lastId;
+        String[] scope={peer,Long.toString(lastId)};
+        long sourceCount=DatabaseUtils.longForQuery(database,"SELECT count(*) FROM messages WHERE peer=? AND id<=?",scope);
+        if(index==null || index.sourceCount!=sourceCount) {
+            index=new HistoryIndex(lastId,sourceCount);
+            if(query.isEmpty())index.total=sourceCount;
+            else {
+                String sql="SELECT id,text,files FROM messages WHERE peer=? AND id<=? ORDER BY time DESC,id DESC";
+                try(Cursor cursor=database.rawQuery(sql,scope)) {
+                    while(current.getAsBoolean() && cursor.moveToNext()) {
+                        if(!contains(cursor.getString(1),query) && Protocol.parseStoredFiles(cursor.getString(2)).stream().noneMatch(file->contains(file.name,query)))continue;
+                        int offset=(int)(index.total%HISTORY_PAGE_SIZE);
+                        if(offset==0)index.matches.add(new long[HISTORY_PAGE_SIZE]);
+                        index.matches.get(index.matches.size()-1)[offset]=cursor.getLong(0);
+                        index.total++;
+                    }
                 }
             }
-            if(scanned<batchSize || page.older!=null)break;
+        }
+        int number=Math.max(1,Math.min(wanted,index.pageCount()));
+        HistoryPage page=new HistoryPage(index,number);
+        if(!current.getAsBoolean() || index.total==0)return page;
+        long start=(long)(number-1)*HISTORY_PAGE_SIZE;
+        String select="SELECT "+MESSAGE_COLUMNS+" FROM messages WHERE peer=? AND ";
+        String sql;
+        List<String> arguments=new ArrayList<>();arguments.add(peer);
+        if(query.isEmpty()) {
+            sql=select+"id<=? ORDER BY time DESC,id DESC LIMIT ? OFFSET ?";
+            arguments.add(scope[1]);arguments.add(Integer.toString(HISTORY_PAGE_SIZE));arguments.add(Long.toString(start));
+        } else {
+            long[] ids=index.matches.get(number-1);
+            int length=(int)Math.min(HISTORY_PAGE_SIZE,index.total-start);
+            sql=select+"id IN ("+String.join(",",java.util.Collections.nCopies(length,"?"))+") ORDER BY time DESC,id DESC";
+            for(int position=0;position<length;position++)arguments.add(Long.toString(ids[position]));
+        }
+        try(Cursor cursor=database.rawQuery(sql,arguments.toArray(new String[0]))) {
+            while(current.getAsBoolean() && cursor.moveToNext())page.rows.add(messageAt(cursor));
         }
         java.util.Collections.reverse(page.rows);return page;
     }

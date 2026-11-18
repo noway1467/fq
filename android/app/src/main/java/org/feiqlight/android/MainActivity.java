@@ -876,8 +876,13 @@ public final class MainActivity extends Activity implements ChatService.Observer
         EditText input=new EditText(this);configureInput(input);input.setSingleLine();input.setTextSize(15);input.setTextColor(INK);input.setHintTextColor(MUTED);input.setHint("搜索消息或文件名");input.setContentDescription("搜索聊天记录");input.setBackground(shape(PALE,CONTROL_RADIUS));input.setPadding(dp(14),dp(10),dp(14),dp(10));input.setFilters(new InputFilter[]{new InputFilter.LengthFilter(200)});frame.addView(input,new LinearLayout.LayoutParams(-1,-2));
         TextView count=text("正在读取聊天记录…",12,MUTED);count.setContentDescription("聊天记录搜索结果");count.setPadding(0,dp(10),0,dp(10));frame.addView(count);
         ListView results=new ListView(this);results.setContentDescription("聊天记录搜索列表");results.setDivider(null);results.setBackgroundColor(WALL);frame.addView(results,new LinearLayout.LayoutParams(-1,0,1));
-        LinearLayout navigation=row();Button older=button("更早记录",false),newer=button("更新记录",false);
-        navigation.addView(older,weight());navigation.addView(newer,weight());frame.addView(navigation);navigation.setVisibility(View.GONE);
+        LinearLayout navigation=row();navigation.setGravity(Gravity.CENTER_VERTICAL);frame.addView(navigation);navigation.setVisibility(View.GONE);
+        LinearLayout numbers=row();navigation.addView(numbers,new LinearLayout.LayoutParams(0,-2,1));
+        EditText destination=new EditText(this);configureInput(destination);destination.setSingleLine();destination.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+        destination.setContentDescription("跳转页码");destination.setHint("页码");destination.setTextColor(INK);destination.setHintTextColor(MUTED);
+        destination.setSelectAllOnFocus(true);destination.setTextSize(14);destination.setGravity(Gravity.CENTER);destination.setPadding(dp(4),0,dp(4),0);
+        destination.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_GO);navigation.addView(destination,new LinearLayout.LayoutParams(dp(60),dp(48)));
+        Button jump=button("跳转",false);jump.setMinWidth(0);jump.setPadding(dp(8),0,dp(8),0);navigation.addView(jump,new LinearLayout.LayoutParams(dp(56),dp(48)));
         List<LanNode.Message> matches=new ArrayList<>();
         java.util.concurrent.atomic.AtomicLong revision=new java.util.concurrent.atomic.AtomicLong();
         BaseAdapter adapter=new BaseAdapter() {
@@ -899,28 +904,41 @@ public final class MainActivity extends Activity implements ChatService.Observer
             }
         };results.setAdapter(adapter);
         class Pages {
-            final List<ChatStore.HistoryCursor> starts=new ArrayList<>();
-            ChatStore.HistoryCursor next;
-            void load() {
+            ChatStore.HistoryIndex index;
+            void load(int wanted) {
                 long request=revision.incrementAndGet();String query=input.getText().toString();
-                matches.clear();adapter.notifyDataSetChanged();count.setText("正在读取聊天记录…");older.setEnabled(false);newer.setEnabled(false);
-                ChatStore.HistoryCursor start=starts.isEmpty()?null:starts.get(starts.size()-1);
-                source.searchHistory(conversation.peer.id(),query,start,()->revision.get()==request,found->{
+                matches.clear();adapter.notifyDataSetChanged();count.setText("正在读取聊天记录…");navigation.setVisibility(View.GONE);
+                source.searchHistory(conversation.peer.id(),query,wanted,index,()->revision.get()==request,found->{
                     if(historyDialog!=dialog||!dialog.isShowing()||!visible||service!=source||generation!=editorGeneration||!page.equals(selected))return;
-                    matches.addAll(found.rows);next=found.older;adapter.notifyDataSetChanged();results.setSelection(0);
-                    boolean paged=next!=null||!starts.isEmpty();
-                    count.setText((paged?"第 "+(starts.size()+1)+" 页 · ":"")+matches.size()+(query.isEmpty()?" 条记录":" 条匹配记录"));
-                    navigation.setVisibility(paged?View.VISIBLE:View.GONE);older.setEnabled(next!=null);newer.setEnabled(!starts.isEmpty());
+                    matches.addAll(found.rows);index=found.index;adapter.notifyDataSetChanged();results.setSelection(0);
+                    int total=index.pageCount();count.setText(index.total+(query.isEmpty()?" 条记录":" 条匹配记录")+(total==0?"":" · 第 "+found.number+" / "+total+" 页"));
+                    numbers.removeAllViews();destination.setText("");destination.setError(null);
+                    int first=Math.max(1,Math.min(found.number-1,total-2));
+                    for(int number=first;number<=Math.min(total,first+2);number++) {
+                        final int chosen=number;boolean active=number==found.number;
+                        Button pick=button(Integer.toString(number),active);pick.setMinWidth(0);pick.setMinimumWidth(0);pick.setSingleLine();pick.setTextSize(14);pick.setPadding(dp(2),0,dp(2),0);
+                        pick.setContentDescription("第 "+number+" 页");pick.setSelected(active);pick.setOnClickListener(view->{if(!active)load(chosen);});
+                        LinearLayout.LayoutParams slot=new LinearLayout.LayoutParams(0,dp(48),1);slot.rightMargin=dp(4);numbers.addView(pick,slot);
+                    }
+                    navigation.setVisibility(total>1?View.VISIBLE:View.GONE);
                 },count::setText);
             }
+            void jump() {
+                if(index==null)return;
+                int wanted;
+                try {wanted=Integer.parseInt(destination.getText().toString());}catch(NumberFormatException invalid){wanted=0;}
+                if(wanted<1 || wanted>index.pageCount()){destination.setError("请输入 1 至 "+index.pageCount()+" 的页码");destination.requestFocus();return;}
+                getSystemService(InputMethodManager.class).hideSoftInputFromWindow(destination.getWindowToken(),0);
+                load(wanted);
+            }
         }
-        Pages pages=new Pages();older.setOnClickListener(view->{pages.starts.add(pages.next);pages.load();});
-        newer.setOnClickListener(view->{pages.starts.remove(pages.starts.size()-1);pages.load();});
-        input.addTextChangedListener(new TextWatcher(){public void beforeTextChanged(CharSequence s,int start,int count,int after){}public void onTextChanged(CharSequence s,int start,int before,int count){pages.starts.clear();pages.load();}public void afterTextChanged(Editable value){}});
+        Pages pages=new Pages();jump.setOnClickListener(view->pages.jump());
+        destination.setOnEditorActionListener((view,action,event)->{if(action!=android.view.inputmethod.EditorInfo.IME_ACTION_GO)return false;pages.jump();return true;});
+        input.addTextChangedListener(new TextWatcher(){public void beforeTextChanged(CharSequence s,int start,int count,int after){}public void onTextChanged(CharSequence s,int start,int before,int count){pages.index=null;pages.load(1);}public void afterTextChanged(Editable value){}});
         dialog.setOnDismissListener(d->{revision.incrementAndGet();finishSelection();if(historyDialog==dialog)historyDialog=null;});
         dialog.setContentView(frame);Window window=dialog.getWindow();if(window!=null){window.setBackgroundDrawableResource(android.R.color.transparent);window.setGravity(Gravity.BOTTOM);window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);SystemBars.applyOverlay(window,DARK);}
         dialog.show();if(window!=null){window.setLayout(-1,Math.max(dp(240),(int)(getResources().getDisplayMetrics().heightPixels*.85f)));SystemBars.applyOverlay(window,DARK);}
-        pages.load();
+        pages.load(1);
     }
     private void deleteConversation(ChatStore.Conversation c,boolean clearOnly) {
         LinearLayout box=column();TextView hint=text("仅影响本机，不删除已接收的文件。删除列表不是屏蔽，新消息会恢复会话入口。",14,MUTED);box.addView(hint);

@@ -365,12 +365,12 @@ public final class ChatService extends Service {
     void historyAround(String peer,LanNode.Message target,Consumer<List<LanNode.Message>> result) {
         queue(()->{List<LanNode.Message> rows=store.historyAround(peer,target);main.post(()->result.accept(rows));});
     }
-    void searchHistory(String peer,String query,ChatStore.HistoryCursor before,java.util.function.BooleanSupplier current,Consumer<ChatStore.HistoryPage> result,Consumer<String> error) {
+    void searchHistory(String peer,String query,int number,ChatStore.HistoryIndex index,java.util.function.BooleanSupplier current,Consumer<ChatStore.HistoryPage> result,Consumer<String> error) {
         if(stopped)return;
         archive.execute(()->{
             if(!current.getAsBoolean() || stopped)return;
             try(ChatStore reader=new ChatStore(this)) {
-                ChatStore.HistoryPage page=reader.search(peer,query,before,()->!stopped && current.getAsBoolean());
+                ChatStore.HistoryPage page=reader.search(peer,query,number,index,()->!stopped && current.getAsBoolean());
                 main.post(()->{if(!stopped && current.getAsBoolean())result.accept(page);});
             } catch(RuntimeException failure){main.post(()->{if(!stopped && current.getAsBoolean())error.accept("读取聊天记录失败："+failure.getMessage());});}
         });
