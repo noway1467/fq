@@ -99,9 +99,6 @@ final class ChatStore extends SQLiteOpenHelper {
                 String preview=m.text.isEmpty() && !m.files.isEmpty()?"[文件] "+m.files.get(0).name:m.text;
                 db.execSQL("UPDATE peers SET preview=?, time=?, unread=unread+?, hidden=0 WHERE id=?",new Object[]{preview,m.time,(!m.outgoing&&!visible)?1:0,p.id()});
             }
-            // 本版保留每个联系人最近 500 条、全局最近 10000 条，不伪装成无限归档。
-            db.execSQL("DELETE FROM messages WHERE peer=? AND id NOT IN (SELECT id FROM messages WHERE peer=? ORDER BY time DESC,id DESC LIMIT 500)",new Object[]{p.id(),p.id()});
-            db.execSQL("DELETE FROM messages WHERE id NOT IN (SELECT id FROM messages ORDER BY time DESC,id DESC LIMIT 10000)");
             db.setTransactionSuccessful();
             return inserted;
         } finally { db.endTransaction(); }
@@ -155,12 +152,80 @@ final class ChatStore extends SQLiteOpenHelper {
         for(Conversation item:result)item.duplicateName=counts.get(item.baseDisplayName().trim().toLowerCase(Locale.ROOT))>1;
         return result;
     }
+    private static final String MESSAGE_COLUMNS="packet,outgoing,time,text,state,files,local_files,id";
+    static final int HISTORY_PAGE_SIZE=100;
+    static final class HistoryCursor {
+        final long time,id;
+        HistoryCursor(long time,long id){this.time=time;this.id=id;}
+    }
+    static final class HistoryPage {
+        final List<LanNode.Message> rows=new ArrayList<>();
+        HistoryCursor older;
+    }
+    private static LanNode.Message messageAt(Cursor cursor) {
+        LanNode.Message message=new LanNode.Message();
+        message.number=cursor.getLong(0);message.outgoing=cursor.getInt(1)!=0;message.time=cursor.getLong(2);
+        message.text=cursor.getString(3);message.state=cursor.getString(4);message.files=Protocol.parseStoredFiles(cursor.getString(5));
+        if(message.outgoing)try {
+            org.json.JSONArray paths=new org.json.JSONArray(cursor.getString(6));
+            for(int index=0;index<paths.length();index++)message.localPaths.add(paths.getString(index));
+        } catch(org.json.JSONException ignored){message.localPaths.clear();}
+        return message;
+    }
     List<LanNode.Message> history(String peer) {
-        List<LanNode.Message> result=new ArrayList<>();
-        try (Cursor c=getReadableDatabase().rawQuery("SELECT packet,outgoing,time,text,state,files,local_files FROM (SELECT * FROM messages WHERE peer=? ORDER BY time DESC,id DESC LIMIT 200) ORDER BY time,id",new String[]{peer})) {
-            while(c.moveToNext()) { LanNode.Message m=new LanNode.Message(); m.number=c.getLong(0); m.outgoing=c.getInt(1)!=0; m.time=c.getLong(2); m.text=c.getString(3); m.state=c.getString(4); m.files=Protocol.parseStoredFiles(c.getString(5));
-                if(m.outgoing)try {org.json.JSONArray paths=new org.json.JSONArray(c.getString(6));for(int i=0;i<paths.length();i++)m.localPaths.add(paths.getString(i));}catch(org.json.JSONException ignored){m.localPaths.clear();}
-                result.add(m); }
-        } return result;
+        List<LanNode.Message> rows=new ArrayList<>();
+        try(Cursor cursor=getReadableDatabase().rawQuery("SELECT "+MESSAGE_COLUMNS+" FROM messages WHERE peer=? ORDER BY time DESC,id DESC LIMIT 200",new String[]{peer})) {
+            while(cursor.moveToNext())rows.add(messageAt(cursor));
+        }
+        java.util.Collections.reverse(rows);return rows;
+    }
+    LanNode.Message findMessage(String peer,long packet,boolean outgoing) {
+        try(Cursor cursor=getReadableDatabase().rawQuery("SELECT "+MESSAGE_COLUMNS+" FROM messages WHERE peer=? AND packet=? AND outgoing=?",new String[]{peer,Long.toString(packet),outgoing?"1":"0"})) {
+            return cursor.moveToFirst()?messageAt(cursor):null;
+        }
+    }
+    List<LanNode.Message> historyAround(String peer,LanNode.Message target) {
+        SQLiteDatabase database=getReadableDatabase();long time,rowId;
+        try(Cursor cursor=database.rawQuery("SELECT time,id FROM messages WHERE peer=? AND packet=? AND outgoing=?",new String[]{peer,Long.toString(target.number),target.outgoing?"1":"0"})) {
+            if(!cursor.moveToFirst())return new ArrayList<>();
+            time=cursor.getLong(0);rowId=cursor.getLong(1);
+        }
+        String[] key={peer,Long.toString(time),Long.toString(time),Long.toString(rowId)};
+        List<LanNode.Message> rows=new ArrayList<>();
+        String select="SELECT "+MESSAGE_COLUMNS+" FROM messages WHERE peer=? AND ";
+        try(Cursor cursor=database.rawQuery(select+"(time<? OR (time=? AND id<=?)) ORDER BY time DESC,id DESC LIMIT 100",key)) {
+            while(cursor.moveToNext())rows.add(messageAt(cursor));
+        }
+        java.util.Collections.reverse(rows);
+        try(Cursor cursor=database.rawQuery(select+"(time>? OR (time=? AND id>?)) ORDER BY time,id LIMIT 100",key)) {
+            while(cursor.moveToNext())rows.add(messageAt(cursor));
+        }
+        return rows;
+    }
+    HistoryPage search(String peer,String query,HistoryCursor before,java.util.function.BooleanSupplier current) {
+        HistoryPage page=new HistoryPage();
+        HistoryCursor oldestMatch=null,scan=before;
+        final int batchSize=HISTORY_PAGE_SIZE+1;
+        while(current.getAsBoolean()) {
+            String where=scan==null?"peer=?":"peer=? AND (time,id)<(?,?)";
+            String[] arguments=scan==null?new String[]{peer}:new String[]{peer,Long.toString(scan.time),Long.toString(scan.id)};
+            String sql="SELECT "+MESSAGE_COLUMNS+" FROM messages WHERE "+where+" ORDER BY time DESC,id DESC LIMIT "+batchSize;
+            int scanned=0;
+            try(Cursor cursor=getReadableDatabase().rawQuery(sql,arguments)) {
+                while(current.getAsBoolean() && cursor.moveToNext()) {
+                    scanned++;
+                    scan=new HistoryCursor(cursor.getLong(2),cursor.getLong(7));
+                    if(!contains(cursor.getString(3),query) && Protocol.parseStoredFiles(cursor.getString(5)).stream().noneMatch(file->contains(file.name,query)))continue;
+                    if(page.rows.size()==HISTORY_PAGE_SIZE){page.older=oldestMatch;break;}
+                    page.rows.add(messageAt(cursor));oldestMatch=scan;
+                }
+            }
+            if(scanned<batchSize || page.older!=null)break;
+        }
+        java.util.Collections.reverse(page.rows);return page;
+    }
+    static boolean contains(String value,String query) {
+        for(int index=0;index<=value.length()-query.length();index++)if(value.regionMatches(true,index,query,0,query.length()))return true;
+        return false;
     }
 }

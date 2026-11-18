@@ -674,8 +674,11 @@ namespace FeiqLight.Tests
                         byte[] entry = Protocol.Encode(1, "silent", "test", Protocol.Entry | Protocol.Utf8, Protocol.Field("静默节点"), null, null);
                         silent.Send(entry, entry.Length, Endpoint(portA));
                         Wait(() => a.Peers.Any(p => p.Login == "silent" && p.Online), "静默节点未出现在线列表", 3000);
-                        idleField.SetValue(a,TimeSpan.FromMilliseconds(100));retryField.SetValue(a,TimeSpan.FromMilliseconds(50));missesField.SetValue(a,1);
-                        Wait(() => !a.Peers.Single(p => p.Login == "silent").Online, "静默节点长期假在线", 8000);
+                        idleField.SetValue(a,TimeSpan.FromMilliseconds(100));retryField.SetValue(a,TimeSpan.FromMilliseconds(300));missesField.SetValue(a,1);
+                        Peer silentPeer=a.Peers.Single(peer=>peer.Login=="silent");
+                        Stopwatch elapsed=Stopwatch.StartNew();
+                        while(silentPeer.Online && elapsed.ElapsedMilliseconds<8000) {a.Revalidate();Thread.Sleep(40);}
+                        Assert(!silentPeer.Online,"连续刷新时静默节点长期假在线");
                         Assert(a.Peers.Single(p => p.Login == "bob").Online, "能应答的节点被心跳误判离线");
                     }} finally {idleField.SetValue(a,idle);retryField.SetValue(a,retry);missesField.SetValue(a,misses);}
                 });

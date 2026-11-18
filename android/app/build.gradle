@@ -7,8 +7,8 @@ android {
         applicationId 'org.feiqlight.android'
         minSdk 26
         targetSdk 36
-        versionCode 62
-        versionName '0.7.11'
+        versionCode 63
+        versionName '0.7.12'
     }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17

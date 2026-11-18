@@ -325,15 +325,20 @@ public final class LanNode implements AutoCloseable {
         probe(to,false);
     }
     private void probe(InetSocketAddress to,boolean broadcast) throws IOException {
-        boolean schedule=!broadcast&&started&&!closed&&heartbeatRetry>=TimeUnit.SECONDS.toNanos(1)&&routeAllowed(to.getAddress());
+        IOException udpFailure=null;
         try {
             send(encode(Protocol.ENTRY|Protocol.CAP_UTF8|Protocol.FILE,Protocol.field(nickname),Protocol.field(group)),to);
-        } finally {
-            if(schedule) {
-                synchronized(gate){if(pendingTcpTargets.size()<256)pendingTcpTargets.add(to);}
-                scheduleTcpFallback();
+        } catch(IOException error) {udpFailure=error;}
+        if(!broadcast && started && heartbeatRetry>=TimeUnit.SECONDS.toNanos(1) && routeAllowed(to.getAddress())) {
+            synchronized(gate) {
+                if(!closed && udp!=null && (pendingTcpTargets.size()<256 || pendingTcpTargets.contains(to))) {
+                    pendingTcpTargets.add(to);
+                    scheduleTcpFallback();
+                    return;
+                }
             }
         }
+        if(udpFailure!=null)throw udpFailure;
     }
     public void rememberEndpoints(Collection<InetSocketAddress> endpoints) {
         synchronized(gate) {
@@ -373,8 +378,11 @@ public final class LanNode implements AutoCloseable {
             if(physical==null)throw new IOException("未配置物理局域网，已停止广播");
             addresses.addAll(physical);
         }
-        IOException failure=null;boolean sent=addresses.isEmpty();
-        for (InetAddress address:addresses) try { probe(new InetSocketAddress(address,port),true);sent=true; } catch (IOException e) {failure=e;}
+        boolean broadcastSent=loopback;
+        for (InetAddress address:addresses) {
+            try {probe(new InetSocketAddress(address,port),true);broadcastSent=true;}
+            catch(IOException ignored) { }
+        }
         Set<InetSocketAddress> targets;
         synchronized(gate) {
             targets=new LinkedHashSet<>(remembered);
@@ -382,10 +390,9 @@ public final class LanNode implements AutoCloseable {
             for(Peer peer:peers.values())targets.add(peer.endpoint);
         }
         for(InetSocketAddress target:targets) {
-            try { probe(target);sent=true; } catch(IOException ignored) { if(routeAllowed(target.getAddress()))sent=true; }
+            try {probe(target);} catch(IOException ignored) { }
         }
-        if(!sent && failure!=null){switchNetwork(null);networkState(false,"局域网暂不可用，正在重试："+failure.getMessage());}
-        else networkState(true,"");
+        networkState(true,broadcastSent?"":"广播受限，可手动添加 IP");
     }
     private boolean isSelf(Protocol.Packet packet,InetSocketAddress from) {
         return (deviceId!=null&&deviceId.equals(packet.deviceId))||(packet.login.equals(login)&&packet.host.equals(host)&&(packet.replyPort>0?packet.replyPort:from.getPort())==port);

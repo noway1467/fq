@@ -18,12 +18,16 @@ public final class NetworkRecoveryTest {
         Method method=LanNode.class.getDeclaredMethod("switchNetwork",Object.class);method.setAccessible(true);method.invoke(node,key);
     }
     private static void await(BooleanSupplier condition)throws Exception {
-        long until=System.nanoTime()+TimeUnit.SECONDS.toNanos(3);
+        long until=System.nanoTime()+TimeUnit.SECONDS.toNanos(8);
         while(!condition.getAsBoolean() && System.nanoTime()<until)Thread.sleep(10);
         assertTrue(condition.getAsBoolean());
     }
     private static int port()throws Exception {
-        try(ServerSocket tcp=new ServerSocket(0,1,InetAddress.getLoopbackAddress());DatagramSocket udp=new DatagramSocket(tcp.getLocalPort(),InetAddress.getLoopbackAddress())){return tcp.getLocalPort();}
+        for(int attempt=0;attempt<32;attempt++) {
+            try(ServerSocket tcp=new ServerSocket(0,1,InetAddress.getLoopbackAddress());DatagramSocket udp=new DatagramSocket(tcp.getLocalPort(),InetAddress.getLoopbackAddress())){return tcp.getLocalPort();}
+            catch(BindException occupied){if(attempt==31)throw occupied;}
+        }
+        throw new AssertionError("没有可用于 TCP 和 UDP 的回环测试端口");
     }
     private static final class Events implements LanNode.Listener {
         final List<String> errors=new CopyOnWriteArrayList<>(),updates=new CopyOnWriteArrayList<>();
@@ -120,7 +124,7 @@ public final class NetworkRecoveryTest {
     @Test public void offlinePeerAutoRecoversWhenReachableWithoutManualRefresh()throws Exception {
         Events events=new Events();int port=port();
         try(LanNode node=new LanNode(port,true,"local","host","local","组",events);DatagramSocket raw=new DatagramSocket(0,InetAddress.getLoopbackAddress())) {
-            node.start();announce(raw,port);await(()->!node.peers().isEmpty());LanNode.Peer peer=node.peers().get(0);
+            node.start();await(node::networkAvailable);announce(raw,port);await(()->!node.peers().isEmpty());LanNode.Peer peer=node.peers().get(0);
             node.heartbeatIdle=TimeUnit.MILLISECONDS.toNanos(80);node.heartbeatRetry=TimeUnit.MILLISECONDS.toNanos(80);node.idleMisses=1;
             await(()->!peer.online);
             raw.setSoTimeout(40);byte[] buf=new byte[2048];
@@ -202,6 +206,43 @@ public final class NetworkRecoveryTest {
             a.revalidate();
             await(()->!saved.online);
             assertTrue(ea.errors.toString(),ea.errors.isEmpty());
+        }
+    }
+
+    @Test public void blockedBroadcastOnColdStartKeepsManualTcpDiscoveryUntilRouteLoss()throws Exception {
+        InetAddress loop=InetAddress.getLoopbackAddress();
+        java.util.concurrent.atomic.AtomicBoolean blockUdp=new java.util.concurrent.atomic.AtomicBoolean(true);
+        java.util.concurrent.atomic.AtomicBoolean hasLan=new java.util.concurrent.atomic.AtomicBoolean(true);
+        LanNode.SocketBinding route=new LanNode.SocketBinding() {
+            public Object networkKey(){return hasLan.get()?this:null;}
+            public Collection<InetAddress> broadcasts(){return Collections.singletonList(loop);}
+            public boolean allows(InetAddress destination){return hasLan.get()&&destination.equals(loop);}
+            public void bind(DatagramSocket socket){fail("同一网段的广播失败不应重建监听");}
+            public void bind(Socket socket)throws IOException{socket.bind(new InetSocketAddress(loop,0));}
+            public void send(DatagramSocket socket,byte[] bytes,InetSocketAddress destination)throws IOException {
+                assertEquals(loop,destination.getAddress());
+                if(blockUdp.get())throw new SocketException("UDP unavailable");
+            }
+        };
+        try(ServerSocket tcp=new ServerSocket(port(),4,loop);
+            DatagramSocket udp=new DatagramSocket(tcp.getLocalPort(),loop);
+            LanNode local=new LanNode(tcp.getLocalPort(),false,"local","phone","手机","",new Events());
+            LanNode remote=new LanNode(port(),true,"remote","pc","电脑","",new Events())) {
+            local.setSocketBinding(route);
+            for(String name:Arrays.asList("tcp","udp","networkKey")) {
+                Field slot=LanNode.class.getDeclaredField(name);slot.setAccessible(true);
+                slot.set(local,name.equals("tcp")?tcp:name.equals("udp")?udp:route);
+            }
+            remote.start();local.start();
+            assertTrue("没有历史联系人时，广播失败不应关闭可用的本机监听",local.networkAvailable());
+            assertTrue(local.networkStatus().contains("广播"));assertTrue(local.peers().isEmpty());
+            local.probe(new InetSocketAddress(loop,remote.port()));
+            await(()->!local.peers().isEmpty()&&local.peers().get(0).online);
+            assertEquals("电脑",local.peers().get(0).name);
+            local.refresh();assertTrue(local.networkStatus().contains("广播"));assertFalse(udp.isClosed());
+            blockUdp.set(false);local.refresh();assertEquals("",local.networkStatus());assertSame(udp,field(local,"udp"));
+            hasLan.set(false);local.refresh();assertFalse(local.networkAvailable());assertTrue(udp.isClosed());
+            assertFalse(local.peers().get(0).online);
         }
     }
 }

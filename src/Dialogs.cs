@@ -564,6 +564,7 @@ namespace FeiqLight
     public sealed class HistoryDialog : ModernWindow
     {
         internal ChatRecord LocatedRecord { get; private set; }
+        private System.Threading.CancellationTokenSource reading;
         public HistoryDialog(LocalStore store, Peer peer, MainForm main = null)
         {
             Text = "聊天记录 · " + peer.DisplayName; UseSecondaryChrome();ShowInTaskbar=false; ClientSize = new Size(760, 720); MinimumSize = new Size(520, 460); StartPosition = FormStartPosition.CenterParent;
@@ -574,18 +575,34 @@ namespace FeiqLight
             BubbleHistory body = new BubbleHistory { Dock = DockStyle.Fill, Margin = new Padding(10), BackColor = Theme.Wallpaper, RecordLimit=500, CharacterLimit=Int32.MaxValue };
             body.RecordActivated += delegate(ChatRecord record) {LocatedRecord=record;DialogResult=DialogResult.OK;};
             Panel frame = new Panel { Dock = DockStyle.Fill, Padding = new Padding(10, 0, 10, 10), BackColor = Theme.Wallpaper }; frame.Controls.Add(body); Surface.Controls.Add(frame); Surface.Controls.Add(top);
-            try { var records = store.History(peer.Id, 500); Action render = () => {
-                string query=input.Input.Text;
-                var matches=records.Where(r=>(r.Text??"").IndexOf(query,StringComparison.OrdinalIgnoreCase)>=0||(r.Transfers??new FileTransferState[0]).Any(f=>(f.Name??"").IndexOf(query,StringComparison.OrdinalIgnoreCase)>=0)).ToArray();
-                // 批量排版一次，逐条追加会在每次输入时重排整个记录。
-                body.SetRecords(matches, query);
-                summary.Text=query.Length==0?"最近 "+records.Count+" 条记录":"找到 "+matches.Length+" 条匹配记录 · 关键词已高亮";
-            }; input.Input.TextChanged += delegate { render(); };
-                if(main != null) body.DeleteRequested += delegate(ChatRecord[] selected) {
-                    if(main.DeleteMessages(peer, selected)) { records.RemoveAll(r => selected.Any(s => s.Packet == r.Packet && s.Outgoing == r.Outgoing)); render(); }
-                };
-                render(); }
-            catch (Exception e) { using (NoticeDialog error = new NoticeDialog("读取失败", e.Message)) error.ShowDialog(this); }
+            FlowLayoutPanel pages=new FlowLayoutPanel {Dock=DockStyle.Bottom, Height=44, Visible=false, BackColor=Theme.Surface};
+            int page=0;Action render=null;
+            Button older=Theme.Button("更早记录",delegate {page++;render();},false);
+            Button newer=Theme.Button("更新记录",delegate {page--;render();},false);
+            pages.Controls.Add(older);pages.Controls.Add(newer);Surface.Controls.Add(pages);
+            render=async delegate {
+                if(reading!=null)reading.Cancel();
+                var request=new System.Threading.CancellationTokenSource();reading=request;
+                string query=input.Input.Text;int wanted=page;older.Enabled=newer.Enabled=false;
+                try {
+                    LocalStore.ArchivePage found;
+                    if(store.LargeHistory(peer.Id)) {
+                        summary.Text="正在读取聊天记录…";body.SetRecords(new ChatRecord[0],query);
+                        found=await System.Threading.Tasks.Task.Run(()=>store.ReadArchive(peer.Id,query,wanted,null,request.Token),request.Token);
+                    } else found=store.ReadArchive(peer.Id,query,wanted,null,request.Token);
+                    if(request.IsCancellationRequested || IsDisposed)return;
+                    page=found.Page;body.SetRecords(found.Records,query);
+                    newer.Enabled=page>0;older.Enabled=((long)page+1)*LocalStore.ArchivePage.Size<found.Total;
+                    pages.Visible=older.Enabled||newer.Enabled;
+                    summary.Text=(query.Length==0?"共 ":"找到 ")+found.Total+" 条"+(query.Length==0?"记录":"匹配记录")+(pages.Visible?" · 第 "+(page+1)+" 页":"");
+                } catch(OperationCanceledException) { }
+                catch(Exception error){if(!request.IsCancellationRequested && !IsDisposed){body.SetRecords(new ChatRecord[0]);summary.Text="读取失败："+error.Message;}}
+                finally{if(reading==request)reading=null;request.Dispose();}
+            };
+            input.Input.TextChanged+=delegate{page=0;render();};
+            if(main!=null)body.DeleteRequested+=delegate(ChatRecord[] selected){if(main.DeleteMessages(peer,selected))render();};
+            render();
         }
+        protected override void Dispose(bool disposing){if(disposing && reading!=null)reading.Cancel();base.Dispose(disposing);}
     }
 }

@@ -265,9 +265,7 @@ namespace FeiqLight
                     try { Probe(new IPEndPoint(address, Port), true); } catch (SocketException e) { Report("广播失败：" + e.Message); }
             }
             // 单播补充广播；只有收到真实报文才置为在线，不把历史地址伪装成在线联系人。
-            List<Peer> known = Peers; TimeSpan now = clock.Elapsed;
-            // 每次单播都计为一次待回应探测，对方任何报文都会清零。
-            lock (gate) foreach (Peer peer in known) { peer.Probed = now; peer.Misses++; }
+            List<Peer> known = Peers;
             IEnumerable<IPEndPoint> targets = known.Select(p => p.Endpoint).Concat(AppSettings.NormalizeKnownPeers(Settings.KnownPeers).Select(AppSettings.ParseKnownPeer)).Distinct();
             foreach (IPEndPoint target in targets)
             {
@@ -296,7 +294,12 @@ namespace FeiqLight
         // 网络切换或用户刷新时立即复核：仍能回应的联系人保持在线，失联者约 6 秒内离线。
         public void Revalidate()
         {
-            lock (gate) { verifyFrom = clock.Elapsed; foreach (Peer peer in peers.Values) if (!peer.Online) peer.Misses = 0; }
+            lock (gate)
+            {
+                verifyFrom = clock.Elapsed;
+                foreach (Peer peer in peers.Values)
+                    if (peer.Misses == 0) peer.Probed = verifyFrom - HeartbeatRetry;
+            }
             Refresh();
         }
         // 系统地址通知常成批到达，只记标记，由每秒维护合并处理。

@@ -41,13 +41,13 @@ public final class UiTest {
                 invoke(activity,"conversationMenu",ChatStore.Conversation.class,service.conversations().get(0));clickDialogButton("聊天记录");dialog=org.robolectric.shadows.ShadowDialog.getLatestDialog();settle(service);
                 View decor=dialog.getWindow().getDecorView();EditText input=(EditText)descendants(decor).stream().filter(v->"搜索聊天记录".contentEquals(v.getContentDescription()==null?"":v.getContentDescription())).findFirst().get();
                 ListView results=(ListView)descendants(decor).stream().filter(v->v instanceof ListView).findFirst().get();TextView count=(TextView)descendants(decor).stream().filter(v->"聊天记录搜索结果".contentEquals(v.getContentDescription()==null?"":v.getContentDescription())).findFirst().get();
-                assertEquals(3,results.getCount());input.setText("关键词");assertEquals(2,results.getCount());assertTrue(count.getText().toString().contains("2 条"));
+                assertEquals(3,results.getCount());input.setText("关键词");settle(service);assertEquals(2,results.getCount());assertTrue(count.getText().toString().contains("2 条"));
                 View first=results.getAdapter().getView(0,null,results);List<TextView> texts=new ArrayList<>();for(View v:descendants(first))if(v instanceof TextView)texts.add((TextView)v);
-                TextView content=texts.stream().filter(v->v.getText().toString().contains("https://")).findFirst().get();android.text.Spanned spans=(android.text.Spanned)content.getText();assertEquals(3,spans.getSpans(0,spans.length(),android.text.style.BackgroundColorSpan.class).length);assertEquals(1,spans.getSpans(0,spans.length(),android.text.style.ClickableSpan.class).length);assertTrue(content.isTextSelectable());
+                TextView content=texts.stream().filter(v->v.getText().toString().contains("https://")).findFirst().get();android.text.Spanned spans=(android.text.Spanned)content.getText();assertEquals(3,spans.getSpans(0,spans.length(),android.text.style.BackgroundColorSpan.class).length);assertEquals(0,spans.getSpans(0,spans.length(),android.text.style.ClickableSpan.class).length);assertFalse(content.isTextSelectable());
                 View second=results.getAdapter().getView(1,null,results);TextView name=(TextView)descendants(second).stream().filter(v->v instanceof TextView&&"关键词.PNG".contentEquals(((TextView)v).getText())).findFirst().get();assertEquals(1,((android.text.Spanned)name.getText()).getSpans(0,name.length(),android.text.style.BackgroundColorSpan.class).length);
                 dialogScreenshot(dialog,"android-history-search-"+(dark?"dark":"light"));
-                input.setText("png");assertEquals(1,results.getCount());input.setText("摘要尾部😊");assertEquals(1,results.getCount());View tail=results.getAdapter().getView(0,null,results);assertTrue(descendants(tail).stream().anyMatch(v->v instanceof TextView&&((TextView)v).getText().toString().contains("摘要尾部😊")));
-                input.setText("不存在");assertEquals(0,results.getCount());assertTrue(count.getText().toString().contains("0 条"));input.setText("");assertEquals(3,results.getCount());dialog.dismiss();
+                input.setText("png");settle(service);assertEquals(1,results.getCount());input.setText("摘要尾部😊");settle(service);assertEquals(1,results.getCount());View tail=results.getAdapter().getView(0,null,results);assertTrue(descendants(tail).stream().anyMatch(v->v instanceof TextView&&((TextView)v).getText().toString().contains("摘要尾部😊")));
+                input.setText("不存在");settle(service);assertEquals(0,results.getCount());assertTrue(count.getText().toString().contains("0 条"));input.setText("");settle(service);assertEquals(3,results.getCount());dialog.dismiss();
                 assertEquals("搜索不能修改的草稿",((EditText)field(activity,"editor")).getText().toString());
             }
             invoke(activity,"showHistory",ChatStore.Conversation.class,service.conversations().get(0));dialog=(android.app.Dialog)field(activity,"historyDialog");invoke(activity,"open",String.class,"");settle(service);assertFalse(dialog.isShowing());assertNull(field(activity,"historyDialog"));
@@ -60,15 +60,21 @@ public final class UiTest {
         try {
             settle(service);ExecutorService io=(ExecutorService)field(service,"io");ChatStore store=(ChatStore)field(service,"store");
             LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:32425"),"locate-history","host","搜索定位","");
-            io.submit(()->{for(int index=0;index<60;index++){
+            io.submit(()->{for(int index=0;index<520;index++){
                 LanNode.Message message=new LanNode.Message();message.number=index/2+1;message.outgoing=index%2==0;message.time=index+1;message.state="已送达";message.text=index==4||index==5?"定位目标关键词":"上下文消息 "+index;store.message(peer,message,false,false);
             }}).get();service.active(peer.id());settle(service);invoke(activity,"open",String.class,peer.id());settle(service);
             EditText editor=(EditText)field(activity,"editor");editor.setText("搜索定位保留草稿");View root=(View)field(activity,"root");measure(root,786,1704,true);
             for(boolean outgoing:new boolean[]{true,false}) {
                 invoke(activity,"showHistory",ChatStore.Conversation.class,service.conversations().get(0));settle(service);dialog=(android.app.Dialog)field(activity,"historyDialog");
-                View decor=dialog.getWindow().getDecorView();EditText input=(EditText)descendants(decor).stream().filter(view->"搜索聊天记录".contentEquals(view.getContentDescription()==null?"":view.getContentDescription())).findFirst().get();input.setText("定位目标关键词");
+                View decor=dialog.getWindow().getDecorView();EditText input=(EditText)descendants(decor).stream().filter(view->"搜索聊天记录".contentEquals(view.getContentDescription()==null?"":view.getContentDescription())).findFirst().get();input.setText("定位目标关键词");settle(service);
                 ListView results=(ListView)descendants(decor).stream().filter(view->view instanceof ListView).findFirst().get();assertEquals(2,results.getCount());
-                View item=results.getAdapter().getView(outgoing?0:1,null,results);assertTrue(item.performClick());assertFalse(dialog.isShowing());settle(service);
+                measure(decor,786,1440,true);View item=results.getChildAt(outgoing?0:1);assertNotNull(item);
+                long down=android.os.SystemClock.uptimeMillis();float tapX=results.getWidth()*.7f,tapY=item.getBottom()-2;
+                for(int action:new int[]{MotionEvent.ACTION_DOWN,MotionEvent.ACTION_UP}) {
+                    MotionEvent tap=MotionEvent.obtain(down,down+(action==MotionEvent.ACTION_UP?70:0),action,tapX,tapY,0);
+                    try{results.dispatchTouchEvent(tap);}finally{tap.recycle();}
+                }
+                shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(300));assertFalse(dialog.isShowing());settle(service);
                 measure(root,786,1704,true);ScrollView scroll=(ScrollView)field(activity,"scroll");scroll.getViewTreeObserver().dispatchOnPreDraw();
                 assertEquals("3:"+outgoing,field(activity,"locatedMessage"));assertNull(field(activity,"pendingMessageLocation"));assertEquals("搜索定位保留草稿",editor.getText().toString());
                 Map<?,?> views=(Map<?,?>)field(activity,"messageViews");View target=(View)views.get("3:"+outgoing);assertNotNull(target.getForeground());assertNull(((View)views.get("3:"+!outgoing)).getForeground());
@@ -76,6 +82,8 @@ public final class UiTest {
                 assertTrue("定位消息未滚进视口",messagePosition[1]+target.getHeight()>viewportPosition[1]&&messagePosition[1]<viewportPosition[1]+scroll.getHeight());
                 screenshot(activity,"android-search-location-"+outgoing);
             }
+            ((Button)field(activity,"returnToLatest")).performClick();settle(service);
+            assertTrue(((Map<?,?>)field(activity,"messageViews")).containsKey("260:false"));
             invoke(activity,"showHistory",ChatStore.Conversation.class,service.conversations().get(0));settle(service);dialog=(android.app.Dialog)field(activity,"historyDialog");
             ListView oldResults=(ListView)descendants(dialog.getWindow().getDecorView()).stream().filter(view->view instanceof ListView).findFirst().get();View stale=oldResults.getAdapter().getView(0,null,oldResults);
             invoke(activity,"open",String.class,"");stale.performClick();settle(service);assertEquals("",field(activity,"selected"));assertNull(field(activity,"pendingMessageLocation"));assertFalse(dialog.isShowing());
@@ -290,7 +298,9 @@ public final class UiTest {
             View button=descendants((View)field(activity,"root")).stream().filter(v->"表情".contentEquals(v.getContentDescription()==null?"":v.getContentDescription())).findFirst().get();button.performClick();shadowOf(Looper.getMainLooper()).idle();
             android.app.Dialog dialog=org.robolectric.shadows.ShadowDialog.getLatestDialog();assertTrue(dialog.isShowing());dialogScreenshot(dialog,"android-emoji-picker");
             Button smile=(Button)descendants(dialog.getWindow().getDecorView()).stream().filter(v->v instanceof Button&&((Button)v).getText().toString().equals("😀")).findFirst().get();smile.performClick();assertEquals("A😀B",input.getText().toString());assertEquals(3,input.getSelectionStart());
-            input.setText("a".repeat(17999));assertFalse(MainActivity.insertEmoji(input,"👨‍👩‍👧‍👦",17999,17999));assertEquals(17999,input.length());
+            input.setText("a".repeat(17999));assertTrue(MainActivity.insertEmoji(input,"👨‍👩‍👧‍👦",17999,17999));
+            EditText longDraft=new EditText(activity);longDraft.setText("a".repeat(MessageText.INPUT_LIMIT-1));
+            assertFalse(MainActivity.insertEmoji(longDraft,"😀",longDraft.length(),longDraft.length()));assertEquals(MessageText.INPUT_LIMIT-1,longDraft.length());
             input.setText("旧草稿");button.performClick();shadowOf(Looper.getMainLooper()).idle();dialog=org.robolectric.shadows.ShadowDialog.getLatestDialog();Button old=(Button)descendants(dialog.getWindow().getDecorView()).stream().filter(v->v instanceof Button&&((Button)v).getText().toString().equals("😀")).findFirst().get();invoke(activity,"open",String.class,"other-emoji");old.performClick();assertEquals("",((EditText)field(activity,"editor")).getText().toString());
         }finally{ac.pause().stop().destroy();sc.destroy();}
     }
@@ -524,7 +534,8 @@ public final class UiTest {
     private static Object invoke(Object object,String name,Class<?> type,Object value) throws Exception { Method m=object.getClass().getDeclaredMethod(name,type); m.setAccessible(true); return m.invoke(object,value); }
     private static void settle(ChatService service) throws Exception {
         ExecutorService io=(ExecutorService)field(service,"io");
-        for(int i=0;i<3;i++) { io.submit(()->{}).get(5,TimeUnit.SECONDS); shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(100)); }
+        ExecutorService archive=(ExecutorService)field(service,"archive");
+        for(int i=0;i<3;i++) { io.submit(()->{}).get(5,TimeUnit.SECONDS);archive.submit(()->{}).get(5,TimeUnit.SECONDS); shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(100)); }
     }
     private static void screenshot(MainActivity activity,String name) throws Exception {
         View view=(View)field(activity,"root");

@@ -26,6 +26,25 @@ import static org.robolectric.Shadows.shadowOf;
 @Config(sdk=35,qualifiers="w360dp-h800dp-xhdpi")
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 public final class SettingsMessageTest {
+    @Test public void archiveRetainsOlderRowsAcrossRestartAndPagesEqualTimesWithoutDuplicates() throws Exception {
+        Context context=RuntimeEnvironment.getApplication();
+        LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:2425"),"archive","host","历史","");
+        try(ChatStore store=new ChatStore(context)) {
+            store.peer(peer);
+            store.getWritableDatabase().execSQL("WITH RECURSIVE sequence(packet) AS (VALUES(1) UNION ALL SELECT packet+1 FROM sequence WHERE packet<10005) INSERT INTO messages(peer,packet,outgoing,time,text,state,files) SELECT ?,packet,0,12,'分页','已收到','' FROM sequence",new Object[]{peer.id()});
+            LanNode.Message latest=new LanNode.Message();latest.number=10006;latest.time=12;latest.text="最新";latest.state="已收到";store.message(peer,latest,false,true);
+        }
+        try(ChatStore store=new ChatStore(context)) {
+            assertEquals(10006,android.database.DatabaseUtils.queryNumEntries(store.getReadableDatabase(),"messages"));
+            LanNode.Message first=store.findMessage(peer.id(),1,false);assertNotNull(first);
+            assertEquals(1,store.historyAround(peer.id(),first).get(0).number);
+            ChatStore.HistoryPage recent=store.search(peer.id(),"分页",null,()->true);
+            ChatStore.HistoryPage older=store.search(peer.id(),"分页",recent.older,()->true);
+            assertEquals(100,recent.rows.size());assertEquals(100,older.rows.size());
+            assertEquals(10005,recent.rows.get(99).number);assertEquals(9905,older.rows.get(99).number);
+            store.deleteMessages(peer.id(),Collections.singletonList(first));assertTrue(store.historyAround(peer.id(),first).isEmpty());
+        }
+    }
     private static Object field(Object target,String name) throws Exception {Field f=target.getClass().getDeclaredField(name);f.setAccessible(true);return f.get(target);}
     private static Object invoke(Object target,String name,Class<?>[] types,Object...args) throws Exception {Method m=target.getClass().getDeclaredMethod(name,types);m.setAccessible(true);return m.invoke(target,args);}
     private static List<View> views(View root) {List<View> result=new ArrayList<>();result.add(root);if(root instanceof ViewGroup){ViewGroup group=(ViewGroup)root;for(int i=0;i<group.getChildCount();i++)result.addAll(views(group.getChildAt(i)));}return result;}

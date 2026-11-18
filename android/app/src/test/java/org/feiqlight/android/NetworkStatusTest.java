@@ -44,19 +44,31 @@ public final class NetworkStatusTest {
             LanNode node=(LanNode)field(service,"node");((ScheduledExecutorService)field(node,"timer")).shutdownNow();assertTrue(service.online());
             shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));
             ac=Robolectric.buildActivity(MainActivity.class).create().start().resume().visible();MainActivity activity=ac.get();settle(service);
-            Method switchNetwork=LanNode.class.getDeclaredMethod("switchNetwork",Object.class);switchNetwork.setAccessible(true);switchNetwork.invoke(node,new Object[]{null});settle(service);
-            assertFalse(service.online());assertTrue(service.canDisconnect());assertTrue(ChatService.shouldRestoreConnection(service));
-            assertTrue(((TextView)field(activity,"subtitle")).getText().toString().contains("等待 Wi-Fi"));
-            assertEquals("刷新",((Button)field(activity,"connect")).getText().toString());
-            Notification notification=shadowOf(service.getSystemService(NotificationManager.class)).getNotification(1);
-            assertTrue(notification.extras.getString(Notification.EXTRA_TEXT).contains("等待 Wi-Fi"));
-            for(boolean dark:new boolean[]{false,true}) {
-                service.getSharedPreferences("settings",0).edit().putBoolean("dark_mode",dark).apply();
-                Method render=MainActivity.class.getDeclaredMethod("renderPage");render.setAccessible(true);render.invoke(activity);settle(service);
-                View root=(View)field(activity,"root");root.measure(View.MeasureSpec.makeMeasureSpec(720,View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(1600,View.MeasureSpec.EXACTLY));root.layout(0,0,720,1600);
-                Bitmap bitmap=Bitmap.createBitmap(720,1600,Bitmap.Config.ARGB_8888);root.draw(new Canvas(bitmap));
-                File output=new File(System.getProperty("feiq.previewDir"),"network-waiting-"+(dark?"dark":"light")+".png");assertTrue(output.getParentFile().isDirectory()||output.getParentFile().mkdirs());
-                try(OutputStream stream=new FileOutputStream(output)){assertTrue(bitmap.compress(Bitmap.CompressFormat.PNG,100,stream));}finally{bitmap.recycle();}
+            Method state=LanNode.class.getDeclaredMethod("networkState",boolean.class,String.class);state.setAccessible(true);
+            state.invoke(node,true,"广播受限，可手动添加 IP");settle(service);
+            assertTrue(service.online());assertTrue(service.connectionDetails().contains("已监听 · 广播受限"));
+            assertTrue(((TextView)field(activity,"subtitle")).getText().toString().contains("添加 IP"));
+            Notification limited=shadowOf(service.getSystemService(NotificationManager.class)).getNotification(1);
+            assertTrue(limited.extras.getString(Notification.EXTRA_TEXT).contains("广播受限"));
+            Method addPeer=MainActivity.class.getDeclaredMethod("addPeer");addPeer.setAccessible(true);addPeer.invoke(activity);
+            android.app.Dialog manual=org.robolectric.shadows.ShadowDialog.getLatestDialog();assertTrue(manual.isShowing());manual.dismiss();
+            for(boolean waiting:new boolean[]{false,true}) {
+                if(waiting) {
+                    Method switchNetwork=LanNode.class.getDeclaredMethod("switchNetwork",Object.class);switchNetwork.setAccessible(true);switchNetwork.invoke(node,new Object[]{null});settle(service);
+                    assertFalse(service.online());assertTrue(service.canDisconnect());assertTrue(ChatService.shouldRestoreConnection(service));
+                    assertTrue(((TextView)field(activity,"subtitle")).getText().toString().contains("等待 Wi-Fi"));
+                    assertEquals("刷新",((Button)field(activity,"connect")).getText().toString());
+                    Notification notification=shadowOf(service.getSystemService(NotificationManager.class)).getNotification(1);
+                    assertTrue(notification.extras.getString(Notification.EXTRA_TEXT).contains("等待 Wi-Fi"));
+                }
+                for(boolean dark:new boolean[]{false,true}) {
+                    service.getSharedPreferences("settings",0).edit().putBoolean("dark_mode",dark).apply();
+                    Method render=MainActivity.class.getDeclaredMethod("renderPage");render.setAccessible(true);render.invoke(activity);settle(service);
+                    View root=(View)field(activity,"root");root.measure(View.MeasureSpec.makeMeasureSpec(720,View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(1600,View.MeasureSpec.EXACTLY));root.layout(0,0,720,1600);
+                    Bitmap bitmap=Bitmap.createBitmap(720,1600,Bitmap.Config.ARGB_8888);root.draw(new Canvas(bitmap));
+                    File output=new File(System.getProperty("feiq.previewDir"),(waiting?"network-waiting-":"network-limited-")+(dark?"dark":"light")+".png");assertTrue(output.getParentFile().isDirectory()||output.getParentFile().mkdirs());
+                    try(OutputStream stream=new FileOutputStream(output)){assertTrue(bitmap.compress(Bitmap.CompressFormat.PNG,100,stream));}finally{bitmap.recycle();}
+                }
             }
             ((Button)field(activity,"connect")).performClick();settle(service);
             assertTrue("等待网络时刷新必须触发已有节点恢复",service.online());assertSame(node,field(service,"node"));

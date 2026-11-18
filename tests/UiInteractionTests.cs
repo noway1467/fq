@@ -208,7 +208,17 @@ namespace FeiqLight.Tests
                         Check(editor.Text=="搜索定位保留的草稿","定位改写草稿");Render(main,"search-navigation-"+expected.Outgoing);
                     }
                     ChatRecord wrongPeer=new ChatRecord {PeerId="other",Packet=21};Check(!main.ActiveChat.LocateMessage(wrongPeer),"跨会话相同编号被错误定位");
-                    main.ExitApplication();Check(store.History(peer.Id,500).Count==360,"定位修改了历史记录");Check(store.LoadDraft(peer.Id)=="搜索定位保留的草稿","退出未保留草稿");
+                    for(int number=1000;number<1600;number++)store.Append(new ChatRecord {PeerId=peer.Id,Packet=number,Text=new string('a',7400),State="已收到"});
+                    ChatRecord oldest=records.First();
+                    var matches=store.ReadArchive(peer.Id,"定位目标关键词",0,null,System.Threading.CancellationToken.None);
+                    Check(matches.Total==2 && matches.Records.Count==2,"超过 4 MiB 的历史正文未被搜索");
+                    var second=store.ReadArchive(peer.Id,"",1,null,System.Threading.CancellationToken.None);
+                    Check(second.Records.Count==100 && second.Records.Last().Packet==1499,"历史翻页重复或漏掉消息");
+                    Check(main.ActiveChat.LocateMessage(oldest),"超出最近 500 条的搜索结果不能定位");
+                    Button latest=All(main.ActiveChat).OfType<Button>().Single(button=>button.Text=="回到最新消息");Check(latest.Visible,"缺少回到最新消息入口");
+                    latest.PerformClick();Check(!latest.Visible,"回到最新消息没有离开旧上下文");
+                    store.DeleteRecords(peer.Id,new[]{oldest});Check(!main.ActiveChat.LocateMessage(oldest),"已删除的旧记录被搜索快照复活");
+                    main.ExitApplication();Check(store.LoadDraft(peer.Id)=="搜索定位保留的草稿","退出未保留草稿");
                 }
             });
             foreach(bool dark in new[]{false,true}) Run("渲染与布局："+(dark?"深色":"浅色")+"、最小/常用/最大化与空数据",()=>{

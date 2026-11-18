@@ -162,7 +162,7 @@ final class LanNetwork implements LanNode.SocketBinding {
             cachedLocal=true;
             cachedLocalLinks=Collections.unmodifiableList(localLinks);
             cachedLocalBroadcasts=Collections.unmodifiableList(new ArrayList<>(localBroadcasts));
-            cachedKey=Arrays.asList("local",localKeys,vpn);
+            cachedKey=Arrays.asList("local",localKeys);
             return;
         }
         if(vpn) throw new IOException("VPN 下未找到可直连的 Wi-Fi/以太网或热点。请连接局域网或开启热点，并在 VPN 中允许局域网或将飞Q排除；强制 VPN 模式可能阻止直连。");
@@ -234,11 +234,22 @@ final class LanNetwork implements LanNode.SocketBinding {
     @Override public synchronized void send(DatagramSocket receiver,byte[] bytes,InetSocketAddress destination)throws IOException {
         Network network=select();
         // 扫描缓存刷新不能把之前绑定失败的 socket 误认为已绑定，导致广播重新走 VPN。
-        if(network!=null&&network.equals(bound.get(receiver))){receiver.send(new DatagramPacket(bytes,bytes.length,destination));return;}
-        LocalLink link=localLink(destination.getAddress());if(link==null)throw new IOException("目标不在当前热点或共享子网内");
+        IOException boundFailure=null;
+        if(network!=null && network.equals(bound.get(receiver))) {
+            try {receiver.send(new DatagramPacket(bytes,bytes.length,destination));return;}
+            catch(IOException error) {
+                if(receiver.isClosed())throw error;
+                boundFailure=error;
+            }
+        }
+        LocalLink link=localLink(destination.getAddress());
+        if(link==null) {
+            if(boundFailure!=null)throw blocked(boundFailure);
+            throw new IOException("目标不在当前热点或共享子网内");
+        }
         // 发送 socket 绑定热点本地地址，应用只使用当前共享子网；回复端口由发现报文明确提供。
         try(DatagramSocket sender=datagramFactory.create(new InetSocketAddress(link.address,0))){sender.setBroadcast(true);sender.send(new DatagramPacket(bytes,bytes.length,destination));}
-        catch(IOException e){throw blocked(e);}
+        catch(IOException error){if(boundFailure!=null)error.addSuppressed(boundFailure);throw blocked(error);}
     }
     private IOException blocked(IOException cause) { return new IOException("局域网直连被系统限制，请检查 VPN 的允许局域网/应用排除与阻止非 VPN 连接设置。",cause); }
     @Override public synchronized Collection<InetAddress> broadcasts() throws IOException {

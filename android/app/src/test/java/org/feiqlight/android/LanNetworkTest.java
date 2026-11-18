@@ -251,7 +251,10 @@ public final class LanNetworkTest {
         ConnectivityManager cm=(ConnectivityManager)RuntimeEnvironment.getApplication().getSystemService(Context.CONNECTIVITY_SERVICE);shadowOf(cm).clearAllNetworks();
         Network vpn=add(cm,951,NetworkCapabilities.TRANSPORT_VPN,"10.99.0.2",24);
         LanNetwork route=new LanNetwork(cm,()->Collections.singletonList(iface("ap0",true,false,false,false,"192.168.43.1",24)));
-        assertNotNull(route.networkKey());assertTrue(route.allows(InetAddress.getByName("192.168.43.2")));
+        Object hotspot=route.networkKey();assertNotNull(hotspot);
+        shadowOf(cm).removeNetwork(vpn);route.changed();assertEquals("仅关闭 VPN 不应清除热点会话",hotspot,route.networkKey());
+        vpn=add(cm,953,NetworkCapabilities.TRANSPORT_VPN,"10.99.0.2",24);route.changed();assertEquals(hotspot,route.networkKey());
+        assertTrue(route.allows(InetAddress.getByName("192.168.43.2")));
         assertFalse(route.allows(InetAddress.getByName("10.99.0.3")));
         try(RecordingSocket tcp=new RecordingSocket()){route.bind(tcp,InetAddress.getByName("192.168.43.2"));assertEquals(new InetSocketAddress("192.168.43.1",0),tcp.source);}
         try(DatagramSocket udp=new DatagramSocket(null)) {
@@ -299,6 +302,26 @@ public final class LanNetworkTest {
             route.send(receiver,new byte[]{2},destination);
             assertEquals(Arrays.asList(new InetSocketAddress("192.168.10.25",0),new InetSocketAddress("192.168.10.25",0)),sources);
             assertEquals(Arrays.asList(destination,destination),destinations);
+        }
+    }
+
+    @Test public void boundWifiMayRejectSendAndOnlyRetryFromMatchingPrivateAddress() throws Exception {
+        ConnectivityManager manager=RuntimeEnvironment.getApplication().getSystemService(ConnectivityManager.class);
+        shadowOf(manager).clearAllNetworks();
+        Network vpn=add(manager,980,NetworkCapabilities.TRANSPORT_VPN,"198.18.0.1",16);
+        Network wifi=add(manager,981,NetworkCapabilities.TRANSPORT_WIFI,"192.168.10.25",24);
+        List<SocketAddress> sources=new ArrayList<>(),destinations=new ArrayList<>();
+        LanNetwork route=new LanNetwork(manager,NO_LOCAL,source->{
+            sources.add(source);
+            return new DatagramSocket((SocketAddress)null){@Override public void send(DatagramPacket packet){destinations.add(packet.getSocketAddress());}};
+        });
+        try(DatagramSocket receiver=new DatagramSocket((SocketAddress)null){@Override public void send(DatagramPacket packet)throws IOException{throw new SocketException("UDP unavailable");}}) {
+            route.bind(receiver);assertTrue(shadowOf(wifi).isSocketBound(receiver));
+            InetSocketAddress broadcast=new InetSocketAddress("192.168.10.255",2425);
+            route.send(receiver,new byte[]{1},broadcast);
+            assertThrows(IOException.class,()->route.send(receiver,new byte[]{2},new InetSocketAddress("192.168.99.255",2425)));
+            assertEquals(Collections.singletonList(new InetSocketAddress("192.168.10.25",0)),sources);
+            assertEquals(Collections.singletonList(broadcast),destinations);assertEquals(0,shadowOf(vpn).boundSocketCount());
         }
     }
 }

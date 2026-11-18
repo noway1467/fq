@@ -560,5 +560,89 @@ namespace FeiqLight
                 return result.Where(r=>r.Outgoing||r.Sender!="文件"||r.State!="已保存"||!(r.Text??"").StartsWith("已保存：",StringComparison.Ordinal)||r.GetLocalFiles().Length==0||!r.GetLocalFiles().All(attached.Contains)).ToList();
             }
         }
+        private sealed class ArchiveEntry
+        {
+            internal long Line;
+            internal bool Matches, SavedNotice;
+            internal string[] Paths;
+        }
+        internal bool LargeHistory(string peerId)
+        {
+            FileInfo file=new FileInfo(HistoryPath(peerId));
+            return file.Exists && file.Length>256*1024;
+        }
+        internal sealed class ArchivePage
+        {
+            internal const int Size=100;
+            internal readonly List<ChatRecord> Records=new List<ChatRecord>();
+            internal int Total, Page;
+            internal bool HasNewer;
+        }
+        internal ArchivePage ReadArchive(string peerId,string query,int page,ChatRecord target,System.Threading.CancellationToken cancel)
+        {
+            ArchivePage result=new ArchivePage();
+            FileStream stream;
+            lock(gate)
+            {
+                string path=HistoryPath(peerId);
+                if(!File.Exists(path))return result;
+                stream=new FileStream(path,FileMode.Open,FileAccess.Read,FileShare.ReadWrite|FileShare.Delete);
+            }
+            using(stream)
+            using(StreamReader reader=new StreamReader(stream,Encoding.UTF8))
+            {
+                var parser=new JavaScriptSerializer { MaxJsonLength=16*1024*1024 };
+                var order=new List<ArchiveEntry>();
+                var index=new Dictionary<string,ArchiveEntry>(StringComparer.Ordinal);
+                string line;long number=0;
+                while((line=reader.ReadLine())!=null)
+                {
+                    cancel.ThrowIfCancellationRequested();number++;
+                    ChatRecord record;
+                    try {record=parser.Deserialize<ChatRecord>(line);}
+                    catch(ArgumentException){continue;}catch(InvalidOperationException){continue;}
+                    if(record==null||record.PeerId!=peerId||record.Text==null)continue;
+                    string key=RecordKey(record);ArchiveEntry entry;
+                    if(!index.TryGetValue(key,out entry)){entry=new ArchiveEntry();index.Add(key,entry);order.Add(entry);}
+                    if(record.Deleted){entry.Line=-1;continue;}
+                    if(entry.Line<0)continue;
+                    entry.Line=number;
+                    entry.Matches=query.Length==0||record.Text.IndexOf(query,StringComparison.OrdinalIgnoreCase)>=0||
+                        (record.Transfers??new FileTransferState[0]).Any(file=>(file.Name??"").IndexOf(query,StringComparison.OrdinalIgnoreCase)>=0);
+                    entry.Paths=record.Outgoing?null:record.GetLocalFiles();
+                    entry.SavedNotice=record.Sender=="文件" && record.State=="已保存" && record.Text.StartsWith("已保存：",StringComparison.Ordinal);
+                }
+                var attached=new HashSet<string>(order.Where(entry=>entry.Line>0 && !entry.SavedNotice && entry.Paths!=null).SelectMany(entry=>entry.Paths),StringComparer.OrdinalIgnoreCase);
+                order.RemoveAll(entry=>entry.Line<0 || !entry.Matches || entry.SavedNotice && entry.Paths!=null && entry.Paths.Length>0 && entry.Paths.All(attached.Contains));
+                result.Total=order.Count;
+                if(order.Count==0)return result;
+                const int pageSize=ArchivePage.Size;
+                result.Page=Math.Min(page,(order.Count-1)/pageSize);
+                int end=order.Count-result.Page*pageSize,start=Math.Max(0,end-pageSize);
+                if(target!=null)
+                {
+                    ArchiveEntry anchor;
+                    if(!index.TryGetValue(RecordKey(target),out anchor))return result;
+                    int position=order.IndexOf(anchor);if(position<0)return result;
+                    if(position>=order.Count-500){start=Math.Max(0,order.Count-500);end=order.Count;}
+                    else{start=Math.Max(0,position-75);end=Math.Min(order.Count,start+150);}
+                }
+                result.HasNewer=end<order.Count;
+                var slots=new Dictionary<long,int>();
+                for(int position=start;position<end;position++){slots.Add(order[position].Line,position-start);result.Records.Add(null);}
+                reader.DiscardBufferedData();stream.Position=0;number=0;
+                while(slots.Count>0 && (line=reader.ReadLine())!=null)
+                {
+                    cancel.ThrowIfCancellationRequested();int slot;
+                    if(!slots.TryGetValue(++number,out slot))continue;
+                    ChatRecord record=parser.Deserialize<ChatRecord>(line);
+                    if(record.Time.Kind==DateTimeKind.Utc)record.Time=record.Time.ToLocalTime();
+                    if(record.Outgoing && record.State=="等待确认")lock(gate){if(!activePending.ContainsKey(peerId+"/"+record.Packet))record.State="上次退出，未确认送达";}
+                    result.Records[slot]=record;slots.Remove(number);
+                }
+                if(slots.Count!=0)throw new IOException("聊天记录已更改，请重新搜索。");
+            }
+            return result;
+        }
     }
 }

@@ -204,7 +204,17 @@ public final class SharedFilesTest {
                 long until=System.currentTimeMillis()+10000;
                 while((!service.online()||(generation<2&&service.sharedFiles()==null))&&System.currentTimeMillis()<until){org.robolectric.Shadows.shadowOf(Looper.getMainLooper()).idle();Thread.sleep(20);}
                 assertTrue("聊天服务未启动："+service.status(),service.online());
-                if(generation<2){assertNotNull("重启未恢复共享",service.sharedFiles());String cookie=login(service.sharedFiles());assertEquals(200,get(service.sharedFiles(),"/api/list",cookie).code);if(generation==1)service.stopSharing();}
+                if(generation==0){
+                    SharedFiles before=service.sharedFiles();assertNotNull(before);
+                    java.lang.reflect.Field field=ChatService.class.getDeclaredField("node");field.setAccessible(true);
+                    org.feiqlight.android.core.LanNode node=(org.feiqlight.android.core.LanNode)field.get(service);
+                    java.lang.reflect.Method change=node.getClass().getDeclaredMethod("switchNetwork",Object.class);change.setAccessible(true);
+                    change.invoke(node,new Object[]{null});node.refresh();assertTrue(node.networkAvailable());
+                    long deadline=System.currentTimeMillis()+5000;
+                    while((service.sharedFiles()==null || service.sharedFiles()==before) && System.currentTimeMillis()<deadline){org.robolectric.Shadows.shadowOf(Looper.getMainLooper()).idle();Thread.sleep(20);}
+                    assertNotSame("切网后不能保留旧共享会话",before,service.sharedFiles());
+                }
+                if(generation<2){assertNotNull("重连未恢复共享",service.sharedFiles());String cookie=login(service.sharedFiles());assertEquals(200,get(service.sharedFiles(),"/api/list",cookie).code);if(generation==1)service.stopSharing();}
                 else{assertNull(service.sharedFiles());assertFalse(new SharedFolderSettings(context).enabled());assertEquals(TREE,new SharedFolderSettings(context).tree());}
             }finally{controller.destroy();java.lang.reflect.Field executor=ChatService.class.getDeclaredField("io");executor.setAccessible(true);assertTrue(((java.util.concurrent.ExecutorService)executor.get(service)).awaitTermination(5,java.util.concurrent.TimeUnit.SECONDS));}
         }

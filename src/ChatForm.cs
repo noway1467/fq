@@ -18,6 +18,9 @@ namespace FeiqLight
         private readonly LocalStore store;
         private readonly MainForm main;
         private readonly BubbleHistory history = new BubbleHistory();
+        private readonly Button returnToLatest;
+        private bool showingArchive;
+        private int locationVersion;
         private readonly ChatEditor editor = new ChatEditor();
         private readonly ListBox files = new ListBox();
         private readonly Label queued = Theme.Label("", Theme.Small, Theme.Muted);
@@ -86,6 +89,8 @@ namespace FeiqLight
             history.DeleteRequested += DeleteMessages;
             history.DeleteFileRequested += (record,path)=>main.DeleteReceivedFile(peer,record,path);
             history.Dock = DockStyle.Fill; history.Margin = Padding.Empty; middle.Controls.Add(history);
+            returnToLatest=Theme.Button("回到最新消息",delegate {LoadLatest();},false);
+            returnToLatest.Dock=DockStyle.Bottom;returnToLatest.Visible=false;middle.Controls.Add(returnToLatest);
             dropOverlay.Dock = DockStyle.Fill; middle.Controls.Add(dropOverlay); dropOverlay.BringToFront();
             drawer = new TableLayoutPanel { Dock = DockStyle.Right, Width = 292, ColumnCount = 1, RowCount = 4, Padding = new Padding(16, 14, 16, 12), Margin = Padding.Empty, BackColor = Theme.Surface, Visible = false };
             drawer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); drawer.RowStyles.Add(new RowStyle(SizeType.Absolute, 34)); drawer.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); drawer.RowStyles.Add(new RowStyle(SizeType.Absolute, 46)); drawer.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
@@ -198,8 +203,16 @@ namespace FeiqLight
             }
         }
         public void FocusEditor() { editor.Focus(); }
-        public void Append(ChatRecord record) { history.Append(record); }
-        public void ClearHistory() { history.Clear(); }
+        public void Append(ChatRecord record) {
+            if(showingArchive){if(record.Outgoing)LoadLatest();return;}
+            history.Append(record);
+        }
+        private void LoadLatest() {
+            locationVersion++;
+            var records=store.History(peer.Id,150).Select(record=>record.Outgoing?network.OutgoingRecord(peer.Id,record.Packet)??record:record);
+            history.SetRecords(records);showingArchive=false;returnToLatest.Visible=false;
+        }
+        public void ClearHistory() { locationVersion++;showingArchive=false;returnToLatest.Visible=false;history.Clear(); }
         private void DeleteMessages(ChatRecord[] records) { main.DeleteMessages(peer, records); }
         internal void RemoveMessages(ChatRecord[] records) { history.RemoveRecords(records); }
         internal bool HasPendingMessages(ChatRecord[] records) {
@@ -378,12 +391,20 @@ namespace FeiqLight
         }
         // 弹出菜单由会话持有；隐藏会话仍保留它，最终在 Dispose 中统一释放。
         private static void ShowPopup(ContextMenuStrip menu, Control source) { menu.Show(source, new Point(source.Width, source.Height + 4), ToolStripDropDownDirection.BelowLeft); }
-        private void ShowHistory(object sender, EventArgs e)
+        private async void ShowHistory(object sender, EventArgs e)
         {
+            int request=++locationVersion;
             using (HistoryDialog dialog = new HistoryDialog(store, peer, main))
                 if(dialog.ShowDialog(main)==DialogResult.OK&&dialog.LocatedRecord!=null) {
                     main.OpenChat(peer);
-                    try {if(!LocateMessage(dialog.LocatedRecord))Error("无法定位","该消息已删除或不在当前可加载的聊天记录中。");}
+                    try {
+                        ChatRecord target=dialog.LocatedRecord;
+                        if(store.LargeHistory(peer.Id)) {
+                            var context=await Task.Run(()=>store.ReadArchive(peer.Id,"",0,target,CancellationToken.None));
+                            if(IsDisposed || main.ActiveChat!=this || request!=locationVersion)return;
+                            if(!ShowLocation(target,context.Records,context.HasNewer))Error("无法定位","这条消息已删除。");
+                        } else if(!LocateMessage(target))Error("无法定位","这条消息已删除。");
+                    }
                     catch(IOException error){Error("读取聊天记录失败",error.Message);}
                     catch(UnauthorizedAccessException error){Error("读取聊天记录失败",error.Message);}
                 }
@@ -391,10 +412,17 @@ namespace FeiqLight
         internal bool LocateMessage(ChatRecord target)
         {
             if(target.PeerId!=peer.Id)return false;
-            // 搜索窗口可读 500 条，定位时补齐同一范围，仍保留到最新消息的连续上下文。
-            var records=store.History(peer.Id,500).Select(record=>record.Outgoing?network.OutgoingRecord(peer.Id,record.Packet)??record:record).ToList();
+            var records=store.History(peer.Id,500);
+            bool older=!records.Any(record=>record.Packet==target.Packet&&record.Outgoing==target.Outgoing);
+            if(older)records=store.ReadArchive(peer.Id,"",0,target,CancellationToken.None).Records;
+            return ShowLocation(target,records,older);
+        }
+        private bool ShowLocation(ChatRecord target,List<ChatRecord> records,bool older)
+        {
             if(!records.Any(record=>record.Packet==target.Packet&&record.Outgoing==target.Outgoing))return false;
-            history.RecordLimit=500;history.CharacterLimit=Int32.MaxValue;history.SetRecords(records);
+            showingArchive=older;returnToLatest.Visible=older;
+            history.RecordLimit=500;history.CharacterLimit=Int32.MaxValue;
+            history.SetRecords(records.Select(record=>record.Outgoing?network.OutgoingRecord(peer.Id,record.Packet)??record:record));
             return history.RevealRecord(target);
         }
         private void Error(string title, string text) { using (NoticeDialog dialog = new NoticeDialog(title, text)) dialog.ShowDialog(main); }
