@@ -189,6 +189,13 @@ final class ChatStore extends SQLiteOpenHelper {
             return cursor.moveToFirst()?messageAt(cursor):null;
         }
     }
+    List<Long> unconfirmedOutgoingPackets(String peer) {
+        List<Long> packets=new ArrayList<>();
+        try(Cursor cursor=getReadableDatabase().rawQuery("SELECT packet FROM messages WHERE peer=? AND outgoing=1 AND (state='等待确认' OR state LIKE '%未确认%' OR state LIKE '%失败%')",new String[]{peer})) {
+            while(cursor.moveToNext())packets.add(cursor.getLong(0));
+        }
+        return packets;
+    }
     List<LanNode.Message> historyAround(String peer,LanNode.Message target) {
         SQLiteDatabase database=getReadableDatabase();long time,rowId;
         try(Cursor cursor=database.rawQuery("SELECT time,id FROM messages WHERE peer=? AND packet=? AND outgoing=?",new String[]{peer,Long.toString(target.number),target.outgoing?"1":"0"})) {

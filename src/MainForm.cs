@@ -125,7 +125,7 @@ public sealed class MainForm : ModernWindow
             chatHost.Pattern = pattern == "image" || pattern == "none" ? "orbits" : pattern;
             chatHost.Invalidate();
         }
-        private void Ui(Action action)
+        internal void Ui(Action action)
         {
             if (IsDisposed || Disposing || !IsHandleCreated) return;
             try { BeginInvoke((MethodInvoker)delegate { if (!IsDisposed && !Disposing) action(); }); } catch (InvalidOperationException) { }
@@ -223,14 +223,19 @@ public sealed class MainForm : ModernWindow
         internal bool DeleteMessages(Peer peer, ChatRecord[] records)
         {
             ChatForm chat; chats.TryGetValue(peer.Id, out chat);
-            if (chat != null && chat.HasPendingMessages(records)) {
-                using(NoticeDialog notice = new NoticeDialog("请先处理文件", "选中的消息含有待接收或传输中的文件，请完成或拒绝后再删除。")) notice.ShowDialog(this);
+            if ((chat != null && chat.HasPendingMessages(records)) || (chat==null&&records.Any(r=>(r.Outgoing&&network.HasActiveOutgoingTransfer(peer.Id,r.Packet))||(r.Transfers??new FileTransferState[0]).Any(f=>((f.DisplayStatus()??"").Contains("中")&&!((f.DisplayStatus()??"").Contains("中断"))&&f.Percent<100))))) {
+                using(NoticeDialog notice = new NoticeDialog("请先处理文件", "选中的消息含有待接收或传输中的文件，请完成、拒绝或取消发送后再删除。")) notice.ShowDialog(this);
                 return false;
             }
             string title = records.Length == 1 ? "删除这条消息？" : "删除选中的 " + records.Length + " 条消息？";
-            using(ConfirmDialog confirm = new ConfirmDialog(title, "仅删除这台电脑上的消息记录，对方的记录和已保存的附件文件会保留。", "删除", true))
+            string detail=records.Any(r=>r.Outgoing&&network.HasUndeliveredOutgoing(peer.Id,r.Packet,r.State))?"将停止发送尚未送达的消息并撤销对应文件邀请；仅删除这台电脑上的消息记录，对方已收到的记录和本机附件文件会保留。":"仅删除这台电脑上的消息记录，对方的记录和已保存的附件文件会保留。";
+            using(ConfirmDialog confirm = new ConfirmDialog(title, detail, "删除", true))
                 if(confirm.ShowDialog(this) != DialogResult.OK) return false;
             try {
+                if((chat!=null&&chat.HasPendingMessages(records))||(chat==null&&records.Any(r=>(r.Outgoing&&network.HasActiveOutgoingTransfer(peer.Id,r.Packet))||(r.Transfers??new FileTransferState[0]).Any(f=>((f.DisplayStatus()??"").Contains("中")&&!((f.DisplayStatus()??"").Contains("中断"))&&f.Percent<100))))) {
+                    using(NoticeDialog notice=new NoticeDialog("删除未完成","传输已开始，请等待、拒绝或取消发送后再删除。"))notice.ShowDialog(this);return false;
+                }
+                foreach(ChatRecord record in records)if(record.Outgoing)network.CancelUndeliveredOutgoing(peer.Id,record.Packet,record.State,false);
                 // 持久化成功后再更新界面，写入失败时仍保留原选区和消息。
                 store.DeleteRecords(peer.Id, records);
                 if(chat != null) chat.RemoveMessages(records);
@@ -350,9 +355,9 @@ public sealed class MainForm : ModernWindow
         {
             using(ConversationDialog dialog=new ConversationDialog(peer,true,clearOnly))if(dialog.ShowDialog(this)==DialogResult.OK){
                 ChatForm chat;chats.TryGetValue(peer.Id,out chat);
-                if(dialog.DeleteHistory&&chat!=null&&chat.PendingFileCount>0){using(NoticeDialog notice=new NoticeDialog("请先处理文件","此会话还有待接收或传输中的文件。请完成或拒绝后再清空记录。"))notice.ShowDialog(this);return;}
+                if(dialog.DeleteHistory&&((chat!=null&&chat.PendingFileCount>0)||network.HasActiveOutgoingTransfer(peer.Id))){using(NoticeDialog notice=new NoticeDialog("请先处理文件","此会话还有待接收或传输中的文件。请完成、拒绝或取消发送后再清空记录。"))notice.ShowDialog(this);return;}
                 try {
-                    if(dialog.DeleteHistory){store.ClearHistory(peer.Id);if(chat!=null)chat.ClearHistory();previews.Remove(peer.Id);times.Remove(peer.Id);recent.Remove(peer.Id);}
+                    if(dialog.DeleteHistory){network.CancelUndeliveredOutgoingForPeer(peer.Id);store.ClearHistory(peer.Id);if(chat!=null)chat.ClearHistory();previews.Remove(peer.Id);times.Remove(peer.Id);recent.Remove(peer.Id);}
                     bool hidden=peer.Hidden;peer.Hidden=!clearOnly;unread.Remove(peer.Id);
                     if(!RememberPeerAddresses()){peer.Hidden=hidden;fingerprint=null;RefreshPeers();return;}
                     if(!clearOnly&&chat!=null)CloseChat(chat);

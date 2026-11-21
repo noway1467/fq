@@ -318,4 +318,51 @@ public final class SettingsMessageTest {
             assertEquals("实时新昵称",remote.peers().get(0).name);
         } finally {if(settings!=null)settings.dismiss();ac.pause().stop().destroy();sc.destroy();}
     }
+    @Test public void offlineOutgoingFileCancelAndDelete() throws Exception {
+        ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();
+        shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));
+        ActivityController<MainActivity> ac=Robolectric.buildActivity(MainActivity.class).create().start().resume().visible();MainActivity activity=ac.get();
+        try(java.net.ServerSocket port=new java.net.ServerSocket(0,1,java.net.InetAddress.getLoopbackAddress());java.net.DatagramSocket offlinePeer=new java.net.DatagramSocket(0,java.net.InetAddress.getLoopbackAddress())) {
+            int localPort=port.getLocalPort();port.close();
+            try(LanNode node=new LanNode(localPort,true,"android-cancel","host","本机","",new LanNode.Listener(){
+                public void peersChanged(){}
+                public void error(String text){}
+                public void message(LanNode.Peer peer,LanNode.Message message,boolean update){service.incoming(peer,message,update);}
+                public void fileProgress(LanNode.Peer peer,long packet,long file,int percent,String state,double bytesPerSecond){
+                    try{Class<?>[] sig={String.class,long.class,long.class,boolean.class,int.class,String.class,double.class,LanNode.Transfer.class};invoke(service,"fileProgress",sig,peer.id(),packet,file,true,percent,state,bytesPerSecond,null);}catch(Exception ignored){}
+                }
+            })) {
+                settle(service);node.start();Field current=ChatService.class.getDeclaredField("node");current.setAccessible(true);current.set(service,node);
+                File f1=new File(service.getFilesDir(),"离线菜单取消.txt"), f2=new File(service.getFilesDir(),"离线直接删除.txt");
+                java.nio.file.Files.write(f1.toPath(),new byte[]{1,2,3,4});java.nio.file.Files.write(f2.toPath(),new byte[]{5,6,7,8});
+                LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:"+offlinePeer.getLocalPort()),"offline-peer","host","离线联系人","");peer.utf8=true;
+                LanNode.Message m1=node.sendMessage(peer,"离线菜单取消",Collections.singletonList(f1));settle(service);
+                invoke(activity,"open",new Class<?>[]{String.class},peer.id());settle(service);
+                assertTrue(service.canCancelOutgoing(peer.id(),m1.number));
+                // 检查消息菜单和已发文件卡片都暴露“取消发送”
+                View bubble=views((View)field(activity,"messages")).stream().filter(v->"消息：离线菜单取消".contentEquals(v.getContentDescription()==null?"":v.getContentDescription())).findFirst().orElseThrow();
+                messageMenu(bubble);Dialog menu=ShadowDialog.getLatestDialog();
+                assertTrue("消息菜单缺少取消发送",views(menu.getWindow().getDecorView()).stream().anyMatch(v->v instanceof Button&&"取消发送".contentEquals(((Button)v).getText())));
+                click(menu,"取消发送");click(ShadowDialog.getLatestDialog(),"取消发送");settle(service);
+                assertFalse("取消后仍可取消",service.canCancelOutgoing(peer.id(),m1.number));
+                assertFalse("取消后报价未撤销",node.offering(peer.id(),m1.number,0));
+                assertTrue("取消不能删除本机原文件",f1.isFile());
+                ChatStore store=(ChatStore)field(service,"store");
+                assertEquals("已取消发送",store.findMessage(peer.id(),m1.number,true).state);
+                assertEquals("已取消发送",service.progress(peer.id(),m1.number,0,true).state);
+
+                // 测试离线未送达消息直接删除同步撤销报价，且同包号入站进度不被误清
+                LanNode.Message m2=node.sendMessage(peer,"离线直删",Collections.singletonList(f2));settle(service);
+                Class<?>[] sig={String.class,long.class,long.class,boolean.class,int.class,String.class,double.class,LanNode.Transfer.class};
+                invoke(service,"fileProgress",sig,peer.id(),m2.number,0L,false,55,"已保存",0.0,null);
+                assertTrue(node.offering(peer.id(),m2.number,0));
+                List<Boolean> deleted=new ArrayList<>();service.deleteMessages(peer.id(),Collections.singletonList(m2),deleted::add);settle(service);
+                assertEquals(Collections.singletonList(true),deleted);
+                assertFalse("直接删除未送达离线消息未撤销报价",node.offering(peer.id(),m2.number,0));
+                assertTrue("直接删除不能删除本机原文件",f2.isFile());
+                assertNotNull("删除出站消息误清了同包号入站文件进度",service.progress(peer.id(),m2.number,0,false));
+                assertEquals("已保存",service.progress(peer.id(),m2.number,0,false).state);
+            }
+        } finally {ac.pause().stop().destroy();sc.destroy();}
+    }
 }

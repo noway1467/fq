@@ -21,7 +21,7 @@ namespace FeiqLight
             public readonly IPEndPoint Endpoint;
             public readonly string Login, DeviceId, Fingerprint;
             public int Sending, Transmitting;
-            public volatile bool Delivered, DirectFailed;
+            public volatile bool Delivered, DirectFailed, Canceled;
             public TimeSpan AttemptStarted = clock.Elapsed;
             public volatile TcpClient ConnectingClient;
             public byte[] Bytes; public ChatRecord Record;
@@ -40,6 +40,8 @@ namespace FeiqLight
             public ChatRecord Record; public int FileId, Percent; public long ProgressVersion; public string TransferState;
             public string DeviceId, Fingerprint, Sha256;
             public int Pushing;
+            public bool Canceled;
+            public readonly HashSet<TcpClient> ActiveClients = new HashSet<TcpClient>();
         }
         private sealed class PendingDownload
         {
@@ -177,7 +179,32 @@ namespace FeiqLight
         }
         private static HashSet<IPAddress> CurrentAddresses() { HashSet<IPAddress> result = new HashSet<IPAddress>(LocalIPv4()); result.Add(IPAddress.Loopback); return result; }
         public List<Peer> Peers { get { lock (gate) return peers.Values.OrderByDescending(p => p.Online).ThenBy(p => p.Nickname).ToList(); } }
-        public ChatRecord OutgoingRecord(string peer, long packet) { lock(gate) { Offer offer=offers.Values.FirstOrDefault(o=>o.Record.PeerId==peer&&o.Record.Packet==packet&&o.Expires>DateTime.UtcNow);return offer==null?null:offer.Record; } }
+        public ChatRecord OutgoingRecord(string peer, long packet) { lock(gate) { Offer offer=offers.Values.FirstOrDefault(o=>!o.Canceled&&o.Record.PeerId==peer&&o.Record.Packet==packet&&o.Expires>DateTime.UtcNow);return offer==null?null:offer.Record; } }
+
+        private static bool IsOfferCompleted(Offer offer) { return offer!=null&&(offer.TransferState=="已发送（非保存确认）"||offer.TransferState=="对方已校验保存"); }
+        private static bool IsUnconfirmedState(string state) { string s=state??"";return s=="等待确认"||s.Contains("未确认")||s.Contains("失败"); }
+        private void NotifyDelivery(ChatRecord record) { Action<ChatRecord> handler=DeliveryChanged;if(!disposed&&handler!=null)handler(record); }
+        private bool TryBeginOfferStream(string key,Func<Offer,bool> authorize,TcpClient client,out Offer offer,out long version)
+        {
+            lock(gate) {
+                if(!disposed&&offers.TryGetValue(key,out offer)&&!offer.Canceled&&offer.Expires>=DateTime.UtcNow&&authorize(offer)) {
+                    version=++offer.ProgressVersion;offer.ActiveClients.Add(client);return true;
+                }
+                offer=null;version=0;return false;
+            }
+        }
+        private void EndOfferStream(Offer offer,TcpClient client) { if(offer!=null&&client!=null)lock(gate)offer.ActiveClients.Remove(client); }
+
+        public bool HasActiveOutgoingTransfer(string peerId,long packet) { lock(gate)return offers.Any(item=>item.Value.Record.PeerId==peerId&&item.Value.Record.Packet==packet&&!item.Value.Canceled&&item.Value.ActiveClients.Count>0); }
+        public bool HasActiveOutgoingTransfer(string peerId) { lock(gate)return offers.Any(item=>item.Value.Record.PeerId==peerId&&!item.Value.Canceled&&item.Value.ActiveClients.Count>0); }
+        public bool CanCancelOutgoing(string peerId,long packet)
+        {
+            lock(gate) return pending.Any(p=>p.Key==packet&&!p.Value.Canceled&&!p.Value.Delivered&&p.Value.Record.PeerId==peerId)||offers.Any(o=>o.Value.Record.PeerId==peerId&&o.Value.Record.Packet==packet&&!o.Value.Canceled&&o.Value.Expires>=DateTime.UtcNow&&!IsOfferCompleted(o.Value));
+        }
+        public bool HasUndeliveredOutgoing(string peerId,long packet,string recordState)
+        {
+            lock(gate) return pending.Any(p=>p.Key==packet&&!p.Value.Canceled&&!p.Value.Delivered&&p.Value.Record.PeerId==peerId)||(IsUnconfirmedState(recordState)&&offers.Any(o=>o.Value.Record.PeerId==peerId&&o.Value.Record.Packet==packet&&!o.Value.Canceled&&!IsOfferCompleted(o.Value)));
+        }
         public void Start()
         {
             if (udp != null) throw new InvalidOperationException("通信服务已启动。");
@@ -372,10 +399,10 @@ namespace FeiqLight
                 lock (gate)
                 {
                     Pending candidate;
-                    if (pending.TryGetValue(number, out candidate) && (secure || candidate.Fingerprint==null) && candidate.Endpoint.Equals(remote) && candidate.Login == packet.Login && (packet.DeviceId == null || candidate.DeviceId == null || candidate.DeviceId == packet.DeviceId))
-                    { item = candidate; pending.Remove(number); }
+                    if (pending.TryGetValue(number, out candidate) && !candidate.Canceled && (secure || candidate.Fingerprint==null) && candidate.Endpoint.Equals(remote) && candidate.Login == packet.Login && (packet.DeviceId == null || candidate.DeviceId == null || candidate.DeviceId == packet.DeviceId))
+                    { item = candidate; candidate.Delivered=true;candidate.Record.State="已送达"; pending.Remove(number); }
                 }
-                if (item != null) Complete(item.Record, "已送达");
+                if (item != null) { Complete(item.Record, "已送达"); if(item.Record.HasAttachments)try{SaveOffers();}catch(IOException){} }
                 return;
             }
             if (packet.Mode == Protocol.ReleaseFiles)
@@ -413,6 +440,48 @@ namespace FeiqLight
         private void Complete(ChatRecord record, string state)
         {
             record.State = state; Action<ChatRecord> handler = DeliveryChanged; if (!disposed && handler != null) handler(record);
+        }
+        private bool CancelOutgoingCore(string peerId,long packet,string knownState,bool notify,bool onlyUndelivered)
+        {
+            Pending item=null;List<KeyValuePair<string,Offer>> selected;List<TcpClient> socketsToClose=new List<TcpClient>();List<Tuple<Offer,long,int>> notifiedTransfers=new List<Tuple<Offer,long,int>>();TcpClient connectingToClose=null;ChatRecord stateRecord=null;bool wasPending=false,updateRecordState=false;
+            lock(gate) {
+                Pending candidate;
+                if(pending.TryGetValue(packet,out candidate)&&candidate.Record.PeerId==peerId&&!candidate.Canceled&&!candidate.Delivered)item=candidate;
+                selected=offers.Where(o=>o.Value.Record.PeerId==peerId&&o.Value.Record.Packet==packet&&!o.Value.Canceled&&!IsOfferCompleted(o.Value)).ToList();
+                bool active=selected.Any(o=>o.Value.ActiveClients.Count>0);
+                string offerState=selected.Select(o=>o.Value.Record.State).FirstOrDefault();
+                string effectiveState=item!=null?item.Record.State:offerState=="已送达"?offerState:(!String.IsNullOrEmpty(knownState)?knownState:offerState);
+                if(onlyUndelivered&&knownState=="已送达")return false;
+                if(onlyUndelivered&&item==null&&(!IsUnconfirmedState(effectiveState)||active))return false;
+                if(item==null&&selected.Count==0)return false;
+                Dictionary<string,Offer> nextOffers=new Dictionary<string,Offer>(offers);
+                foreach(KeyValuePair<string,Offer> entry in selected)if(entry.Value.Fingerprint!=null)nextOffers.Remove(entry.Key);
+                if(selected.Any(o=>o.Value.Fingerprint!=null))SaveOffers(nextOffers);
+                if(item!=null) {
+                    wasPending=true;item.Canceled=true;pending.Remove(packet);connectingToClose=item.ConnectingClient;item.ConnectingClient=null;stateRecord=item.Record;
+                }
+                foreach(KeyValuePair<string,Offer> entry in selected) {
+                    Offer offer=entry.Value;offer.Canceled=true;offers.Remove(entry.Key);socketsToClose.AddRange(offer.ActiveClients);offer.ActiveClients.Clear();
+                    long version=++offer.ProgressVersion;offer.TransferState="已取消发送";
+                    if(notify)notifiedTransfers.Add(Tuple.Create(offer,version,offer.Percent));
+                    if(stateRecord==null)stateRecord=offer.Record;
+                }
+                updateRecordState=wasPending||(IsUnconfirmedState(effectiveState)&&effectiveState!="已送达");
+                if(updateRecordState&&stateRecord!=null)stateRecord.State="已取消发送";
+            }
+            if(connectingToClose!=null)try{connectingToClose.Close();}catch{}
+            foreach(TcpClient client in socketsToClose)try{client.Close();}catch{}
+            foreach(Tuple<Offer,long,int> entry in notifiedTransfers)Transfer(entry.Item1,entry.Item2,entry.Item3,"已取消发送");
+            if(notify&&updateRecordState&&stateRecord!=null)NotifyDelivery(stateRecord);
+            return true;
+        }
+        public bool CancelOutgoing(string peerId,long packet,string knownState=null,bool notify=true) { return CancelOutgoingCore(peerId,packet,knownState,notify,false); }
+        public bool CancelUndeliveredOutgoing(string peerId,long packet,string knownState,bool notify=false) { return CancelOutgoingCore(peerId,packet,knownState,notify,true); }
+        public void CancelUndeliveredOutgoingForPeer(string peerId)
+        {
+            List<KeyValuePair<long,string>> messages;
+            lock(gate) messages=pending.Values.Where(p=>p.Record.PeerId==peerId&&!p.Canceled&&!p.Delivered).Select(p=>new KeyValuePair<long,string>(p.Record.Packet,p.Record.State)).Concat(offers.Values.Where(o=>o.Record.PeerId==peerId&&!o.Canceled&&IsUnconfirmedState(o.Record.State)).Select(o=>new KeyValuePair<long,string>(o.Record.Packet,o.Record.State))).GroupBy(p=>p.Key).Select(g=>g.First()).ToList();
+            foreach(KeyValuePair<long,string> message in messages)CancelUndeliveredOutgoing(peerId,message.Key,message.Value,false);
         }
         public ChatRecord SendContent(Peer peer, string text, IList<string> paths, string dataRoot)
         {
@@ -549,8 +618,8 @@ namespace FeiqLight
                     DateTime now = DateTime.UtcNow; TimeSpan elapsed = clock.Elapsed;
                     foreach (Pending item in pending.Values.ToList())
                     {
-                        if (item.Sending!=0 || item.Transmitting!=0 || item.Delivered || (now - item.Last).TotalSeconds < 2) continue;
-                        if (item.Attempts >= 4) { pending.Remove(item.Record.Packet); failed.Add(item); }
+                        if (item.Canceled || item.Sending!=0 || item.Transmitting!=0 || item.Delivered || (now - item.Last).TotalSeconds < 2) continue;
+                        if (item.Attempts >= 4) { pending.Remove(item.Record.Packet); item.Record.State="未确认送达，请检查网络后重发"; failed.Add(item); }
                         else { item.Attempts++; item.Last = now; retry.Add(item); }
                     }
                     foreach (string key in seen.Where(p => (now - p.Value).TotalMinutes > 10).Select(p => p.Key).ToList()) seen.Remove(key);
@@ -570,10 +639,10 @@ namespace FeiqLight
                         else { peer.Probed = elapsed; peer.Misses++; probes.Add(peer.Endpoint); }
                     }
                 }
-                foreach (Pending item in retry) try { if(item.Fingerprint!=null&&Security!=null)Task.Run(()=>SendSecurePending(item));else Send(item.Bytes, item.Endpoint); } catch (SocketException) { }
+                foreach (Pending item in retry) if(!item.Canceled&&!item.Delivered)try { if(item.Fingerprint!=null&&Security!=null)Task.Run(()=>SendSecurePending(item));else Send(item.Bytes, item.Endpoint); } catch (SocketException) { }
                 foreach (IPEndPoint target in probes) try { Probe(target); } catch (SocketException) { } catch(IOException) { }
                 foreach (Peer target in syncTargets) ScheduleSync(target);
-                foreach (Pending item in failed) Complete(item.Record, "未确认送达，请检查网络后重发");
+                foreach (Pending item in failed) NotifyDelivery(item.Record);
                 if (changed) Changed();
                 if (Interlocked.Exchange(ref networkDirty, 0) != 0) Revalidate();
                 else if ((DateTime.UtcNow - lastRefresh).TotalSeconds >= 30) Refresh();
@@ -659,7 +728,7 @@ namespace FeiqLight
             if (targetDeviceId == null || targetFingerprint == null) return false;
             lock (gate)
             {
-                return pending.Values.Any(item => !item.Delivered && item.DeviceId == targetDeviceId && item.Fingerprint == targetFingerprint)
+                return pending.Values.Any(item => !item.Delivered && !item.Canceled && item.DeviceId == targetDeviceId && item.Fingerprint == targetFingerprint)
                     || pendingDownloads.Any(pd => pd.Claimed == 0 && pd.DeviceId == targetDeviceId && pd.Fingerprint == targetFingerprint);
             }
         }
@@ -738,7 +807,7 @@ namespace FeiqLight
         private void PushSecureFile(Peer peer, long number, int fileId, long offset)
         {
             Offer offer;
-            lock (gate) { if (!offers.TryGetValue(number + ":" + fileId, out offer)) return; }
+            lock (gate) { if (!offers.TryGetValue(number + ":" + fileId, out offer) || offer.Canceled) return; }
             if (offer.DeviceId != peer.DeviceId || offer.Fingerprint != peer.Fingerprint || offer.Expires < DateTime.UtcNow || offset < 0 || offset > offer.Size) return;
             if (Interlocked.CompareExchange(ref offer.Pushing, 1, 0) != 0) return;
             TcpClient connection = null;
@@ -752,7 +821,7 @@ namespace FeiqLight
                     Upsert(remote, peer.Endpoint);
                     SecureIdentity.WriteText(stream, "P\n" + Port);
                     SecureIdentity.WriteFrame(stream, Protocol.Encode(Next(), Login, Host, Protocol.GetFile | Protocol.Utf8, number.ToString("x") + ":" + fileId.ToString("x") + ":" + offset.ToString("x") + ":", null, Settings.DeviceId, null, Security.Fingerprint));
-                    StreamOffer(stream, offer, offset);
+                    StreamOffer(client,stream,number+":"+fileId,o=>o.DeviceId==peer.DeviceId&&o.Fingerprint==peer.Fingerprint&&offset>=0&&offset<=o.Size,offset);
                 }
             }
             catch (Exception) { }
@@ -778,7 +847,7 @@ namespace FeiqLight
         }
         private void ServeFile(TcpClient client)
         {
-            Offer active = null; int percent = 0; long version = 0;
+            Offer active = null; int percent = 0; long version = 0;bool completed=false;
             try
             {
                 client.ReceiveTimeout = 5000; client.SendTimeout = 15000;
@@ -793,10 +862,8 @@ namespace FeiqLight
                     string[] fields = packet.Body.Split(':'); long messageId, offset; int fileId;
                     if (fields.Length < 3 || !Int64.TryParse(fields[0], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out messageId) || !Int32.TryParse(fields[1], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out fileId) || !Int64.TryParse(fields[2], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out offset)) return;
                     Offer offer;
-                    lock (gate) if (!offers.TryGetValue(messageId + ":" + fileId, out offer)) return;
-                    if (offer.Fingerprint!=null || offer.Expires < DateTime.UtcNow || offer.Address != ((IPEndPoint)client.Client.RemoteEndPoint).Address.ToString() || offset < 0 || offset > offer.Size) return;
-                    // 保留重复下载能力，但只让最新连接更新这一文件的显示进度。
-                    lock (gate) { version = ++offer.ProgressVersion; active = offer; }
+                    if(!TryBeginOfferStream(messageId+":"+fileId,o=>o.Fingerprint==null&&o.Address==((IPEndPoint)client.Client.RemoteEndPoint).Address.ToString()&&offset>=0&&offset<=o.Size,client,out offer,out version))return;
+                    active=offer;
                     FileInfo current = new FileInfo(offer.Path);
                     if (!current.Exists || current.Length != offer.Size || current.LastWriteTimeUtc != offer.Modified) throw new IOException("原文件已改变");
                     percent = offer.Size == 0 ? 0 : (int)(offset * 100.0 / offer.Size); Transfer(offer, version, percent, "发送中");
@@ -811,7 +878,7 @@ namespace FeiqLight
                         }
                         if (disposed || sent != offer.Size) throw new IOException("发送中断");
                     }
-                    Transfer(offer, version, 100, "已发送（非保存确认）"); active = null;
+                    Transfer(offer, version, 100, "已发送（非保存确认）");completed=true;
                     Action<string> notice = TransferNotice; if (!disposed && notice != null) notice("文件已发送：" + current.Name);
                 }
             }
@@ -819,7 +886,7 @@ namespace FeiqLight
             catch (SocketException) { }
             catch (ObjectDisposedException) { }
             catch (UnauthorizedAccessException e) { Report("无法读取发送文件：" + e.Message); }
-            finally { if (active != null) Transfer(active, version, percent, "发送中断，等待对方重试"); lock (gate) connections.Remove(client); client.Close(); }
+            finally { if (active != null&&!completed) Transfer(active, version, percent, "发送中断，等待对方重试"); EndOfferStream(active,client); lock (gate) connections.Remove(client); client.Close(); }
         }
         private void Transfer(Offer offer, long version, int percent, string status, double bytesPerSecond = 0)
         {
@@ -927,30 +994,31 @@ namespace FeiqLight
         }
         private void SendSecurePending(Pending item)
         {
-            if(item.Delivered||Interlocked.CompareExchange(ref item.Sending,1,0)!=0)return;
+            if(item.Delivered||item.Canceled||Interlocked.CompareExchange(ref item.Sending,1,0)!=0)return;
             item.AttemptStarted=clock.Elapsed;
             item.DirectFailed=false;
             TcpClient connection=null;
             Task.Delay(150).ContinueWith(_ =>
             {
-                if(!item.Delivered&&item.ConnectingClient!=null&&!disposed)
+                if(!item.Delivered&&!item.Canceled&&item.ConnectingClient!=null&&!disposed)
                     try{Send(Encode(Protocol.Entry|Protocol.CapUtf8|Protocol.FileAttach,Protocol.Field(Settings.Nickname),Protocol.Field(Settings.Group)),item.Endpoint);}catch{}
             }, TaskScheduler.Default);
             try {
-                using(TcpClient client=connection=SecureConnect(item.Endpoint,c=>item.ConnectingClient=c))using(SslStream stream=Security.Client(client,item.Fingerprint)) {
-                    if(item.Delivered)return;
+                using(TcpClient client=connection=SecureConnect(item.Endpoint,c=>{lock(gate){if(item.Canceled||item.Delivered){c.Close();throw new IOException("已取消发送。");}item.ConnectingClient=c;}}))using(SslStream stream=Security.Client(client,item.Fingerprint)) {
+                    if(item.Delivered||item.Canceled)return;
                     client.ReceiveTimeout=45000;stream.ReadTimeout=45000;
                     Packet remote=AuthenticateSecureClient(stream,item.DeviceId,item.Fingerprint,item.Login);
-                    if(item.Delivered||Interlocked.CompareExchange(ref item.Transmitting,1,0)!=0)return;
+                    if(item.Delivered||item.Canceled||Interlocked.CompareExchange(ref item.Transmitting,1,0)!=0)return;
                     try {
-                        if(item.Delivered)return;
+                        if(item.Delivered||item.Canceled)return;
                         SaveOffers();
+                        lock(gate){Pending active;if(item.Canceled||item.Delivered||!pending.TryGetValue(item.Record.Packet,out active)||active!=item)return;}
                         SecureIdentity.WriteText(stream,"M\n"+Port);SecureIdentity.WriteFrame(stream,item.Bytes);
                         if(SecureIdentity.ReadText(stream,1024)!="OK")throw new IOException("对方未接受消息或未完成配对。");
-                        item.Delivered=true;
+                        lock(gate){Pending active;if(item.Canceled||!pending.TryGetValue(item.Record.Packet,out active)||active!=item)return;item.Delivered=true;item.Record.State="已送达";pending.Remove(item.Record.Packet);}
                         Upsert(remote,item.Endpoint);
-                        lock(gate){Pending active;if(!pending.TryGetValue(item.Record.Packet,out active)||active!=item)return;pending.Remove(item.Record.Packet);}
                         Complete(item.Record,"已送达");
+                        if(item.Record.HasAttachments)try{SaveOffers();}catch(IOException){}
                         if(item.Record.HasAttachments&&!disposed&&item.Peer!=null) {
                             Task.Delay(300).ContinueWith(_=>ScheduleSync(item.Peer),TaskScheduler.Default);
                             Task.Delay(1200).ContinueWith(_=>ScheduleSync(item.Peer),TaskScheduler.Default);
@@ -961,30 +1029,32 @@ namespace FeiqLight
                 }
             } catch(Exception error) {
                 item.DirectFailed=true;
-                if(item.Delivered)return;
+                if(item.Delivered||item.Canceled)return;
                 if(!(error is IOException||error is SocketException||error is System.Security.Authentication.AuthenticationException||error is AggregateException||error is ObjectDisposedException))throw;
                 Exception baseErr=error.GetBaseException();
                 if(baseErr is SecureIdentity.TrustException || baseErr is System.Security.Authentication.AuthenticationException){lock(gate)pending.Remove(item.Record.Packet);Complete(item.Record,"身份核对未通过，未确认送达");}
                 else if(HeartbeatRetry>=TimeSpan.FromSeconds(1)&&!disposed) {
                     TimeSpan waitUntil=clock.Elapsed+TimeSpan.FromMilliseconds(2200);
-                    while(!item.Delivered&&!disposed&&clock.Elapsed<waitUntil)Thread.Sleep(50);
-                    if(item.Delivered)return;
+                    while(!item.Delivered&&!item.Canceled&&!disposed&&clock.Elapsed<waitUntil)Thread.Sleep(50);
+                    if(item.Delivered||item.Canceled)return;
                 }
-                if(!disposed&&!item.Delivered)Report("加密发送未完成："+baseErr.Message);
+                if(!disposed&&!item.Delivered&&!item.Canceled)Report("加密发送未完成："+baseErr.Message);
             }
-            finally {item.ConnectingClient=null;if(connection!=null)lock(gate)connections.Remove(connection);item.Last=DateTime.UtcNow;Interlocked.Exchange(ref item.Sending,0);}
+            finally {lock(gate)item.ConnectingClient=null;if(connection!=null)lock(gate)connections.Remove(connection);item.Last=DateTime.UtcNow;Interlocked.Exchange(ref item.Sending,0);}
         }
-        private void StreamOffer(SslStream stream, Offer offer, long offset)
+        private void StreamOffer(TcpClient client,SslStream stream,string key,Func<Offer,bool> authorize,long offset)
         {
-            FileInfo current=new FileInfo(offer.Path);if(!current.Exists||current.Length!=offer.Size||current.LastWriteTimeUtc!=offer.Modified)throw new IOException("源文件已改变。");
-            long version;lock(gate)version=++offer.ProgressVersion;
-            SecureIdentity.WriteText(stream,"OK\n"+offer.Size+"\n"+offer.Sha256);
-            long sent=offset;TransferRate rate=new TransferRate(offset);var timing=System.Diagnostics.Stopwatch.StartNew();
+            Offer offer;long version;if(!TryBeginOfferStream(key,authorize,client,out offer,out version))throw new IOException("文件授权无效或已取消。");
             try {
+                FileInfo current=new FileInfo(offer.Path);if(!current.Exists||current.Length!=offer.Size||current.LastWriteTimeUtc!=offer.Modified)throw new IOException("源文件已改变。");
+                SecureIdentity.WriteText(stream,"OK\n"+offer.Size+"\n"+offer.Sha256);
+                long sent=offset;TransferRate rate=new TransferRate(offset);var timing=System.Diagnostics.Stopwatch.StartNew();
                 using(FileStream file=File.OpenRead(offer.Path)) {file.Position=offset;byte[] buffer=new byte[65536];while(sent<offer.Size){int count=file.Read(buffer,0,(int)Math.Min(buffer.Length,offer.Size-sent));if(count==0)throw new EndOfStreamException();stream.Write(buffer,0,count);sent+=count;lock(gate)offer.Expires=DateTime.UtcNow.AddDays(7);if(rate.Update(sent,timing.Elapsed.TotalMilliseconds))Transfer(offer,version,(int)(sent*100.0/Math.Max(1,offer.Size)),"发送中",rate.BytesPerSecond);}}
                 stream.Flush();Transfer(offer,version,100,"已发送，等待校验保存");
                 if(SecureIdentity.ReadText(stream,128)=="STORED\n"+offer.Sha256){Transfer(offer,version,100,"对方已校验保存");SaveOffers();}
             }catch(IOException){Transfer(offer,version,offer.Percent,"传输中断或保存确认未送达");throw;}
+            catch(ObjectDisposedException){Transfer(offer,version,offer.Percent,"传输中断或保存确认未送达");throw;}
+            finally {EndOfferStream(offer,client);}
         }
         private void ServeSecure(TcpClient client)
         {
@@ -1008,29 +1078,31 @@ namespace FeiqLight
                         double waitMs=0;
                         lock(gate) {
                             TimeSpan now=clock.Elapsed;
-                            foreach(Pending item in pending.Values)if(!item.Delivered&&item.DeviceId==packet.DeviceId&&item.Fingerprint==fingerprint&&!item.DirectFailed){double rem=120-(now-item.AttemptStarted).TotalMilliseconds;if(rem>waitMs)waitMs=rem;}
+                            foreach(Pending item in pending.Values)if(!item.Delivered&&!item.Canceled&&item.DeviceId==packet.DeviceId&&item.Fingerprint==fingerprint&&!item.DirectFailed){double rem=120-(now-item.AttemptStarted).TotalMilliseconds;if(rem>waitMs)waitMs=rem;}
                             foreach(PendingDownload pd in pendingDownloads)if(pd.Claimed==0&&pd.DeviceId==packet.DeviceId&&pd.Fingerprint==fingerprint&&!pd.DirectFailed){double rem=120-(now-pd.CreatedAt).TotalMilliseconds;if(rem>waitMs)waitMs=rem;}
                         }
                         if(waitMs>0)Thread.Sleep((int)waitMs+5);
                         List<Pending> due=new List<Pending>();
                         lock(gate) {
                             foreach(Pending item in pending.Values.OrderBy(p=>p.Record.Packet))
-                                if(!item.Delivered&&item.DeviceId==packet.DeviceId&&item.Fingerprint==fingerprint)due.Add(item);
+                                if(!item.Delivered&&!item.Canceled&&item.DeviceId==packet.DeviceId&&item.Fingerprint==fingerprint)due.Add(item);
                         }
                         foreach(Pending item in due) {
                             // 逐条占用发送权；前一条失败不能把后续消息永久留在“发送中”。
                             if(Interlocked.CompareExchange(ref item.Transmitting,1,0)!=0)continue;
                             try {
-                                lock(gate){Pending current;if(item.Delivered||!pending.TryGetValue(item.Record.Packet,out current)||current!=item||!Security.IsTrusted(item.DeviceId,item.Fingerprint))continue;}
+                                lock(gate){Pending current;if(item.Delivered||item.Canceled||!pending.TryGetValue(item.Record.Packet,out current)||current!=item||!Security.IsTrusted(item.DeviceId,item.Fingerprint))continue;}
                                 SaveOffers();
+                                lock(gate){Pending current;if(item.Delivered||item.Canceled||!pending.TryGetValue(item.Record.Packet,out current)||current!=item)continue;}
                                 SecureIdentity.WriteText(stream,"M");
                                 SecureIdentity.WriteFrame(stream,item.Bytes);
                                 if(SecureIdentity.ReadText(stream,1024)=="OK") {
-                                    item.Delivered=true;
-                                    TcpClient connecting;
-                                    lock(gate){connecting=item.ConnectingClient;Pending active;if(pending.TryGetValue(item.Record.Packet,out active)&&active==item)pending.Remove(item.Record.Packet);}
+                                    TcpClient connecting;bool delivered=false;
+                                    lock(gate){Pending active;if(!item.Canceled&&pending.TryGetValue(item.Record.Packet,out active)&&active==item){item.Delivered=true;item.Record.State="已送达";connecting=item.ConnectingClient;item.ConnectingClient=null;pending.Remove(item.Record.Packet);delivered=true;}else connecting=null;}
                                     if(connecting!=null)try{connecting.Close();}catch{}
+                                    if(!delivered)continue;
                                     Complete(item.Record,"已送达");
+                                    if(item.Record.HasAttachments)try{SaveOffers();}catch(IOException){}
                                     if(item.Record.HasAttachments&&!disposed&&item.Peer!=null) {
                                         Task.Delay(300).ContinueWith(_=>ScheduleSync(item.Peer),TaskScheduler.Default);
                                         Task.Delay(1200).ContinueWith(_=>ScheduleSync(item.Peer),TaskScheduler.Default);
@@ -1075,9 +1147,7 @@ namespace FeiqLight
                 Upsert(identity,endpoint);
                 string[] fields=packet.Body.Split(':');long number,offset;int fileId;
                 if(fields.Length<3||!Int64.TryParse(fields[0],NumberStyles.HexNumber,CultureInfo.InvariantCulture,out number)||!Int32.TryParse(fields[1],NumberStyles.HexNumber,CultureInfo.InvariantCulture,out fileId)||!Int64.TryParse(fields[2],NumberStyles.HexNumber,CultureInfo.InvariantCulture,out offset))throw new IOException("文件请求无效。");
-                Offer offer;lock(gate){if(!offers.TryGetValue(number+":"+fileId,out offer))throw new IOException("文件邀请不存在或已过期。");}
-                if(offer.DeviceId!=packet.DeviceId||offer.Fingerprint!=fingerprint||offer.Expires<DateTime.UtcNow||offset<0||offset>offer.Size)throw new IOException("文件授权无效。");
-                StreamOffer(stream,offer,offset);
+                StreamOffer(client,stream,number+":"+fileId,o=>o.DeviceId==packet.DeviceId&&o.Fingerprint==fingerprint&&offset>=0&&offset<=o.Size,offset);
             }
         }
         private byte[] SecureHello() { return Protocol.Encode(0,Login,Host,Protocol.Entry|Protocol.Utf8,Protocol.Field(Settings.Nickname),Protocol.Field(Settings.Group),Settings.DeviceId,null,Security.Fingerprint); }

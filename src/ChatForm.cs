@@ -78,6 +78,8 @@ namespace FeiqLight
             head.Paint += delegate(object sender, PaintEventArgs e) { using (Pen line = new Pen(Theme.Line)) e.Graphics.DrawLine(line, 0, head.Height - 1, head.Width, head.Height - 1); };
             middle = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty, BackColor = Theme.Wallpaper };
             history.RetryRequested += RetryMessage;
+            history.CanCancelSend = record => record != null && record.Outgoing && network.CanCancelOutgoing(peer.Id, record.Packet);
+            history.CancelSendRequested += CancelSendMessage;
             history.AvatarClicked += outgoing => { if (outgoing) main.OpenSettings(); else main.ShowContactProfile(peer); };
             history.FileRequested += (record, id) => {
                 ReceivedFile item = files.Items.Cast<ReceivedFile>().FirstOrDefault(f => f.Packet == record.Packet && f.File.Id == id);
@@ -144,7 +146,7 @@ namespace FeiqLight
             editor.EnableAutoDragDrop = false;
             RegisterFileDrop(this);
             ApplyAppearance();
-            try { var records = store.History(peer.Id, 150).Select(record => record.Outgoing ? network.OutgoingRecord(peer.Id, record.Packet) ?? record : record).ToList(); history.SetRecords(records); editor.Text = store.LoadDraft(peer.Id);
+            try { var records = store.History(peer.Id, 150).Select(record => { ChatRecord outgoing=record.Outgoing?network.OutgoingRecord(peer.Id,record.Packet):null;if(outgoing!=null&&record.State=="已送达")outgoing.State=record.State;return outgoing??record; }).ToList(); history.SetRecords(records); editor.Text = store.LoadDraft(peer.Id);
                 foreach(ChatRecord record in records.Where(r=>!r.Outgoing))foreach(FileTransferState file in record.Transfers??new FileTransferState[0]) {
                     if(files.Items.Count>=1000)break;
                     if(file.Status=="已拒绝"||file.Status=="本机文件已删除"||!String.IsNullOrEmpty(file.LocalPath)||!SecureIdentity.ValidFingerprint(file.Sha256))continue;
@@ -209,15 +211,25 @@ namespace FeiqLight
         }
         private void LoadLatest() {
             locationVersion++;
-            var records=store.History(peer.Id,150).Select(record=>record.Outgoing?network.OutgoingRecord(peer.Id,record.Packet)??record:record);
+            var records=store.History(peer.Id,150).Select(record=>{ChatRecord outgoing=record.Outgoing?network.OutgoingRecord(peer.Id,record.Packet):null;if(outgoing!=null&&record.State=="已送达")outgoing.State=record.State;return outgoing??record;});
             history.SetRecords(records);showingArchive=false;returnToLatest.Visible=false;
         }
         public void ClearHistory() { locationVersion++;showingArchive=false;returnToLatest.Visible=false;history.Clear(); }
         private void DeleteMessages(ChatRecord[] records) { main.DeleteMessages(peer, records); }
+        private void CancelSendMessage(ChatRecord record)
+        {
+            if(record==null||!record.Outgoing||!network.CanCancelOutgoing(peer.Id,record.Packet))return;
+            using(ConfirmDialog confirm=new ConfirmDialog("取消发送？",record.HasAttachments?"将停止发送并撤销对方尚未接收的文件邀请；本机原文件会保留。":"将停止继续发送这条尚未确认送达的消息。","取消发送",true)) {
+                if(confirm.ShowDialog(main)!=DialogResult.OK)return;
+                try { if(!network.CancelOutgoing(peer.Id,record.Packet,record.State,true))main.FileReceiveStatus("此消息已发送完成或已结束，无需取消。"); }
+                catch(Exception error) { Error("取消发送失败",error.Message); }
+            }
+        }
         internal void RemoveMessages(ChatRecord[] records) { history.RemoveRecords(records); }
         internal bool HasPendingMessages(ChatRecord[] records) {
             return records.Any(r => (!r.Outgoing && files.Items.Cast<ReceivedFile>().Any(f => f.Packet == r.Packet)) ||
-                (r.Transfers ?? new FileTransferState[0]).Any(f => f.DisplayStatus() == "等待对方接收" || ((f.DisplayStatus() ?? "").Contains("中") && !(f.DisplayStatus() ?? "").Contains("中断") && f.Percent < 100)));
+                (r.Outgoing&&network.HasActiveOutgoingTransfer(peer.Id,r.Packet)) ||
+                (r.Transfers ?? new FileTransferState[0]).Any(f => ((f.DisplayStatus() ?? "").Contains("中") && !(f.DisplayStatus() ?? "").Contains("中断") && f.Percent < 100)));
         }
         public void Delivery(ChatRecord record) { history.Delivery(record); }
         public void AddAttachments(IncomingMessage message)
@@ -422,7 +434,7 @@ namespace FeiqLight
             if(!records.Any(record=>record.Packet==target.Packet&&record.Outgoing==target.Outgoing))return false;
             showingArchive=older;returnToLatest.Visible=older;
             history.RecordLimit=500;history.CharacterLimit=Int32.MaxValue;
-            history.SetRecords(records.Select(record=>record.Outgoing?network.OutgoingRecord(peer.Id,record.Packet)??record:record));
+            history.SetRecords(records.Select(record=>{ChatRecord outgoing=record.Outgoing?network.OutgoingRecord(peer.Id,record.Packet):null;if(outgoing!=null&&record.State=="已送达")outgoing.State=record.State;return outgoing??record;}));
             return history.RevealRecord(target);
         }
         private void Error(string title, string text) { using (NoticeDialog dialog = new NoticeDialog(title, text)) dialog.ShowDialog(main); }
@@ -448,9 +460,17 @@ namespace FeiqLight
             ReceivedFile selected = files.SelectedItem as ReceivedFile; if (selected == null) return;
             await ReceiveAsync(selected, false);
         }
+        private sealed class UiProgress : IProgress<TransferProgress>
+        {
+            private readonly MainForm host;
+            private readonly Action<TransferProgress> callback;
+            public UiProgress(MainForm host, Action<TransferProgress> callback) { this.host = host; this.callback = callback; }
+            public void Report(TransferProgress value) { host.Ui(() => callback(value)); }
+        }
         private async Task ReceiveAsync(ReceivedFile selected, bool automatic)
         {
             if (receiving != null || IsDisposed) return;
+            if (!main.InvokeRequired && SynchronizationContext.Current == null) SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
             selected.AutomaticPending = false; selected.Status = "接收中"; files.SelectedItem = selected;
             CancellationTokenSource cancel = new CancellationTokenSource(); receiving = cancel; activeFile = selected;
             FileState(selected, 0, "连接中 · 点击取消");
@@ -460,7 +480,7 @@ namespace FeiqLight
                 string destination = SendBatch.Destination(network.Settings.ReceiveFolder, selected.File);
                 selected.PartialPaths.Add(LanService.PartialPath(peer, selected.Packet, selected.File, destination));
                 fileStatus.Text = "连接中";
-                string saved = await network.ReceiveFileAsync(peer, selected.Packet, selected.File, destination, null, cancel.Token, true, new Progress<TransferProgress>(p => {
+                string saved = await network.ReceiveFileAsync(peer, selected.Packet, selected.File, destination, null, cancel.Token, true, new UiProgress(main, p => {
                     if (!IsDisposed && receiving == cancel && activeFile == selected) {
                         FileState(selected, p.Percent, "接收中 · 点击取消", null, p.BytesPerSecond);
                         selected.Status = p.Percent + "% · " + Theme.SizeText((long)p.BytesPerSecond) + "/s";

@@ -333,4 +333,89 @@ public final class CoreTest {
             }
         }
     }
+    @Test public void offlineOutgoingFileCancelAndUndeliveredRevocationWork() throws Exception {
+        Path dir=Files.createTempDirectory("feiq-java-cancel-out-");
+        File source=dir.resolve("离线取消.bin").toFile();
+        byte[] payload=new byte[2048]; new Random(23).nextBytes(payload); Files.write(source.toPath(),payload);
+        Inbox ia=new Inbox(); int pa=port(), pb=port();
+        try(LanNode sender=node(ia,pa,"sender")) {
+            LanNode.Peer target;
+            try(LanNode receiver=node(new Inbox(),pb,"receiver")) {
+                sender.probe(LanNode.endpoint("127.0.0.1:"+pb));
+                target=waitPeer(sender,"receiver");
+            }
+            LanNode.Message sent=sender.sendMessage(target,"离线文件",Collections.singletonList(source));
+            assertTrue(sender.canCancelOutgoing(target.id(),sent.number));
+            assertTrue(sender.hasUndeliveredOutgoing(target.id(),sent.number,sent.state));
+            assertTrue(sender.cancelOutgoing(target.id(),sent.number,sent.state,true));
+            assertFalse(sender.canCancelOutgoing(target.id(),sent.number));
+            assertFalse(sender.offering(target.id(),sent.number,0));
+            assertTrue("取消发送不能删除原文件",source.isFile());
+            String progress=ia.progress.poll(3,TimeUnit.SECONDS); assertNotNull(progress); assertTrue(progress.endsWith("/已取消发送"));
+            LanNode.Message update=ia.updates.poll(3,TimeUnit.SECONDS); assertNotNull(update); assertEquals("已取消发送",update.state);
+
+            LanNode.Message directDel=sender.sendMessage(target,"离线直删",Collections.singletonList(source));
+            assertTrue(sender.offering(target.id(),directDel.number,0));
+            assertTrue(sender.cancelUndeliveredOutgoing(target.id(),directDel.number,"等待确认",false));
+            assertFalse(sender.offering(target.id(),directDel.number,0));
+
+            LanNode.Message peerClear=sender.sendMessage(target,"离线清会话",Collections.singletonList(source));
+            assertTrue(sender.offering(target.id(),peerClear.number,0));
+            sender.cancelUndeliveredOutgoingForPeer(target.id(),Collections.singleton(peerClear.number));
+            assertFalse(sender.offering(target.id(),peerClear.number,0));
+
+            Inbox ib=new Inbox();
+            try(LanNode receiver=node(ib,pb,"receiver")) {
+                receiver.probe(LanNode.endpoint("127.0.0.1:"+pa));
+                LanNode.Peer back=waitPeer(receiver,"sender");
+                assertNull("已取消的离线消息不应在对方上线后投递",ib.messages.poll(400,TimeUnit.MILLISECONDS));
+                try { receiver.receiveFile(back,sent.number,sent.files.get(0),dir.resolve("不应收到.bin").toFile(),new LanNode.Transfer(),null); fail("已撤销报价仍被拉取"); }
+                catch(IOException expected) { }
+            }
+        } finally { try(java.util.stream.Stream<Path> paths=Files.walk(dir)) { paths.sorted(Comparator.reverseOrder()).forEach(p->{try{Files.delete(p);}catch(IOException e){throw new UncheckedIOException(e);}}); } }
+    }
+    @Test public void plaintextCompletionClearsActiveStreamAndActiveTransferAbortsCleanlyOnCancel() throws Exception {
+        Path dir=Files.createTempDirectory("feiq-java-active-cancel-");
+        File small=dir.resolve("small.bin").toFile(), large=dir.resolve("large.bin").toFile();
+        byte[] smallBytes=new byte[1024], largeBytes=new byte[4*1024*1024];
+        new Random(31).nextBytes(smallBytes); new Random(37).nextBytes(largeBytes);
+        Files.write(small.toPath(),smallBytes); Files.write(large.toPath(),largeBytes);
+        Inbox ia=new Inbox(), ib=new Inbox(); int pa=port(), pb=port();
+        try(LanNode sender=node(ia,pa,"sender"); LanNode receiver=node(ib,pb,"receiver")) {
+            sender.probe(LanNode.endpoint("127.0.0.1:"+pb));
+            LanNode.Peer target=waitPeer(sender,"receiver"), back=waitPeer(receiver,"sender");
+            LanNode.Message mSmall=sender.sendMessage(target,"小文件",Collections.singletonList(small));
+            LanNode.Message gotSmall=ib.messages.poll(3,TimeUnit.SECONDS); assertNotNull(gotSmall);
+            assertEquals("已送达",ia.updates.poll(3,TimeUnit.SECONDS).state);
+            File smallOut=dir.resolve("small-out.bin").toFile();
+            receiver.receiveFile(back,gotSmall.number,gotSmall.files.get(0),smallOut,new LanNode.Transfer(),null);
+            assertArrayEquals(smallBytes,Files.readAllBytes(smallOut.toPath()));
+            long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(3);
+            while(sender.hasActiveOutgoingTransfer(target.id(),mSmall.number)&&System.nanoTime()<deadline)Thread.sleep(10);
+            assertFalse("明文正常发完不应泄漏 activeSockets",sender.hasActiveOutgoingTransfer(target.id(),mSmall.number));
+            assertFalse("cancelUndeliveredOutgoing 不能撤销已送达报价",sender.cancelUndeliveredOutgoing(target.id(),mSmall.number,"已送达",false));
+
+            LanNode.Message mLarge=sender.sendMessage(target,"大文件",Collections.singletonList(large));
+            LanNode.Message gotLarge=ib.messages.poll(3,TimeUnit.SECONDS); assertNotNull(gotLarge);
+            assertEquals("已送达",ia.updates.poll(3,TimeUnit.SECONDS).state);
+            ia.progress.clear();
+            try(Socket stall=new Socket()) {
+                stall.setReceiveBufferSize(4096);
+                stall.connect(new InetSocketAddress(InetAddress.getLoopbackAddress(),pa),3000);
+                stall.getOutputStream().write(Protocol.encode(77,"receiver","host",Protocol.GET_FILE|Protocol.UTF8,Long.toHexString(mLarge.number)+":0:0:",null));
+                assertTrue(stall.getInputStream().read()>=0);
+                long activeDeadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(3);
+                while(!sender.hasActiveOutgoingTransfer(target.id(),mLarge.number)&&System.nanoTime()<activeDeadline)Thread.sleep(10);
+                assertTrue("活动发送流未登记",sender.hasActiveOutgoingTransfer(target.id(),mLarge.number));
+                assertTrue(sender.cancelOutgoing(target.id(),mLarge.number,"已送达",true));
+                long stopDeadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(3);
+                while(sender.hasActiveOutgoingTransfer(target.id(),mLarge.number)&&System.nanoTime()<stopDeadline)Thread.sleep(10);
+                assertFalse("取消后活动流未释放",sender.hasActiveOutgoingTransfer(target.id(),mLarge.number));
+                Thread.sleep(150);
+                List<String> events=new ArrayList<>(); ia.progress.drainTo(events);
+                assertTrue("缺少已取消发送进度事件",events.stream().anyMatch(e->e.endsWith("/已取消发送")));
+                assertEquals("取消发送状态不应被发送中断覆盖",events.get(events.size()-1).endsWith("/已取消发送"),true);
+            }
+        } finally { try(java.util.stream.Stream<Path> paths=Files.walk(dir)) { paths.sorted(Comparator.reverseOrder()).forEach(p->{try{Files.delete(p);}catch(IOException e){throw new UncheckedIOException(e);}}); } }
+    }
 }

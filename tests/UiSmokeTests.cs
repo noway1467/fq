@@ -595,16 +595,17 @@ namespace FeiqLight.Tests
                     Check(!history.SelectionMode && history.SelectionCount == 0, "Esc 未退出多选"); form.Close();
                 }
             });
-            test("消息删除保护：待接收与发送邀请需先处理文件", () => {
+            test("消息删除保护：待接收与传输中阻断，未传出站邀请允许删除", () => {
                 LocalStore store = new LocalStore(Path.Combine(directory, "delete-pending"));
                 AppSettings settings = new AppSettings { Notifications = false, CloseToTray = false, AutoReceiveFiles = false, Conversations = new[] { new SavedConversation { Endpoint = "127.0.0.1:" + Port(), Login = "pending-peer", Nickname = "文件任务" } } };
                 using(LanService node = new LanService(settings, Port(), true, "pending-local")) using(MainForm main = new MainForm(node, store)) {
                     Peer peer = node.Peers.Single();
-                    ChatRecord outgoing = new ChatRecord { PeerId = peer.Id, Packet = 20, Text = "发出的邀请", Outgoing = true, Time = DateTime.Now, Transfers = new[] { new FileTransferState { Id = 0, Name = "文件.txt", Status = "等待对方接收" } } };
+                    ChatRecord outgoingSending = new ChatRecord { PeerId = peer.Id, Packet = 20, Text = "发送中的文件", State = "已送达", Outgoing = true, Time = DateTime.Now, Transfers = new[] { new FileTransferState { Id = 0, Name = "文件.txt", Status = "发送中", Percent = 40 } } };
+                    ChatRecord outgoingWaiting = new ChatRecord { PeerId = peer.Id, Packet = 22, Text = "等待对方接收的邀请", State = "已送达", Outgoing = true, Time = DateTime.Now, Transfers = new[] { new FileTransferState { Id = 0, Name = "等待.txt", Status = "等待对方接收", Percent = 0 } } };
                     ChatRecord incoming = new ChatRecord { PeerId = peer.Id, Packet = 21, Text = "收到的邀请", Time = DateTime.Now };
-                    store.Append(outgoing); store.AppendIncoming(incoming); main.Show(); main.OpenChat(peer);
+                    store.Append(outgoingSending); store.Append(outgoingWaiting); store.AppendIncoming(incoming); main.Show(); main.OpenChat(peer);
                     main.ActiveChat.AddAttachments(new IncomingMessage { Peer = peer, Record = incoming, Files = new List<Attachment> { new Attachment { Id = 0, Name = "待接收.txt", Size = 12 } } });
-                    foreach(ChatRecord record in new[] { outgoing, incoming }) {
+                    foreach(ChatRecord record in new[] { outgoingSending, incoming }) {
                         bool noticed = false;
                         using(System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 20 }) {
                             timer.Tick += delegate {
@@ -613,10 +614,19 @@ namespace FeiqLight.Tests
                                 ConfirmDialog confirm = Application.OpenForms.OfType<ConfirmDialog>().FirstOrDefault();
                                 if(confirm != null) { timer.Stop(); Button(confirm, "取消").PerformClick(); }
                             };
-                            timer.Start(); Check(!main.DeleteMessages(peer, new[] { record }), "删除了未完成文件任务的消息");
+                            timer.Start(); Check(!main.DeleteMessages(peer, new[] { record }), "删除了待接收或正在传输中的文件消息");
                         }
-                        Check(noticed && store.History(peer.Id, 10).Count == 2, "文件任务保护提示或历史保留错误");
+                        Check(noticed && store.History(peer.Id, 10).Count == 3, "文件任务保护提示或历史保留错误");
                     }
+                    bool confirmed = false;
+                    using(System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 20 }) {
+                        timer.Tick += delegate {
+                            ConfirmDialog confirm = Application.OpenForms.OfType<ConfirmDialog>().FirstOrDefault();
+                            if(confirm != null) { confirmed = true; timer.Stop(); Button(confirm, "删除").PerformClick(); }
+                        };
+                        timer.Start(); Check(main.DeleteMessages(peer, new[] { outgoingWaiting }), "未在传输中的出站邀请仍被错误阻断删除");
+                    }
+                    Check(confirmed && store.History(peer.Id, 10).Count == 2, "删除未传出站邀请后历史数量错误");
                     main.ExitApplication();
                 }
             });

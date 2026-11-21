@@ -467,10 +467,10 @@ public final class MainActivity extends Activity implements ChatService.Observer
                 if(m.outgoing) {
                     Uri sentUri=outgoingUri(m,fileIndex);
                     if(sentUri!=null&&MediaPreview.supported(f.name)&&previewCount++<24)
-                        bubble.addView(media.thumbnail(sentUri,f.name,Math.min(dp(260),maxWidth-dp(35)),()->openFile(sentUri,f.name,false),()->sentFileActions(sentUri,f.name)),bubble.getChildCount()-1);
+                        bubble.addView(media.thumbnail(sentUri,f.name,Math.min(dp(260),maxWidth-dp(35)),()->openFile(sentUri,f.name,false),()->sentFileActions(sentUri,f.name,m,conversation==null?null:conversation.peer)),bubble.getChildCount()-1);
                     attachment.setContentDescription(f.name+(sentUri==null?"，文件已删除或不可用":"，文件操作"));
-                    attachment.setOnClickListener(v->sentFileActions(sentUri,f.name));
-                    attachment.setOnLongClickListener(v->{sentFileActions(sentUri,f.name);return true;});
+                    attachment.setOnClickListener(v->sentFileActions(sentUri,f.name,m,conversation==null?null:conversation.peer));
+                    attachment.setOnLongClickListener(v->{sentFileActions(sentUri,f.name,m,conversation==null?null:conversation.peer);return true;});
                 } else if(conversation!=null) {
                     File saved=service.receivedFile(conversation.peer,m.number,f);
                     boolean available=saved.isFile()||receivedStorage.saved(saved)!=null;
@@ -631,6 +631,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
     private void messageActions(LanNode.Message message,LanNode.Peer source){
         int generation=editorGeneration;
         LinearLayout options=column();Dialog dialog=sheet("消息",options,null,null);
+        if(message.outgoing&&service!=null&&service.canCancelOutgoing(source.id(),message.number))fileAction(options,dialog,"取消发送",()->{if(selected.equals(source.id())&&generation==editorGeneration)requestCancelOutgoing(message,source);});
         if(!message.text.isEmpty())fileAction(options,dialog,"复制消息",()->copyText("消息",message.text));
         if(!message.text.isEmpty())fileAction(options,dialog,"查看全文 / 选段复制",()->showFullText(message.text));
         fileAction(options,dialog,"转发…",()->forward(message,source));
@@ -648,9 +649,19 @@ public final class MainActivity extends Activity implements ChatService.Observer
             else entry.getValue().setForeground(null);
         }
     }
+    private void requestCancelOutgoing(LanNode.Message message,LanNode.Peer target) {
+        if(message==null||target==null||service==null)return;
+        ChatService source=service;String peer=target.id();int generation=editorGeneration;
+        confirm("取消发送？",message.files.isEmpty()?"将停止继续发送这条尚未确认送达的消息。":"将停止发送并撤销对方尚未接收的文件邀请；本机原文件会保留。","取消发送",()->{
+            if(service!=source||!peer.equals(selected)||generation!=editorGeneration)return;
+            source.cancelOutgoing(peer,message,success->{if(success&&!isDestroyed()&&!isFinishing()&&service==source&&peer.equals(selected)&&generation==editorGeneration)changed();});
+        });
+    }
     private void requestDeleteMessages(List<LanNode.Message> messages) {
         if(messages.isEmpty()||service==null)return;ChatService source=service;String peer=selected;int generation=editorGeneration;
-        confirm(messages.size()==1?"删除这条消息？":"删除选中的 "+messages.size()+" 条消息？","仅删除这台设备上的记录，对方记录和附件文件会保留。","删除",()->{
+        boolean undelivered=messages.stream().anyMatch(message->message.outgoing&&source.hasUndeliveredOutgoing(peer,message));
+        String body=undelivered?"将停止发送尚未送达的消息并撤销对应文件邀请；只删除本机的消息记录，对方已收到的记录和本机附件文件会保留。":"仅删除这台设备上的记录，对方记录和附件文件会保留。";
+        confirm(messages.size()==1?"删除这条消息？":"删除选中的 "+messages.size()+" 条消息？",body,"删除",()->{
             if(service!=source||!peer.equals(selected)||generation!=editorGeneration)return;
             source.deleteMessages(peer,messages,success->{if(success&&!isDestroyed()&&!isFinishing()&&service==source&&peer.equals(selected)&&generation==editorGeneration){endMessageSelection();changed();}});
         });
@@ -1194,7 +1205,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
     private void confirm(String title,String body,String action,Runnable confirm) { TextView content=text(body,15,INK); content.setPadding(0,dp(14),0,dp(4)); sheet(title,content,action,dialog->{ dialog.dismiss(); confirm.run(); }); }
     private void copyText(String label,String value) { getSystemService(ClipboardManager.class).setPrimaryClip(ClipData.newPlainText(label,value)); error("已复制"+label); }
     private void fileAction(LinearLayout options,Dialog dialog,String label,Runnable action) {
-        boolean danger=label.equals("断开")||label.startsWith("拒绝")||label.startsWith("删除")||label.startsWith("清空");
+        boolean danger=label.equals("断开")||label.equals("取消发送")||label.startsWith("拒绝")||label.startsWith("删除")||label.startsWith("清空");
         if(danger&&options.getChildCount()>0) { View line=new View(this);line.setBackgroundColor(blend(INK,SURFACE,.09f));LinearLayout.LayoutParams separator=new LinearLayout.LayoutParams(-1,dp(1));separator.setMargins(dp(12),dp(8),dp(12),dp(8));options.addView(line,separator); }
         int color=danger?0xffd24e54:INK;
         Button item=button(label,false); item.setTextColor(color); item.setGravity(Gravity.START|Gravity.CENTER_VERTICAL); item.setMinHeight(dp(52)); item.setPadding(dp(12),dp(12),dp(14),dp(12));
@@ -1222,7 +1233,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
             else if(label.contains("设置")) { c.drawCircle(12,12,7,paint);c.drawCircle(12,12,3,paint);for(int i=0;i<8;i++){double a=i*Math.PI/4;c.drawLine(12+(float)Math.cos(a)*8,12+(float)Math.sin(a)*8,12+(float)Math.cos(a)*10,12+(float)Math.sin(a)*10,paint);} }
             else if(label.contains("添加")) { c.drawLine(12,4,12,20,paint);c.drawLine(4,12,20,12,paint); }
             else if(label.contains("连接")||label.equals("断开")) { c.drawArc(4,4,20,20,-50,280,false,paint);c.drawLine(12,2,12,12,paint); }
-            else if(label.startsWith("拒绝")||label.startsWith("删除")) { c.drawLine(5,5,19,19,paint);c.drawLine(5,19,19,5,paint); }
+            else if(label.equals("取消发送")||label.startsWith("拒绝")||label.startsWith("删除")) { c.drawLine(5,5,19,19,paint);c.drawLine(5,19,19,5,paint); }
             else if(label.equals("关于")) { c.drawCircle(12,12,9,paint);c.drawLine(12,11,12,17,paint);c.drawPoint(12,7,paint); }
             else { c.drawRoundRect(5,3,19,21,2,2,paint);c.drawLine(9,11,15,11,paint);c.drawLine(9,16,15,16,paint); }
             c.restore();
@@ -1234,8 +1245,10 @@ public final class MainActivity extends Activity implements ChatService.Observer
         File file=new File(message.localPaths.get(index));if(!file.isFile())return null;
         try {return ReceivedFileProvider.uri(this,file,message.files.get(index).name);} catch(IllegalArgumentException e) {return null;}
     }
-    private void sentFileActions(Uri uri,String name) {
+    private void sentFileActions(Uri uri,String name,LanNode.Message message,LanNode.Peer peer) {
+        int generation=editorGeneration;
         LinearLayout options=column();Dialog dialog=sheet(name,options,null,null);
+        if(message!=null&&peer!=null&&message.outgoing&&service!=null&&service.canCancelOutgoing(peer.id(),message.number))fileAction(options,dialog,"取消发送",()->{if(selected.equals(peer.id())&&generation==editorGeneration)requestCancelOutgoing(message,peer);});
         if(uri!=null){fileAction(options,dialog,"打开文件",()->openFile(uri,name,false));fileAction(options,dialog,"打开方式…",()->openFileWith(uri,name,false,true));fileAction(options,dialog,"分享文件",()->openFile(uri,name,true));}
         else options.addView(text("文件已删除或读取授权已失效，消息记录仍可删除。",14,MUTED));
         fileAction(options,dialog,"复制文件名",()->copyText("文件名",name));

@@ -4,13 +4,18 @@
   const mode = location.hash === '#remote' ? 'remote' : 'share';
   const queryParams = new URLSearchParams(location.search);
   const gatewayAccess = queryParams.get('gateway') || queryParams.get('access') || '';
-  let token = '', generation = 0, frameTimer = 0, frameUrl = '', drag = false;
+  let token = '', generation = 0, frameTimer = 0, frameUrl = '', drag = false, frameFailures = 0;
   let frameAbort=null;
   let display = 0, displayVersion = 0, zoomLevel = 0;
   let phone = false, scale = 1, fillHeight = false;
   let trail = [{id: '', name: '共享文件夹'}], items = [], listing = 0;
   let pending = [], sending = false, closing = Promise.resolve();
-  const status = (text, error = false) => { $('status').textContent = text; $('status').hidden = !text; $('status').classList.toggle('error', error); };
+  let recoveryNotice='';
+  const status = (text, error = false) => {
+    const activeRemote=mode==='remote'&&Boolean(token);
+    $('status').textContent=text;$('status').hidden=!text||activeRemote;$('status').classList.toggle('error',error);
+    if(mode==='remote'){$('remote-error').textContent=text;$('remote-error').hidden=!text||!activeRemote;}
+  };
   const clamp = (n, limit) => Math.max(-limit, Math.min(limit, Math.round(n)));
   if (mode === 'remote') {
     document.title = '飞Q · 远程控制'; $('page-title').textContent = '远程控制';
@@ -32,22 +37,43 @@
       const response = await fetch(path, options);
       if (!response.ok) {
         let error; try { error = (await response.json()).error; } catch (_) { error = ''; }
-        const failure = new Error(error || `请求失败 (${response.status})`); failure.status = response.status; throw failure;
+        const failure = new Error(error || `请求失败 (${response.status})`); failure.status = response.status; failure.retryable = response.status === 408 || response.status === 425 || response.status === 429 || response.status >= 500; throw failure;
       }
       // 超时覆盖完整响应体；仅收到响应头不能算画面或输入确认已完成。
       return await (path.startsWith('/api/screen?') ? response.blob() : response.json());
-    } catch (error) { if (error.name === 'AbortError') throw new Error('连接超时，请检查对方是否在线；远控操作不会自动重发。'); throw error; }
+    } catch (error) {
+      if (error.name === 'AbortError') { const failure = new Error('连接超时，请检查对方是否在线；远控操作不会自动重发。'); failure.retryable = true; throw failure; }
+      if (!error.status) error.retryable = true;
+      throw error;
+    }
     finally { clearTimeout(timer); if(frameAbort===abort)frameAbort=null; }
   }
-  function unavailable() { end('设备未连接或尚未开启远控', true); if (document.documentElement.dataset.native === 'true') location.href='/native/unavailable'; }
+  function unavailable() { end('设备未连接或尚未开启远控', true, {navigate:true}); }
   window.feiqCheck = async () => {
     if(mode!=='remote')return;
-    try { const data=await request('/api/status',undefined,4000);if(!data.remote)unavailable();else if((data.remotePaired||data.paired)&&!token&&!$('connect').disabled)connect(true); }
-    catch (error) { if(error.status!==404)unavailable(); }
+    const version=generation, activeToken=token;
+    try {
+      const data=await request('/api/status',undefined,4000);
+      if(version!==generation||activeToken!==token)return;
+      if(!data.remote)unavailable();
+      else if((data.remotePaired||data.paired)&&!token&&!$('connect').disabled)connect(true);
+    } catch (error) {
+      if(version!==generation||activeToken!==token||error.status===404)return;
+      if(error.status===401&&activeToken)recoverRemoteSession(version);
+      else if(token)status('连接状态检查暂时不可用，当前远控会话保持中。',true);
+      else status('连接状态暂时不可用，可点“连接上次”重试。',true);
+    }
   };
   function closePlayer() { $('player').pause(); $('player').removeAttribute('src'); $('player').load(); $('player-panel').hidden = true; }
-  function end(message, error = false) {
+  function logout(previousToken) {
+    if(!previousToken)return Promise.resolve();
+    const abort=new AbortController(),timeout=setTimeout(()=>abort.abort(),5000);
+    return fetch('/api/logout',{method:'POST',headers:{'Content-Type':'application/json','X-FQ-Token':previousToken},body:JSON.stringify({mode}),credentials:'same-origin',keepalive:true,signal:abort.signal})
+      .catch(()=>{}).finally(()=>clearTimeout(timeout));
+  }
+  function end(message, error = false, options = {}) {
     const previousToken = token; token = ''; generation++; listing++; clearTimeout(frameTimer); pending = []; drag = false;
+    frameFailures=0;
     if(frameAbort){frameAbort.abort();frameAbort=null;}
     $('drag').setAttribute('aria-pressed', 'false'); $('disconnect').hidden = true; $('remote').hidden = true; $('files').hidden = true; $('login').hidden = false;
     points.clear(); previous = null; start = null; $('drag').textContent = '拖拽';
@@ -58,15 +84,14 @@
     scale=1; fillHeight=false; screenPoints.clear(); screenDown=null; pinch=null;
     $('remote-error').hidden=true;
     closePlayer(); if (frameUrl) URL.revokeObjectURL(frameUrl); frameUrl = ''; $('screen').removeAttribute('src'); status(message, error);
-    if (previousToken) {
-      const abort = new AbortController(), timeout = setTimeout(() => abort.abort(), 5000);
-      closing = fetch('/api/logout', {method: 'POST', headers: {'Content-Type': 'application/json', 'X-FQ-Token': previousToken}, body: JSON.stringify({mode}), credentials: 'same-origin', keepalive: true, signal: abort.signal}).catch(() => {}).finally(() => clearTimeout(timeout));
-    }
+    if (previousToken && options.logout !== false) closing = logout(previousToken);
+    if(options.navigate&&document.documentElement.dataset.native==='true')location.href='/native/unavailable';
   }
   $('disconnect').onclick = $('remote-disconnect').onclick = () => end('');
   window.feiqStop = () => end('');
   window.addEventListener('hashchange', () => { if ((location.hash === '#remote' ? 'remote' : 'share') !== mode) { end('正在切换页面'); location.reload(); } });
-  async function connect(reconnect) {
+  async function connect(reconnect, recovery = false, recoveryAttempt = 0) {
+    if(!recovery)recoveryNotice='';
     $('connect').disabled = $('reconnect').disabled = true; status(mode === 'remote' ? '等待电脑确认…' : '连接中…');
     const version = ++generation;
     try {
@@ -82,10 +107,28 @@
         $('display').replaceChildren(); screens.items.forEach((item,index) => { const option = document.createElement('option'); option.value = item.id; option.textContent = '屏幕 ' + (index+1); $('display').append(option); });
         $('display').hidden = screens.items.length < 2;
         if(document.documentElement.dataset.nativePairing==='true')location.href='/native/paired';
-        display = Number($('display').value); viewport(); frames(version);
+        display = Number($('display').value); frameFailures=0; viewport();
+        if(recoveryNotice)status(recoveryNotice);
+        frames(version);
       } else { trail = [{id: '', name: '共享文件夹'}]; await loadDirectory(); }
-    } catch (error) { if (version === generation) { if(mode==='remote'&&!error.status)unavailable();else end(error.message, true); } }
-    finally { $('connect').disabled = $('reconnect').disabled = false; }
+    } catch (error) {
+      if(version===generation) {
+        if(recovery&&(error.retryable||error.status===401||error.status===409)&&recoveryAttempt<4) {
+          const nextAttempt=recoveryAttempt+1,wait=[500,1000,2000,4000][recoveryAttempt];
+          end('连接暂时中断，正在尝试恢复…',true);
+          const retryGeneration=generation;
+          frameTimer=setTimeout(()=>{if(retryGeneration===generation)connect(true,true,nextAttempt);},wait);
+        } else if(mode==='remote'&&error.status===404)unavailable();
+        else end(error.message,true);
+      }
+    } finally { $('connect').disabled = $('reconnect').disabled = false; }
+  }
+  function recoverRemoteSession(version, notice = '') {
+    if(version!==generation||!token||mode!=='remote')return;
+    const previousToken=token;end('连接已失效，正在尝试恢复…',true,{logout:false});
+    recoveryNotice=notice;
+    closing=logout(previousToken);
+    connect(true,true);
   }
   $('connect-form').onsubmit = event => { event.preventDefault(); connect(!$('code').value.trim()); };
   $('reconnect').onclick = () => connect(true);
@@ -178,14 +221,26 @@
     try {
       const blob = await request('/api/screen?display=' + display, undefined, 8000);
       if (!token || version !== generation) return;
+      frameFailures=0;
       if (screenVersion !== displayVersion) { frameTimer = setTimeout(() => frames(version), 0); return; }
       const previous = frameUrl; frameUrl = URL.createObjectURL(blob); $('screen').src = frameUrl;
       if (previous) URL.revokeObjectURL(previous);
+      if(!recoveryNotice)status('');
       frameTimer = setTimeout(() => frames(version), 250);
-    } catch (error) { if (version === generation) end(error.message, true); }
+    } catch (error) {
+      if(version!==generation)return;
+      if(error.status===401){recoverRemoteSession(version);return;}
+      if((error.retryable||error.status===409)&&frameFailures<6) {
+        const wait=[250,500,1000,2000,4000,8000][frameFailures++];
+        status('画面连接短暂中断，正在重试…',true);
+        frameTimer=setTimeout(()=>frames(version),wait);return;
+      }
+      end(error.retryable?'远控画面连续请求失败，连接已结束。'+error.message:error.message,true);
+    }
   }
   function input(data, done) {
     if (!token || mode !== 'remote') return;
+    if(recoveryNotice){recoveryNotice='';status('');}
     data.display = display;
     if(phone){data.frameWidth=$('screen').naturalWidth;data.frameHeight=$('screen').naturalHeight;}
     const last = pending[pending.length - 1];
@@ -207,7 +262,11 @@
         $('remote-error').hidden=true;
         if (item.version === generation && item.done) item.done();
       }
-    } catch (error) { if (version === generation) end(error.message, true); }
+    } catch (error) {
+      if(version!==generation)return;
+      if(error.status===401||error.retryable)recoverRemoteSession(version,'控制请求结果不确定，操作未自动重发；远控已重新连接。');
+      else end(error.message,true);
+    }
     finally { sending = false; if (version === generation) $('type-text').disabled = false; if (pending.length && token) pump(); }
   }
   document.querySelectorAll('[data-key]').forEach(button => { button.onclick = () => input({type: 'key', key: button.dataset.key}); });

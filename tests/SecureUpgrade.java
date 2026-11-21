@@ -157,6 +157,48 @@ public final class SecureUpgrade {
                 }
             }
         });
+        run("离线加密出站文件取消发送、未送达删除撤销与持久化报价格式兼容",()->{
+            int ap=port(),bp=port();String aid="07070707070707070707070707070707",bid="08080808080808080808080808080808";
+            File senderRoot=root.resolve("cancel-sec-a").toFile(),receiverRoot=root.resolve("cancel-sec-b").toFile();
+            byte[] payload=new byte[4096];new Random(51).nextBytes(payload);
+            File source=root.resolve("cancel-sec.bin").toFile();Files.write(source.toPath(),payload);
+            try(Node a=new Node(senderRoot,ap,aid)) {
+                LanNode.Peer target;
+                try(Node b=new Node(receiverRoot,bp,bid)) { target=find(a,b); a.node.verifyPeer(target); }
+                LanNode.Message cancelled=a.node.sendMessage(target,"离线加密取消",Collections.singletonList(source));
+                check(a.node.canCancelOutgoing(target.id(),cancelled.number),"离线加密发送应允许取消");
+                check(a.node.hasUndeliveredOutgoing(target.id(),cancelled.number,cancelled.state),"离线加密发送应识别为未送达");
+                check(a.node.cancelOutgoing(target.id(),cancelled.number,cancelled.state,true),"离线加密取消发送失败");
+                check(!a.node.canCancelOutgoing(target.id(),cancelled.number)&&!a.node.offering(target.id(),cancelled.number,0),"取消后未撤销加密报价");
+                check(source.isFile(),"取消发送不能删除本机原文件");
+                try(DataInputStream in=new DataInputStream(new FileInputStream(new File(senderRoot,"transfer-offers.dat")))) {
+                    check(in.readInt()==2&&in.readInt()==0,"取消后持久化格式或条数不正确");
+                }
+                LanNode.Message directDeleted=a.node.sendMessage(target,"离线直删加密",Collections.singletonList(source));
+                check(a.node.cancelUndeliveredOutgoing(target.id(),directDeleted.number,"等待确认",false),"删除未送达加密消息未撤销报价");
+                check(!a.node.offering(target.id(),directDeleted.number,0),"未送达加密报价仍残留");
+                try(DataInputStream in=new DataInputStream(new FileInputStream(new File(senderRoot,"transfer-offers.dat")))) {
+                    check(in.readInt()==2&&in.readInt()==0,"直删未送达后持久化报价未清空");
+                }
+                LanNode.Message deliveredMsg;
+                try(Node b=new Node(receiverRoot,bp,bid)) {
+                    LanNode.Peer back=find(b,a);
+                    check(b.incoming.poll(500,TimeUnit.MILLISECONDS)==null,"已取消或已删除的离线加密消息不应在上线后投递");
+                    boolean blocked=false;try{b.node.receiveFile(back,cancelled.number,cancelled.files.get(0),root.resolve("should-not-download.bin").toFile(),new LanNode.Transfer(),null);}catch(IOException expected){blocked=true;}
+                    check(blocked,"已撤销加密报价仍可下载");
+                    LanNode.Peer onlineTarget=find(a,b);
+                    deliveredMsg=a.node.sendMessage(onlineTarget,"已送达保留报价",Collections.singletonList(source));
+                    LanNode.Message received=b.incoming.poll(5,TimeUnit.SECONDS);check(received!=null&&received.number==deliveredMsg.number,"已送达加密邀请未到达");
+                    long waitEnd=System.nanoTime()+TimeUnit.SECONDS.toNanos(3);
+                    while(a.node.hasUndeliveredOutgoing(onlineTarget.id(),deliveredMsg.number,deliveredMsg.state)&&System.nanoTime()<waitEnd)Thread.sleep(10);
+                    check(!a.node.cancelUndeliveredOutgoing(onlineTarget.id(),deliveredMsg.number,"已送达",false),"删除已送达消息不能撤销对方下载报价");
+                    check(a.node.offering(onlineTarget.id(),deliveredMsg.number,0),"已送达报价被误撤销");
+                    File downloaded=root.resolve("kept-delivered.bin").toFile();
+                    b.node.receiveFile(back,received.number,received.files.get(0),downloaded,new LanNode.Transfer(),null);
+                    check(Arrays.equals(payload,Files.readAllBytes(downloaded.toPath())),"已送达加密文件下载内容不一致");
+                }
+            }
+        });
         System.out.println("ANDROID SECURE: "+passed+" passed, "+failed+" failed");System.exit(failed==0?0:1);
     }
 }

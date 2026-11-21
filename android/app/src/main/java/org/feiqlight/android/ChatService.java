@@ -109,6 +109,26 @@ public final class ChatService extends Service {
     }
     void cancelFile(String peer,long packet,long file) {FileProgress p=progress(peer,packet,file,false);if(p!=null&&p.task!=null&&p.task==transfer)p.task.close();}
     boolean offering(String peer,long packet,long file) {LanNode current=node;return current!=null&&current.offering(peer,packet,file);}
+    boolean canCancelOutgoing(String peer,long packet) {LanNode current=node;return current!=null&&current.canCancelOutgoing(peer,packet);}
+    boolean hasUndeliveredOutgoing(String peer,LanNode.Message message) {LanNode current=node;return current!=null&&current.hasUndeliveredOutgoing(peer,message.number,message.state);}
+    void cancelOutgoing(String peer,LanNode.Message message,Consumer<Boolean> done) {
+        queue(()->{
+            try {
+                LanNode current=node;
+                if(current==null){showError("请先连接局域网");main.post(()->{if(!stopped)done.accept(false);});return;}
+                boolean canceled=current.cancelOutgoing(peer,message.number,message.state,true);
+                if(canceled) {
+                    LanNode.Message stored=store.findMessage(peer,message.number,true);
+                    if(stored!=null&&!("已送达".equals(stored.state)||"已取消发送".equals(stored.state))){
+                        stored.state="已取消发送";
+                        LanNode.Peer target=store.conversations().stream().filter(item->item.peer.id().equals(peer)).map(item->item.peer).findFirst().orElse(null);
+                        if(target!=null)store.message(target,stored,true,peer.equals(activePeer));
+                    }
+                    publish();main.post(()->{if(!stopped)done.accept(true);});
+                } else {showError("此消息已发送完成或已结束，无需取消");main.post(()->{if(!stopped)done.accept(false);});}
+            } catch(Exception error){fail(error);main.post(()->{if(!stopped)done.accept(false);});}
+        });
+    }
     private boolean notificationQueued;
     private boolean networkReady;
     private final Runnable notifyChanges=()->{notificationQueued=false;for (Observer observer:new ArrayList<>(observers)) observer.changed();};
@@ -277,15 +297,21 @@ public final class ChatService extends Service {
     }
     void avatarSettingsChanged() { profileSettingsChanged(); }
     void deleteMessages(String peer,List<LanNode.Message> messages,Consumer<Boolean> done) {
-        boolean pending=messages.stream().anyMatch(message->waiting.values().stream().anyMatch(r->!message.outgoing&&r.peer.id().equals(peer)&&r.packet==message.number)||message.files.stream().anyMatch(file->{
+        LanNode current=node;
+        boolean pending=messages.stream().anyMatch(message->waiting.values().stream().anyMatch(r->!message.outgoing&&r.peer.id().equals(peer)&&r.packet==message.number)||message.outgoing&&current!=null&&current.hasActiveOutgoingTransfer(peer,message.number)||message.files.stream().anyMatch(file->{
             FileProgress progress=progress(peer,message.number,file.id,message.outgoing);
             return progress!=null&&progress.live&&progress.state.contains("中")&&!progress.state.contains("中断")&&progress.percent<100
                 &&(message.outgoing?offering(peer,message.number,file.id):progress.task!=null&&progress.task==transfer&&busy());
         }));
-        if(pending){showError("请先完成或拒绝选中消息的文件任务，再删除记录");done.accept(false);return;}
+        if(pending){showError("请先完成、拒绝或取消选中消息的文件任务，再删除记录");done.accept(false);return;}
         List<LanNode.Message> selected=new ArrayList<>(messages);
         queue(()->{
-            try {store.deleteMessages(peer,selected);publish();main.post(()->{if(!stopped)done.accept(true);});}
+            try {
+                LanNode active=node;
+                if(selected.stream().anyMatch(message->message.outgoing&&active!=null&&active.hasActiveOutgoingTransfer(peer,message.number))) {showError("请先完成、拒绝或取消选中消息的文件任务，再删除记录");main.post(()->{if(!stopped)done.accept(false);});return;}
+                for(LanNode.Message message:selected)if(message.outgoing&&active!=null)active.cancelUndeliveredOutgoing(peer,message.number,message.state,false);
+                store.deleteMessages(peer,selected);main.post(()->{fileProgress.entrySet().removeIf(entry->entry.getKey().startsWith(peer+"/")&&selected.stream().anyMatch(message->entry.getKey().startsWith(peer+"/"+message.number+"/")&&entry.getKey().endsWith("/"+message.outgoing)));notifyTransfers.run();});publish();main.post(()->{if(!stopped)done.accept(true);});
+            }
             catch(Exception error){fail(error);main.post(()->{if(!stopped)done.accept(false);});}
         });
     }
@@ -302,8 +328,9 @@ public final class ChatService extends Service {
         queue(()->{store.edit(id,note,pinned);publish();});
     }
     void removeConversation(String id,boolean clear,boolean hide,Consumer<Boolean> done) {
-        if(clear && (busy() || waiting.values().stream().anyMatch(r->r.peer.id().equals(id)))) {showError("请先完成或拒绝待接收文件，再清空记录");done.accept(false);return;}
-        queue(()->{try {store.remove(id,clear,hide);publish();main.post(()->done.accept(true));}catch(Exception e){fail(e);main.post(()->done.accept(false));}});
+        LanNode current=node;
+        if(clear && (busy() || current!=null&&current.hasActiveOutgoingTransfer(id) || waiting.values().stream().anyMatch(r->r.peer.id().equals(id)))) {showError("请先完成、拒绝或取消文件任务，再清空记录");done.accept(false);return;}
+        queue(()->{try {LanNode active=node;if(clear&&active!=null&&active.hasActiveOutgoingTransfer(id)){showError("请先完成、拒绝或取消文件任务，再清空记录");main.post(()->done.accept(false));return;}if(clear&&active!=null)active.cancelUndeliveredOutgoingForPeer(id,store.unconfirmedOutgoingPackets(id));store.remove(id,clear,hide);publish();main.post(()->done.accept(true));}catch(Exception e){fail(e);main.post(()->done.accept(false));}});
     }
     boolean online() { LanNode current=node;return current!=null && !connecting && current.networkAvailable(); }
     private void updateNetworkStatus(boolean available,String reason) {

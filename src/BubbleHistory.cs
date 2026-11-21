@@ -89,6 +89,8 @@ namespace FeiqLight
         }
         private int previousHeight;
         public event Action<ChatRecord> RetryRequested;
+        public Func<ChatRecord,bool> CanCancelSend;
+        public event Action<ChatRecord> CancelSendRequested;
         public event Action<bool> AvatarClicked;
         public event Action<ChatRecord> RecordActivated;
         public event Action<ChatRecord> ForwardRequested;
@@ -135,6 +137,7 @@ namespace FeiqLight
             ToolStripItem path = menu.Items.Add("复制文件路径", null, delegate { ChatRecord record = SelectedRecord; if (record != null) CopyText(String.Join(Environment.NewLine, record.GetLocalFiles())); });
             menu.Items.Add(retryGroup);
             ToolStripItem retry=menu.Items.Add("重新发送（可能重复）",null,delegate {if(SelectedRecord!=null&&RetryRequested!=null)RetryRequested(SelectedRecord);});
+            ToolStripItem cancelSend=menu.Items.Add("取消发送",null,delegate {if(SelectedRecord!=null&&CancelSendRequested!=null)CancelSendRequested(SelectedRecord);});
             ToolStripMenuItem deleteFile=new ToolStripMenuItem("删除本机文件");menu.Items.Add(deleteFile);
             deleteFile.Click+=delegate {var target=deleteFile.Tag as Tuple<ChatRecord,string>;if(target!=null&&DeleteFileRequested!=null)DeleteFileRequested(target.Item1,target.Item2);};
             menu.Opening += delegate(object sender, System.ComponentModel.CancelEventArgs e)
@@ -148,7 +151,9 @@ namespace FeiqLight
                 selectMode.Visible = delete.Visible = DeleteRequested != null;
                 delete.Text = multiSelectMode ? "删除选中的 " + marked.Count + " 条消息" : "删除这条消息";
                 delete.Enabled = !multiSelectMode || marked.Count > 0;
-                retry.Visible=retryGroup.Visible=RetryRequested!=null&&record.Outgoing&&(record.State??"").Contains("未确认"); copy.Enabled = !String.IsNullOrEmpty(record.Text);
+                retry.Visible=RetryRequested!=null&&record.Outgoing&&(record.State??"").Contains("未确认");
+                cancelSend.Visible=CancelSendRequested!=null&&CanCancelSend!=null&&!multiSelectMode&&record.Outgoing&&CanCancelSend(record);
+                retryGroup.Visible=retry.Visible||cancelSend.Visible; copy.Enabled = !String.IsNullOrEmpty(record.Text);
                 string[] paths = record.GetLocalFiles();
                 deleteFile.Visible=DeleteFileRequested!=null&&!record.Outgoing&&!multiSelectMode&&paths.Length>0;
                 foreach(ToolStripItem child in deleteFile.DropDownItems.Cast<ToolStripItem>().ToArray())child.Dispose();deleteFile.DropDownItems.Clear();
