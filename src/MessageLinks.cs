@@ -80,7 +80,8 @@ namespace FeiqLight
         internal MessageLayout(string text,Font font,int maxWidth,string query = null)
         {
             this.font = font; segments = new List<Segment>();
-            text=text??"";
+            text=MessageText.NormalizeLineBreaks(text);
+            query=MessageText.NormalizeLineBreaks(query);
             bool[] highlighted=new bool[text.Length];
             if(!String.IsNullOrEmpty(query))
                 for(int from=0;from<text.Length;) {
@@ -95,8 +96,7 @@ namespace FeiqLight
                 int start=offset;string part;bool emoji=ColorEmoji.Match(text,offset,out part);
                 if(!emoji) {part=StringInfo.GetNextTextElement(text,offset);int next=offset+part.Length;while(next<text.Length&&text[next]=='\u200d'&&next+1<text.Length){string joined=StringInfo.GetNextTextElement(text,next+1);part+="\u200d"+joined;next+=1+joined.Length;}}
                 offset+=part.Length;
-                if(part=="\r")continue;
-                if(part=="\n"||part=="\r\n"){segments.Add(new Segment {NewLine=true});segment=null;continue;}
+                if(part=="\n"){segments.Add(new Segment {NewLine=true});segment=null;continue;}
                 if(part=="\t")part="    ";
                 while(linkIndex<links.Count&&start>=links[linkIndex].Start+links[linkIndex].Length)linkIndex++;
                 string url=linkIndex<links.Count&&start>=links[linkIndex].Start?links[linkIndex].Url:null;

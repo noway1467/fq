@@ -1018,7 +1018,13 @@ public final class LanNode implements AutoCloseable {
             if(e instanceof UncheckedIOException&&item.canceled)return;
             item.directFailed=true;
             if(item.delivered||item.canceled)return;
-            if(e instanceof SecureIdentity.TrustException||e instanceof javax.net.ssl.SSLException){synchronized(gate){pending.remove(item.message.number);}item.message.state="身份核对未通过，未确认送达";listener.message(item.peer,item.message.copy(),true);}
+            if(e instanceof SecureIdentity.TrustException||e instanceof javax.net.ssl.SSLException){
+                synchronized(gate){
+                    if(item.canceled||item.delivered||pending.get(item.message.number)!=item)return;
+                    pending.remove(item.message.number);item.message.state="身份核对未通过，未确认送达";
+                }
+                listener.message(item.peer,item.message.copy(),true);
+            }
             else if(heartbeatRetry>=TimeUnit.SECONDS.toNanos(1)&&!closed) {
                 long waitUntil=System.nanoTime()+TimeUnit.MILLISECONDS.toNanos(2200);
                 while(!item.delivered&&!item.canceled&&!closed&&System.nanoTime()<waitUntil) {

@@ -1,7 +1,9 @@
-﻿param([switch]$Test, [string]$OutputDirectory)
+param([switch]$Test, [string]$OutputDirectory, [string]$TemporaryDirectory)
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
-$temporary=Join-Path $root 'build\tmp'; New-Item -ItemType Directory -Force -Path $temporary | Out-Null
+$temporary=if($TemporaryDirectory){[IO.Path]::GetFullPath($TemporaryDirectory)}else{Join-Path $root 'build\tmp'}
+if($TemporaryDirectory -and !$temporary.StartsWith([IO.Path]::GetFullPath((Join-Path $root 'build/tmp')).TrimEnd('\','/')+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)){throw '临时目录必须位于项目 build/tmp 内'}
+New-Item -ItemType Directory -Force -Path $temporary | Out-Null
 $env:TEMP=$temporary; $env:TMP=$temporary; $env:TMPDIR=$temporary
 $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 if (!(Test-Path -LiteralPath $compiler)) { throw '未找到系统 .NET Framework C# 编译器。请安装 .NET Framework 4.8。' }
@@ -14,7 +16,7 @@ $testOut = Join-Path $root 'build'
 New-Item -ItemType Directory -Force -Path $testOut | Out-Null
 $sources = @(Get-ChildItem -LiteralPath (Join-Path $root 'src') -Filter '*.cs' | ForEach-Object FullName)
 $common = @('/nologo','/utf8output','/optimize+','/warn:4','/warnaserror+','/platform:anycpu','/r:System.dll','/r:System.Core.dll','/r:System.Drawing.dll','/r:System.Windows.Forms.dll','/r:System.Web.Extensions.dll')
-& $compiler @common '/target:exe' "/out:$testOut\MakeIcon.exe" "$root\src\Theme.cs" "$root\src\Motion.cs" "$root\src\EmojiAvatars.cs" "$root\tools\MakeIcon.cs"
+& $compiler @common '/target:exe' "/out:$testOut\MakeIcon.exe" "$root\src\Theme.cs" "$root\src\MessageText.cs" "$root\src\Motion.cs" "$root\src\EmojiAvatars.cs" "$root\tools\MakeIcon.cs"
 if ($LASTEXITCODE -ne 0) { throw '图标生成工具编译失败' }
 & "$testOut\MakeIcon.exe" "$testOut\app.ico"
 if ($LASTEXITCODE -ne 0) { throw '图标生成失败' }

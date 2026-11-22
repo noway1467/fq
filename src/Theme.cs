@@ -262,10 +262,12 @@ namespace FeiqLight
             ClipboardAction(delegate
             {
                 if (!Clipboard.ContainsText()) return;
-                string text = Clipboard.GetText(); int available = Math.Max(0, input.MaxLength - input.TextLength + input.SelectionLength);
+                string text = MessageText.NormalizeLineBreaks(Clipboard.GetText());
+                if (!input.Multiline) text = text.Replace('\n', ' ');
+                int available = Math.Max(0, input.MaxLength - input.TextLength + input.SelectionLength);
                 int count = Math.Min(text.Length, available);
                 if (count > 0 && count < text.Length && Char.IsHighSurrogate(text[count - 1])) count--;
-                input.SelectedText = text.Substring(0, count);
+                if (count > 0) input.SelectedText = text.Substring(0, count);
             });
         }
         public static void Glyph(Graphics g, string name, Rectangle bounds, Color color) { Glyph(g, name, (RectangleF)bounds, color); }

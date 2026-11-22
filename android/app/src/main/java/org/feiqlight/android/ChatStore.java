@@ -90,7 +90,11 @@ final class ChatStore extends SQLiteOpenHelper {
             // REPLACE 会删除旧行再分配 id，导致同毫秒消息在 ACK 后换序；原位更新保持排序稳定。
             String[] key={p.id(),Long.toString(m.number),m.outgoing?"1":"0"}; boolean inserted;
             if(DatabaseUtils.longForQuery(db,"SELECT COUNT(*) FROM deleted_messages WHERE peer=? AND packet=? AND outgoing=?",key)>0){db.setTransactionSuccessful();return false;}
-            try(Cursor existing=db.rawQuery("SELECT id FROM messages WHERE peer=? AND packet=? AND outgoing=? LIMIT 1",key)) { inserted=!existing.moveToFirst(); }
+            try(Cursor existing=db.rawQuery("SELECT id,state FROM messages WHERE peer=? AND packet=? AND outgoing=? LIMIT 1",key)) {
+                inserted=!existing.moveToFirst();
+                // 网络线程传来的是状态快照；取消落库后，旧失败或 ACK 快照不能覆盖这个本机终态。
+                if(!inserted&&m.outgoing&&"已取消发送".equals(existing.getString(1)))v.put("state","已取消发送");
+            }
             // 已清空的消息不能被迟到的 ACK / 文件状态回调复活。
             if(inserted && update) { db.setTransactionSuccessful(); return false; }
             if(inserted) db.insertOrThrow("messages",null,v);
@@ -98,6 +102,7 @@ final class ChatStore extends SQLiteOpenHelper {
             // 网络去重表会过期；持久层也必须幂等，重复旧消息不能抬高未读或倒退最近预览。
             if (!update && inserted) {
                 String preview=m.text.isEmpty() && !m.files.isEmpty()?"[文件] "+m.files.get(0).name:m.text;
+                preview=MessageText.normalizeLineBreaks(preview).replace('\n',' ');
                 db.execSQL("UPDATE peers SET preview=?, time=?, unread=unread+?, hidden=0 WHERE id=?",new Object[]{preview,m.time,(!m.outgoing&&!visible)?1:0,p.id()});
             }
             db.setTransactionSuccessful();
@@ -120,7 +125,7 @@ final class ChatStore extends SQLiteOpenHelper {
             try(Cursor last=db.rawQuery("SELECT text,files,time FROM messages WHERE peer=? ORDER BY time DESC,id DESC LIMIT 1",new String[]{peer})) {
                 if(last.moveToFirst()){preview=last.getString(0);time=last.getLong(2);List<Protocol.Attachment> files=Protocol.parseStoredFiles(last.getString(1));if(preview.isEmpty()&&!files.isEmpty())preview="[文件] "+files.get(0).name;}
             }
-            db.execSQL("UPDATE peers SET preview=?,time=? WHERE id=?",new Object[]{preview,time,peer});db.setTransactionSuccessful();
+            db.execSQL("UPDATE peers SET preview=?,time=? WHERE id=?",new Object[]{MessageText.normalizeLineBreaks(preview).replace('\n',' '),time,peer});db.setTransactionSuccessful();
         } finally {db.endTransaction();}
     }
     void read(String id) { getWritableDatabase().execSQL("UPDATE peers SET unread=0 WHERE id=?",new Object[]{id}); }
@@ -142,7 +147,7 @@ final class ChatStore extends SQLiteOpenHelper {
                 item.peer.conversationId=c.getString(13);item.peer.deviceId=Protocol.normalizeDeviceId(c.getString(14));
                 item.peer.avatar=Protocol.normalizeAvatar(c.getString(15));
                 item.peer.fingerprint=c.getString(16)!=null&&c.getString(16).matches("[0-9a-f]{64}")?c.getString(16):null;
-                item.preview=c.getString(5); item.time=c.getLong(6); item.unread=c.getInt(7); item.peer.utf8=c.getInt(8)!=0; item.note=c.getString(9);item.pinned=c.getInt(10)!=0;item.hidden=c.getInt(11)!=0;item.number=c.getLong(12);result.add(item);
+                item.preview=MessageText.normalizeLineBreaks(c.getString(5)).replace('\n',' '); item.time=c.getLong(6); item.unread=c.getInt(7); item.peer.utf8=c.getInt(8)!=0; item.note=c.getString(9);item.pinned=c.getInt(10)!=0;item.hidden=c.getInt(11)!=0;item.number=c.getLong(12);result.add(item);
             } catch (IOException ignored) { }
         }
         // 重名判断不能被列表的 1000 条上限截断，否则旧会话进出窗口会让编号反复消失。

@@ -30,6 +30,7 @@ public final class SecureUpgrade {
     public static void main(String[] args)throws Exception {
         Path root=Paths.get(args[0]);Files.createDirectories(root);
         if(args.length>1&&args[1].equals("partial")){partialTests(root);System.out.println("ANDROID PARTIAL TLS: "+passed+" passed, "+failed+" failed");System.exit(failed==0?0:1);return;}
+        if(args.length>1&&args[1].equals("text-cancel")){textCancelTests(root);System.out.println("ANDROID TEXT CANCEL TLS: "+passed+" passed, "+failed+" failed");System.exit(failed==0?0:1);return;}
         run("目录协议与恶意路径拒绝",()->{Protocol.Attachment file=new Protocol.Attachment(0,"中文😀.txt",5,1);file.sha256="a".repeat(64);file.relativePath="目录/子目录/中文😀.txt";check(Protocol.parseFiles(Protocol.files(Collections.singletonList(file))).get(0).relativePath.equals(file.relativePath),"目录丢失");for(String value:new String[]{"../secret","/root/a","a//b","a/CON","a/../b","a\\b"})check(!Protocol.safeRelativePath(value),"接受危险路径");});
         run("TLS 配对、双重启恢复、哈希失败不提交与拒绝持久化",()->{
             int ap=port(),bp=port();String aid="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",bid="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";byte[] bytes=new byte[1024*1024+7];for(int i=0;i<bytes.length;i++)bytes[i]=(byte)(i*17);File source=root.resolve("source.bin").toFile();Files.write(source.toPath(),bytes);LanNode.Message message;String fingerprint;
@@ -218,6 +219,39 @@ public final class SecureUpgrade {
             }
         });
         System.out.println("ANDROID SECURE: "+passed+" passed, "+failed+" failed");System.exit(failed==0?0:1);
+    }
+    private static Object member(Object target,String name)throws Exception {java.lang.reflect.Field value=target.getClass().getDeclaredField(name);value.setAccessible(true);return value.get(target);}
+    private static void textCancelTests(Path root)throws Exception {
+        run("普通 TLS 文本取消关闭正在握手的连接，异步异常不恢复重试",()->{
+            try(ServerSocket server=new ServerSocket(0,1,InetAddress.getLoopbackAddress());Node sender=new Node(root.resolve("text-a").toFile(),port(),"11111111111111111111111111111111")) {
+                server.setSoTimeout(5000);LanNode.Peer peer=new LanNode.Peer(new InetSocketAddress(InetAddress.getLoopbackAddress(),server.getLocalPort()),"blocked","host","等待 TLS","");peer.deviceId="22222222222222222222222222222222";peer.fingerprint="a".repeat(64);peer.utf8=true;
+                LanNode.Message sent=sender.node.sendMessage(peer,"0",Collections.emptyList());
+                try(Socket raw=server.accept()) {
+                    raw.setSoTimeout(3000);check(Arrays.equals(new byte[]{'F','Q','2','\n'},raw.getInputStream().readNBytes(4)),"尚未进入 TLS 连接");Object pending; synchronized(field(sender.node,"gate")){pending=((Map<?,?>)field(sender.node,"pending")).get(sent.number);}
+                    check(pending!=null&&sender.node.cancelOutgoing(peer.id(),sent.number,sent.state,true),"握手中的文本不能取消");java.util.concurrent.atomic.AtomicBoolean sending=(java.util.concurrent.atomic.AtomicBoolean)member(pending,"sending");waitFor(()->!sending.get(),"取消后 TLS 发送线程未结束");
+                    check("已取消发送".equals(((LanNode.Message)member(pending,"message")).state)&&!sender.node.canCancelOutgoing(peer.id(),sent.number),"异步异常覆盖取消状态或恢复重试");
+                }
+            }
+        });
+        run("证书失败等待状态锁期间取消，失败分支不得覆盖取消终态",()->{
+            SecureIdentity remote=new SecureIdentity(root.resolve("race-remote").toFile());
+            try(ServerSocket server=new ServerSocket(0,1,InetAddress.getLoopbackAddress());Node sender=new Node(root.resolve("race-a").toFile(),port(),"33333333333333333333333333333333")) {
+                server.setSoTimeout(5000);LanNode.Peer peer=new LanNode.Peer(new InetSocketAddress(InetAddress.getLoopbackAddress(),server.getLocalPort()),"wrong-pin","host","错误证书","");peer.deviceId="44444444444444444444444444444444";peer.fingerprint="f".repeat(64);peer.utf8=true;LanNode.Message sent=sender.node.sendMessage(peer,"123",Collections.emptyList());
+                try(Socket raw=server.accept()) {
+                    raw.setSoTimeout(3000);check(Arrays.equals(new byte[]{'F','Q','2','\n'},raw.getInputStream().readNBytes(4)),"尚未进入证书失败连接");Object gate=field(sender.node,"gate"),pending;
+                    java.util.concurrent.atomic.AtomicBoolean rejected=new java.util.concurrent.atomic.AtomicBoolean();
+                    FutureTask<Void> handshake=new FutureTask<>(()->{try(javax.net.ssl.SSLSocket tls=remote.server(raw,false)){return null;}catch(IOException expected){rejected.set(true);return null;}});
+                    Thread receiver=new Thread(handshake,"text-cancel-wrong-pin");
+                    synchronized(gate) {
+                        pending=((Map<?,?>)field(sender.node,"pending")).get(sent.number);check(pending!=null,"发送任务已提前结束");receiver.start();
+                        waitFor(()->Thread.getAllStackTraces().entrySet().stream().anyMatch(entry->entry.getKey().getState()==Thread.State.BLOCKED&&Arrays.stream(entry.getValue()).anyMatch(frame->frame.getClassName().equals(LanNode.class.getName())&&frame.getMethodName().equals("sendSecurePending"))),"未截住身份失败分支等待状态锁的窗口");
+                        check(sender.node.cancelOutgoing(peer.id(),sent.number,sent.state,true),"身份失败等待期间不能取消");
+                    }
+                    handshake.get(8,TimeUnit.SECONDS);java.util.concurrent.atomic.AtomicBoolean sending=(java.util.concurrent.atomic.AtomicBoolean)member(pending,"sending");waitFor(()->!sending.get(),"取消后证书失败线程未结束");check(rejected.get(),"测试未实际触发证书拒绝");
+                    check("已取消发送".equals(((LanNode.Message)member(pending,"message")).state)&&!sender.node.canCancelOutgoing(peer.id(),sent.number),"身份核对失败覆盖了已取消发送");
+                }
+            }
+        });
     }
     private static void waitFor(java.util.function.BooleanSupplier condition,String message)throws Exception {
         long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(8);

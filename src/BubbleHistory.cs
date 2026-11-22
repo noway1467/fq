@@ -46,7 +46,7 @@ namespace FeiqLight
         private string highlightText = "";
         internal int RecordLimit = 200;
         internal int CharacterLimit = 200000;
-        public string HighlightText { get { return highlightText; } set { highlightText = value ?? ""; Arrange(); Invalidate(); } }
+        public string HighlightText { get { return highlightText; } set { highlightText = MessageText.NormalizeLineBreaks(value); Arrange(); Invalidate(); } }
         private int selected = -1;
         private readonly HashSet<ChatRecord> marked = new HashSet<ChatRecord>();
         private int selectionAnchor = -1;
@@ -217,7 +217,7 @@ namespace FeiqLight
         public void SetRecords(IEnumerable<ChatRecord> values, string highlight)
         {
             CancelLongPress();
-            records.Clear(); records.AddRange(values); highlightText = highlight ?? "";
+            records.Clear(); records.AddRange(values); highlightText = MessageText.NormalizeLineBreaks(highlight);
             Trim(); selected = -1; EndSelection(); unseen = 0; appearFrom = 0; pressedAction = null; dragFilePath = null;
             UpdateText(); Arrange(); JumpTo(AutoScrollMinSize.Height); Invalidate();
         }
@@ -307,12 +307,20 @@ namespace FeiqLight
         private int StampHeight { get { if (stampDpi != DeviceDpi || stampHeight == 0) { stampDpi = DeviceDpi; stampHeight = TextRenderer.MeasureText("08:00", Theme.Small, Size.Empty, Tight).Height; } return stampHeight; } }
         private static readonly Font ExtensionFont = new Font("Microsoft YaHei UI", 8F, FontStyle.Bold), CompactExtensionFont = new Font("Microsoft YaHei UI", 7F, FontStyle.Bold);
         private static string StampTime(ChatRecord r) { return r.Time == default(DateTime) ? "" : r.Time.ToString("HH:mm"); }
-        private int StampWidth(ChatRecord r) { return TextRenderer.MeasureText(StampTime(r), Theme.Small, Size.Empty, Tight).Width + (StatusGlyph(r).Length > 0 ? Dp(19) : 0); }
+        private int StampWidth(ChatRecord r)
+        {
+            string label = StatusLabel(r), time = StampTime(r);
+            if (label.Length > 0)
+                return (time.Length > 0 ? TextRenderer.MeasureText(time, Theme.Small, Size.Empty, Tight).Width + Dp(7) : 0) + Dp(10) + TextRenderer.MeasureText(label, Theme.Small, Size.Empty, Tight).Width;
+            return TextRenderer.MeasureText(time, Theme.Small, Size.Empty, Tight).Width + (StatusGlyph(r).Length > 0 ? Dp(19) : 0);
+        }
+        private static string StatusLabel(ChatRecord r) { return r.Outgoing && (r.State ?? "").Contains("取消") ? "已取消发送" : ""; }
         // 状态图标只表达本机能确认的事实：时钟=等待 ACK，单勾=对方程序已收到（不是已读），红色感叹号=未确认送达。
         private static string StatusGlyph(ChatRecord r)
         {
             if (!r.Outgoing) return "";
             string state = r.State ?? "";
+            if (StatusLabel(r).Length > 0) return "canceled";
             if (state.Contains("未确认") || state.Contains("失败")) return "error";
             if (state == "等待确认") return "clock";
             if (state.Contains("送达")) return "check";
@@ -326,7 +334,7 @@ namespace FeiqLight
             if (state.Contains("送达") && !state.Contains("未确认")) return state + "（对方程序已收到，不代表已读）";
             return state;
         }
-        private static bool Failed(ChatRecord r) { return StatusGlyph(r) == "error"; }
+        private static bool Failed(ChatRecord r) { return r.Outgoing && (r.State ?? "").Contains("未确认") && StatusLabel(r).Length == 0; }
         private static bool CardMedia(FileTransferState file) { return !String.IsNullOrEmpty(file.LocalPath) && MediaPreview.Supported(file.LocalPath); }
         private static bool Continues(ChatRecord previous, ChatRecord next)
         {
@@ -346,7 +354,7 @@ namespace FeiqLight
             bool cards = r.Transfers != null && r.Transfers.Length > 0;
             string[] media = cards ? new string[0] : r.GetLocalFiles().Where(MediaPreview.Supported).ToArray();
             int stamp = StampWidth(r);
-            string contentKey = display + "\u0001" + Font.Name + Font.Size + Font.Style + Font.Unit + "\u0001" + highlightText + "\u0001" + stamp + "\u0001" + (cards ? String.Join("|", r.Transfers.Select(f => CardMedia(f) ? "m" : "f")) : "-") + "\u0001" + media.Length + "\u0001" + DeviceDpi;
+            string contentKey = display + "\u0001" + Font.Name + Font.Size + Font.Style + Font.Unit + "\u0001" + highlightText + "\u0001" + r.State + "\u0001" + stamp + "\u0001" + (cards ? String.Join("|", r.Transfers.Select(f => CardMedia(f) ? "m" : "f")) : "-") + "\u0001" + media.Length + "\u0001" + DeviceDpi;
             string key = contentKey + "\u0001" + maxBubble;
             Measure m; if (measures.TryGetValue(r, out m) && m.Key == key) return m;
             MessageLayout previous = m != null && m.ContentKey == contentKey ? m.Layout : null;
@@ -538,7 +546,7 @@ namespace FeiqLight
                 string[] media = record.GetLocalFiles().Where(MediaPreview.Supported).ToArray();
                 foreach (string path in media) { Rectangle preview = new Rectangle(origin.X, y, m.ContentWidth, MediaHeight); DrawPreview(g, preview, path, null); y = preview.Bottom + Dp(6); }
             }
-            int stampWidth = StampWidth(record), stampHeight = StampHeight;
+            int stampWidth = Math.Min(StampWidth(record), m.ContentWidth), stampHeight = StampHeight;
             Rectangle stamp = new Rectangle(r.Right - PadX - stampWidth, r.Bottom - PadBottom - stampHeight, stampWidth, stampHeight);
             DrawStamp(g, stamp, record, meta);
             stampHits.Add(Tuple.Create(stamp, record));
@@ -551,6 +559,25 @@ namespace FeiqLight
         private void DrawStamp(Graphics g, Rectangle stamp, ChatRecord record, Color meta)
         {
             string glyph = StatusGlyph(record), time = StampTime(record);
+            string label = StatusLabel(record);
+            if (label.Length > 0)
+            {
+                int labelWidth = TextRenderer.MeasureText(label, Theme.Small, Size.Empty, Tight).Width;
+                int timeWidth = time.Length > 0 ? TextRenderer.MeasureText(time, Theme.Small, Size.Empty, Tight).Width : 0;
+                int timeGap = timeWidth > 0 ? Dp(7) : 0;
+                // 极窄的历史窗口先保留取消状态；所有文字和红点限制在底部状态区内。
+                int prefixWidth = timeWidth > 0 && timeWidth + timeGap + Dp(10) + labelWidth <= stamp.Width ? timeWidth + timeGap : 0;
+                GraphicsState clip = g.Save(); g.SetClip(stamp, CombineMode.Intersect);
+                try
+                {
+                    if (prefixWidth > 0) TextRenderer.DrawText(g, time, Theme.Small, new Rectangle(stamp.X, stamp.Y, timeWidth, stamp.Height), meta, Tight | TextFormatFlags.VerticalCenter);
+                    int dot = Dp(6), left = stamp.X + prefixWidth;
+                    using (SolidBrush danger = new SolidBrush(Theme.Danger)) g.FillEllipse(danger, left, stamp.Y + (stamp.Height - dot) / 2, dot, dot);
+                    TextRenderer.DrawText(g, label, Theme.Small, new Rectangle(left + Dp(10), stamp.Y, Math.Max(0, stamp.Right - left - Dp(10)), stamp.Height), Theme.Danger, Tight | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+                }
+                finally { g.Restore(clip); }
+                return;
+            }
             int iconSize = Dp(15), textWidth = stamp.Width - (glyph.Length > 0 ? Dp(19) : 0);
             TextRenderer.DrawText(g, time, Theme.Small, new Rectangle(stamp.X, stamp.Y, textWidth, stamp.Height), meta, Tight | TextFormatFlags.VerticalCenter);
             if (glyph.Length == 0) return;
@@ -668,7 +695,7 @@ namespace FeiqLight
         }
         private string DisplayText(ChatRecord record)
         {
-            string text=record.DisplayText(), preview=MessageText.Preview(text);
+            string text=MessageText.NormalizeLineBreaks(record.DisplayText()), preview=MessageText.Preview(text);
             if(highlightText.Length==0||preview.IndexOf(highlightText,StringComparison.OrdinalIgnoreCase)>=0)return preview;
             int index=text.IndexOf(highlightText,StringComparison.OrdinalIgnoreCase);if(index<0)return preview;
             // 命中摘要之外时展示上下文，搜索结果不应只剩一条看不见关键词的气泡。
@@ -816,8 +843,8 @@ namespace FeiqLight
         }
         private void CopySelected()
         {
-            if(multiSelectMode) CopyText(String.Join(Environment.NewLine, records.Where(marked.Contains).Select(r => r.Text)));
-            else { ChatRecord record = SelectedRecord; if (record != null) CopyText(record.Text); }
+            if(multiSelectMode) CopyText(MessageText.NormalizeLineBreaks(String.Join(Environment.NewLine, records.Where(marked.Contains).Select(r => r.Text))));
+            else { ChatRecord record = SelectedRecord; if (record != null) CopyText(MessageText.NormalizeLineBreaks(record.Text)); }
         }
         private static void CopyText(string text)
         {

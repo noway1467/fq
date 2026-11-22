@@ -98,7 +98,7 @@ namespace FeiqLight
                     DeviceId=Protocol.NormalizeDeviceId(item.DeviceId),Avatar=Protocol.NormalizeAvatar(item.Avatar),Fingerprint=SecureIdentity.ValidFingerprint(item.Fingerprint)?item.Fingerprint:null,ConversationId=String.IsNullOrEmpty(item.ConversationId)?null:Protocol.Prefix(item.ConversationId,256),
                     Note=Protocol.Prefix((item.Note??"").Trim(),64),Pinned=item.Pinned,Hidden=item.Hidden,ConversationNumber=item.ConversationNumber>0&&item.ConversationNumber<=1000000?item.ConversationNumber:0,
                     Host=Protocol.Prefix(item.Host??"",128),Nickname=Protocol.Prefix(String.IsNullOrWhiteSpace(item.Nickname)?item.Login:item.Nickname,128),
-                    Group=Protocol.Prefix(item.Group??"我的局域网",128),Preview=Protocol.Prefix((item.Preview??"").Replace('\0',' ').Replace('\r',' ').Replace('\n',' '),160),
+                    Group=Protocol.Prefix(item.Group??"我的局域网",128),Preview=Protocol.Prefix(MessageText.NormalizeLineBreaks(item.Preview).Replace('\0',' ').Replace('\n',' '),160),
                     MessageUtcTicks=item.MessageUtcTicks>0&&item.MessageUtcTicks<=DateTime.MaxValue.Ticks?item.MessageUtcTicks:0,Unread=Math.Max(0,Math.Min(1000000,item.Unread)) };
                 result[clean.Id]=clean;if(result.Count>=2000)break;
             }
@@ -420,7 +420,7 @@ namespace FeiqLight
                 string path = Path.ChangeExtension(HistoryPath(peerId), ".draft.txt");
                 if (!File.Exists(path)) return "";
                 if (new FileInfo(path).Length > 4L * MessageText.InputLimit) throw new IOException("草稿文件超过大小限制。");
-                string text = File.ReadAllText(path, Encoding.UTF8); return text.Substring(0, Math.Min(text.Length, MessageText.InputLimit));
+                string text = File.ReadAllText(path, Encoding.UTF8); return Protocol.Prefix(text, MessageText.InputLimit);
             }
         }
         public void SaveDraft(string peerId, string text)

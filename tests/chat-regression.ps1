@@ -1,8 +1,9 @@
-param()
+param([string]$ValidationDirectory)
 $ErrorActionPreference='Stop'
 $projectRoot=Split-Path -Parent $PSScriptRoot
 $testOutput=Join-Path $projectRoot 'build/tmp/chat-regression'
-$validationOutput=Join-Path $projectRoot 'build/release-0.7.1'
+$validationOutput=if($ValidationDirectory){[IO.Path]::GetFullPath($ValidationDirectory)}else{Join-Path $projectRoot 'build/release-0.7.1'}
+if(!$validationOutput.StartsWith([IO.Path]::GetFullPath((Join-Path $projectRoot 'build')).TrimEnd('\','/')+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)){throw '验证输出必须位于项目 build 内'}
 $testData=Join-Path $projectRoot ('build/test-data/chat-regression-'+[Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path $testOutput,$validationOutput,$testData | Out-Null
 $env:TEMP=$testOutput;$env:TMP=$testOutput;$env:TMPDIR=$testOutput

@@ -55,6 +55,15 @@ public final class MainActivity extends Activity implements ChatService.Observer
     private static int wall(int[] p) { return Color.rgb((Color.red(p[6])+Color.red(p[7])+Color.red(p[8])+Color.red(p[9]))/4,(Color.green(p[6])+Color.green(p[7])+Color.green(p[8])+Color.green(p[9]))/4,(Color.blue(p[6])+Color.blue(p[7])+Color.blue(p[8])+Color.blue(p[9]))/4); }
     // 气泡元信息、日期胶囊与气泡投影：与 Windows OutgoingMeta、ServiceFill 及气泡阴影同一换算。
     private int outgoingMeta(){return DARK?blend(BLUE,INK,.38f):blend(BLUE,INK,.62f);}
+    private CharSequence messageMeta(String prefix,LanNode.Message message,boolean includeDelivery) {
+        boolean canceled=message.outgoing&&message.state.contains("取消");
+        if(!message.outgoing||(!includeDelivery&&!canceled))return prefix;
+        if(!canceled)return prefix+"  "+message.state;
+        SpannableStringBuilder value=new SpannableStringBuilder(prefix).append("  ");
+        int start=value.length();value.append("● ").append(message.state);
+        value.setSpan(new android.text.style.ForegroundColorSpan(DARK?0xffff6e6e:0xffd24e54),start,value.length(),Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        return value;
+    }
     private int serviceFill(){return (blend(Color.BLACK,WALL,DARK?.45f:.42f)&0xffffff)|((DARK?150:165)<<24);}
     private int bubbleShadow(){return DARK?0x46000000:(blend(Color.BLACK,BLUE,.7f)&0xffffff)|(26<<24);}
     private ChatService service;
@@ -284,8 +293,21 @@ public final class MainActivity extends Activity implements ChatService.Observer
             return target!=null && service.sendKeyboardImage(target.peer,uri,mime,release);
         }); configureInput(editor); editor.setContentDescription("消息输入框"); editor.setHint("消息"); editor.setTextSize(messageSize()); editor.setTextColor(INK); editor.setHintTextColor(MUTED); editor.setBackground(shape(PALE,CONTROL_RADIUS)); editor.setPadding(dp(16),dp(12),dp(16),dp(12));
         editor.setInputType(android.text.InputType.TYPE_CLASS_TEXT|android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE|android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES); editor.setMaxLines(5); editor.setMinHeight(dp(48));
-        editor.setFilters(new InputFilter[]{new InputFilter.LengthFilter(MessageText.INPUT_LIMIT)});
-        editorSavedText=drafts.read(selected); editor.setText(editorSavedText); composer.addView(editor,weight());
+        editor.setFilters(new InputFilter[]{(source,start,end,dest,dstart,dend)->{
+            String value=source.subSequence(start,end).toString();
+            if(value.equals(MessageText.normalizeLineBreaks(value)))return null;
+            // 保留输入法和剪贴板的 Span；仅改换行字符，再交给 LengthFilter 保护长度和代理对。
+            SpannableStringBuilder normalized=new SpannableStringBuilder(source,start,end);
+            for(int i=normalized.length()-1;i>=0;i--){
+                char ch=normalized.charAt(i);
+                if(ch=='\r'&&i+1<normalized.length()&&normalized.charAt(i+1)=='\n')normalized.delete(i,i+1);
+                else if(ch=='\r'||ch=='\u000b'||ch=='\u2028'||ch=='\u2029')normalized.replace(i,i+1,"\n");
+            }
+            return normalized;
+        },new InputFilter.LengthFilter(MessageText.INPUT_LIMIT)});
+        String rawDraft=drafts.read(selected),normalizedDraft=MessageText.normalizeLineBreaks(rawDraft);
+        if(!normalizedDraft.equals(rawDraft))drafts.save(selected,normalizedDraft);
+        editorSavedText=normalizedDraft; editor.setText(editorSavedText); composer.addView(editor,weight());
         editor.addTextChangedListener(new TextWatcher() {
             public void beforeTextChanged(CharSequence s,int start,int count,int after) { }
             public void onTextChanged(CharSequence s,int start,int before,int count) { saveDraft(); updateSendFeedback(); }
@@ -339,7 +361,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         for(ChatStore.Conversation contact:choices)fileAction(box,dialog,contact.displayName(),()->{
             try{ArrayList<Uri> uris=Intent.ACTION_SEND_MULTIPLE.equals(action)?request.getParcelableArrayListExtra(Intent.EXTRA_STREAM):new ArrayList<>();if(uris==null)uris=new ArrayList<>();if(Intent.ACTION_SEND.equals(action)){Uri uri=request.getParcelableExtra(Intent.EXTRA_STREAM);if(uri!=null)uris.add(uri);}
                 if(uris.isEmpty()&&request.getClipData()!=null)for(int i=0;i<request.getClipData().getItemCount();i++){Uri uri=request.getClipData().getItemAt(i).getUri();if(uri!=null)uris.add(uri);}
-                CharSequence text=request.getCharSequenceExtra(Intent.EXTRA_TEXT);if(!uris.isEmpty())service.sendFiles(contact.peer,uris);if(text!=null&&!text.toString().trim().isEmpty())service.send(contact.peer,text.toString(),success->{});open(contact.peer.id());
+                CharSequence text=request.getCharSequenceExtra(Intent.EXTRA_TEXT);if(!uris.isEmpty())service.sendFiles(contact.peer,uris);if(text!=null&&!text.toString().trim().isEmpty())service.send(contact.peer,MessageText.normalizeLineBreaks(text.toString()),success->{});open(contact.peer.id());
             }catch(RuntimeException error){error("分享内容无效："+error.getMessage());}
         });
     }
@@ -363,7 +385,8 @@ public final class MainActivity extends Activity implements ChatService.Observer
                 if(connectionBar!=null) connectionBar.setVisibility(service!=null&&service.online()?View.GONE:View.VISIBLE);
                 if(empty!=null) empty.setText(search!=null&&!search.getText().toString().isEmpty()?"没有结果":"暂无会话");
             } else {
-                String saved=drafts.read(selected);
+                String rawSaved=drafts.read(selected),saved=MessageText.normalizeLineBreaks(rawSaved);
+                if(!saved.equals(rawSaved))drafts.save(selected,saved);
                 if(editor!=null && !editor.getText().toString().equals(saved)) { editorSavedText=saved; editor.setText(saved); }
                 ChatStore.Conversation item=conversation(selected);
                 title.setText(item==null?"聊天":item.displayName());
@@ -458,8 +481,8 @@ public final class MainActivity extends Activity implements ChatService.Observer
             bubble.setPadding(dp(m.outgoing?14:21),dp(8),dp(m.outgoing?21:14),0);
             messageRow.addView(bubble,new LinearLayout.LayoutParams(-2,-2));if(m.outgoing)messageRow.addView(portrait,ap);
             if(!m.text.isEmpty()) {
-                String preview=MessageText.preview(m.text);TextView content=text(preview,messageSize(),INK);selectable(content);MessageLinks.apply(content,BLUE);content.setMaxWidth(maxWidth-dp(35));content.setLineSpacing(dp(3),1);bubble.addView(content);
-                if(!preview.equals(m.text)){TextView more=text("查看全文",14,BLUE);more.setMinHeight(dp(44));more.setGravity(Gravity.CENTER_VERTICAL);more.setFocusable(true);more.setOnClickListener(v->showFullText(m.text));bubble.addView(more);}
+                String normalized=MessageText.normalizeLineBreaks(m.text),preview=MessageText.preview(normalized);TextView content=text(preview,messageSize(),INK);selectable(content);MessageLinks.apply(content,BLUE);content.setMaxWidth(maxWidth-dp(35));content.setLineSpacing(dp(3),1);bubble.addView(content);
+                if(!preview.equals(normalized)){TextView more=text("查看全文",14,BLUE);more.setMinHeight(dp(44));more.setGravity(Gravity.CENTER_VERTICAL);more.setFocusable(true);more.setOnClickListener(v->showFullText(m.text));bubble.addView(more);}
             }
             for(int fileIndex=0;fileIndex<m.files.size();fileIndex++) {
                 Protocol.Attachment f=m.files.get(fileIndex);
@@ -500,7 +523,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
                 });
             }
             // 时间行保留整行点击高度并延伸到气泡底边，文字在行内垂直居中，气泡底部不再空出一截。
-            TextView stamp=text(new SimpleDateFormat("HH:mm",Locale.CHINA).format(new Date(m.time))+(m.outgoing?"  "+m.state:""),10,m.outgoing?outgoingMeta():MUTED); stamp.setMaxWidth(maxWidth-dp(35)); stamp.setGravity(Gravity.END|Gravity.CENTER_VERTICAL); bubble.addView(stamp,new LinearLayout.LayoutParams(-1,-2));
+            TextView stamp=text("",10,m.outgoing?outgoingMeta():MUTED); stamp.setText(messageMeta(new SimpleDateFormat("HH:mm",Locale.CHINA).format(new Date(m.time)),m,true)); stamp.setMaxWidth(maxWidth-dp(35)); stamp.setGravity(Gravity.END|Gravity.CENTER_VERTICAL); bubble.addView(stamp,new LinearLayout.LayoutParams(-1,-2));
             menuStamp[0]=stamp;
             final LanNode.Peer source=conversation==null?null:conversation.peer;
             bubble.setOnLongClickListener(v->{if(cardPeer.equals(selected)&&cardGeneration==editorGeneration){if(selectingMessages)toggleMessage(m);else beginMessageSelection(m);}return true;});
@@ -625,14 +648,14 @@ public final class MainActivity extends Activity implements ChatService.Observer
         });
     }
     private void showFullText(String value) {
-        TextView content=text(value,messageSize(),INK);selectable(content);content.setPadding(dp(4),dp(10),dp(4),dp(12));
+        TextView content=text(MessageText.normalizeLineBreaks(value),messageSize(),INK);selectable(content);content.setPadding(dp(4),dp(10),dp(4),dp(12));
         sheet("消息全文（长按选择复制）",content,"关闭",Dialog::dismiss);
     }
     private void messageActions(LanNode.Message message,LanNode.Peer source){
         int generation=editorGeneration;
         LinearLayout options=column();Dialog dialog=sheet("消息",options,null,null);
         if(message.outgoing&&service!=null&&service.canCancelOutgoing(source.id(),message.number))fileAction(options,dialog,"取消发送",()->{if(selected.equals(source.id())&&generation==editorGeneration)requestCancelOutgoing(message,source);});
-        if(!message.text.isEmpty())fileAction(options,dialog,"复制消息",()->copyText("消息",message.text));
+        if(!message.text.isEmpty())fileAction(options,dialog,"复制消息",()->copyText("消息",MessageText.normalizeLineBreaks(message.text)));
         if(!message.text.isEmpty())fileAction(options,dialog,"查看全文 / 选段复制",()->showFullText(message.text));
         fileAction(options,dialog,"转发…",()->forward(message,source));
         fileAction(options,dialog,"选择多条消息",()->{if(selected.equals(source.id())&&generation==editorGeneration)beginMessageSelection(message);});
@@ -670,7 +693,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         ChatStore.Conversation current=conversation(selected); if(sending)return;
         if(service==null||!service.online()){error("请先连接局域网");return;}
         if(current==null){error("会话尚未就绪，请稍后重试");return;}
-        String value=editor.getText().toString(); if(value.trim().isEmpty()) return;
+        String value=MessageText.normalizeLineBreaks(editor.getText().toString()); if(value.trim().isEmpty()) return;
         sending=true;sendingPeer=selected;updateSendFeedback();String peer=selected;saveDraft();
         service.send(current.peer,value,success->{
             if(isDestroyed() || isFinishing()) return;
@@ -864,6 +887,8 @@ public final class MainActivity extends Activity implements ChatService.Observer
         return spans;
     }
     private static String searchPreview(String value,String query) {
+        value=MessageText.normalizeLineBreaks(value);
+        query=MessageText.normalizeLineBreaks(query);
         String preview=MessageText.preview(value);
         if(ChatStore.contains(preview,query))return preview;
         for(int i=0;i+query.length()<=value.length();i++)if(value.regionMatches(true,i,query,0,query.length())) {
@@ -906,7 +931,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
                 };
                 LinearLayout item=column();item.setPadding(dp(10),dp(8),dp(10),dp(8));LinearLayout bubble=column();bubble.setPadding(dp(14),dp(10),dp(14),dp(10));bubble.setBackground(shape(message.outgoing?OUTGOING:SURFACE,CONTROL_RADIUS));item.addView(bubble);
                 item.setOnClickListener(locate);item.setFocusable(true);item.setContentDescription("定位到聊天消息");
-                TextView stamp=text(new SimpleDateFormat("M月d日 HH:mm",Locale.CHINA).format(new Date(message.time))+" · "+(message.outgoing?"我":conversation.displayName()),12,MUTED);bubble.addView(stamp);
+                TextView stamp=text("",12,MUTED);stamp.setText(messageMeta(new SimpleDateFormat("M月d日 HH:mm",Locale.CHINA).format(new Date(message.time))+" · "+(message.outgoing?"我":conversation.displayName()),message,false));bubble.addView(stamp);
                 if(!message.text.isEmpty()) {
                     TextView content=text("",messageSize(),INK);content.setText(searchHighlight(searchPreview(message.text,query),query));content.setLineSpacing(dp(3),1);content.setPadding(0,dp(6),0,dp(4));bubble.addView(content);
                 }
@@ -1461,7 +1486,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
             name.setEllipsize(c.duplicateName?TextUtils.TruncateAt.MIDDLE:TextUtils.TruncateAt.END);name.setContentDescription(c.displayName());
             if(c.duplicateName) {SpannableString caption=new SpannableString(name.getText());int start=caption.length()-c.nameSuffix().length();caption.setSpan(new android.text.style.ForegroundColorSpan(MUTED),start,caption.length(),Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);caption.setSpan(new android.text.style.RelativeSizeSpan(.8f),start,caption.length(),Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);name.setText(caption);}
             center.addView(name);
-            TextView preview=text(c.preview.isEmpty()?(c.peer.online?"在线 · ":"离线 · ")+c.peer.endpoint.getAddress().getHostAddress():c.preview.replace('\n',' '),14,MUTED); preview.setSingleLine(); preview.setEllipsize(TextUtils.TruncateAt.END); preview.setPadding(0,dp(5),0,0); center.addView(preview);
+            TextView preview=text(c.preview.isEmpty()?(c.peer.online?"在线 · ":"离线 · ")+c.peer.endpoint.getAddress().getHostAddress():MessageText.normalizeLineBreaks(c.preview).replace('\n',' '),14,MUTED); preview.setSingleLine(); preview.setEllipsize(TextUtils.TruncateAt.END); preview.setPadding(0,dp(5),0,0); center.addView(preview);
             LinearLayout right=column(); right.setGravity(Gravity.END); LinearLayout.LayoutParams rp=new LinearLayout.LayoutParams(-2,-2); rp.leftMargin=dp(8); row.addView(right,rp);
             TextView time=text(c.time==0?"":new SimpleDateFormat("HH:mm",Locale.CHINA).format(new Date(c.time)),11,MUTED); right.addView(time);
             if(c.unread>0) { TextView badge=text(c.unread>99?"99+":Integer.toString(c.unread),11,Color.WHITE); badge.setGravity(Gravity.CENTER); badge.setBackground(shape(BLUE,14)); LinearLayout.LayoutParams b=new LinearLayout.LayoutParams(dp(28),dp(23)); b.topMargin=dp(7); right.addView(badge,b); }

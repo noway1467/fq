@@ -35,7 +35,7 @@ public final class Protocol {
         }
     }
     public static String field(String value) {
-        return value == null ? "" : value.replace(':','_').replace("\0", "").replace('\n',' ').replace('\r',' ');
+        return value == null ? "" : value.replace(':','_').replace("\0", "").replace("\r\n"," ").replace('\n',' ').replace('\r',' ').replace('\u000b',' ').replace('\u2028',' ').replace('\u2029',' ');
     }
     public static String prefix(String value,int length) {
         int end=Math.min(value.length(),length);

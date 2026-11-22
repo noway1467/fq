@@ -132,7 +132,12 @@ namespace FeiqLight
             {
                 if (editor.IsComposing) return;
                 if ((e.Control && e.KeyCode == Keys.V) || (e.Shift && e.KeyCode == Keys.Insert)) { e.SuppressKeyPress = true; PasteClipboard(); }
-                else if (e.KeyCode == Keys.Enter && !e.Shift) { e.SuppressKeyPress = true; SendMessage(); }
+                else if (e.KeyCode == Keys.Enter)
+                {
+                    e.SuppressKeyPress = true;
+                    if (e.Shift) { if (!editor.ReadOnly) editor.SelectedText = "\n"; }
+                    else SendMessage();
+                }
             }; inputShell.Controls.Add(editor); compose.Controls.Add(inputShell, 1, 0);
             draftTimer.Tick += delegate { draftTimer.Stop(); SaveDraft(); };
             editor.HandleCreated += delegate { ResizeComposer(); };

@@ -202,8 +202,11 @@ namespace FeiqLight
         private struct TextArea { internal int Left, Top, Right, Bottom; }
         [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
         private struct GetTextOptions { internal uint Bytes, Flags, CodePage; internal IntPtr DefaultChar, UsedDefaultChar; }
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        private struct TextRange { internal int Start, End; }
         [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)] private static extern IntPtr LoadLibrary(string path);
         [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr handle, int message, IntPtr wparam, ref TextArea area);
+        [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr handle, int message, IntPtr wparam, ref TextRange range);
         [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr handle, int message, IntPtr wparam, IntPtr lparam);
         [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)] private static extern IntPtr SendMessage(IntPtr handle, int message, ref GetTextOptions options, System.Text.StringBuilder text);
         [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern bool HideCaret(IntPtr handle);
@@ -215,14 +218,54 @@ namespace FeiqLight
             {
                 if (!IsHandleCreated || IsDisposed || Disposing) return base.Text;
                 // .NET Framework 的 Text getter 使用 EM_STREAMOUT，会结束 RichEdit 5 的拼音组合。
-                // EM_GETTEXTEX 只读取正文；段落统一为 \n，与 RichTextBox 原有 Text 语义保持一致。
+                // Flags=0 的 EM_GETTEXTEX 每段返回一个 \r，字符索引与原生选区一致；软换行也统一为 \n。
                 int capacity = TextLength + 1;
                 var text = new System.Text.StringBuilder(capacity);
                 var options = new GetTextOptions { Bytes = checked((uint)capacity * 2), Flags = 0, CodePage = 1200, DefaultChar = IntPtr.Zero, UsedDefaultChar = IntPtr.Zero };
                 SendMessage(Handle, 0x045E, ref options, text);
-                return text.ToString().Replace('\r', '\n');
+                return MessageText.NormalizeLineBreaks(text.ToString());
             }
-            set { base.Text = value; }
+            set { string normalized = MessageText.NormalizeLineBreaks(value); base.Text = MaxLength > 0 ? Protocol.Prefix(normalized, MaxLength) : normalized; }
+        }
+        public override string SelectedText
+        {
+            get
+            {
+                if (!IsHandleCreated || IsDisposed || Disposing) return base.SelectedText;
+                int capacity = SelectionLength + 1;
+                var text = new System.Text.StringBuilder(capacity);
+                var options = new GetTextOptions { Bytes = checked((uint)capacity * 2), Flags = 2, CodePage = 1200 };
+                SendMessage(Handle, 0x045E, ref options, text);
+                return MessageText.NormalizeLineBreaks(text.ToString());
+            }
+            set
+            {
+                string text = MessageText.NormalizeLineBreaks(value), current = Text;
+                int start = SelectionStart, end = start + SelectionLength;
+                // 插入点落在代理对中间时移到其后；非空选区扩至整个字符，避免留下半个表情。
+                if (start > 0 && start < current.Length && Char.IsSurrogatePair(current, start - 1))
+                {
+                    if (start == end) { start++; end++; }
+                    else start--;
+                }
+                if (end > 0 && end < current.Length && Char.IsSurrogatePair(current, end - 1)) end++;
+                string insert = MaxLength > 0 ? Protocol.Prefix(text, Math.Max(0, (MaxLength - TextLength) + (end - start))) : text;
+                if (insert.Length == 0 && text.Length > 0) return;
+                if (start != SelectionStart || end - start != SelectionLength) Select(start, end - start);
+                // SelectedText 使用可撤销的原生替换，不重新设置全文或导出 RTF。
+                base.SelectedText = insert;
+            }
+        }
+        public override int SelectionLength
+        {
+            get
+            {
+                if (!IsHandleCreated || IsDisposed || Disposing) return base.SelectionLength;
+                // 系统 RichTextBox 通过 SelectedText 导出流计算长度；直接读原生选区才不会结束拼音组合。
+                TextRange range = new TextRange(); SendMessage(Handle, 0x0434, IntPtr.Zero, ref range);
+                return range.End - range.Start;
+            }
+            set { base.SelectionLength = value; }
         }
         private Rectangle textArea;
         internal int ContentHeight { get; private set; }

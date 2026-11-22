@@ -1,8 +1,9 @@
-param([switch]$Baseline)
+param([switch]$Baseline,[string]$ValidationDirectory)
 $ErrorActionPreference='Stop'
 $projectRoot=Split-Path -Parent $PSScriptRoot
 $temporary=Join-Path $projectRoot 'build/tmp/window-input'
-$validation=Join-Path $projectRoot 'build/release-0.7.7'
+$validation=if($ValidationDirectory){[IO.Path]::GetFullPath($ValidationDirectory)}else{Join-Path $projectRoot 'build/release-0.7.7'}
+if(!$validation.StartsWith([IO.Path]::GetFullPath((Join-Path $projectRoot 'build')).TrimEnd('\','/')+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)){throw '验证输出必须位于项目 build 内'}
 $testData=Join-Path $projectRoot ('build/test-data/window-input-'+[Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path $temporary,$validation,$testData | Out-Null
 $env:TEMP=$temporary; $env:TMP=$temporary; $env:TMPDIR=$temporary

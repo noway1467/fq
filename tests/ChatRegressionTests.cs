@@ -16,6 +16,11 @@ namespace FeiqLight.Tests
         private static int passed, failed;
         private static string root, output;
         [DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr window, int message, IntPtr wparam, IntPtr lparam);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr SendMessage(IntPtr window, int message, IntPtr wparam, string text);
+        [DllImport("user32.dll")] private static extern bool GetKeyboardState(byte[] keys);
+        [DllImport("user32.dll")] private static extern bool SetKeyboardState(byte[] keys);
+        [StructLayout(LayoutKind.Sequential)] private struct GetTextOptions { internal uint Bytes, Flags, CodePage; internal IntPtr DefaultChar, UsedDefaultChar; }
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr SendMessage(IntPtr window, int message, ref GetTextOptions options, System.Text.StringBuilder text);
         private static void Check(bool value, string message) { if (!value) throw new Exception(message); }
         private static void Run(string name, Action action) { try { action(); passed++; Console.WriteLine("PASS " + name); } catch (Exception error) { failed++; Console.WriteLine("FAIL " + name + ": " + error); } }
         private static object Field(object target, string name) { return target.GetType().GetField(name, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public).GetValue(target); }
@@ -27,6 +32,35 @@ namespace FeiqLight.Tests
             public void Dispose() { ReleaseHandle(); }
         }
         private static IEnumerable<Control> All(Control parent) { foreach (Control child in parent.Controls) { yield return child; foreach (Control nested in All(child)) yield return nested; } }
+        private static void ShiftEnter(ChatEditor editor)
+        {
+            byte[] original = new byte[256]; Check(GetKeyboardState(original), "无法读取测试线程的键盘状态");
+            byte[] shifted = (byte[])original.Clone(); shifted[16] = shifted[160] = 128; shifted[17] = shifted[18] = 0;
+            try
+            {
+                Check(SetKeyboardState(shifted), "无法设置测试线程的 Shift 状态");
+                SendMessage(editor.Handle, 0x0100, new IntPtr((int)Keys.Enter), new IntPtr(0x001C0001));
+                SendMessage(editor.Handle, 0x0101, new IntPtr((int)Keys.Enter), new IntPtr(unchecked((int)0xC01C0001)));
+            }
+            finally { SetKeyboardState(original); }
+            Application.DoEvents();
+        }
+        private static string NativeText(ChatEditor editor)
+        {
+            var text = new System.Text.StringBuilder(editor.TextLength + 1);
+            var options = new GetTextOptions { Bytes = checked((uint)(editor.TextLength + 1) * 2), CodePage = 1200 };
+            SendMessage(editor.Handle, 0x045E, ref options, text); return text.ToString();
+        }
+        private static Bitmap Render(Control control)
+        {
+            Bitmap image = new Bitmap(control.Width, control.Height); control.DrawToBitmap(image, new Rectangle(Point.Empty, image.Size)); return image;
+        }
+        private static void SamePixels(Bitmap actual, Bitmap expected, string reason)
+        {
+            Check(actual.Size == expected.Size, reason + "：图片尺寸不同");
+            for (int y = 0; y < actual.Height; y++) for (int x = 0; x < actual.Width; x++)
+                if (actual.GetPixel(x, y) != expected.GetPixel(x, y)) throw new Exception(reason + "：像素不同 " + x + "," + y);
+        }
         [STAThread] public static int Main(string[] args)
         {
             root = Path.GetFullPath(args[0]); output = Path.GetFullPath(args[1]); Directory.CreateDirectory(root); Directory.CreateDirectory(output);
@@ -79,6 +113,125 @@ namespace FeiqLight.Tests
                     main.ExitApplication();
                 }
             });
+            Run("换行输入：真实键盘消息 Shift+Enter、旧草稿及粘贴保留撤销、代理对和长度边界", () => {
+                string legacy = "首行\v第二行\r\n第三行\r末行\u2028第五行\u2029😀";
+                string normalized = "首行\n第二行\n第三行\n末行\n第五行\n😀";
+                LocalStore store = new LocalStore(Path.Combine(root, "line-input"));
+                Peer peer = new Peer { Endpoint = new IPEndPoint(IPAddress.Loopback, 24481), Login = "line-input", Nickname = "换行输入回归", Online = false };
+                store.SaveDraft(peer.Id, "seed"); string draft = Directory.GetFiles(store.Root, "*.draft.txt", SearchOption.AllDirectories).Single();
+                File.WriteAllText(draft, legacy, new System.Text.UTF8Encoding(false));
+                IDataObject clipboard = Clipboard.GetDataObject();
+                try
+                {
+                    using (LanService node = new LanService(new AppSettings { Notifications = false, AutoReceiveFiles = false }, 24480, true, "line-local"))
+                    using (MainForm main = new MainForm(node, store))
+                    {
+                        node.Start(); main.Show(); main.OpenChat(peer); Application.DoEvents();
+                        ChatEditor editor = All(main.ActiveChat).OfType<ChatEditor>().Single();
+                        Check(editor.Text == normalized && !NativeText(editor).Contains("\v"), "旧草稿未转换成标准段落");
+                        using (NativeReads reads = new NativeReads(editor))
+                        {
+                            editor.Text = "A😀B"; editor.MaxLength = 5; editor.Select(3, 0); ShiftEnter(editor);
+                            Check(editor.Text == "A😀\nB" && !NativeText(editor).Contains("\v"), "Shift+Enter 仍插入软换行或被当作发送");
+                            Check(editor.SelectionStart == 4 && editor.CanUndo, "换行未保留光标或撤销");
+                            editor.Undo(); Check(editor.Text == "A😀B", "撤销换行未恢复原文");
+                            editor.MaxLength = 4; editor.Select(editor.TextLength, 0); ShiftEnter(editor);
+                            Check(editor.Text == "A😀B" && editor.SelectionStart == 4, "满输入框仍插入换行或改变光标");
+                            editor.Select(1, 2); ShiftEnter(editor); Check(editor.Text == "A\nB", "换行没有替换完整表情选区");
+                            editor.Undo(); Check(editor.Text == "A😀B", "选区替换不能撤销");
+                            editor.MaxLength = 5; editor.Select(2, 0); int caret = editor.SelectionStart; ShiftEnter(editor);
+                            Check(editor.Text == (caret == 1 ? "A\n😀B" : "A😀\nB"), "换行没有保留原生控件的表情插入边界");
+                            editor.MaxLength = 100; editor.Text = ""; Clipboard.SetText(legacy); Theme.PasteText(editor);
+                            Check(editor.Text == normalized && !NativeText(editor).Contains("\v"), "粘贴没有统一换行");
+                            editor.MaxLength = 6; editor.Text = "a"; editor.Select(1, 0); Clipboard.SetText("abcd\r\n😀"); Theme.PasteText(editor);
+                            Check(editor.Text == "aabcd\n", "粘贴按原始 CRLF 计数或截断了表情");
+                            editor.Select(0, 0); Clipboard.SetText("😀"); Theme.PasteText(editor);
+                            Check(editor.Text == "aabcd\n" && editor.SelectionStart == 0, "满输入框粘贴改变了原文或光标");
+                            editor.MaxLength = 100; editor.Text = "";
+                            SendMessage(editor.Handle, 0x00C2, new IntPtr(1), legacy);
+                            Check(editor.Text == normalized && editor.Text.Length == editor.TextLength, "原生旧软换行读取破坏了字符索引");
+                            Check(reads.StreamOut == 0, "换行、粘贴或撤销触发 EM_STREAMOUT：" + reads.StreamOut);
+                        }
+                        main.ExitApplication();
+                    }
+                    File.WriteAllText(draft, new string('a', MessageText.InputLimit - 1) + "😀", new System.Text.UTF8Encoding(false));
+                    string loaded = store.LoadDraft(peer.Id); Check(loaded.Length == MessageText.InputLimit - 1 && !Char.IsSurrogate(loaded[loaded.Length - 1]), "旧长草稿截断留下了半个代理对");
+                }
+                finally { if (clipboard != null) Clipboard.SetDataObject(clipboard, true); else Clipboard.Clear(); }
+            });
+            Run("换行摘要和布局：六种分隔符、URL、表情及高亮与标准 LF 渲染完全一致", () => {
+                string[] separators = { "\n", "\r\n", "\r", "\v", "\u2028", "\u2029" };
+                Check(MessageText.NormalizeLineBreaks(null) == "", "空正文未兼容");
+                foreach (string separator in separators)
+                {
+                    string sample = "首行" + separator + "https://example.com/a" + separator + "定位 😀" + separator + "www.example.org/b";
+                    string normal = "首行\nhttps://example.com/a\n定位 😀\nwww.example.org/b";
+                    Check(MessageText.Preview(sample) == normal, "短摘要遗漏换行符");
+                    string longLines = String.Join(separator, Enumerable.Range(1, 12).Select(i => "第" + i + "行"));
+                    Check(MessageText.Preview(longLines) == String.Join("\n", Enumerable.Range(1, 8).Select(i => "第" + i + "行")) + "\n… 查看全文（双击）", "八行摘要阈值错误");
+                    MessageLayout layout = new MessageLayout(sample, Theme.Body, 500, "定位"), expected = new MessageLayout(normal, Theme.Body, 500, "定位");
+                    Check(layout.Height == expected.Height && layout.Height >= layout.LineHeight * 4, "多行正文被挤成一行");
+                    Check(layout.Runs.Select(r => r.Text).SequenceEqual(expected.Runs.Select(r => r.Text)) && layout.Runs.Select(r => r.Bounds).SequenceEqual(expected.Runs.Select(r => r.Bounds)), "换行影响分段、表情或高亮索引");
+                    Check(layout.Runs.Any(r => r.Text.Contains("定位") && r.Highlight), "搜索高亮索引错位");
+                    using (Bitmap image = new Bitmap(520, layout.Height + 4)) using (Bitmap reference = new Bitmap(520, expected.Height + 4))
+                    {
+                        var hits = new List<Tuple<Rectangle, string>>();
+                        using (Graphics g = Graphics.FromImage(image)) { g.Clear(Theme.Surface); layout.Draw(g, Point.Empty, Theme.Body, hits); }
+                        using (Graphics g = Graphics.FromImage(reference)) { g.Clear(Theme.Surface); expected.Draw(g, Point.Empty, Theme.Body, new List<Tuple<Rectangle, string>>()); }
+                        SamePixels(image, reference, "旧换行渲染出现方块或字符错位");
+                        Check(hits.Select(h => h.Item2).Distinct().Count() == 2 && hits.All(h => h.Item1.Top >= layout.LineHeight), "链接命中没有跟随换行");
+                    }
+                }
+            });
+            Run("旧历史显示：纯文本和富文本气泡、会话预览、复制及全文均不传播软换行", () => {
+                string raw = "首行\v第二行\r第三行\u2028第四行\u2029末行", rich = "https://example.com/\r\n定位😀\vwww.example.org/";
+                string plain = "首行\n第二行\n第三行\n第四行\n末行", richPlain = "https://example.com/\n定位😀\nwww.example.org/";
+                IDataObject clipboard = Clipboard.GetDataObject();
+                try
+                {
+                    using (Form host = new Form { ClientSize = new Size(768, 600) }) using (BubbleHistory history = new BubbleHistory { Dock = DockStyle.Fill })
+                    {
+                        host.Controls.Add(history); host.Show();
+                        ChatRecord[] legacy = { new ChatRecord { Text = raw }, new ChatRecord { Text = rich } };
+                        history.SetRecords(legacy); Application.DoEvents();
+                        var items = (System.Collections.IList)Field(history, "items");
+                        Check((string)Field(Field(items[0], "M"), "Text") == plain && Field(Field(items[0], "M"), "Layout") == null, "纯文本显示未规范化");
+                        Check(Field(Field(items[1], "M"), "Layout") != null, "链接与表情没有走富文本路径");
+                        using (Bitmap actual = Render(history))
+                        {
+                            history.SetRecords(new[] { new ChatRecord { Text = plain }, new ChatRecord { Text = richPlain } }); Application.DoEvents();
+                            using (Bitmap expected = Render(history)) SamePixels(actual, expected, "旧历史气泡与 LF 正文绘制不一致");
+                            actual.Save(Path.Combine(output, "legacy-line-breaks.png"), ImageFormat.Png);
+                        }
+                        history.SetRecords(legacy, "定位"); Application.DoEvents(); Render(history).Dispose();
+                        Check(((MessageLayout)Field(Field(((System.Collections.IList)Field(history, "items"))[1], "M"), "Layout")).Runs.Any(r => r.Highlight), "旧历史搜索高亮没有命中");
+                        typeof(BubbleHistory).GetField("selected", BindingFlags.Instance | BindingFlags.NonPublic).SetValue(history, 0);
+                        typeof(BubbleHistory).GetMethod("CopySelected", BindingFlags.Instance | BindingFlags.NonPublic).Invoke(history, null);
+                        Check(Clipboard.GetText() == plain && legacy[0].Text == raw, "复制仍含软换行或修改了历史原文");
+                        history.SelectAllMessages(); typeof(BubbleHistory).GetMethod("CopySelected", BindingFlags.Instance | BindingFlags.NonPublic).Invoke(history, null);
+                        Check(Clipboard.GetText() == plain + "\n" + richPlain, "多选复制传播旧换行");
+                        using (MessageTextDialog dialog = new MessageTextDialog(raw))
+                        {
+                            dialog.Show(host); Application.DoEvents(); RichTextBox full = All(dialog).OfType<RichTextBox>().Single();
+                            Check(full.Text == plain, "全文没有规范化旧历史"); full.SelectAll(); full.Copy(); Check(!Clipboard.GetText().Contains("\v"), "全文选段复制仍传播软换行"); dialog.Close();
+                        }
+                        host.Close();
+                    }
+                    using (Form host = new Form { ClientSize = new Size(360, 120) }) using (ConversationList list = new ConversationList { Dock = DockStyle.Fill })
+                    {
+                        host.Controls.Add(list); host.Show(); Peer peer = new Peer { Endpoint = new IPEndPoint(IPAddress.Loopback, 24491), Login = "preview", Nickname = "旧会话" };
+                        list.SetItems(new[] { new ConversationList.Item { Peer = peer, Preview = "你：" + raw } }); Application.DoEvents();
+                        using (Bitmap actual = Render(list))
+                        {
+                            list.SetItems(new[] { new ConversationList.Item { Peer = peer, Preview = "你：" + plain.Replace('\n', ' ') } }); Application.DoEvents();
+                            using (Bitmap expected = Render(list)) SamePixels(actual, expected, "会话单行预览出现换行方块");
+                        }
+                        SavedConversation saved = SavedConversation.Normalize(new[] { new SavedConversation { Endpoint = peer.Endpoint.ToString(), Login = peer.Login, Preview = raw } }).Single();
+                        Check(saved.Preview == plain.Replace('\n', ' ') && Protocol.Field(raw) == saved.Preview, "持久化预览或单行协议字段遗漏换行"); host.Close();
+                    }
+                }
+                finally { if (clipboard != null) Clipboard.SetDataObject(clipboard, true); else Clipboard.Clear(); }
+            });
             Run("历史文件：重启后气泡可以继续接收，已拒绝或已保存文件不复活", () => {
                 LocalStore store=new LocalStore(Path.Combine(root,"history"));Peer peer=new Peer {Endpoint=new IPEndPoint(IPAddress.Loopback,24351),Login="history",Nickname="历史文件"};
                 foreach(int id in new[]{1,2,3})store.AppendIncoming(new ChatRecord {PeerId=peer.Id,Packet=id,Time=DateTime.Now,Text="历史邀请",Transfers=new[]{new FileTransferState {Session="previous-process",Id=0,Name="history.txt",Size=1,Sha256=new string('a',64),Status=id==2?"已拒绝":id==3?"已保存":"待接收 · 点击接收",LocalPath=id==3?Path.Combine(root,"already-saved.txt"):null}}});
@@ -123,6 +276,50 @@ namespace FeiqLight.Tests
                     }
                 }
                 Theme.Configure(false,"blue");
+            });
+            Run("取消文本渲染：明暗主题和三种宽度都有红点与标签，状态缓存失效且不出现重发入口", () => {
+                foreach (bool dark in new[] { false, true }) foreach (int width in new[] { 360, 768, 1280 })
+                {
+                    Theme.Configure(dark, "blue");
+                    using (Form host = new Form { ClientSize = new Size(width, 420) }) using (BubbleHistory history = new BubbleHistory { Dock = DockStyle.Fill })
+                    {
+                        host.Controls.Add(history); host.Show(); history.SetAvatars("peer", "builtin:1", "own", "builtin:2");
+                        ChatRecord[] records = { new ChatRecord { Packet = 1, Text = "0", Outgoing = true, State = "已送达", Time = DateTime.Today.AddHours(19).AddMinutes(42) }, new ChatRecord { Packet = 2, Text = "123", Outgoing = true, State = "已取消发送", Time = DateTime.Today.AddHours(19).AddMinutes(43) } };
+                        history.SetRecords(records); Application.DoEvents();
+                        object previous = Field(((System.Collections.IList)Field(history, "items"))[0], "M");
+                        records[0].State = "未确认送达"; history.Delivery(records[0]);
+                        object failedMeasure = Field(((System.Collections.IList)Field(history, "items"))[0], "M");
+                        Check((string)Field(previous, "ContentKey") != (string)Field(failedMeasure, "ContentKey"), "同宽图标的状态变化命中旧缓存");
+                        records[0].State = "已取消发送"; history.Delivery(records[0]); Application.DoEvents();
+                        history.RetryRequested += delegate { throw new Exception("取消消息不应能重发"); };
+                        history.CanCancelSend = r => r.State == "等待确认"; history.CancelSendRequested += delegate { throw new Exception("取消消息不应能再次取消"); };
+                        using (Bitmap image = Render(history))
+                        {
+                            var hits = (List<Tuple<Rectangle, ChatRecord>>)Field(history, "stampHits"); var bounds = (List<Rectangle>)Field(history, "bounds"); var items = (System.Collections.IList)Field(history, "items");
+                            Check(hits.Count == 2 && ((System.Collections.IList)Field(history, "retryHits")).Count == 0, "取消文本缺少状态区或仍有重发红色感叹号");
+                            for (int i = 0; i < records.Length; i++)
+                            {
+                                Rectangle stamp = hits[i].Item1, bubble = bounds[i]; object measure = Field(items[i], "M"); Size text = (Size)Field(measure, "TextSize");
+                                int padTop = (int)typeof(BubbleHistory).GetProperty("PadTop", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(history, null);
+                                Check(bubble.Contains(stamp) && bubble.Left >= 0 && bubble.Right <= history.Width, "取消状态区越界");
+                                Check(stamp.Top >= bubble.Top + padTop + text.Height + 3, "取消状态行与正文重叠");
+                                string label = (string)typeof(BubbleHistory).GetMethod("StatusLabel", BindingFlags.Static | BindingFlags.NonPublic).Invoke(null, new object[] { records[i] });
+                                Check(label == "已取消发送" && ((string)Field(measure, "ContentKey")).Contains(records[i].State), "缺少明确标签或缓存没有记录取消状态");
+                                int red = 0; for (int y = stamp.Top; y < stamp.Bottom; y++) for (int x = stamp.Left; x < stamp.Right; x++) if (image.GetPixel(x, y).ToArgb() == Theme.Danger.ToArgb()) red++;
+                                int prefix = TextRenderer.MeasureText(records[i].Time.ToString("HH:mm"), Theme.Small, Size.Empty, TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine).Width + (int)Math.Round(7 * history.DeviceDpi / 96F);
+                                int dotSize = (int)Math.Round(6 * history.DeviceDpi / 96F);
+                                int dotRed = 0; for (int y = stamp.Top; y < stamp.Bottom; y++) for (int x = stamp.Left + prefix; x < Math.Min(stamp.Right, stamp.Left + prefix + dotSize); x++) if (image.GetPixel(x, y).ToArgb() == Theme.Danger.ToArgb()) dotRed++;
+                                Check(red > 15 && dotRed >= 4, "取消标签或状态点没有实际绘制危险色像素");
+                            }
+                            image.Save(Path.Combine(output, "canceled-text-" + width + "-" + (dark ? "dark" : "light") + ".png"), ImageFormat.Png);
+                        }
+                        typeof(BubbleHistory).GetField("selected", BindingFlags.Instance | BindingFlags.NonPublic).SetValue(history, 0);
+                        history.ContextMenuStrip.Show(history, new Point(10, 10)); Application.DoEvents();
+                        Check(!history.ContextMenuStrip.Items.Cast<ToolStripItem>().Single(item => item.Text == "取消发送").Visible && !history.ContextMenuStrip.Items.Cast<ToolStripItem>().Single(item => item.Text == "重新发送（可能重复）").Visible, "取消后菜单仍提供发送操作");
+                        history.ContextMenuStrip.Close(); host.Close();
+                    }
+                }
+                Theme.Configure(false, "blue");
             });
             Console.WriteLine("CHAT REGRESSION: "+passed+" passed, "+failed+" failed");return failed==0?0:1;
         }

@@ -169,7 +169,7 @@ namespace FeiqLight
                 }
                 else if (item.Peer.Pinned) { int size = Dp(17); badgeWidth = size + Dp(8); Theme.Glyph(g, "pin", new Rectangle(right - size, row.Top + Dp(39), size, size), muted); }
                 Rectangle preview = new Rectangle(left, row.Top + Dp(37), Math.Max(Dp(20), right - left - badgeWidth), Dp(22));
-                string text = (item.Preview ?? "").Replace('\r', ' ').Replace('\n', ' ');
+                string text = MessageText.NormalizeLineBreaks(item.Preview).Replace('\n', ' ');
                 if (text.StartsWith("你：") && text.Length > 2)
                 {
                     // 自己发出的预览前缀用强调色区分，正文保持次要色。

@@ -204,7 +204,7 @@ namespace FeiqLight
             Label hint = Theme.Label("拖动选择文字 · Ctrl+C 复制 · Ctrl+A 全选", Theme.Small, Theme.Muted); hint.Dock = DockStyle.Fill; hint.AutoEllipsis = true; footer.Controls.Add(hint); hint.BringToFront();
             RichTextBox content = new RichTextBox { Dock = DockStyle.Fill, ReadOnly = true, BorderStyle = BorderStyle.None, Font = Theme.Body,
                 BackColor = Theme.Surface, ForeColor = Theme.Ink, DetectUrls = false, HideSelection = false, ScrollBars = RichTextBoxScrollBars.Vertical,
-                Text = text ?? "", AccessibleName = "消息全文（可选择复制）" };
+                Text = MessageText.NormalizeLineBreaks(text), AccessibleName = "消息全文（可选择复制）" };
             Theme.AttachEditMenu(content); Theme.ThemeScrollbars(content);
             RoundedPanel card = new RoundedPanel { Dock = DockStyle.Fill, Fill = Theme.Ice, Radius = Theme.ControlRadius, Padding = new Padding(14, 12, 10, 10), Margin = new Padding(20, 6, 20, 0) };
             content.BackColor = Theme.Ice; card.Controls.Add(content);

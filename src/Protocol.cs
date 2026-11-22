@@ -32,7 +32,7 @@ namespace FeiqLight
         private static readonly Encoding StrictLegacy = Encoding.GetEncoding(936, EncoderFallback.ExceptionFallback, DecoderFallback.ExceptionFallback);
         public static string Field(string value)
         {
-            return (value ?? "").Replace(":", "_").Replace("\0", "").Replace("\n", " ").Replace("\r", " ");
+            return MessageText.NormalizeLineBreaks(value).Replace(":", "_").Replace("\0", "").Replace('\n', ' ');
         }
         public static string Prefix(string value, int length)
         {

@@ -16,12 +16,21 @@ namespace FeiqLight.Tests
         [DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr window, int message, IntPtr wparam, IntPtr lparam);
         [DllImport("user32.dll")] private static extern int GetWindowLong(IntPtr window, int index);
         [DllImport("user32.dll")] private static extern IntPtr ChildWindowFromPointEx(IntPtr window, Point point, uint flags);
+        [DllImport("user32.dll")] private static extern bool GetKeyboardState(byte[] keys);
+        [DllImport("user32.dll")] private static extern bool SetKeyboardState(byte[] keys);
         private static void Check(bool value, string message) { if (!value) throw new Exception(message); }
         private static void Run(string name, Action action) { try { action(); passed++; Console.WriteLine("PASS " + name); } catch (Exception error) { failed++; Console.WriteLine("FAIL " + name + ": " + error); } }
         private static System.Collections.Generic.IEnumerable<Control> All(Control parent) { foreach(Control child in parent.Controls) { yield return child; foreach(Control nested in All(child)) yield return nested; } }
         private static void Render(Control control, string name) { using(Bitmap image=new Bitmap(control.Width,control.Height)) { control.DrawToBitmap(image,new Rectangle(Point.Empty,image.Size)); image.Save(Path.Combine(output,label+"-"+name+".png"),ImageFormat.Png); } }
         private static Peer Peer() { return new Peer { Endpoint=new IPEndPoint(IPAddress.Loopback,24791),Login="input-peer",Nickname="中文 English 输入回归",Online=true }; }
         private static LanService Node(LocalStore store) { return new LanService(new AppSettings {AutoReceiveFiles=false,Notifications=false,CloseToTray=false,ReceiveFolder=Path.Combine(store.Root,"received")},24790,true,"window-input"); }
+        private static void ShiftEnter(ChatEditor editor)
+        {
+            byte[] original = new byte[256]; Check(GetKeyboardState(original), "无法读取测试键盘状态"); byte[] keys = (byte[])original.Clone(); keys[16] = keys[160] = 128; keys[17] = keys[18] = 0;
+            try { Check(SetKeyboardState(keys), "无法设置测试 Shift 状态"); SendMessage(editor.Handle, 0x0100, new IntPtr(13), new IntPtr(0x001C0001)); SendMessage(editor.Handle, 0x0101, new IntPtr(13), new IntPtr(unchecked((int)0xC01C0001))); }
+            finally { SetKeyboardState(original); }
+            Application.DoEvents();
+        }
         [STAThread] public static int Main(string[] args)
         {
             root=Path.GetFullPath(args[0]);output=Path.GetFullPath(args[1]);label=args[2];
@@ -81,7 +90,9 @@ namespace FeiqLight.Tests
                         Check(editor.ForeColor.ToArgb()==Theme.Ink.ToArgb(),"输入正文颜色未应用当前主题");
                         int contentHeight=0;editor.ContentsResized+=delegate(object sender,ContentsResizedEventArgs e){contentHeight=e.NewRectangle.Height;};
                         for(int lines=2;lines<=5;lines++) {
-                            editor.Text=String.Join("\n",Enumerable.Range(1,lines).Select(n=>"第 "+n+" 行 English"));
+                            editor.Text="第 1 行 English"; editor.Select(editor.TextLength, 0);
+                            for (int line = 2; line <= lines; line++) { ShiftEnter(editor); editor.SelectedText = "第 " + line + " 行 English"; }
+                            Check(editor.Text == String.Join("\n", Enumerable.Range(1, lines).Select(n => "第 " + n + " 行 English")), "Shift+Enter 的实际输入与段落文本不一致");
                             Application.DoEvents();editor.Select(editor.TextLength,0);editor.ScrollToCaret();Application.DoEvents();
                             Point first=editor.GetPositionFromCharIndex(0),last=editor.GetPositionFromCharIndex(editor.TextLength-1);
                             Console.WriteLine("METRIC font="+fontSize+" lines="+lines+" editor="+editor.ClientSize+" fontHeight="+editor.Font.Height+" content="+contentHeight+" first="+first+" last="+last);

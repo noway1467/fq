@@ -474,7 +474,13 @@ namespace FeiqLight
         }
         private void Complete(ChatRecord record, string state)
         {
-            record.State = state; Action<ChatRecord> handler = DeliveryChanged; if (!disposed && handler != null) handler(record);
+            lock (gate)
+            {
+                // 取消是本机的终态，晚到的切网或发送失败回调不能重新开启重发入口。
+                if (record.Outgoing && record.State == "已取消发送" && state != "已取消发送") return;
+                record.State = state;
+            }
+            NotifyDelivery(record);
         }
         private bool CancelOutgoingCore(string peerId,long packet,string knownState,bool notify,bool onlyUndelivered)
         {
@@ -1078,7 +1084,16 @@ namespace FeiqLight
                 if(item.Delivered||item.Canceled)return;
                 if(!(error is IOException||error is SocketException||error is System.Security.Authentication.AuthenticationException||error is AggregateException||error is ObjectDisposedException))throw;
                 Exception baseErr=error.GetBaseException();
-                if(baseErr is SecureIdentity.TrustException || baseErr is System.Security.Authentication.AuthenticationException){lock(gate)pending.Remove(item.Record.Packet);Complete(item.Record,"身份核对未通过，未确认送达");}
+                if(baseErr is SecureIdentity.TrustException || baseErr is System.Security.Authentication.AuthenticationException)
+                {
+                    lock(gate)
+                    {
+                        Pending active;
+                        if(item.Canceled||item.Delivered||!pending.TryGetValue(item.Record.Packet,out active)||active!=item)return;
+                        pending.Remove(item.Record.Packet);item.Record.State="身份核对未通过，未确认送达";
+                    }
+                    NotifyDelivery(item.Record);
+                }
                 else if(HeartbeatRetry>=TimeSpan.FromSeconds(1)&&!disposed) {
                     TimeSpan waitUntil=clock.Elapsed+TimeSpan.FromMilliseconds(2200);
                     while(!item.Delivered&&!item.Canceled&&!disposed&&clock.Elapsed<waitUntil)Thread.Sleep(50);

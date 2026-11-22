@@ -18,7 +18,7 @@ if(!$WindowsOnly){
     $core=@(Get-ChildItem -LiteralPath "$root/android/app/src/main/java/org/feiqlight/android/core" -Filter '*.java' | ForEach-Object FullName)
     & 'C:/Program Files/Java/jdk-17/bin/javac.exe' -encoding UTF-8 -d $out @core "$root/tests/SecureUpgrade.java"
     if($LASTEXITCODE -ne 0){throw 'Android 核心安全回归编译失败'}
-    & 'C:/Program Files/Java/jdk-17/bin/java.exe' '-Dfile.encoding=UTF-8' -cp $out SecureUpgrade "$data/android" | Tee-Object -FilePath "$logs/android-secure.log"
+    & 'C:/Program Files/Java/jdk-17/bin/java.exe' '-Dfile.encoding=UTF-8' -cp $out SecureUpgrade "$data/android" $Case | Tee-Object -FilePath "$logs/android-secure.log"
     if($LASTEXITCODE -ne 0){throw 'Android 核心安全回归失败'}
 }
 $resolved=[IO.Path]::GetFullPath($data)

@@ -20,6 +20,7 @@ namespace FeiqLight.Tests
         private static string root;
         private static int passed, failed;
         private static void Check(bool value, string reason) { if(!value) throw new Exception(reason); }
+        private static object PrivateField(object target, string name) { return target.GetType().GetField(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic).GetValue(target); }
         private static System.Collections.Generic.IEnumerable<Control> All(Control parent)
         {
             foreach(Control child in parent.Controls) { yield return child; foreach(Control item in All(child)) yield return item; }
@@ -438,6 +439,89 @@ namespace FeiqLight.Tests
                     }
                 }
                 Theme.Configure(false,"blue");
+            });
+            Run("普通文本取消发送经菜单确认立即落盘，晚到失败不覆盖且会话重开、重启保持", delegate {
+                LocalStore store = new LocalStore(Path.Combine(root, "text-cancel")); Peer peer;
+                using (UdpClient offline = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0)))
+                {
+                    peer = new Peer { Endpoint = (IPEndPoint)offline.Client.LocalEndPoint, Login = "offline-text", Host = "host", Nickname = "离线文本", Utf8 = true };
+                    using (LanService sender = new LanService(Settings("文本取消"), FreePort(), true, "text-cancel")) using (MainForm main = new MainForm(sender, store))
+                    {
+                        sender.Start(); main.Show(); main.OpenChat(peer); Application.DoEvents();
+                        ChatRecord record = sender.SendContent(peer, "0", new string[0], store.Root); main.Sent(peer, record); main.ActiveChat.Append(record);
+                        BubbleHistory history = All(main.ActiveChat).OfType<BubbleHistory>().Single();
+                        typeof(BubbleHistory).GetField("selected", BindingFlags.Instance | BindingFlags.NonPublic).SetValue(history, 0);
+                        history.ContextMenuStrip.Show(history, new Point(10, 10)); Application.DoEvents();
+                        ToolStripItem cancel = history.ContextMenuStrip.Items.Cast<ToolStripItem>().Single(item => item.Text == "取消发送"); Check(cancel.Visible, "普通文本缺少取消发送菜单");
+                        bool confirmed = false;
+                        using (System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 20 })
+                        {
+                            timer.Tick += delegate { ConfirmDialog dialog = Application.OpenForms.OfType<ConfirmDialog>().FirstOrDefault(); if (dialog != null && !confirmed) { confirmed = true; Button(dialog, "取消发送").PerformClick(); } };
+                            timer.Start(); cancel.PerformClick(); history.ContextMenuStrip.Close();
+                        }
+                        Check(confirmed && record.State == "已取消发送", "未经过确认或取消未即时更新状态");
+                        Pump(() => store.History(peer.Id, 10).Single().State == "已取消发送", "取消状态未持久化");
+                        Check(!sender.CanCancelOutgoing(peer.Id, record.Packet), "取消后仍在待重试队列");
+                        Task lateFailure = Task.Run(() => typeof(LanService).GetMethod("Complete", BindingFlags.Instance | BindingFlags.NonPublic).Invoke(sender, new object[] { record, "发送失败，未确认送达" }));
+                        Await(lateFailure); Check(record.State == "已取消发送", "晚到失败改写了取消终态");
+                        byte[] ack = Protocol.Encode(1, peer.Login, peer.Host, Protocol.ReceiveMessage, record.Packet.ToString(), null);
+                        offline.Send(ack, ack.Length, new IPEndPoint(IPAddress.Loopback, sender.Port));
+                        Stopwatch clock = Stopwatch.StartNew(); bool resent = false;
+                        while (clock.ElapsedMilliseconds < 2300)
+                        {
+                            while (offline.Available > 0)
+                            {
+                                IPEndPoint remote = null; Packet packet;
+                                if (Protocol.TryParse(offline.Receive(ref remote), out packet) && packet.Mode == Protocol.SendMessage && packet.Number == record.Packet && clock.ElapsedMilliseconds > 100) resent = true;
+                            }
+                            Application.DoEvents(); Thread.Sleep(15);
+                        }
+                        Check(!resent && record.State == "已取消发送", "取消后重试或迟到 ACK 覆盖终态");
+                        main.ActiveChat.Dispose(); main.OpenChat(peer); Application.DoEvents();
+                        BubbleHistory reopened = All(main.ActiveChat).OfType<BubbleHistory>().Single(); Check(((List<ChatRecord>)PrivateField(reopened, "records")).Single().State == "已取消发送", "重开会话丢失取消状态");
+                        using (HistoryDialog archive = new HistoryDialog(store, peer))
+                        {
+                            archive.Show(main); Application.DoEvents(); BubbleHistory body = All(archive).OfType<BubbleHistory>().Single();
+                            Check(((List<ChatRecord>)PrivateField(body, "records")).Single().State == "已取消发送", "历史搜索丢失取消状态");
+                            using (Bitmap image = new Bitmap(body.Width, body.Height)) { body.DrawToBitmap(image, new Rectangle(Point.Empty, image.Size)); image.Save(Path.Combine(Path.GetTempPath(), "canceled-text-history.png"), ImageFormat.Png); }
+                            archive.Close();
+                        }
+                        main.ExitApplication();
+                    }
+                }
+                using (LanService restarted = new LanService(store.LoadSettings(), FreePort(), true, "text-cancel")) using (MainForm main = new MainForm(restarted, new LocalStore(store.Root)))
+                {
+                    main.Show(); main.OpenChat(peer); Application.DoEvents();
+                    BubbleHistory history = All(main.ActiveChat).OfType<BubbleHistory>().Single(); Check(((List<ChatRecord>)PrivateField(history, "records")).Single().State == "已取消发送", "程序重启把取消状态恢复成未确认");
+                    Check(!restarted.CanCancelOutgoing(peer.Id, ((List<ChatRecord>)PrivateField(history, "records")).Single().Packet), "重启复活了取消重试"); main.ExitApplication();
+                }
+            });
+            Run("TLS 普通文本取消关闭正在握手的连接，真实异步异常不会覆盖取消或重新重试", delegate {
+                TcpListener listener = new TcpListener(IPAddress.Loopback, 0); listener.Start();
+                try
+                {
+                    LocalStore store = new LocalStore(Path.Combine(root, "tls-text-cancel"));
+                    Peer peer = new Peer { Endpoint = (IPEndPoint)listener.LocalEndpoint, Login = "blocked-tls", Nickname = "阻塞 TLS", DeviceId = Guid.NewGuid().ToString("N"), Fingerprint = new string('a', 64), Utf8 = true };
+                    using (LanService sender = new LanService(Settings("TLS 文本取消"), FreePort(), true, "tls-text-cancel")) using (MainForm main = new MainForm(sender, store))
+                    {
+                        sender.ConfigureSecurity(Path.Combine(store.Root, "security"), (name, code) => true); sender.Start(); main.Show();
+                        Task<TcpClient> accepted = listener.AcceptTcpClientAsync();
+                        ChatRecord record = sender.SendContent(peer, "取消握手中的文本", new string[0], store.Root); main.Sent(peer, record);
+                        Await(accepted); using (TcpClient remote = accepted.Result)
+                        {
+                            remote.ReceiveTimeout = 3000; byte[] header = new byte[4]; int count = 0;
+                            while (count < header.Length) { int read = remote.GetStream().Read(header, count, header.Length - count); Check(read > 0, "TLS 前导读取未完成"); count += read; }
+                            Check(Encoding.ASCII.GetString(header) == "FQ2\n", "发送端尚未进入 TLS 连接");
+                            object gate = PrivateField(sender, "gate"), pending;
+                            lock (gate) pending = ((System.Collections.IDictionary)PrivateField(sender, "pending"))[record.Packet];
+                            Check(pending != null && sender.CancelOutgoing(peer.Id, record.Packet, record.State, true), "正在握手的文本不能取消");
+                            Pump(() => (int)PrivateField(pending, "Sending") == 0, "取消后异步 TLS 线程未结束");
+                            Check(record.State == "已取消发送" && store.History(peer.Id, 10).Single().State == "已取消发送" && !sender.CanCancelOutgoing(peer.Id, record.Packet), "真实 TLS 失败覆盖取消状态或重新加入队列");
+                        }
+                        main.ExitApplication();
+                    }
+                }
+                finally { listener.Stop(); }
             });
             Run("离线发送文件可取消发送、撤销持久化报价并阻止上线后投递与拉取",delegate {
                 string senderSec=Path.Combine(root,"cancel-offline-sender-sec"), receiverSec=Path.Combine(root,"cancel-offline-receiver-sec");

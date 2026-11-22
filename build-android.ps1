@@ -1,18 +1,28 @@
-﻿param(
+param(
     [string]$SdkRoot = $env:ANDROID_HOME,
     [string]$JavaHome = $env:JAVA_HOME,
     [string]$GradleHome,
     [string]$OutputDirectory,
+    [string]$TemporaryDirectory,
+    [string]$TestOutputDirectory,
     [switch]$Test,
     [switch]$Offline
 )
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
-$temporary=Join-Path $root 'build\tmp'; New-Item -ItemType Directory -Force -Path $temporary | Out-Null
+$temporary=if($TemporaryDirectory){[IO.Path]::GetFullPath($TemporaryDirectory)}else{Join-Path $root 'build\tmp'}
+if($TemporaryDirectory -and !$temporary.StartsWith([IO.Path]::GetFullPath((Join-Path $root 'build/tmp')).TrimEnd('\','/')+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)){throw '临时目录必须位于项目 build/tmp 内'}
+New-Item -ItemType Directory -Force -Path $temporary | Out-Null
 $env:TEMP=$temporary; $env:TMP=$temporary; $env:TMPDIR=$temporary
 $env:GRADLE_USER_HOME=Join-Path $root 'build\gradle-home'
 $env:ANDROID_USER_HOME=Join-Path $root 'build/android-home'
 $env:JAVA_TOOL_OPTIONS='-Djava.io.tmpdir="'+$temporary+'"'
+if($TestOutputDirectory){
+    $testOutput=[IO.Path]::GetFullPath($TestOutputDirectory)
+    if(!$testOutput.StartsWith([IO.Path]::GetFullPath((Join-Path $root 'build')).TrimEnd('\','/')+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)){throw '测试输出必须位于项目 build 内'}
+    New-Item -ItemType Directory -Force -Path $testOutput | Out-Null
+    $env:JAVA_TOOL_OPTIONS+=' -Dfeiq.previewDir="'+$testOutput+'"'
+}
 $android = Join-Path $root 'android'
 if (!$JavaHome -and (Test-Path -LiteralPath 'C:\Program Files\Java\jdk-17')) { $JavaHome = 'C:\Program Files\Java\jdk-17' }
 if (!$JavaHome -or !(Test-Path -LiteralPath (Join-Path $JavaHome 'bin\javac.exe'))) { throw '请使用 -JavaHome 指定 JDK 17 或更高版本。' }

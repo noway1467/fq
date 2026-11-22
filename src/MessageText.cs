@@ -9,9 +9,13 @@ namespace FeiqLight
         public const int FileThreshold = 16 * 1024;
         public const int InputLimit = 1024 * 1024;
         public static bool AsFile(string text) { return Encoding.UTF8.GetByteCount(text ?? "") > FileThreshold; }
+        public static string NormalizeLineBreaks(string text)
+        {
+            return (text ?? "").Replace("\r\n", "\n").Replace('\r', '\n').Replace('\v', '\n').Replace('\u2028', '\n').Replace('\u2029', '\n');
+        }
         public static string Preview(string text)
         {
-            text = text ?? ""; int end = Math.Min(text.Length, 600), lines = 0;
+            text = NormalizeLineBreaks(text); int end = Math.Min(text.Length, 600), lines = 0;
             for (int i = 0; i < end; i++) if (text[i] == '\n' && ++lines == 8) { end = i; break; }
             if (end == text.Length) return text;
             if (end > 0 && Char.IsHighSurrogate(text[end - 1])) end--;
