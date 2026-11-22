@@ -117,6 +117,8 @@ namespace FeiqLight
             public long Size, ModifiedTicks, ExpiresTicks;
             public int FileId;
             public ChatRecord Record;
+            public string TransferState;
+            public int Percent;
         }
         public event Action NetworkReset;
         public void ConfigureSecurity(string root, Func<string,string,bool> confirmation)
@@ -133,7 +135,8 @@ namespace FeiqLight
         {
             if(dataRoot==null)return;
             lock(gate) {
-                var saved=(snapshot??offers).Where(o=>o.Value.Fingerprint!=null).Select(o=>new StoredOffer{Key=o.Key,Path=o.Value.Path,Address=o.Value.Address,DeviceId=o.Value.DeviceId,Fingerprint=o.Value.Fingerprint,Sha256=o.Value.Sha256,Size=o.Value.Size,ModifiedTicks=o.Value.Modified.Ticks,ExpiresTicks=o.Value.Expires.Ticks,FileId=o.Value.FileId,Record=o.Value.Record}).ToArray();
+                if(disposed)return;
+                var saved=(snapshot??offers).Where(o=>o.Value.Fingerprint!=null).Select(o=>new StoredOffer{Key=o.Key,Path=o.Value.Path,Address=o.Value.Address,DeviceId=o.Value.DeviceId,Fingerprint=o.Value.Fingerprint,Sha256=o.Value.Sha256,Size=o.Value.Size,ModifiedTicks=o.Value.Modified.Ticks,ExpiresTicks=o.Value.Expires.Ticks,FileId=o.Value.FileId,Record=o.Value.Record,TransferState=o.Value.TransferState,Percent=o.Value.Percent}).ToArray();
                 SecureIdentity.AtomicBytes(Path.Combine(dataRoot,"transfer-offers.json"),System.Text.Encoding.UTF8.GetBytes(new System.Web.Script.Serialization.JavaScriptSerializer{MaxJsonLength=8*1024*1024}.Serialize(saved)));
             }
         }
@@ -147,7 +150,10 @@ namespace FeiqLight
                 if(item==null||item.Record==null||item.ExpiresTicks<=DateTime.UtcNow.Ticks||!Security.IsTrusted(item.DeviceId,item.Fingerprint)||!SecureIdentity.ValidFingerprint(item.Sha256))continue;
                 FileInfo file=new FileInfo(item.Path);if(!file.Exists||file.Length!=item.Size||file.LastWriteTimeUtc.Ticks!=item.ModifiedTicks)continue;
                 if(item.Key!=item.Record.Packet+":"+item.FileId)throw new IOException("文件任务编号无效。");
-                offers[item.Key]=new Offer{Path=file.FullName,Size=item.Size,Modified=file.LastWriteTimeUtc,Address=item.Address,Expires=new DateTime(item.ExpiresTicks,DateTimeKind.Utc),DeviceId=item.DeviceId,Fingerprint=item.Fingerprint,Sha256=item.Sha256,Record=item.Record,FileId=item.FileId};
+                FileTransferState previous=(item.Record.Transfers??new FileTransferState[0]).FirstOrDefault(transfer=>transfer.Id==item.FileId);
+                string transferState=item.TransferState??(previous==null?null:previous.Status);
+                int percent=item.TransferState==null?(previous==null?0:previous.Percent):item.Percent;
+                offers[item.Key]=new Offer{Path=file.FullName,Size=item.Size,Modified=file.LastWriteTimeUtc,Address=item.Address,Expires=new DateTime(item.ExpiresTicks,DateTimeKind.Utc),DeviceId=item.DeviceId,Fingerprint=item.Fingerprint,Sha256=item.Sha256,Record=item.Record,FileId=item.FileId,TransferState=transferState,Percent=Math.Max(0,Math.Min(100,percent))};
                 sequence=Math.Max(sequence,item.Record.Packet);
             }
         }

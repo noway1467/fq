@@ -11,6 +11,7 @@
   let trail = [{id: '', name: '共享文件夹'}], items = [], listing = 0;
   let pending = [], sending = false, closing = Promise.resolve();
   let recoveryNotice='';
+  let recoveryAttempts=0;
   const status = (text, error = false) => {
     const activeRemote=mode==='remote'&&Boolean(token);
     $('status').textContent=text;$('status').hidden=!text||activeRemote;$('status').classList.toggle('error',error);
@@ -90,10 +91,14 @@
   $('disconnect').onclick = $('remote-disconnect').onclick = () => end('');
   window.feiqStop = () => end('');
   window.addEventListener('hashchange', () => { if ((location.hash === '#remote' ? 'remote' : 'share') !== mode) { end('正在切换页面'); location.reload(); } });
-  async function connect(reconnect, recovery = false, recoveryAttempt = 0) {
-    if(!recovery)recoveryNotice='';
+  async function connect(reconnect, recovery = false) {
+    if(recovery) {
+      if(recoveryAttempts>=4){end('远控连接连续失效，已停止自动恢复。请检查对方状态，再点“连接上次”。',true);return;}
+      recoveryAttempts++;
+    } else {recoveryNotice='';recoveryAttempts=0;}
     $('connect').disabled = $('reconnect').disabled = true; status(mode === 'remote' ? '等待电脑确认…' : '连接中…');
     const version = ++generation;
+    let finishGeneration=version;
     try {
       await closing; if (version !== generation) return;
       const data = await request(reconnect ? '/api/reconnect' : '/api/login', reconnect ? {mode} : {mode, code: $('code').value.trim()}, 40000);
@@ -113,15 +118,16 @@
       } else { trail = [{id: '', name: '共享文件夹'}]; await loadDirectory(); }
     } catch (error) {
       if(version===generation) {
-        if(recovery&&(error.retryable||error.status===401||error.status===409)&&recoveryAttempt<4) {
-          const nextAttempt=recoveryAttempt+1,wait=[500,1000,2000,4000][recoveryAttempt];
+        if(recovery&&(error.retryable||error.status===401||error.status===409)&&recoveryAttempts<4) {
+          const wait=[500,1000,2000,4000][recoveryAttempts-1];
           end('连接暂时中断，正在尝试恢复…',true);
           const retryGeneration=generation;
-          frameTimer=setTimeout(()=>{if(retryGeneration===generation)connect(true,true,nextAttempt);},wait);
+          frameTimer=setTimeout(()=>{if(retryGeneration===generation)connect(true,true);},wait);
         } else if(mode==='remote'&&error.status===404)unavailable();
         else end(error.message,true);
+        finishGeneration=generation;
       }
-    } finally { $('connect').disabled = $('reconnect').disabled = false; }
+    } finally { if(finishGeneration===generation)$('connect').disabled = $('reconnect').disabled = false; }
   }
   function recoverRemoteSession(version, notice = '') {
     if(version!==generation||!token||mode!=='remote')return;
@@ -221,7 +227,7 @@
     try {
       const blob = await request('/api/screen?display=' + display, undefined, 8000);
       if (!token || version !== generation) return;
-      frameFailures=0;
+      frameFailures=0;recoveryAttempts=0;
       if (screenVersion !== displayVersion) { frameTimer = setTimeout(() => frames(version), 0); return; }
       const previous = frameUrl; frameUrl = URL.createObjectURL(blob); $('screen').src = frameUrl;
       if (previous) URL.revokeObjectURL(previous);
@@ -259,6 +265,7 @@
         if (Date.now() - item.time > 5000) throw new Error('操作等待过久，已停止控制，不会补发旧操作。');
         try { await request('/api/input', item.data, 5000); }
         catch(error){if(phone&&(error.status===403||error.status===409)){if(item.version===generation){$('remote-error').textContent=error.message;$('remote-error').hidden=false;}continue;}throw error;}
+        if(item.version!==generation||version!==generation||!token)return;
         $('remote-error').hidden=true;
         if (item.version === generation && item.done) item.done();
       }

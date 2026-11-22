@@ -321,6 +321,25 @@ namespace FeiqLight.Tests
                     main.ExitApplication();
                 }
             });
+            Run("附件完成状态跨重启与旧任务格式恢复保持一致",delegate {
+                string senderRoot=Path.Combine(root,"completed-restart-sender"),receiverRoot=Path.Combine(root,"completed-restart-receiver"),source=Path.Combine(root,"completed-restart.bin");File.WriteAllBytes(source,new byte[]{1,2,3});
+                AppSettings senderSettings=Settings("完成发送端"),receiverSettings=Settings("完成接收端");long packet;string peerId;
+                using(LanService sender=new LanService(senderSettings,FreePort(),true,"completed-sender"))
+                using(LanService receiver=new LanService(receiverSettings,FreePort(),true,"completed-receiver")){
+                    sender.ConfigureSecurity(senderRoot,(name,code)=>true);receiver.ConfigureSecurity(receiverRoot,(name,code)=>true);sender.Start();receiver.Start();IncomingMessage incoming=null;receiver.MessageReceived+=message=>incoming=message;
+                    sender.TransferChanged+=(record,file,percent,state,rate)=>{FileTransferState transfer=record.Transfers.Single(value=>value.Id==file);transfer.Status=state;transfer.Percent=percent;};
+                    sender.Probe(new IPEndPoint(IPAddress.Loopback,receiver.Port));Pump(()=>sender.Peers.Any(peer=>peer.Login=="completed-receiver"),"接收端未发现");Peer target=sender.Peers.Single(peer=>peer.Login=="completed-receiver");sender.VerifyPeer(target);peerId=target.Id;
+                    ChatRecord sent=sender.SendMessage(target,"保存确认",new[]{source});packet=sent.Packet;Pump(()=>incoming!=null&&sent.State=="已送达","邀请未送达");Peer back=receiver.Peers.Single(peer=>peer.Login=="completed-sender");
+                    Await(receiver.ReceiveFileAsync(back,packet,incoming.Files[0],Path.Combine(root,"completed-restart-copy.bin"),null,CancellationToken.None));
+                    Pump(()=>File.ReadAllText(Path.Combine(senderRoot,"transfer-offers.json"),Encoding.UTF8).Contains("\"TransferState\":\"对方已校验保存\""),"完成状态未落盘");Check(!sender.CanCancelOutgoing(peerId,packet),"已完成文件仍可取消");
+                }
+                for(int generation=0;generation<2;generation++){
+                    using(LanService restored=new LanService(senderSettings,FreePort(),true,"completed-sender")){
+                        restored.ConfigureSecurity(senderRoot,(name,code)=>true);Check(!restored.CanCancelOutgoing(peerId,packet),"重启或旧格式丢失完成状态");Check(!restored.CancelOutgoing(peerId,packet,"已送达",true),"完成报价被误取消");Check(restored.OutgoingRecord(peerId,packet)!=null,"完成报价丢失");
+                    }
+                    if(generation==0){string stored=Path.Combine(senderRoot,"transfer-offers.json");var parser=new System.Web.Script.Serialization.JavaScriptSerializer();object[] legacy=(object[])parser.DeserializeObject(File.ReadAllText(stored,Encoding.UTF8));foreach(Dictionary<string,object> entry in legacy){entry.Remove("TransferState");entry.Remove("Percent");}File.WriteAllText(stored,parser.Serialize(legacy),new UTF8Encoding(false));}
+                }
+            });
             Run("明文发送完成不泄漏活跃流计数，正在发送中阻断删除且取消可中止传输流",delegate {
                 LocalStore store=new LocalStore(Path.Combine(root,"active-stream-store"));
                 string smallFile=Path.Combine(root,"明文小文件.bin"), largeFile=Path.Combine(root,"传输中取消.bin");

@@ -197,6 +197,7 @@ public final class ChatService extends Service {
                 applyProfile(next,prefs);
                 next.setSourceResolver(key->new DocumentSource(this,Uri.parse(key)));
                 next.configureSecurity(new File(getFilesDir(),"security"),AppIdentity.get(this),(name,code)->securityConfirmation!=null&&securityConfirmation.confirm(name,code));
+                Map<String,String> savedStates=new HashMap<>();for(ChatStore.TransferState state:store.transfers())savedStates.put(state.key,state.state);next.restoreOutgoingStates(savedStates);
                 next.rememberPeers(store.conversations().stream().map(c->c.peer).collect(java.util.stream.Collectors.toList()));
                 next.rememberEndpoints(store.conversations().stream().map(c->c.peer.endpoint).collect(java.util.stream.Collectors.toList()));
                 next.setSocketBinding(new LanNetwork(getSystemService(ConnectivityManager.class)));
@@ -310,6 +311,7 @@ public final class ChatService extends Service {
                 LanNode active=node;
                 if(selected.stream().anyMatch(message->message.outgoing&&active!=null&&active.hasActiveOutgoingTransfer(peer,message.number))) {showError("请先完成、拒绝或取消选中消息的文件任务，再删除记录");main.post(()->{if(!stopped)done.accept(false);});return;}
                 for(LanNode.Message message:selected)if(message.outgoing&&active!=null)active.cancelUndeliveredOutgoing(peer,message.number,message.state,false);
+                if(active==null){Set<Long> unconfirmed=new HashSet<>(store.unconfirmedOutgoingPackets(peer));List<Long> packets=selected.stream().filter(message->message.outgoing&&unconfirmed.contains(message.number)).map(message->message.number).collect(java.util.stream.Collectors.toList());LanNode.cancelStoredOffers(new File(getFilesDir(),"security"),peer,packets);}
                 store.deleteMessages(peer,selected);main.post(()->{fileProgress.entrySet().removeIf(entry->entry.getKey().startsWith(peer+"/")&&selected.stream().anyMatch(message->entry.getKey().startsWith(peer+"/"+message.number+"/")&&entry.getKey().endsWith("/"+message.outgoing)));notifyTransfers.run();});publish();main.post(()->{if(!stopped)done.accept(true);});
             }
             catch(Exception error){fail(error);main.post(()->{if(!stopped)done.accept(false);});}
@@ -330,7 +332,7 @@ public final class ChatService extends Service {
     void removeConversation(String id,boolean clear,boolean hide,Consumer<Boolean> done) {
         LanNode current=node;
         if(clear && (busy() || current!=null&&current.hasActiveOutgoingTransfer(id) || waiting.values().stream().anyMatch(r->r.peer.id().equals(id)))) {showError("请先完成、拒绝或取消文件任务，再清空记录");done.accept(false);return;}
-        queue(()->{try {LanNode active=node;if(clear&&active!=null&&active.hasActiveOutgoingTransfer(id)){showError("请先完成、拒绝或取消文件任务，再清空记录");main.post(()->done.accept(false));return;}if(clear&&active!=null)active.cancelUndeliveredOutgoingForPeer(id,store.unconfirmedOutgoingPackets(id));store.remove(id,clear,hide);publish();main.post(()->done.accept(true));}catch(Exception e){fail(e);main.post(()->done.accept(false));}});
+        queue(()->{try {LanNode active=node;if(clear&&active!=null&&active.hasActiveOutgoingTransfer(id)){showError("请先完成、拒绝或取消文件任务，再清空记录");main.post(()->done.accept(false));return;}if(clear){List<Long> packets=store.unconfirmedOutgoingPackets(id);if(active!=null)active.cancelUndeliveredOutgoingForPeer(id,packets);else LanNode.cancelStoredOffers(new File(getFilesDir(),"security"),id,packets);}store.remove(id,clear,hide);publish();main.post(()->done.accept(true));}catch(Exception e){fail(e);main.post(()->done.accept(false));}});
     }
     boolean online() { LanNode current=node;return current!=null && !connecting && current.networkAvailable(); }
     private void updateNetworkStatus(boolean available,String reason) {

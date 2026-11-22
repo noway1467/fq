@@ -199,6 +199,21 @@ public final class SecureUpgrade {
                 }
             }
         });
+        run("加密附件保存确认跨重启保留且完成报价不能取消",()->{
+            File senderRoot=root.resolve("completed-restart-a").toFile(),receiverRoot=root.resolve("completed-restart-b").toFile();
+            String aid="09090909090909090909090909090909",bid="10101010101010101010101010101010";File source=root.resolve("completed-restart.bin").toFile();Files.write(source.toPath(),new byte[]{1,2,3});long packet;
+            try(Node sender=new Node(senderRoot,port(),aid);Node receiver=new Node(receiverRoot,port(),bid)){
+                LanNode.Peer target=find(sender,receiver);sender.node.verifyPeer(target);LanNode.Message sent=sender.node.sendMessage(target,"保存确认",Collections.singletonList(source));packet=sent.number;
+                LanNode.Message received=receiver.incoming.poll(5,TimeUnit.SECONDS);check(received!=null,"邀请未到达");LanNode.Peer back=find(receiver,sender);
+                receiver.node.receiveFile(back,received.number,received.files.get(0),root.resolve("completed-restart-copy.bin").toFile(),new LanNode.Transfer(),null);
+                File stored=new File(senderRoot,"transfer-offers.dat");long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(5);
+                while(System.nanoTime()<deadline&&!new String(Files.readAllBytes(stored.toPath()),java.nio.charset.StandardCharsets.UTF_8).contains("对方已校验保存"))Thread.sleep(10);
+                check(new String(Files.readAllBytes(stored.toPath()),java.nio.charset.StandardCharsets.UTF_8).contains("对方已校验保存"),"保存完成状态未落盘");check(!sender.node.canCancelOutgoing(target.id(),packet),"完成文件仍可取消");
+            }
+            try(Node restored=new Node(senderRoot,port(),aid)){
+                check(!restored.node.canCancelOutgoing("device:"+bid,packet),"重启丢失文件完成状态");check(!restored.node.cancelOutgoing("device:"+bid,packet,"已送达",true),"完成报价被取消");check(restored.node.offering("device:"+bid,packet,0),"完成报价丢失");
+            }
+        });
         System.out.println("ANDROID SECURE: "+passed+" passed, "+failed+" failed");System.exit(failed==0?0:1);
     }
 }

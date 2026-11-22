@@ -318,6 +318,67 @@ public final class SettingsMessageTest {
             assertEquals("实时新昵称",remote.peers().get(0).name);
         } finally {if(settings!=null)settings.dismiss();ac.pause().stop().destroy();sc.destroy();}
     }
+    private static void writeLegacyOffers(File root,File original,LanNode.Peer target,LanNode.Peer other)throws Exception {
+        assertTrue(root.isDirectory()||root.mkdirs());
+        try(DataOutputStream output=new DataOutputStream(new FileOutputStream(new File(root,"transfer-offers.dat")))){
+            output.writeInt(2);output.writeInt(3);
+            for(int index=0;index<3;index++){
+                LanNode.Peer peer=index==2?other:target;
+                output.writeLong(10+index);output.writeInt(0);output.writeUTF(original.getCanonicalPath());output.writeLong(original.length());output.writeLong(original.lastModified());output.writeLong(System.currentTimeMillis()+86400000);
+                output.writeUTF(peer.deviceId);output.writeUTF(peer.fingerprint);output.writeUTF(SecureIdentity.hashFile(original));output.writeUTF(peer.endpoint.getAddress().getHostAddress()+":"+peer.endpoint.getPort());
+                output.writeUTF(peer.login);output.writeUTF(peer.host);output.writeUTF(peer.name);output.writeUTF(peer.group);output.writeUTF(peer.id());
+            }
+        }
+    }
+    private static List<Long> storedPackets(File root)throws Exception {
+        List<Long> packets=new ArrayList<>();
+        try(DataInputStream input=new DataInputStream(new FileInputStream(new File(root,"transfer-offers.dat")))){
+            assertEquals(2,input.readInt());int count=input.readInt();
+            for(int index=0;index<count;index++){packets.add(input.readLong());input.readInt();input.readUTF();input.readLong();input.readLong();input.readLong();for(int field=0;field<9;field++)input.readUTF();}
+        }
+        return packets;
+    }
+    @Test public void disconnectedDeleteRevokesOffers()throws Exception {
+        for(boolean clear:new boolean[]{false,true}){
+            ServiceController<ChatService> controller=Robolectric.buildService(ChatService.class).create();ChatService service=controller.get();
+            try {
+                settle(service);assertNull(field(service,"node"));
+                File original=new File(service.getFilesDir(),"离线原文件.bin");java.nio.file.Files.write(original.toPath(),new byte[]{1,2,3});File security=new File(service.getFilesDir(),"security");
+                LanNode.Peer target=new LanNode.Peer(LanNode.endpoint("127.0.0.1:34251"),"target","host","target","");target.deviceId=clear?"44444444444444444444444444444444":"11111111111111111111111111111111";target.fingerprint="a".repeat(64);
+                LanNode.Peer other=new LanNode.Peer(LanNode.endpoint("127.0.0.1:34252"),"other","host","other","");other.deviceId="22222222222222222222222222222222";other.fingerprint="b".repeat(64);
+                writeLegacyOffers(security,original,target,other);
+                LanNode.Message pending=new LanNode.Message();pending.number=10;pending.time=1;pending.outgoing=true;pending.state="上次退出，未确认送达";pending.text="离线附件";pending.files.add(new Protocol.Attachment(0,original.getName(),3,0));
+                LanNode.Message delivered=pending.copy();delivered.number=11;delivered.state="已送达";
+                service.incoming(target,pending,false);service.incoming(target,delivered,false);settle(service);
+                assertNotNull("测试用未送达消息必须已入库",((ChatStore)field(service,"store")).findMessage(target.id(),10,true));
+                List<Boolean> results=new ArrayList<>();
+                if(clear)service.removeConversation(target.id(),true,false,results::add);else service.deleteMessages(target.id(),Arrays.asList(pending,delivered),results::add);
+                settle(service);assertEquals(Collections.singletonList(true),results);assertTrue(((ChatStore)field(service,"store")).history(target.id()).isEmpty());
+                assertEquals("只撤销未送达报价，保留已送达和其他会话",Arrays.asList(11L,12L),storedPackets(security));assertTrue(original.isFile());
+                SecureIdentity identity=new SecureIdentity(security);identity.confirmation=(name,code)->true;identity.ensureTrusted(target.deviceId,target.fingerprint,target.name);identity.ensureTrusted(other.deviceId,other.fingerprint,other.name);
+                try(LanNode restored=new LanNode(34250,true,"restored","host","restored","",new LanNode.Listener(){public void peersChanged(){}public void error(String text){}public void message(LanNode.Peer peer,LanNode.Message message,boolean update){}})){
+                    restored.configureSecurity(security,identity,(name,code)->true);assertFalse(restored.offering(target.id(),10,0));assertTrue(restored.offering(target.id(),11,0));assertTrue(restored.offering(other.id(),12,0));
+                }
+            } finally {controller.destroy();}
+        }
+    }
+    @Test public void legacyCompletionMigrates()throws Exception {
+        Context context=RuntimeEnvironment.getApplication();File security=new File(context.getFilesDir(),"legacy-completion");File original=new File(context.getFilesDir(),"完成文件.bin");java.nio.file.Files.write(original.toPath(),new byte[]{1,2,3});
+        LanNode.Peer target=new LanNode.Peer(LanNode.endpoint("127.0.0.1:34251"),"target","host","target","");target.deviceId="33333333333333333333333333333333";target.fingerprint="c".repeat(64);
+        writeLegacyOffers(security,original,target,target);SecureIdentity identity=new SecureIdentity(security);identity.confirmation=(name,code)->true;identity.ensureTrusted(target.deviceId,target.fingerprint,target.name);
+        LanNode.Listener events=new LanNode.Listener(){public void peersChanged(){}public void error(String text){}public void message(LanNode.Peer peer,LanNode.Message message,boolean update){}};
+        try(LanNode migrated=new LanNode(34250,true,"migrated","host","migrated","",events)){
+            migrated.configureSecurity(security,identity,(name,code)->true);assertTrue(migrated.canCancelOutgoing(target.id(),10));
+            migrated.restoreOutgoingStates(Collections.singletonMap(ChatService.fileKey(target.id(),10,0,true),"对方已校验保存"));
+            assertFalse(migrated.canCancelOutgoing(target.id(),10));
+            Object delivered=((Map<?,?>)field(migrated,"offers")).get("11:0");Field deliveredState=delivered.getClass().getDeclaredField("storedMessageState");deliveredState.setAccessible(true);deliveredState.set(delivered,"已送达");
+            migrated.restoreOutgoingStates(Collections.singletonMap(ChatService.fileKey(target.id(),11,0,true),"等待对方接收"));
+        }
+        LanNode.cancelStoredOffers(security,target.id(),Arrays.asList(10L,11L));
+        try(LanNode restored=new LanNode(34250,true,"restored","host","restored","",events)){
+            restored.configureSecurity(security,(name,code)->true);assertTrue(restored.offering(target.id(),10,0));assertFalse(restored.canCancelOutgoing(target.id(),10));assertTrue(restored.offering(target.id(),11,0));assertTrue(restored.canCancelOutgoing(target.id(),11));
+        }
+    }
     @Test public void offlineOutgoingFileCancelAndDelete() throws Exception {
         ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();
         shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));

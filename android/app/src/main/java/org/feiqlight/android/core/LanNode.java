@@ -113,7 +113,7 @@ public final class LanNode implements AutoCloseable {
         File file; long size, modified, expires; InetAddress address;
         Source source;
         Peer peer; Message message; long packet, id, progressVersion; int percent; String state;
-        String deviceId,fingerprint,sha256;
+        String deviceId,fingerprint,sha256,storedMessageState;
         boolean canceled;
         final Set<Socket> activeSockets=new HashSet<>();
         final AtomicBoolean pushing=new AtomicBoolean();
@@ -149,7 +149,8 @@ public final class LanNode implements AutoCloseable {
     interface PeerConnector {void connect(Socket socket,InetSocketAddress target)throws IOException;}
     private PeerConnector peerConnector=(socket,target)->socket.connect(target,8000);
     private static void closeSocket(Socket socket){try{socket.close();}catch(IOException ignored){}}
-    private static boolean isOfferCompleted(Offer offer){return offer!=null&&("已发送（非保存确认）".equals(offer.state)||"对方已校验保存".equals(offer.state));}
+    private static boolean isCompletedState(String state){return "已发送（非保存确认）".equals(state)||"对方已校验保存".equals(state);}
+    private static boolean isOfferCompleted(Offer offer){return offer!=null&&isCompletedState(offer.state);}
     private static boolean isUnconfirmedState(String state){String value=state==null?"":state;return "等待确认".equals(value)||value.contains("未确认")||value.contains("失败");}
     private boolean tryBeginOfferStream(String key,java.util.function.Predicate<Offer> authorize,Socket client,long[] version,Offer[] selected) {
         synchronized(gate){Offer offer=offers.get(key);if(!closed&&offer!=null&&!offer.canceled&&offer.expires>=System.nanoTime()&&authorize.test(offer)){version[0]=++offer.progressVersion;offer.activeSockets.add(client);selected[0]=offer;return true;}version[0]=0;selected[0]=null;return false;}
@@ -166,7 +167,7 @@ public final class LanNode implements AutoCloseable {
         Pending item=null;List<Map.Entry<String,Offer>> selected=new ArrayList<>();List<Socket> sockets=new ArrayList<>();Socket connecting=null;Message stateMessage=null;Peer notifyPeer=null;boolean wasPending=false,updateState=false;
         synchronized(gate){Pending candidate=pending.get(packet);if(candidate!=null&&candidate.peer.id().equals(peerId)&&!candidate.canceled&&!candidate.delivered)item=candidate;
             for(Map.Entry<String,Offer> entry:offers.entrySet()){Offer offer=entry.getValue();if(offer.peer.id().equals(peerId)&&offer.packet==packet&&!offer.canceled&&!isOfferCompleted(offer))selected.add(entry);}
-            boolean active=selected.stream().anyMatch(entry->!entry.getValue().activeSockets.isEmpty());String actualState=item!=null?item.message.state:selected.stream().map(entry->entry.getValue().message==null?null:entry.getValue().message.state).filter(Objects::nonNull).findFirst().orElse(null);String state=item!=null?actualState:"已送达".equals(actualState)?actualState:(knownState!=null&&!knownState.isEmpty()?knownState:actualState);
+            boolean active=selected.stream().anyMatch(entry->!entry.getValue().activeSockets.isEmpty());String actualState=item!=null?item.message.state:selected.stream().map(entry->entry.getValue().message==null?entry.getValue().storedMessageState:entry.getValue().message.state).filter(Objects::nonNull).findFirst().orElse(null);String state=item!=null?actualState:"已送达".equals(actualState)?actualState:(knownState!=null&&!knownState.isEmpty()?knownState:actualState);
             if(onlyUndelivered&&"已送达".equals(knownState))return false;if(onlyUndelivered&&item==null&&(!isUnconfirmedState(state)||active))return false;if(item==null&&selected.isEmpty())return false;
             Map<String,Offer> next=new HashMap<>(offers);for(Map.Entry<String,Offer> entry:selected)if(entry.getValue().fingerprint!=null)next.remove(entry.getKey());if(selected.stream().anyMatch(entry->entry.getValue().fingerprint!=null))saveOffers(next);
             if(item!=null){item.canceled=true;pending.remove(packet);connecting=item.connectingSocket;item.connectingSocket=null;stateMessage=item.message;wasPending=true;}
@@ -178,7 +179,7 @@ public final class LanNode implements AutoCloseable {
     public void cancelUndeliveredOutgoingForPeer(String peerId)throws IOException { cancelUndeliveredOutgoingForPeer(peerId,Collections.emptyList()); }
     public void cancelUndeliveredOutgoingForPeer(String peerId,Collection<Long> unconfirmedPackets)throws IOException {
         List<Map.Entry<Long,String>> messages;
-        synchronized(gate){Map<Long,String> unique=new LinkedHashMap<>();for(Pending item:pending.values())if(item.peer.id().equals(peerId)&&!item.canceled&&!item.delivered)unique.put(item.message.number,item.message.state);for(Offer offer:offers.values())if(offer.peer.id().equals(peerId)&&!offer.canceled&&offer.message!=null&&isUnconfirmedState(offer.message.state))unique.putIfAbsent(offer.packet,offer.message.state);if(unconfirmedPackets!=null)for(Long packet:unconfirmedPackets)if(packet!=null)unique.putIfAbsent(packet,"未确认送达");messages=new ArrayList<>(unique.entrySet());}
+        synchronized(gate){Map<Long,String> unique=new LinkedHashMap<>();for(Pending item:pending.values())if(item.peer.id().equals(peerId)&&!item.canceled&&!item.delivered)unique.put(item.message.number,item.message.state);for(Offer offer:offers.values()){String state=offer.message==null?offer.storedMessageState:offer.message.state;if(offer.peer.id().equals(peerId)&&!offer.canceled&&isUnconfirmedState(state))unique.putIfAbsent(offer.packet,state);}if(unconfirmedPackets!=null)for(Long packet:unconfirmedPackets)if(packet!=null)unique.putIfAbsent(packet,"未确认送达");messages=new ArrayList<>(unique.entrySet());}
         for(Map.Entry<Long,String> entry:messages)cancelUndeliveredOutgoing(peerId,entry.getKey(),entry.getValue(),false);
     }
     private void cancelReverseRequests(){transportEpoch++;for(ReverseRequest request:reverseRequests.values())request.ready.countDown();reverseRequests.clear();}
@@ -206,6 +207,19 @@ public final class LanNode implements AutoCloseable {
     public void setSourceResolver(SourceResolver resolver){if(started)throw new IllegalStateException("需在启动前设置文件来源");sourceResolver=resolver;}
     private String hashSource(Source source)throws IOException {try(InputStream input=source.open(0)){java.security.MessageDigest hash=java.security.MessageDigest.getInstance("SHA-256");byte[] buffer=new byte[65536];int count;while((count=input.read(buffer))>=0)hash.update(buffer,0,count);StringBuilder result=new StringBuilder();for(byte b:hash.digest())result.append(String.format(Locale.ROOT,"%02x",b&255));return result.toString();}catch(java.security.NoSuchAlgorithmException e){throw new IllegalStateException(e);}}
     private File dataRoot;
+    private static final Object storedOffersGate=new Object();
+    private static final int OFFER_STATES_MARKER=0x46515331;
+    private static final class StoredOfferState {
+        final String state,messageState;
+        final int percent;
+        StoredOfferState(String state,int percent,String messageState){this.state=state;this.percent=percent;this.messageState=messageState;}
+    }
+    private static final class StoredOfferSpan {
+        final int start,length;
+        final long packet,file;
+        final String peer;
+        StoredOfferSpan(int start,int length,long packet,long file,String peer){this.start=start;this.length=length;this.packet=packet;this.file=file;this.peer=peer;}
+    }
     public boolean allowLegacyProtocol=true;
     public SecureIdentity security(){return security;}
     public void configureSecurity(File root,SecureIdentity.Confirmation confirmation)throws IOException{configureSecurity(root,new SecureIdentity(root),confirmation);}
@@ -215,13 +229,52 @@ public final class LanNode implements AutoCloseable {
     private void saveOffers(Map<String,Offer> snapshot)throws IOException {
         if(dataRoot==null)return;
         synchronized(gate){ByteArrayOutputStream buffer=new ByteArrayOutputStream();try(DataOutputStream out=new DataOutputStream(buffer)) {
+            if(closed)return;
             out.writeInt(2);List<Offer> saved=new ArrayList<>();for(Offer o:snapshot.values())if(o.fingerprint!=null)saved.add(o);out.writeInt(saved.size());
             for(Offer o:saved){out.writeLong(o.packet);out.writeInt((int)o.id);out.writeUTF(o.source==null?o.file.getCanonicalPath():"uri:"+o.source.key());out.writeLong(o.size);out.writeLong(o.modified);out.writeLong(System.currentTimeMillis()+TimeUnit.NANOSECONDS.toMillis(o.expires-System.nanoTime()));out.writeUTF(o.deviceId);out.writeUTF(o.fingerprint);out.writeUTF(o.sha256);out.writeUTF(o.peer.endpoint.getAddress().getHostAddress()+":"+o.peer.endpoint.getPort());out.writeUTF(o.peer.login);out.writeUTF(o.peer.host);out.writeUTF(o.peer.name);out.writeUTF(o.peer.group);out.writeUTF(o.peer.id());}
-        }SecureIdentity.atomic(new File(dataRoot,"transfer-offers.dat"),buffer.toByteArray());}
+            out.writeInt(OFFER_STATES_MARKER);out.writeInt(saved.size());
+            for(Offer offer:saved){out.writeLong(offer.packet);out.writeInt((int)offer.id);out.writeUTF(offer.state==null?"":offer.state);out.writeInt(offer.percent);String state=offer.message==null?offer.storedMessageState:offer.message.state;out.writeUTF(state==null?"":state);}
+        }synchronized(storedOffersGate){SecureIdentity.atomic(new File(dataRoot,"transfer-offers.dat"),buffer.toByteArray());}}
+    }
+    private static Map<String,StoredOfferState> readOfferStates(DataInputStream input)throws IOException {
+        Map<String,StoredOfferState> states=new HashMap<>();
+        if(input.available()==0)return states;
+        if(input.readInt()!=OFFER_STATES_MARKER)throw new IOException("文件任务状态格式无效");
+        int count=input.readInt();if(count<0||count>1000)throw new IOException("文件任务状态数量无效");
+        for(int index=0;index<count;index++){long packet=input.readLong();int file=input.readInt();String state=input.readUTF();int percent=input.readInt();String messageState=input.readUTF();if(percent<0||percent>100)throw new IOException("文件任务进度无效");states.put(packet+":"+file,new StoredOfferState(state,percent,messageState));}
+        if(input.read()!=-1)throw new IOException("文件任务状态含有多余数据");
+        return states;
+    }
+    public static void cancelStoredOffers(File root,String peerId,Collection<Long> packets)throws IOException {
+        if(packets.isEmpty())return;
+        File saved=new File(root,"transfer-offers.dat");Set<Long> selectedPackets=new HashSet<>(packets);
+        synchronized(storedOffersGate){
+            if(!saved.isFile())return;if(saved.length()>8*1024*1024)throw new IOException("文件任务记录过大");
+            byte[] bytes=Files.readAllBytes(saved.toPath());List<StoredOfferSpan> spans=new ArrayList<>();int format,count,metadataStart;Map<String,StoredOfferState> states;
+            try(DataInputStream input=new DataInputStream(new ByteArrayInputStream(bytes))){
+                format=input.readInt();if(format!=1&&format!=2)throw new IOException("文件任务版本不支持");count=input.readInt();if(count<0||count>1000)throw new IOException("文件任务数量无效");
+                for(int index=0;index<count;index++){
+                    int start=bytes.length-input.available();long packet=input.readLong();int file=input.readInt();input.readUTF();input.readLong();input.readLong();input.readLong();
+                    for(int field=0;field<8;field++)input.readUTF();String peer=input.readUTF();
+                    spans.add(new StoredOfferSpan(start,bytes.length-input.available()-start,packet,file,peer));
+                }
+                metadataStart=bytes.length-input.available();states=readOfferStates(input);
+            }
+            spans.removeIf(span->{StoredOfferState state=states.get(span.packet+":"+span.file);return span.peer.equals(peerId)&&selectedPackets.contains(span.packet)&&(state==null||!isCompletedState(state.state)&&!"已送达".equals(state.messageState));});
+            if(spans.size()==count)return;
+            ByteArrayOutputStream buffer=new ByteArrayOutputStream();
+            try(DataOutputStream output=new DataOutputStream(buffer)){output.writeInt(format);output.writeInt(spans.size());for(StoredOfferSpan span:spans)output.write(bytes,span.start,span.length);output.write(bytes,metadataStart,bytes.length-metadataStart);}
+            SecureIdentity.atomic(saved,buffer.toByteArray());
+        }
+    }
+    public void restoreOutgoingStates(Map<String,String> states)throws IOException {
+        boolean restored=false;
+        synchronized(gate){for(Offer offer:offers.values()){String state=states.get(offer.peer.id()+"/"+offer.packet+"/"+offer.id+"/true");if((offer.state==null||offer.state.isEmpty())&&state!=null){offer.state=state;if(isCompletedState(state))offer.percent=100;restored=true;}}if(restored)saveOffers();}
     }
     private void restoreOffers()throws IOException {
-        File saved=new File(dataRoot,"transfer-offers.dat");if(!saved.isFile())return;if(saved.length()>8*1024*1024)throw new IOException("文件任务记录过大");
-        try(DataInputStream in=new DataInputStream(new FileInputStream(saved))){int format=in.readInt();if(format!=1&&format!=2)throw new IOException("文件任务版本不支持");int count=in.readInt();if(count<0||count>1000)throw new IOException("文件任务数量无效");
+        File saved=new File(dataRoot,"transfer-offers.dat");byte[] bytes;
+        synchronized(storedOffersGate){if(!saved.isFile())return;if(saved.length()>8*1024*1024)throw new IOException("文件任务记录过大");bytes=Files.readAllBytes(saved.toPath());}
+        try(DataInputStream in=new DataInputStream(new ByteArrayInputStream(bytes))){int format=in.readInt();if(format!=1&&format!=2)throw new IOException("文件任务版本不支持");int count=in.readInt();if(count<0||count>1000)throw new IOException("文件任务数量无效");
             for(int i=0;i<count;i++){Offer o=new Offer();o.packet=in.readLong();o.id=in.readInt();String origin=in.readUTF();o.size=in.readLong();o.modified=in.readLong();long until=in.readLong();o.deviceId=in.readUTF();o.fingerprint=in.readUTF();o.sha256=in.readUTF();o.peer=new Peer(endpoint(in.readUTF()),in.readUTF(),in.readUTF(),in.readUTF(),in.readUTF());o.peer.conversationId=in.readUTF();o.peer.deviceId=o.deviceId;o.peer.fingerprint=o.fingerprint;o.address=o.peer.endpoint.getAddress();
                 if(until<=System.currentTimeMillis()||!security.isTrusted(o.deviceId,o.fingerprint)||!SecureIdentity.validFingerprint(o.sha256))continue;
                 try {
@@ -233,6 +286,8 @@ public final class LanNode implements AutoCloseable {
                 }
                 o.expires=System.nanoTime()+TimeUnit.MILLISECONDS.toNanos(Math.min(TimeUnit.DAYS.toMillis(7),until-System.currentTimeMillis()));offers.put(o.packet+":"+o.id,o);sequence.accumulateAndGet(o.packet,Math::max);
             }
+            Map<String,StoredOfferState> states=readOfferStates(in);
+            for(Map.Entry<String,StoredOfferState> entry:states.entrySet()){Offer offer=offers.get(entry.getKey());if(offer!=null){StoredOfferState state=entry.getValue();offer.state=state.state;offer.percent=state.percent;offer.storedMessageState=state.messageState;}}
         }
     }
     private volatile String avatar="default";
@@ -954,7 +1009,7 @@ public final class LanNode implements AutoCloseable {
                 while(sent<offer.size){int count=file.read(buffer,0,(int)Math.min(buffer.length,offer.size-sent));if(count<0)throw new EOFException("源文件读取中断");socket.getOutputStream().write(buffer,0,count);sent+=count;lastWrite.set(System.nanoTime());synchronized(gate){offer.expires=System.nanoTime()+TimeUnit.DAYS.toNanos(7);}if(rate.update(sent,(System.nanoTime()-startedAt)/1000000.0))progress(offer,version,(int)(sent*100.0/Math.max(1,offer.size)),"发送中",rate.bytesPerSecond());}
             }
             socket.getOutputStream().flush();progress(offer,version,100,"已发送，等待校验保存");
-            if(SecureIdentity.readText(socket.getInputStream(),128).equals("STORED\n"+offer.sha256))progress(offer,version,100,"对方已校验保存");
+            if(SecureIdentity.readText(socket.getInputStream(),128).equals("STORED\n"+offer.sha256)){progress(offer,version,100,"对方已校验保存");try{saveOffers();}catch(IOException error){listener.error("文件完成状态保存失败："+error.getMessage());}}
         } catch(IOException e){progress(offer,version,offer.percent,"传输中断或保存确认未送达");throw e;}
         finally {deadline.cancel(false);endOfferStream(offer,socket);}
     }

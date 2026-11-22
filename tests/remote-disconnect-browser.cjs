@@ -6,8 +6,8 @@ const http = require('node:http');
 const {chromium} = require('playwright');
 
 const root = path.resolve(__dirname, '..');
-const temporary = path.join(root, 'build/tmp/remote-disconnect-browser');
-const output = path.join(root, 'build/remote-drop-audit-20261121');
+const temporary = process.env.FQ_BROWSER_TEMP || path.join(root, 'build/tmp/remote-disconnect-browser');
+const output = process.env.FQ_VALIDATION_DIR || path.join(root, 'build/remote-drop-audit-20261121');
 fs.mkdirSync(temporary, {recursive:true});
 fs.mkdirSync(output, {recursive:true});
 let logins = 0;
@@ -73,9 +73,9 @@ async function countRequest(page, pathname) {
       if (statuses === 1) await route.fulfill({status:503, contentType:'application/json', body:'{"error":"temporary status outage"}'});
       else await route.continue();
     });
-    await page.evaluate(() => window.feiqCheck());
+    const probeSnapshot=await page.evaluate(async()=>{await window.feiqCheck();const warning=document.querySelector('#remote-error');return {visible:!warning.hidden,text:warning.textContent};});
     check('temporary status failure keeps live remote session', await page.locator('#remote').isVisible());
-    check('temporary status failure reports the probe without logging out', await page.locator('#remote-error').isVisible() && (await page.locator('#remote-error').innerText()).includes('保持中'));
+    check('temporary status failure reports the probe without logging out',probeSnapshot.visible&&probeSnapshot.text.includes('保持中'));
     await page.unroute('**/api/status');
 
     const beforeFrames = await countRequest(page, '/api/screen');
@@ -154,10 +154,47 @@ async function countRequest(page, pathname) {
 
     await racePage.evaluate(() => window.feiqStop());
     await racePage.close();
+
+    const budgetPage=await browser.newPage();
+    await budgetPage.goto(`http://127.0.0.1:${server.address().port}/#remote`);await connect(budgetPage,true);
+    const loginsBeforeBudget=logins;
+    await budgetPage.route('**/api/screen?*',route=>route.fulfill({status:401,contentType:'application/json',body:'{"error":"session invalidated"}'}));
+    await budgetPage.waitForFunction(()=>document.querySelector('#status').textContent.includes('已停止自动恢复'));
+    check('persistent frame 401 stops after four paired recovery attempts',logins-loginsBeforeBudget===4&&await budgetPage.locator('#login').isVisible());
+    await budgetPage.unroute('**/api/screen?*');await connect(budgetPage);
+    check('manual reconnect remains available after recovery limit',await budgetPage.locator('#remote').isVisible()&&await budgetPage.locator('#reconnect').isEnabled());
+    for(let outage=0;outage<2;outage++){
+      const beforeOutage=logins;
+      const reconnected=budgetPage.waitForResponse(response=>new URL(response.url()).pathname==='/api/reconnect');
+      await budgetPage.route('**/api/screen?*',route=>route.fulfill({status:401,contentType:'application/json',body:'{"error":"session expired"}'}),{times:1});
+      await reconnected;await budgetPage.waitForFunction(()=>document.querySelector('#screen').naturalWidth>0);
+      check('a valid frame resets recovery budget '+outage,logins-beforeOutage===1&&await budgetPage.locator('#remote').isVisible());
+    }
+    await budgetPage.evaluate(()=>window.feiqStop());await budgetPage.close();
+
+    const latePage=await browser.newPage();
+    await latePage.addInitScript(()=>{const original=window.setTimeout;window.setTimeout=(callback,milliseconds,...args)=>original(callback,milliseconds===250||milliseconds===5000?60000:milliseconds,...args);});
+    let releaseInput,inputEntered,holdInput=true,failProbe=false;
+    const pendingInput=new Promise(resolve=>inputEntered=resolve);
+    await latePage.route('**/api/*',async route=>{
+      const pathname=new URL(route.request().url()).pathname;
+      if(pathname==='/api/input'&&holdInput){holdInput=false;const pending=new Promise(resolve=>releaseInput=resolve);inputEntered();await pending;await route.fulfill({status:200,contentType:'application/json',body:'{"ok":true}'});}
+      else if(pathname==='/api/status'&&failProbe)await route.fulfill({status:503,contentType:'application/json',body:'{"error":"temporary probe failure"}'});
+      else await route.continue();
+    });
+    await latePage.goto(`http://127.0.0.1:${server.address().port}/#remote`);await connect(latePage,true);
+    await latePage.locator('#keyboard').click();await latePage.locator('#remote-text').fill('旧会话输入');await latePage.locator('#type-text').click();await pendingInput;
+    await latePage.evaluate(()=>window.feiqStop());await connect(latePage);
+    failProbe=true;
+    await latePage.evaluate(()=>window.feiqCheck());check('new session warning is visible before old input returns',await latePage.locator('#remote-error').isVisible());
+    const oldResponse=latePage.waitForResponse(response=>new URL(response.url()).pathname==='/api/input');releaseInput();await oldResponse;await latePage.waitForTimeout(80);
+    check('old input success cannot clear new session warning',await latePage.locator('#remote-error').isVisible()&&(await latePage.locator('#remote-error').innerText()).includes('保持中'));
+    await latePage.evaluate(()=>window.feiqStop());await latePage.close();
     fs.writeFileSync(path.join(output, 'browser-results.json'), JSON.stringify({passed:results.length, results}, null, 2)+'\n');
     console.log(`${results.length} remote disconnect browser checks passed`);
   } finally {
     await browser.close();
+    server.closeAllConnections();
     await new Promise(resolve => server.close(resolve));
   }
 })().catch(error => {console.error(error);process.exitCode=1;});
