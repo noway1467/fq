@@ -27,10 +27,10 @@ namespace FeiqLight.Tests
         private static Button Button(Control parent, string text) { return All(parent).OfType<Button>().Single(b => b.Text.TrimStart('✓', ' ') == text); }
         private static void Appearance(SettingsDialog dialog) { All(dialog).OfType<Button>().Single(b => b.AccessibleName == "设置标签：外观").PerformClick(); Application.DoEvents(); }
         private static AppSettings Settings(string name) { return new AppSettings { Nickname = name, Notifications = false, AutoReceiveFiles = false, ReceiveFolder = Path.Combine(root, "received") }; }
-        private static void Await(Task task)
+        private static void Await(Task task, int timeoutMs = 5000)
         {
             Stopwatch clock=Stopwatch.StartNew();
-            while(!task.IsCompleted && clock.ElapsedMilliseconds<5000) { Application.DoEvents(); Thread.Sleep(5); }
+            while(!task.IsCompleted && clock.ElapsedMilliseconds<timeoutMs) { Application.DoEvents(); Thread.Sleep(5); }
             Check(task.IsCompleted,"异步操作没有结束");task.GetAwaiter().GetResult();Application.DoEvents();
         }
         private static int FreePort()
@@ -51,9 +51,9 @@ namespace FeiqLight.Tests
             {
                 timer.Tick += delegate {
                     ConfirmDialog confirm = Application.OpenForms.OfType<ConfirmDialog>().FirstOrDefault();
-                    if (confirm != null) { confirmed = true; timer.Stop(); Button(confirm, "删除").PerformClick(); }
+                    if (confirm != null && !confirmed) { confirmed = true; Button(confirm, "删除").PerformClick(); }
                     NoticeDialog notice = Application.OpenForms.OfType<NoticeDialog>().FirstOrDefault();
-                    if (notice != null) { timer.Stop(); Button(notice, "确定").PerformClick(); }
+                    if (notice != null) { Console.WriteLine("DETAIL 删除提示：" + notice.Text + " " + String.Join(" ", All(notice).OfType<TextBoxBase>().Select(box => box.Text))); Button(notice, "确定").PerformClick(); }
                 };
                 timer.Start();
                 bool result = main.DeleteMessages(peer, records);
@@ -80,6 +80,244 @@ namespace FeiqLight.Tests
         {
             try { test(); passed++; Console.WriteLine("PASS " + name); }
             catch(Exception error) { failed++; Console.WriteLine("FAIL " + name + ": " + error); }
+        }
+        private static object Field(object value, string name) { return value.GetType().GetField(name, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public).GetValue(value); }
+        private static Task Receive(ChatForm chat, long packet, int fileId)
+        {
+            ListBox pending = (ListBox)Field(chat, "files");
+            object item = pending.Items.Cast<object>().Single(value => (long)Field(value, "Packet") == packet && ((Attachment)Field(value, "File")).Id == fileId);
+            return (Task)typeof(ChatForm).GetMethod("ReceiveAsync", BindingFlags.Instance | BindingFlags.NonPublic).Invoke(chat, new[] { item, (object)true });
+        }
+        private static string WriteLargeFile(string folder, string name)
+        {
+            Directory.CreateDirectory(folder); string path = Path.Combine(folder, name);
+            byte[] bytes = new byte[1024 * 1024]; new Random(71).NextBytes(bytes);
+            using (FileStream stream = File.Create(path)) for (int i = 0; i < 64; i++) stream.Write(bytes, 0, bytes.Length);
+            return path;
+        }
+        private static Attachment AttachmentFrom(FileTransferState file) { return new Attachment { Id = file.Id, Name = file.Name, Size = file.Size, Modified = file.Modified, Sha256 = file.Sha256, RelativePath = file.RelativePath }; }
+        private static string Partial(LanService receiver, Peer peer, ChatRecord record, int id)
+        {
+            Attachment file = AttachmentFrom(record.Transfers.Single(value => value.Id == id));
+            return LanService.PartialPath(peer, record.Packet, file, SendBatch.DestinationPath(receiver.Settings.ReceiveFolder, file));
+        }
+        private sealed class ReceivePair : IDisposable
+        {
+            internal readonly LanService Sender, Receiver;
+            internal readonly MainForm Main;
+            internal readonly LocalStore Store;
+            internal readonly Peer Target, Back;
+            internal ReceivePair(string name, bool secure = true)
+            {
+                string folder = Path.Combine(root, name); Directory.CreateDirectory(folder);
+                Store = new LocalStore(Path.Combine(folder, "store"));
+                AppSettings sendSettings = Settings("取消发送端"), receiveSettings = Settings("断点接收端");
+                sendSettings.ReceiveFolder = Path.Combine(folder, "sender-received"); receiveSettings.ReceiveFolder = Path.Combine(folder, "received");
+                Sender = new LanService(sendSettings, FreePort(), true, "partial-sender");
+                Receiver = new LanService(receiveSettings, FreePort(), true, "partial-receiver");
+                Main = new MainForm(Receiver, Store);
+                if (secure) { Sender.ConfigureSecurity(Path.Combine(folder, "sender-security"), (peer, code) => true); Receiver.ConfigureSecurity(Path.Combine(folder, "receiver-security"), (peer, code) => true); }
+                Sender.Start(); Receiver.Start(); Main.Show(); Main.NetworkStarted(); Sender.Probe(new IPEndPoint(IPAddress.Loopback, Receiver.Port));
+                Pump(() => Sender.Peers.Any(peer => peer.Login == "partial-receiver") && Receiver.Peers.Any(peer => peer.Login == "partial-sender"), "断点测试双方未发现");
+                Target = Sender.Peers.Single(peer => peer.Login == "partial-receiver"); Back = Receiver.Peers.Single(peer => peer.Login == "partial-sender");
+                if (secure) Sender.VerifyPeer(Target);
+                Main.OpenChat(Back);
+            }
+            internal ChatRecord Send(params string[] files)
+            {
+                ChatRecord outgoing = Sender.SendMessage(Target, "断点清理验证", files);
+                Pump(() => Store.IncomingAttachments(Back.Id, outgoing.Packet).Count == 1 && outgoing.State == "已送达", "断点邀请未送达");
+                return Store.IncomingAttachments(Back.Id, outgoing.Packet).Single();
+            }
+            internal ChatRecord Stored(long packet) { return Store.IncomingAttachments(Back.Id, packet).Single(); }
+            public void Dispose() { Main.ExitApplication(); Main.Dispose(); Receiver.Dispose(); Sender.Dispose(); Application.DoEvents(); }
+        }
+        private static ChatRecord InterruptedRecord(Peer peer, long packet, string saved, string relative = null)
+        {
+            return new ChatRecord { PeerId = peer.Id, Packet = packet, Sender = peer.Nickname, Text = "中断邀请", Time = DateTime.Now, State = "已收到", HasAttachments = true,
+                LocalFiles = new[] { saved }, Transfers = new[] {
+                    new FileTransferState { Id = 0, Name = Path.GetFileName(saved), Size = 3, LocalPath = saved, Status = "已保存", Percent = 100 },
+                    new FileTransferState { Id = 1, Name = "未完成.bin", Size = 4096, Modified = 123, Sha256 = new string('a', 64), RelativePath = relative, Status = "接收失败 · 点击续传", Session = "previous-session" }
+                } };
+        }
+        private static void ClearWithConfirm(MainForm main, Peer peer, bool clearOnly)
+        {
+            bool confirmed = false;
+            using (System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 20 })
+            {
+                timer.Tick += delegate {
+                    ConversationDialog dialog = Application.OpenForms.OfType<ConversationDialog>().FirstOrDefault();
+                    if (dialog != null && !confirmed) { confirmed = true; All(dialog).OfType<ToggleSwitch>().Single().Checked = true; Button(dialog, "确认删除").PerformClick(); }
+                    NoticeDialog notice = Application.OpenForms.OfType<NoticeDialog>().FirstOrDefault();
+                    if (notice != null) { Console.WriteLine("DETAIL 清空提示：" + notice.Text + " " + String.Join(" ", All(notice).OfType<TextBoxBase>().Select(box => box.Text))); Button(notice, "确定").PerformClick(); }
+                };
+                timer.Start(); typeof(MainForm).GetMethod("DeleteConversation", BindingFlags.Instance | BindingFlags.NonPublic).Invoke(main, new object[] { peer, clearOnly });
+            }
+            Check(confirmed, "清空会话确认未执行");
+        }
+        private static void PartialRegression()
+        {
+            string large = WriteLargeFile(Path.Combine(root, "partial-sources"), "large.bin"), small = Path.Combine(root, "partial-sources", "saved.txt");
+            File.WriteAllText(small, "已保存文件必须保留", new UTF8Encoding(false));
+            Run("0.7.19 发送方中途取消：TLS 与明文即时终止、清断点并保留同批已保存文件", delegate {
+                foreach (bool secure in new[] { true, false }) using (ReceivePair pair = new ReceivePair("cancel-live-" + secure, secure))
+                {
+                    ChatRecord record = pair.Send(small, large);
+                    Await(Receive(pair.Main.ActiveChat, record.Packet, 0)); string saved = pair.Stored(record.Packet).Transfers[0].LocalPath;
+                    string part = Partial(pair.Receiver, pair.Back, record, 1);
+                    // 回环可在一次 UI 消息泵或一次进度采样间隔内收完；独立观察真实落盘数据后立即取消。
+                    Task<long> canceled = Task.Run(() => {
+                        Stopwatch clock = Stopwatch.StartNew();
+                        while (clock.ElapsedMilliseconds < 8000) {
+                            if (File.Exists(part)) {
+                                long bytes = new FileInfo(part).Length;
+                                if (bytes > 0 && bytes < record.Transfers[1].Size) {
+                                    Check(pair.Sender.HasActiveOutgoingTransfer(pair.Target.Id, record.Packet), "取消前没有真实发送流");
+                                    Check(pair.Sender.CancelOutgoing(pair.Target.Id, record.Packet, "已送达", true), "取消失败");
+                                    return bytes;
+                                }
+                            }
+                            Thread.Sleep(1);
+                        }
+                        throw new Exception("取消前没有非空活跃断点");
+                    });
+                    Task download = Receive(pair.Main.ActiveChat, record.Packet, 1);
+                    Await(canceled, 10000); Await(download, 15000);
+                    Console.WriteLine("DETAIL " + (secure ? "TLS" : "明文") + " 中途取消偏移=" + canceled.Result);
+                    Pump(() => !File.Exists(part) && pair.Main.ActiveChat.PendingFileCount == 0 && pair.Stored(record.Packet).Transfers[1].Status == "对方已取消发送", "中途取消没有收敛");
+                    Check(pair.Stored(record.Packet).State == "对方已取消发送", "消息仍提示续传");
+                    string footer = ((Label)Field(pair.Main, "status")).Text;
+                    Console.WriteLine("DETAIL 取消完成主窗口提示=" + footer);
+                    Check(!footer.Contains("接收失败") && !footer.Contains("保留断点"), "取消后主窗口仍提示接收失败或保留断点：" + footer);
+                    Check(File.ReadAllBytes(saved).SequenceEqual(File.ReadAllBytes(small)) && pair.Stored(record.Packet).Transfers[0].Status == "已保存", "取消误删或改写已保存附件");
+                    Check(!Application.OpenForms.OfType<NoticeDialog>().Any(), "取消后台接收弹了错误窗口");
+                    using (Bitmap image = new Bitmap(pair.Main.Width, pair.Main.Height)) { pair.Main.DrawToBitmap(image, new Rectangle(Point.Empty, image.Size)); image.Save(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "partial-canceled-" + secure + ".png")); }
+                }
+            });
+            Run("0.7.19 通知丢失后续传读取 REVOKED、删除断点且重启不复活待接收项", delegate {
+                using (ReceivePair pair = new ReceivePair("cancel-revoked"))
+                {
+                    ChatRecord record = pair.Send(small, large); Await(Receive(pair.Main.ActiveChat, record.Packet, 0));
+                    string saved = pair.Stored(record.Packet).Transfers[0].LocalPath, part = Partial(pair.Receiver, pair.Back, record, 1);
+                    File.WriteAllBytes(part, new byte[4096]); Check(pair.Sender.CancelOutgoing(pair.Target.Id, record.Packet, "已送达", false), "无通知撤报价失败");
+                    Await(Receive(pair.Main.ActiveChat, record.Packet, 1), 15000);
+                    Check(!File.Exists(part) && pair.Stored(record.Packet).Transfers[1].Status == "对方已取消发送" && pair.Main.ActiveChat.PendingFileCount == 0, "REVOKED 未清理断点或待接收队列");
+                    Check(File.Exists(saved) && pair.Stored(record.Packet).Transfers[0].Status == "已保存", "REVOKED 误改已保存附件");
+                    pair.Main.ActiveChat.Dispose(); pair.Main.OpenChat(pair.Back); Check(pair.Main.ActiveChat.PendingFileCount == 0, "重建会话复活已取消邀请");
+                    Check(!Application.OpenForms.OfType<NoticeDialog>().Any(), "REVOKED 弹了错误窗口");
+                }
+            });
+            Run("0.7.19 普通连接中断保留非空断点，并从原偏移续传通过 SHA-256", delegate {
+                using (ReceivePair pair = new ReceivePair("ordinary-interruption"))
+                {
+                    ChatRecord record = pair.Send(large); string part = Partial(pair.Receiver, pair.Back, record, 0);
+                    Task interrupted = Receive(pair.Main.ActiveChat, record.Packet, 0);
+                    Pump(() => File.Exists(part) && new FileInfo(part).Length > 0 && !interrupted.IsCompleted, "断网前没有非空断点");
+                    object gate = Field(pair.Sender, "gate"); List<TcpClient> active;
+                    lock (gate) { object offer = ((System.Collections.IDictionary)Field(pair.Sender, "offers"))[record.Packet + ":0"]; active = ((IEnumerable<TcpClient>)Field(offer, "ActiveClients")).ToList(); }
+                    Check(active.Count > 0, "没有可中断的真实发送连接"); foreach (TcpClient socket in active) socket.Close();
+                    Await(interrupted, 15000); Check(File.Exists(part) && new FileInfo(part).Length > 0 && new FileInfo(part).Length < new FileInfo(large).Length, "普通断网误删断点或测试已收完");
+                    long offset = new FileInfo(part).Length; Check(pair.Stored(record.Packet).Transfers[0].Status == "接收失败 · 点击续传", "普通断网被当成取消");
+                    Await(Receive(pair.Main.ActiveChat, record.Packet, 0), 20000); string saved = pair.Stored(record.Packet).Transfers[0].LocalPath;
+                    Check(!File.Exists(part) && SecureIdentity.HashFile(saved) == SecureIdentity.HashFile(large), "续传 SHA-256 不一致"); Console.WriteLine("DETAIL 普通中断续传偏移=" + offset);
+                }
+            });
+            Run("0.7.19 重启恢复后拒绝与明文断网拒绝先本地清断点及空目录", delegate {
+                foreach (bool plain in new[] { false, true })
+                {
+                    string folder = Path.Combine(root, "reject-" + plain); Directory.CreateDirectory(folder); string saved = Path.Combine(folder, "saved.bin"); File.WriteAllBytes(saved, new byte[] { 1, 2, 3 });
+                    AppSettings settings = Settings("拒收"); settings.ReceiveFolder = Path.Combine(folder, "received");
+                    Peer peer = new Peer { Endpoint = new IPEndPoint(IPAddress.Loopback, FreePort()), Login = "offline", Host = "host", Nickname = "离线发送方", DeviceId = "11111111111111111111111111111111" };
+                    LocalStore store = new LocalStore(Path.Combine(folder, "store")); ChatRecord record = InterruptedRecord(peer, 9001, saved, "文件夹/空目录/未完成.bin");
+                    FileTransferState nonempty = new FileTransferState { Id = 2, Name = "第二个.bin", Size = 4096, Modified = 123, Sha256 = new string('b', 64), RelativePath = "文件夹/保留目录/第二个.bin", Status = "接收失败 · 点击续传" };
+                    record.Transfers = record.Transfers.Concat(new[] { nonempty }).ToArray(); store.Append(record);
+                    using (LanService receiver = new LanService(settings, FreePort(), true, "reject-receiver")) using (MainForm main = new MainForm(receiver, new LocalStore(store.Root)))
+                    {
+                        if (!plain) receiver.ConfigureSecurity(Path.Combine(folder, "security"), (name, code) => false);
+                        foreach (FileTransferState file in record.Transfers.Where(file => file.LocalPath == null)) { string destination = SendBatch.Destination(settings.ReceiveFolder, AttachmentFrom(file)); File.WriteAllBytes(LanService.PartialPath(peer, record.Packet, AttachmentFrom(file), destination), new byte[128]); }
+                        string emptyPart = Partial(receiver, peer, record, 1), keepPart = Partial(receiver, peer, record, 2), keptDirectory = Path.GetDirectoryName(keepPart);
+                        File.WriteAllText(Path.Combine(keptDirectory, "保留.txt"), "保留"); main.Show(); main.OpenChat(peer);
+                        Check(main.ActiveChat.PendingFileCount == 2, "重启未恢复未完成附件");
+                        Check(((ICollection<string>)Field(((ListBox)Field(main.ActiveChat, "files")).Items[0], "PartialPaths")).Count == 0, "重启测试错误地预填了内存路径");
+                        typeof(ChatForm).GetMethod("RejectFile", BindingFlags.Instance | BindingFlags.NonPublic).Invoke(main.ActiveChat, new object[] { null, EventArgs.Empty }); Application.DoEvents();
+                        ChatRecord result = store.IncomingAttachments(peer.Id, record.Packet).Single();
+                        Check(!File.Exists(emptyPart) && !File.Exists(keepPart) && !Directory.Exists(Path.GetDirectoryName(emptyPart)), "拒绝后残留断点或空子目录");
+                        Check(Directory.Exists(settings.ReceiveFolder) && File.Exists(Path.Combine(keptDirectory, "保留.txt")) && File.Exists(saved), "拒绝误删非空目录或已保存文件");
+                        Check(result.State == "已拒绝" && result.Transfers[1].Status == "已拒绝" && result.Transfers[0].Status == "已保存" && main.ActiveChat.PendingFileCount == 0, "拒收未本地持久化");
+                        main.ExitApplication();
+                    }
+                }
+                Attachment absent = new Attachment { Name = "不存在.bin", RelativePath = "没有创建/子目录/不存在.bin" }; string absentRoot = Path.Combine(root, "pure-destination");
+                SendBatch.DestinationPath(absentRoot, absent); Check(!Directory.Exists(absentRoot), "纯路径计算创建了目录");
+            });
+            Run("0.7.19 删除入站消息与清空全部历史清断点，保留正式文件与其他会话", delegate {
+                foreach (int mode in new[] { 0, 1, 2 })
+                {
+                    string folder = Path.Combine(root, "delete-partials-" + mode); Directory.CreateDirectory(folder); string saved = Path.Combine(folder, "saved.bin"); File.WriteAllBytes(saved, new byte[] { 1, 2, 3 });
+                    AppSettings settings = Settings("历史断点"); settings.ReceiveFolder = Path.Combine(folder, "received");
+                    Peer peer = new Peer { Endpoint = new IPEndPoint(IPAddress.Loopback, FreePort()), Login = "history", Host = "host", Nickname = "历史联系人" }; LocalStore store = new LocalStore(Path.Combine(folder, "store"));
+                    ChatRecord record = InterruptedRecord(peer, 100, saved, "旧目录/子目录/未完成.bin"); store.Append(record);
+                    for (int i = 0; i < 250; i++) store.Append(new ChatRecord { PeerId = peer.Id, Packet = 1000 + i, Text = new string('x', 18000), Time = DateTime.Now, State = "已收到" });
+                    Check(!store.History(peer.Id, 150).Any(value => value.Packet == record.Packet), "历史清理测试没有越过读取页/尾部上限");
+                    using (LanService receiver = new LanService(settings, FreePort(), true, "history-receiver")) using (MainForm main = new MainForm(receiver, store))
+                    {
+                        string destination = SendBatch.Destination(settings.ReceiveFolder, AttachmentFrom(record.Transfers[1])), part = Partial(receiver, peer, record, 1); File.WriteAllBytes(part, new byte[128]);
+                        string other = Path.Combine(settings.ReceiveFolder, ".feiq-" + new string('c', 64) + ".part"); File.WriteAllBytes(other, new byte[128]); main.Show();
+                        if (mode == 0) Check(DeleteWithConfirm(main, peer, new[] { record }), "删除中断入站消息失败"); else ClearWithConfirm(main, peer, mode == 1);
+                        Check(!File.Exists(part) && !Directory.Exists(Path.GetDirectoryName(destination)), "历史删除未清理旧断点和空目录");
+                        Check(File.Exists(saved) && File.Exists(other), "历史删除误删正式文件或其他断点");
+                        Check(!store.IncomingAttachments(peer.Id).Any(value => value.Packet == record.Packet), "历史记录未删除"); main.ExitApplication();
+                    }
+                }
+            });
+            Run("0.7.19 取消鉴权、后台会话、数字拒绝兼容及过期断点命名/占用边界", delegate {
+                using (ReceivePair pair = new ReceivePair("cancel-security"))
+                {
+                    ChatRecord record = pair.Send(small, large); Await(Receive(pair.Main.ActiveChat, record.Packet, 0)); string saved = pair.Stored(record.Packet).Transfers[0].LocalPath, part = Partial(pair.Receiver, pair.Back, record, 1); File.WriteAllBytes(part, new byte[128]);
+                    bool barrier = false; pair.Receiver.MessageReceived += message => { if (message.Record.Text == "cancel-barrier") barrier = true; };
+                    using (UdpClient attacker = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0)))
+                    {
+                        foreach (string fingerprint in new[] { pair.Sender.Security.Fingerprint, null })
+                        {
+                            byte[] bytes = Protocol.Encode(81001, pair.Sender.Login, pair.Sender.Host, Protocol.ReleaseFiles | Protocol.Utf8, "cancel:" + record.Packet, null, pair.Sender.Settings.DeviceId, null, fingerprint);
+                            attacker.Send(bytes, bytes.Length, new IPEndPoint(IPAddress.Loopback, pair.Receiver.Port));
+                        }
+                        byte[] stripped = Protocol.Encode(81002, pair.Sender.Login, pair.Sender.Host, Protocol.ReleaseFiles | Protocol.Utf8, "cancel:" + record.Packet, null);
+                        attacker.Send(stripped, stripped.Length, new IPEndPoint(IPAddress.Loopback, pair.Receiver.Port));
+                        byte[] marker = Protocol.Encode(81003, "attacker", "host", Protocol.SendMessage | Protocol.Utf8, "cancel-barrier", null, "33333333333333333333333333333333");
+                        attacker.Send(marker, marker.Length, new IPEndPoint(IPAddress.Loopback, pair.Receiver.Port)); Pump(() => barrier, "伪造取消报文没有被完整处理");
+                    }
+                    Check(File.Exists(part) && pair.Stored(record.Packet).Transfers[1].Status != "对方已取消发送", "伪造明文取消破坏了 TLS 会话");
+                    AppSettings attackSettings = Settings("冒用证书"); attackSettings.DeviceId = pair.Sender.Settings.DeviceId;
+                    using (LanService attacker = new LanService(attackSettings, FreePort(), true, pair.Sender.Login))
+                    {
+                        attacker.ConfigureSecurity(Path.Combine(root, "impostor-security"), (name, code) => true); attacker.Start();
+                        Peer target = new Peer { Endpoint = new IPEndPoint(IPAddress.Loopback, pair.Receiver.Port), DeviceId = pair.Receiver.Settings.DeviceId, Fingerprint = pair.Receiver.Security.Fingerprint, Login = pair.Receiver.Login, Nickname = "接收方" };
+                        bool blocked = false; try { typeof(LanService).GetMethod("SendReleaseFiles", BindingFlags.Instance | BindingFlags.NonPublic).Invoke(attacker, new object[] { target, "cancel:" + record.Packet }); }
+                        catch (TargetInvocationException e) { Check(e.InnerException is IOException || e.InnerException is System.Security.Authentication.AuthenticationException, "冒用验证因无关错误失败：" + e.InnerException); blocked = true; }
+                        Check(blocked && pair.Receiver.Security.IsTrusted(pair.Sender.Settings.DeviceId, pair.Sender.Security.Fingerprint), "冒用证书覆盖了原配对");
+                    }
+                    Check(File.Exists(part) && pair.Stored(record.Packet).Transfers[1].Status != "对方已取消发送", "冒用证书篡改了状态");
+                    pair.Main.ActiveChat.Dispose(); Check(pair.Sender.CancelOutgoing(pair.Target.Id, record.Packet, "已送达", true), "后台会话取消失败");
+                    Pump(() => !File.Exists(part) && pair.Stored(record.Packet).Transfers[1].Status == "对方已取消发送", "会话未打开时取消没有清理持久化历史"); Check(File.Exists(saved) && pair.Stored(record.Packet).Transfers[0].Status == "已保存", "后台取消误删已保存文件");
+                    ChatRecord refused = pair.Send(large); pair.Receiver.RejectFiles(pair.Back, refused.Packet);
+                    Pump(() => pair.Sender.OutgoingRecord(pair.Target.Id, refused.Packet) == null, "纯数字拒绝通知未撤销报价");
+                    long legacyNumber; Check(!Int64.TryParse("cancel:" + refused.Packet, out legacyNumber), "旧版数字分支会误解析取消编码");
+                    string owned = Partial(pair.Receiver, pair.Back, refused, 0); File.WriteAllBytes(owned, new byte[128]);
+                    using (FileStream owner = new FileStream(owned, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+                    {
+                        bool failedOpen = false; try { Await(pair.Receiver.ReceiveFileAsync(pair.Back, refused.Packet, AttachmentFrom(refused.Transfers[0]), SendBatch.DestinationPath(pair.Receiver.Settings.ReceiveFolder, AttachmentFrom(refused.Transfers[0])), null, CancellationToken.None)); } catch (IOException) { failedOpen = true; }
+                        Check(failedOpen && File.Exists(owned) && owner.Length == 128, "未取得断点所有权却清理了其他任务文件");
+                    }
+                }
+                string folder = Path.Combine(root, "expired-partials"); Directory.CreateDirectory(Path.Combine(folder, "nested")); DateTime now = DateTime.UtcNow;
+                string expired = Path.Combine(folder, "nested", ".feiq-" + new string('a', 64) + ".part"), fresh = Path.Combine(folder, ".feiq-" + new string('b', 64) + ".part"), busy = Path.Combine(folder, ".feiq-" + new string('c', 64) + ".part"), ordinary = Path.Combine(folder, "ordinary.part"), invalid = Path.Combine(folder, ".feiq-" + new string('g', 64) + ".part");
+                foreach (string path in new[] { expired, fresh, busy, ordinary, invalid }) { File.WriteAllBytes(path, new byte[128]); File.SetLastWriteTimeUtc(path, now.AddHours(-25)); } File.SetLastWriteTimeUtc(fresh, now.AddHours(-23));
+                using (FileStream owner = new FileStream(busy, FileMode.Open, FileAccess.ReadWrite, FileShare.None)) Check(ReceiveStorage.CleanExpiredPartials(folder, now) == 1, "过期清理数量不正确");
+                Check(!File.Exists(expired) && new[] { fresh, busy, ordinary, invalid }.All(File.Exists), "过期清理误删新断点、占用断点或普通文件");
+                string outside = Path.Combine(root, "outside.part"); File.WriteAllBytes(outside, new byte[128]); bool escaped = false;
+                try { ReceiveStorage.DeletePartialAndEmptyParents(folder, outside, "nested/file.bin"); } catch (IOException) { escaped = true; } Check(escaped && File.Exists(outside), "清理越过接收根目录");
+            });
         }
         [STAThread] public static int Main(string[] args)
         {
@@ -390,6 +628,7 @@ namespace FeiqLight.Tests
                     main.ExitApplication();
                 }
             });
+            PartialRegression();
             Console.WriteLine("RESULT passed="+passed+" failed="+failed);
             return failed==0?0:1;
         }

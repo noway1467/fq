@@ -34,5 +34,18 @@ namespace FeiqLight
             foreach(string part in parts.Take(parts.Length-1)){directory=Path.Combine(directory,part);if(File.Exists(directory))throw new IOException("同名文件阻止创建目录。");if(Directory.Exists(directory)&&(File.GetAttributes(directory)&FileAttributes.ReparsePoint)!=0)throw new IOException("接收目录不能是链接。");Directory.CreateDirectory(directory);}
             return ReceiveStorage.Destination(directory,file.Name);
         }
+        internal static string DestinationPath(string root, Attachment file)
+        {
+            if (!Protocol.SafeFileName(file.Name)) throw new IOException("不安全的文件名。");
+            string directory = ReceiveStorage.Folder(root);
+            if (file.RelativePath != null)
+            {
+                if (!Protocol.SafeRelativePath(file.RelativePath)) throw new IOException("文件夹路径无效。");
+                string[] parts = file.RelativePath.Split('/');
+                foreach (string part in parts.Take(parts.Length - 1)) directory = Path.Combine(directory, part);
+            }
+            // 清理和历史恢复只计算位置，不能为了找断点再创建空目录。
+            return Path.Combine(directory, file.Name);
+        }
     }
 }

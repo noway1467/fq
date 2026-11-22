@@ -13,6 +13,10 @@ using System.Threading.Tasks;
 
 namespace FeiqLight
 {
+    public sealed class OfferRevokedException : IOException
+    {
+        public OfferRevokedException() : base("对方已取消发送") { }
+    }
     public sealed class LanService : IDisposable
     {
         private sealed class Pending
@@ -159,6 +163,7 @@ namespace FeiqLight
         }
         public event Action PeersChanged;
         public event Action<IncomingMessage> MessageReceived;
+        public event Action<Peer, long> OfferCanceled;
         public event Action<ChatRecord> DeliveryChanged;
         public event Action<string> Error;
         public event Action<string> TransferNotice;
@@ -230,6 +235,8 @@ namespace FeiqLight
                 lastMaintenance=clock.Elapsed;
                 timer = new Timer(Tick, null, 1000, 1000);
                 Refresh();
+                string receiveRoot = Settings.ReceiveFolder;
+                Task.Run(() => { try { ReceiveStorage.CleanExpiredPartials(receiveRoot, DateTime.UtcNow); } catch (Exception e) { Report("过期断点清理未完成：" + e.Message); } });
             }
             catch { Dispose(); throw; }
         }
@@ -414,6 +421,28 @@ namespace FeiqLight
             if (packet.Mode == Protocol.ReleaseFiles)
             {
                 long messageId;
+                if ((packet.Body ?? "").StartsWith("cancel:", StringComparison.Ordinal))
+                {
+                    if (!Int64.TryParse(packet.Body.Substring(7), NumberStyles.None, CultureInfo.InvariantCulture, out messageId) || messageId <= 0) return;
+                    Peer sender;
+                    lock (gate)
+                    {
+                        if (secure)
+                        {
+                            if (Security == null || !Security.IsTrusted(packet.DeviceId, packet.Fingerprint)) return;
+                            sender = peers.Values.FirstOrDefault(p => p.DeviceId == packet.DeviceId && p.Fingerprint == packet.Fingerprint);
+                        }
+                        else
+                        {
+                            if (packet.Fingerprint != null || Security != null && (!Settings.AllowLegacyProtocol || Security.TrustedFingerprint(packet.DeviceId) != null)) return;
+                            sender = peers.Values.FirstOrDefault(p => p.Endpoint.Equals(remote) && p.Login == packet.Login && p.Host == packet.Host &&
+                                (packet.DeviceId == null || p.DeviceId == packet.DeviceId) && p.Fingerprint == null && (Security == null || Security.TrustedFingerprint(p.DeviceId) == null));
+                        }
+                    }
+                    Action<Peer, long> canceled = OfferCanceled;
+                    if (sender != null && canceled != null) canceled(sender, messageId);
+                    return;
+                }
                 if (!Int64.TryParse(packet.Body, out messageId)) return;
                 lock (gate)
                     foreach (string key in offers.Where(p => p.Key.StartsWith(messageId + ":", StringComparison.Ordinal) && (secure?p.Value.DeviceId==packet.DeviceId&&p.Value.Fingerprint==packet.Fingerprint:p.Value.Fingerprint==null&&p.Value.Address==remote.Address.ToString())).Select(p => p.Key).ToList()) { EndOffer(offers[key], "对方已拒绝"); offers.Remove(key); }
@@ -450,6 +479,7 @@ namespace FeiqLight
         private bool CancelOutgoingCore(string peerId,long packet,string knownState,bool notify,bool onlyUndelivered)
         {
             Pending item=null;List<KeyValuePair<string,Offer>> selected;List<TcpClient> socketsToClose=new List<TcpClient>();List<Tuple<Offer,long,int>> notifiedTransfers=new List<Tuple<Offer,long,int>>();TcpClient connectingToClose=null;ChatRecord stateRecord=null;bool wasPending=false,updateRecordState=false;
+            Peer cancelPeer = null;
             lock(gate) {
                 Pending candidate;
                 if(pending.TryGetValue(packet,out candidate)&&candidate.Record.PeerId==peerId&&!candidate.Canceled&&!candidate.Delivered)item=candidate;
@@ -460,6 +490,11 @@ namespace FeiqLight
                 if(onlyUndelivered&&knownState=="已送达")return false;
                 if(onlyUndelivered&&item==null&&(!IsUnconfirmedState(effectiveState)||active))return false;
                 if(item==null&&selected.Count==0)return false;
+                if (notify && !onlyUndelivered && selected.Count > 0 && (active || effectiveState == "已送达" || selected.Any(o => o.Value.Percent > 0) || item != null && item.Transmitting != 0))
+                {
+                    Peer target = item != null ? item.Peer : peers.Values.FirstOrDefault(p => p.Id == peerId);
+                    if (target != null) cancelPeer = new Peer { Endpoint = new IPEndPoint(target.Endpoint.Address, target.Endpoint.Port), DeviceId = target.DeviceId, Fingerprint = target.Fingerprint, Login = target.Login, Nickname = target.DisplayName };
+                }
                 Dictionary<string,Offer> nextOffers=new Dictionary<string,Offer>(offers);
                 foreach(KeyValuePair<string,Offer> entry in selected)if(entry.Value.Fingerprint!=null)nextOffers.Remove(entry.Key);
                 if(selected.Any(o=>o.Value.Fingerprint!=null))SaveOffers(nextOffers);
@@ -479,6 +514,11 @@ namespace FeiqLight
             foreach(TcpClient client in socketsToClose)try{client.Close();}catch{}
             foreach(Tuple<Offer,long,int> entry in notifiedTransfers)Transfer(entry.Item1,entry.Item2,entry.Item3,"已取消发送");
             if(notify&&updateRecordState&&stateRecord!=null)NotifyDelivery(stateRecord);
+            if (cancelPeer != null)
+            {
+                Peer target = cancelPeer;
+                Task.Run(() => { try { SendReleaseFiles(target, "cancel:" + packet.ToString(CultureInfo.InvariantCulture)); } catch (Exception) { /* 拉取的 REVOKED 终态兜底通知丢失。 */ } });
+            }
             return true;
         }
         public bool CancelOutgoing(string peerId,long packet,string knownState=null,bool notify=true) { return CancelOutgoingCore(peerId,packet,knownState,notify,false); }
@@ -1050,7 +1090,18 @@ namespace FeiqLight
         }
         private void StreamOffer(TcpClient client,SslStream stream,string key,Func<Offer,bool> authorize,long offset)
         {
-            Offer offer;long version;if(!TryBeginOfferStream(key,authorize,client,out offer,out version))throw new IOException("文件授权无效或已取消。");
+            Offer offer;long version;
+            if (!TryBeginOfferStream(key, authorize, client, out offer, out version))
+            {
+                bool revoked;
+                lock (gate)
+                {
+                    Offer current;
+                    revoked = !disposed && (!offers.TryGetValue(key, out current) || (current.Canceled || current.Expires < DateTime.UtcNow) && authorize(current));
+                }
+                if (revoked) SecureIdentity.WriteText(stream, "REVOKED");
+                throw new IOException("文件授权无效或已取消。");
+            }
             try {
                 FileInfo current=new FileInfo(offer.Path);if(!current.Exists||current.Length!=offer.Size||current.LastWriteTimeUtc!=offer.Modified)throw new IOException("源文件已改变。");
                 SecureIdentity.WriteText(stream,"OK\n"+offer.Size+"\n"+offer.Sha256);
@@ -1181,10 +1232,38 @@ namespace FeiqLight
             bool other=SecureIdentity.ReadText(new SecureIdentity.Deadline(stream,45000),16)=="YES";
             SecureIdentity.WriteText(stream,accepted&&other?"YES":"NO");return accepted&&other?remote:null;
         }
+        private void SendReleaseFiles(Peer peer, string body)
+        {
+            if (Security != null && peer.Fingerprint != null)
+            {
+                TcpClient connection = null;
+                try
+                {
+                    using (TcpClient client = connection = SecurePeerConnect(peer))
+                    using (SslStream stream = Security.Client(client, peer.Fingerprint))
+                    {
+                        Packet remote = AuthenticateSecureClient(stream, peer.DeviceId, peer.Fingerprint, peer.DisplayName);
+                        SecureIdentity.WriteText(stream, "M\n" + Port);
+                        SecureIdentity.WriteFrame(stream, Encode(Protocol.ReleaseFiles, body, null));
+                        if (SecureIdentity.ReadText(stream, 1024) != "OK") throw new IOException("文件通知未送达。");
+                        Upsert(remote, peer.Endpoint);
+                    }
+                }
+                finally { if (connection != null) lock (gate) connections.Remove(connection); }
+                return;
+            }
+            if (Security != null && (!Settings.AllowLegacyProtocol || Security.TrustedFingerprint(peer.DeviceId) != null)) throw new IOException("未允许旧版明文协议。");
+            Send(Protocol.Encode(Next(), Login, Host, Protocol.ReleaseFiles | Protocol.Utf8, body, null, Settings.DeviceId), peer.Endpoint);
+        }
         public void RejectFiles(Peer peer, long packet)
         {
-            if(Security!=null&&peer.Fingerprint!=null){Pending item=new Pending(peer);item.Record=new ChatRecord{Packet=packet};item.Bytes=Encode(Protocol.ReleaseFiles,packet.ToString(CultureInfo.InvariantCulture),null);Task.Run(()=>{TcpClient connection=null;try{using(TcpClient client=connection=SecurePeerConnect(new Peer{Endpoint=item.Endpoint,DeviceId=item.DeviceId,Fingerprint=item.Fingerprint,Login=item.Login}))using(SslStream stream=Security.Client(client,item.Fingerprint)){Packet remote=AuthenticateSecureClient(stream,item.DeviceId,item.Fingerprint,item.Login);SecureIdentity.WriteText(stream,"M\n"+Port);SecureIdentity.WriteFrame(stream,item.Bytes);if(SecureIdentity.ReadText(stream,1024)=="OK")Upsert(remote,item.Endpoint);}}catch(Exception e){Report("拒绝文件通知未送达："+e.Message);}finally{if(connection!=null)lock(gate)connections.Remove(connection);}});return;}
-            if(Security!=null&&(!Settings.AllowLegacyProtocol||Security.TrustedFingerprint(peer.DeviceId)!=null))throw new IOException("未允许旧版明文协议。");Send(Encode(Protocol.ReleaseFiles, packet.ToString(CultureInfo.InvariantCulture), null), peer.Endpoint);
+            string body = packet.ToString(CultureInfo.InvariantCulture);
+            if (Security != null && peer.Fingerprint != null)
+            {
+                Peer snapshot = new Peer { Endpoint = new IPEndPoint(peer.Endpoint.Address, peer.Endpoint.Port), DeviceId = peer.DeviceId, Fingerprint = peer.Fingerprint, Login = peer.Login, Nickname = peer.DisplayName };
+                Task.Run(() => { try { SendReleaseFiles(snapshot, body); } catch (Exception e) { Report("已本地拒收并清理断点；拒绝通知未送达：" + e.Message); } });
+            }
+            else SendReleaseFiles(peer, body);
         }
         public Task<string> ReceiveFileAsync(Peer peer, long packet, Attachment file, string destination, IProgress<int> progress, CancellationToken cancel, bool renameOnCollision = false, IProgress<TransferProgress> details = null)
         {
@@ -1286,7 +1365,7 @@ namespace FeiqLight
         private string ReceiveSecureFile(Peer peer,long packet,Attachment file,string destination,IProgress<int> progress,CancellationToken cancel,bool rename,IProgress<TransferProgress> details)
         {
             if(!Protocol.SafeFileName(file.Name)||file.Size<0||!SecureIdentity.ValidFingerprint(file.Sha256))throw new IOException("文件元数据或校验值无效。");
-            string path=Path.GetFullPath(destination),part=PartialPath(peer,packet,file,path);bool owned=false;TcpClient connection=null;SslStream directStream=null;PendingDownload pd=null;
+            string path=Path.GetFullPath(destination),part=PartialPath(peer,packet,file,path);bool owned=false,revoked=false;TcpClient connection=null;SslStream directStream=null;PendingDownload pd=null;
             SemaphoreSlim targetLock=receiveLocks[(path.ToUpperInvariant().GetHashCode()&Int32.MaxValue)%receiveLocks.Length];targetLock.Wait(cancel);
             try {
                 if(!rename&&(File.Exists(path)||Directory.Exists(path)))throw new IOException("目标已存在，不会覆盖。");
@@ -1337,6 +1416,7 @@ namespace FeiqLight
                     SslStream stream=directStream??pd.PushedStream;
                     using(cancel.Register(()=>{try{activeClient.Close();}catch{}})) {
                         string[] response=SecureIdentity.ReadText(stream,256).Split('\n');
+                        if (response.Length == 1 && response[0] == "REVOKED") { revoked = true; throw new OfferRevokedException(); }
                         if(response.Length!=3||response[0]!="OK"||response[1]!=file.Size.ToString(CultureInfo.InvariantCulture)||response[2]!=file.Sha256)throw new IOException("发送方文件信息已变化。");
                         byte[] buffer=new byte[65536];long received=offset;TransferRate rate=new TransferRate(offset);var timer=System.Diagnostics.Stopwatch.StartNew();
                         while(received<file.Size){cancel.ThrowIfCancellationRequested();int count=stream.Read(buffer,0,(int)Math.Min(buffer.Length,file.Size-received));if(count==0)throw new IOException("传输中断，已保留断点。");output.Write(buffer,0,count);received+=count;bool sampled=rate.Update(received,timer.Elapsed.TotalMilliseconds);if(sampled){int percent=(int)(received*100.0/Math.Max(1,file.Size));if(progress!=null)progress.Report(percent);if(details!=null)details.Report(new TransferProgress(percent,rate.BytesPerSecond));}}
@@ -1354,7 +1434,7 @@ namespace FeiqLight
                 if(pd!=null){lock(gate)pendingDownloads.Remove(pd);pd.Done.Set();}
                 if(directStream!=null)try{directStream.Dispose();}catch{}
                 if(connection!=null){try{connection.Close();}catch{}lock(gate)connections.Remove(connection);}
-                try{if(owned&&File.Exists(part)&&(cancel.IsCancellationRequested||new FileInfo(part).Length==0))File.Delete(part);}finally{targetLock.Release();}
+                try{if(owned&&File.Exists(part)&&(revoked||cancel.IsCancellationRequested||new FileInfo(part).Length==0))File.Delete(part);}finally{targetLock.Release();}
             }
         }
         public void Dispose()

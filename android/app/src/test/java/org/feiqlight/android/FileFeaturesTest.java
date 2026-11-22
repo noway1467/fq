@@ -285,6 +285,86 @@ public final class FileFeaturesTest {
         } finally { controller.destroy(); }
     }
     private static Object uncheckedField(Object o,String name) { try { return field(o,name); } catch(Exception e) { throw new AssertionError(e); } }
+    private static LanNode.Message interrupted(ChatService service,LanNode.Peer peer,long packet)throws Exception {
+        LanNode.Message message=new LanNode.Message();message.number=packet;message.time=1;message.text="中断入站附件";message.state="已收到";
+        message.files.add(new Protocol.Attachment(0,"saved.bin",3,123));message.files.add(new Protocol.Attachment(1,"partial.bin",4096,123));
+        File saved=service.receivedFile(peer,packet,message.files.get(0)),part=LanNode.partialFile(peer,packet,message.files.get(1),service.receivedFile(peer,packet,message.files.get(1)));
+        assertTrue(saved.getParentFile().isDirectory()||saved.getParentFile().mkdirs());Files.write(saved.toPath(),new byte[]{1,2,3});Files.write(part.toPath(),new byte[128]);
+        ((ExecutorService)field(service,"io")).submit(()->((ChatStore)uncheckedField(service,"store")).message(peer,message,false,true)).get(5,TimeUnit.SECONDS);
+        Method progress=ChatService.class.getDeclaredMethod("fileProgress",String.class,long.class,long.class,boolean.class,int.class,String.class,LanNode.Transfer.class);progress.setAccessible(true);
+        progress.invoke(service,peer.id(),packet,0L,false,100,"已保存",null);progress.invoke(service,peer.id(),packet,1L,false,25,"接收失败 · 点击续传",null);settle(service);return message;
+    }
+    @Test public void offlineRejectClears()throws Exception {
+        for(boolean detached:new boolean[]{false,true}) {
+            ServiceController<ChatService> controller=Robolectric.buildService(ChatService.class).create();ChatService service=controller.get();List<String> errors=new ArrayList<>();service.observe(new ChatService.Observer(){public void changed(){}public void error(String text){errors.add(text);}});
+            LanNode local=null;
+            try {
+                settle(service);service.getSharedPreferences("settings",0).edit().putBoolean(ReceivedStorage.AUTO,false).commit();
+                LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:"+port()),"offline","host","离线发送方","");peer.deviceId=detached?"1".repeat(32):"2".repeat(32);
+                if(!detached) {
+                    local=new LanNode(port(),true,"reject-local","host","本机","",new LanNode.Listener(){public void peersChanged(){}public void error(String text){}public void message(LanNode.Peer peer,LanNode.Message message,boolean update){}});
+                    local.start();set(service,"node",local);
+                    // 收包线程/发通知刚失去套接字时，通知 IOException 也不能回滚拒收。
+                    ((DatagramSocket)field(local,"udp")).close();
+                }
+                LanNode.Message message=interrupted(service,peer,901);
+                File saved=service.receivedFile(peer,message.number,message.files.get(0)),part=LanNode.partialFile(peer,message.number,message.files.get(1),service.receivedFile(peer,message.number,message.files.get(1)));
+                service.reject(peer,message.number);settle(service);
+                LanNode.Message stored=((ChatStore)field(service,"store")).findMessage(peer.id(),message.number,false);
+                assertEquals("已拒绝",stored.state);assertTrue(stored.text.endsWith("[附件已拒绝]"));assertEquals(1,stored.files.size());assertEquals(0,stored.files.get(0).id);
+                assertFalse(part.exists());assertArrayEquals(new byte[]{1,2,3},Files.readAllBytes(saved.toPath()));assertEquals("已保存",service.progress(peer.id(),message.number,0,false).state);
+                assertEquals("已拒绝",service.progress(peer.id(),message.number,1,false).state);assertEquals(0,service.progress(peer.id(),message.number,1,false).percent);
+                assertTrue(errors.toString(),errors.stream().anyMatch(text->text.contains("已本地拒收")&&text.contains("拒绝通知未送达")));
+                assertTrue(((Map<?,?>)field(service,"waiting")).isEmpty());
+            } finally {if(local!=null)local.close();controller.destroy();}
+        }
+    }
+    @Test public void deletePartialsAllHistory()throws Exception {
+        for(boolean clear:new boolean[]{false,true}) {
+            ServiceController<ChatService> controller=Robolectric.buildService(ChatService.class).create();ChatService service=controller.get();
+            try {
+                settle(service);LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:"+port()),"history","host","历史联系人","");peer.deviceId=clear?"3".repeat(32):"4".repeat(32);
+                LanNode.Message message=interrupted(service,peer,902);ChatStore store=(ChatStore)field(service,"store");
+                ((ExecutorService)field(service,"io")).submit(()->{for(int i=0;i<250;i++){LanNode.Message newer=new LanNode.Message();newer.number=1000+i;newer.time=100+i;newer.text="较新历史";newer.state="已收到";store.message(peer,newer,false,true);}}).get(5,TimeUnit.SECONDS);
+                assertFalse("测试应超过最近 200 条历史页",store.history(peer.id()).stream().anyMatch(row->row.number==message.number));
+                File saved=service.receivedFile(peer,message.number,message.files.get(0)),part=LanNode.partialFile(peer,message.number,message.files.get(1),service.receivedFile(peer,message.number,message.files.get(1)));
+                File other=new File(part.getParentFile(),"other-conversation.part");Files.write(other.toPath(),new byte[]{9});List<Boolean> result=new ArrayList<>();
+                if(clear)service.removeConversation(peer.id(),true,false,result::add);else service.deleteMessages(peer.id(),Collections.singletonList(message),result::add);
+                settle(service);assertEquals(Collections.singletonList(true),result);assertNull(store.findMessage(peer.id(),message.number,false));assertFalse(part.exists());assertTrue(other.isFile());assertArrayEquals(new byte[]{1,2,3},Files.readAllBytes(saved.toPath()));
+                if(clear)assertTrue(store.history(peer.id()).isEmpty());else assertEquals(200,store.history(peer.id()).size());
+            } finally {controller.destroy();}
+        }
+    }
+    @Test public void liveCancelCleans()throws Exception {
+        ServiceController<ChatService> controller=Robolectric.buildService(ChatService.class).create();ChatService service=controller.get();List<String> errors=new ArrayList<>();
+        LanNode.Listener incoming=new LanNode.Listener(){public void peersChanged(){}public void error(String text){}public void message(LanNode.Peer peer,LanNode.Message message,boolean update){service.incoming(peer,message,update);}public void offerCanceled(LanNode.Peer peer,long packet){service.offerCanceled(peer,packet);}};
+        LanNode.Listener quiet=new LanNode.Listener(){public void peersChanged(){}public void error(String text){}public void message(LanNode.Peer peer,LanNode.Message message,boolean update){}};
+        try(LanNode sender=new LanNode(port(),true,"live-sender","host","发送方","",quiet);LanNode receiver=new LanNode(port(),true,"live-receiver","host","接收方","",incoming)) {
+            settle(service);service.observe(new ChatService.Observer(){public void changed(){}public void error(String text){errors.add(text);}});service.getSharedPreferences("settings",0).edit().putBoolean(ReceivedStorage.AUTO,false).commit();set(service,"node",receiver);
+            sender.setDeviceId("5".repeat(32));receiver.setDeviceId("6".repeat(32));sender.start();receiver.start();sender.probe(LanNode.endpoint("127.0.0.1:"+receiver.port()));waitFor(service,()->sender.peers().size()==1&&receiver.peers().size()==1);
+            File small=source(service,"完成附件"),large=new File(service.getFilesDir(),"large-cancel.bin");byte[] block=new byte[1024*1024];new Random(73).nextBytes(block);
+            try(OutputStream output=new FileOutputStream(large)){for(int i=0;i<64;i++)output.write(block);}
+            LanNode.Peer target=sender.peers().get(0),peer=receiver.peers().get(0);LanNode.Message sent=sender.sendMessage(target,"同批取消",Arrays.asList(small,large));
+            waitFor(service,()->((Map<?,?>)uncheckedField(service,"waiting")).size()==2);service.receive(peer,sent.number,sent.files.get(0));File saved=service.receivedFile(peer,sent.number,sent.files.get(0));waitFor(service,()->saved.isFile()&&!service.busy());
+            service.receive(peer,sent.number,sent.files.get(1));File part=LanNode.partialFile(peer,sent.number,sent.files.get(1),service.receivedFile(peer,sent.number,sent.files.get(1)));
+            waitFor(service,()->part.length()>0&&service.busy());assertTrue("必须在真实流仍活跃时取消",sender.hasActiveOutgoingTransfer(target.id(),sent.number));assertTrue(sender.cancelOutgoing(target.id(),sent.number,"已送达",true));
+            waitFor(service,()->!service.busy()&&!part.exists()&&service.progress(peer.id(),sent.number,1,false)!=null&&service.progress(peer.id(),sent.number,1,false).state.equals("对方已取消发送"));
+            LanNode.Message stored=((ChatStore)field(service,"store")).findMessage(peer.id(),sent.number,false);assertEquals("对方已取消发送",stored.state);assertEquals(1,stored.files.size());assertEquals(0,stored.files.get(0).id);
+            assertArrayEquals(Files.readAllBytes(small.toPath()),Files.readAllBytes(saved.toPath()));assertEquals("已保存",service.progress(peer.id(),sent.number,0,false).state);assertTrue(((Map<?,?>)field(service,"waiting")).isEmpty());
+            assertFalse("取消不应弹接收失败提示："+errors,errors.stream().anyMatch(text->text.contains("传输")||text.contains("中断")));
+            settle(service);assertEquals("对方已取消发送",service.progress(peer.id(),sent.number,1,false).state);
+        } finally {controller.destroy();}
+    }
+    @Test public void cancelKeepsSavedHistory()throws Exception {
+        ServiceController<ChatService> controller=Robolectric.buildService(ChatService.class).create();ChatService service=controller.get();
+        try {
+            settle(service);LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:"+port()),"canceled","host","取消发送方","");peer.deviceId="7".repeat(32);
+            LanNode.Message message=interrupted(service,peer,903);File saved=service.receivedFile(peer,message.number,message.files.get(0)),part=LanNode.partialFile(peer,message.number,message.files.get(1),service.receivedFile(peer,message.number,message.files.get(1)));
+            service.offerCanceled(peer,message.number);settle(service);service.offerCanceled(peer,message.number);settle(service);
+            LanNode.Message stored=((ChatStore)field(service,"store")).findMessage(peer.id(),message.number,false);assertEquals("对方已取消发送",stored.state);assertEquals(1,stored.files.size());assertFalse(part.exists());assertArrayEquals(new byte[]{1,2,3},Files.readAllBytes(saved.toPath()));assertEquals("已保存",service.progress(peer.id(),message.number,0,false).state);
+            assertEquals(1,stored.text.split("\\[对方已取消发送\\]",-1).length-1);assertEquals("对方已取消发送",((ChatStore)field(service,"store")).transfers().stream().filter(state->state.key.equals(ChatService.fileKey(peer.id(),message.number,1,false))).findFirst().orElseThrow().state);
+        } finally {controller.destroy();}
+    }
     private static List<View> views(View parent) { List<View> result=new ArrayList<>(); result.add(parent); if(parent instanceof ViewGroup) for(int i=0;i<((ViewGroup)parent).getChildCount();i++) result.addAll(views(((ViewGroup)parent).getChildAt(i))); return result; }
     private static TextView label(Dialog dialog,String text) { return (TextView)views(dialog.getWindow().getDecorView()).stream().filter(v->v instanceof TextView&&((TextView)v).getText().toString().equals(text)).findFirst().orElseThrow(AssertionError::new); }
     @Test public void fileLongPressMenusReadGrantsInputActionsAndFolderPicker()throws Exception {

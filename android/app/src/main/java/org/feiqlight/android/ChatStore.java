@@ -8,6 +8,7 @@ import android.database.sqlite.SQLiteDatabase;
 import android.database.sqlite.SQLiteOpenHelper;
 import org.feiqlight.android.core.LanNode;
 import org.feiqlight.android.core.Protocol;
+import org.feiqlight.android.core.SecureIdentity;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
@@ -188,6 +189,22 @@ final class ChatStore extends SQLiteOpenHelper {
         try(Cursor cursor=getReadableDatabase().rawQuery("SELECT "+MESSAGE_COLUMNS+" FROM messages WHERE peer=? AND packet=? AND outgoing=?",new String[]{peer,Long.toString(packet),outgoing?"1":"0"})) {
             return cursor.moveToFirst()?messageAt(cursor):null;
         }
+    }
+    LanNode.Peer findPeer(String id) throws IOException {
+        try(Cursor cursor=getReadableDatabase().rawQuery("SELECT endpoint,login,host,name,grp,device_id,fingerprint FROM peers WHERE id=?",new String[]{id})) {
+            if(!cursor.moveToFirst())return null;
+            LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint(cursor.getString(0)),cursor.getString(1),cursor.getString(2),cursor.getString(3),cursor.getString(4));
+            peer.conversationId=id;peer.deviceId=Protocol.normalizeDeviceId(cursor.getString(5));
+            peer.fingerprint=SecureIdentity.validFingerprint(cursor.getString(6))?cursor.getString(6):null;return peer;
+        }
+    }
+    List<LanNode.Message> incomingAttachments(String peer) {
+        List<LanNode.Message> rows=new ArrayList<>();
+        // 清空时读取全部入站附件，历史页的 LIMIT 200 不适用于文件清理。
+        try(Cursor cursor=getReadableDatabase().rawQuery("SELECT "+MESSAGE_COLUMNS+" FROM messages WHERE peer=? AND outgoing=0 AND files<>'' ORDER BY id",new String[]{peer})) {
+            while(cursor.moveToNext()){LanNode.Message message=messageAt(cursor);if(!message.files.isEmpty())rows.add(message);}
+        }
+        return rows;
     }
     List<Long> unconfirmedOutgoingPackets(String peer) {
         List<Long> packets=new ArrayList<>();

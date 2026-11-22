@@ -12,7 +12,7 @@ namespace FeiqLight
 {
     public sealed class ChatForm : Form
     {
-        private sealed class ReceivedFile { public long Packet; public Attachment File; public ChatRecord Record; public readonly HashSet<string> PartialPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase); public bool AutomaticPending = true; public string Status = "待接收"; public override string ToString() { return File.Name; } }
+        private sealed class ReceivedFile { public long Packet; public Attachment File; public ChatRecord Record; public readonly HashSet<string> PartialPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase); public readonly Dictionary<string, string> PartialRoots = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase); public bool AutomaticPending = true, OfferCanceled; public string Status = "待接收"; public override string ToString() { return File.Name; } }
         private readonly Peer peer;
         private readonly LanService network;
         private readonly LocalStore store;
@@ -149,7 +149,7 @@ namespace FeiqLight
             try { var records = store.History(peer.Id, 150).Select(record => { ChatRecord outgoing=record.Outgoing?network.OutgoingRecord(peer.Id,record.Packet):null;if(outgoing!=null&&record.State=="已送达")outgoing.State=record.State;return outgoing??record; }).ToList(); history.SetRecords(records); editor.Text = store.LoadDraft(peer.Id);
                 foreach(ChatRecord record in records.Where(r=>!r.Outgoing))foreach(FileTransferState file in record.Transfers??new FileTransferState[0]) {
                     if(files.Items.Count>=1000)break;
-                    if(file.Status=="已拒绝"||file.Status=="本机文件已删除"||!String.IsNullOrEmpty(file.LocalPath)||!SecureIdentity.ValidFingerprint(file.Sha256))continue;
+                    if(file.Status=="已拒绝"||file.Status=="对方已取消发送"||file.Status=="本机文件已删除"||!String.IsNullOrEmpty(file.LocalPath)||!SecureIdentity.ValidFingerprint(file.Sha256))continue;
                     file.Status="已恢复 · 点击续传";
                     files.Items.Add(new ReceivedFile{Packet=record.Packet,Record=record,File=new Attachment{Id=file.Id,Name=file.Name,Size=file.Size,Modified=file.Modified,Sha256=file.Sha256,RelativePath=file.RelativePath},AutomaticPending=false,Status="已恢复 · 点击续传"});
                 }
@@ -477,33 +477,39 @@ namespace FeiqLight
             receive.Text = "取消"; receive.Enabled = true; reject.Enabled = false; files.Enabled = false; files.Invalidate();
             try
             {
-                string destination = SendBatch.Destination(network.Settings.ReceiveFolder, selected.File);
-                selected.PartialPaths.Add(LanService.PartialPath(peer, selected.Packet, selected.File, destination));
+                string receiveRoot = network.Settings.ReceiveFolder;
+                string destination = SendBatch.Destination(receiveRoot, selected.File);
+                string part = LanService.PartialPath(peer, selected.Packet, selected.File, destination);
+                selected.PartialPaths.Add(part); selected.PartialRoots[part] = receiveRoot;
                 fileStatus.Text = "连接中";
                 string saved = await network.ReceiveFileAsync(peer, selected.Packet, selected.File, destination, null, cancel.Token, true, new UiProgress(main, p => {
-                    if (!IsDisposed && receiving == cancel && activeFile == selected) {
+                    if (!IsDisposed && receiving == cancel && activeFile == selected && !selected.OfferCanceled && selected.Status != "已保存") {
                         FileState(selected, p.Percent, "接收中 · 点击取消", null, p.BytesPerSecond);
                         selected.Status = p.Percent + "% · " + Theme.SizeText((long)p.BytesPerSecond) + "/s";
                         fileStatus.Text = selected.Status; files.Invalidate();
                     }
                 }));
                 if (IsDisposed) return;
+                selected.Status = "已保存";
                 selected.Record.LocalFiles = selected.Record.GetLocalFiles().Concat(new[] { saved }).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
                 FileState(selected, 100, "已保存", saved);
-                int remaining=files.Items.Cast<ReceivedFile>().Count(f=>f.Packet==selected.Packet)-1;
-                selected.Record.State=remaining==0?"已保存":"已接收 "+selected.Record.GetLocalFiles().Length+" / "+(selected.Record.GetLocalFiles().Length+remaining);
+                int remaining=files.Items.Cast<ReceivedFile>().Count(f=>f.Packet==selected.Packet&&f!=selected);
+                selected.Record.State=selected.OfferCanceled&&selected.Record.Transfers.Any(f=>String.IsNullOrEmpty(f.LocalPath)&&f.Status=="对方已取消发送")?"对方已取消发送":remaining==0?"已保存":"已接收 "+selected.Record.GetLocalFiles().Length+" / "+(selected.Record.GetLocalFiles().Length+remaining);
                 // 完成状态与本地附件回写原邀请，不另造一条聊天消息或重复媒体卡片。
                 main.TrySave(selected.Record); history.Delivery(selected.Record);
                 files.SelectedIndex=-1;files.Items.Remove(selected); if (files.Items.Count > 0) files.SelectedIndex = 0;
                 SetDrawer(files.Items.Count > 0); fileStatus.Text = "已保存"; main.FileReceiveStatus("文件已保存：" + Path.GetFileName(saved));
             }
-            catch (OperationCanceledException) { if (!IsDisposed) { selected.Status = "已取消，可重试"; fileStatus.Text = "已取消，可重新接收"; FileState(selected, 0, "已取消 · 点击重试"); main.TrySave(selected.Record); } }
+            catch (OfferRevokedException) { if (!IsDisposed) OfferCanceled(selected.Packet); }
+            catch (OperationCanceledException) { if (!IsDisposed && !selected.OfferCanceled) { selected.Status = "已取消，可重试"; fileStatus.Text = "已取消，可重新接收"; FileState(selected, 0, "已取消 · 点击重试"); main.TrySave(selected.Record); } }
             catch (Exception error)
             {
-                if (!IsDisposed)
+                if (!IsDisposed && !selected.OfferCanceled)
                 {
                     selected.Status = "失败，可续传"; fileStatus.Text = "重试时继续已有断点";
                     FileState(selected, null, "接收失败 · 点击续传"); main.TrySave(selected.Record);
+                    // 更新卡片期间可能派发取消回调，旧失败提示不能覆盖已生效的取消状态。
+                    if (selected.OfferCanceled) return;
                     main.FileReceiveStatus("接收失败：" + selected.File.Name + " — " + error.GetBaseException().Message);
                     // 后台自动接收失败不能弹窗抢焦点，也不能无限重试同一个失败任务。
                     if (!automatic) Error("接收失败", error.GetBaseException().Message);
@@ -511,28 +517,75 @@ namespace FeiqLight
             }
             finally
             {
+                if (selected.OfferCanceled)
+                {
+                    // 取消回调先移除队列；下载 finally 释放独占句柄后再兜底清理。
+                    try {
+                        DeletePartials(selected); main.DeleteIncomingPartials(peer, selected.Record);
+                        // 下载退出后写回最终状态，收敛插入取消通知之前已经开始的失败回调。
+                        main.CancelIncomingOffer(peer, selected.Record, false);
+                    }
+                    catch (Exception e) { main.FileReceiveStatus("对方已取消发送；断点清理未完成：" + e.Message); }
+                }
                 cancel.Dispose(); receiving = null; activeFile = null;
                 if (!IsDisposed) { receive.Text = "接收"; receive.Enabled = reject.Enabled = files.SelectedItem != null; files.Enabled = true; files.Invalidate(); main.ReceiveAutomatically(); }
             }
         }
         private void RejectFile(object sender, EventArgs e)
         {
-            ReceivedFile selected = files.SelectedItem as ReceivedFile; if (selected == null) return;
+            ReceivedFile selected = files.SelectedItem as ReceivedFile; if (selected == null || receiving != null) return;
+            foreach (ReceivedFile item in files.Items.Cast<ReceivedFile>().Where(f => f.Packet == selected.Packet).ToList())
+            {
+                try { DeletePartials(item); }
+                catch (Exception error) { main.FileReceiveStatus("已本地拒收；断点清理未完成：" + error.Message); }
+                FileState(item, 0, "已拒绝"); files.Items.Remove(item);
+            }
+            selected.Record.State = "已拒绝"; main.TrySave(selected.Record);
+            SetDrawer(files.Items.Count > 0); fileStatus.Text = "已拒绝";
             try
             {
                 network.RejectFiles(peer, selected.Packet);
-                foreach (ReceivedFile item in files.Items.Cast<ReceivedFile>().Where(f => f.Packet == selected.Packet).ToList())
-                { foreach (string part in item.PartialPaths) if (File.Exists(part)) File.Delete(part); FileState(item, 0, "已拒绝"); files.Items.Remove(item); }
-                main.TrySave(selected.Record);
-                SetDrawer(files.Items.Count > 0); fileStatus.Text = "已拒绝";
             }
-            catch (Exception error) { Error("拒绝失败", error.Message); }
+            catch (Exception error) { main.FileReceiveStatus("已本地拒收并清理断点；拒绝通知未送达：" + error.Message); }
+        }
+        private void DeletePartials(ReceivedFile item)
+        {
+            var paths = new HashSet<string>(item.PartialPaths, StringComparer.OrdinalIgnoreCase);
+            string destination = SendBatch.DestinationPath(network.Settings.ReceiveFolder, item.File);
+            paths.Add(LanService.PartialPath(peer, item.Packet, item.File, destination));
+            foreach (string part in paths)
+            {
+                string root;
+                if (!item.PartialRoots.TryGetValue(part, out root)) root = network.Settings.ReceiveFolder;
+                ReceiveStorage.DeletePartialAndEmptyParents(root, part, item.File.RelativePath);
+            }
+        }
+        internal void OfferCanceled(long packet)
+        {
+            bool active = activeFile != null && activeFile.Packet == packet && receiving != null;
+            if (active) { activeFile.OfferCanceled = true; receiving.Cancel(); }
+            List<ReceivedFile> pending = files.Items.Cast<ReceivedFile>().Where(f => f.Packet == packet).ToList();
+            ChatRecord record = active ? activeFile.Record : pending.Select(f => f.Record).FirstOrDefault() ?? store.IncomingAttachments(peer.Id, packet).FirstOrDefault();
+            if (record == null) return;
+            foreach (ReceivedFile item in pending)
+            {
+                item.OfferCanceled = true; item.AutomaticPending = false; item.Status = "对方已取消发送";
+                if (item != activeFile)
+                    try { DeletePartials(item); }
+                    catch (Exception e) { main.FileReceiveStatus("对方已取消发送；断点清理未完成：" + e.Message); }
+                files.Items.Remove(item);
+            }
+            main.CancelIncomingOffer(peer, record, !active); history.Delivery(record);
+            SetDrawer(files.Items.Count > 0); fileStatus.Text = "对方已取消发送";
         }
         protected override void OnFormClosing(FormClosingEventArgs e) { if (e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; main.CloseChat(this); return; } if (receiving != null) receiving.Cancel(); base.OnFormClosing(e); }
         private void FileState(ReceivedFile item, int? percent, string status, string path = null, double bytesPerSecond = 0)
         {
             FileTransferState state = item.Record.Transfers == null ? null : item.Record.Transfers.FirstOrDefault(f => f.Id == item.File.Id);
             if (state == null) return;
+            if (!String.IsNullOrEmpty(state.LocalPath) && status != "已保存") return;
+            // 传输失败/进度可能晚于取消通知派发；终态只能被真实保存完成推进。
+            if ((state.Status == "对方已取消发送" || state.Status == "已拒绝") && status != state.Status && status != "已保存") return;
             if (percent.HasValue) state.Percent = percent.Value; state.Status = status; state.BytesPerSecond = bytesPerSecond; if (path != null) state.LocalPath = path;
             history.Delivery(item.Record);
         }

@@ -106,7 +106,7 @@ public sealed class MainForm : ModernWindow
             // NotifyIcon 在 Opening 之前按菜单当前尺寸计算弹出位置，先排好版，首次右键也从鼠标处向上展开。
             Theme.StyleMenu(trayMenu);
             tray.DoubleClick += delegate { Restore(); }; tray.BalloonTipClicked += delegate { Restore(); if (latestSender != null) OpenChat(latestSender); };
-            network.PeersChanged += OnPeersChanged; network.MessageReceived += OnMessage; network.DeliveryChanged += OnDelivery; network.Error += OnError; network.TransferChanged += OnTransfer;
+            network.PeersChanged += OnPeersChanged; network.MessageReceived += OnMessage; network.OfferCanceled += OnOfferCanceled; network.DeliveryChanged += OnDelivery; network.Error += OnError; network.TransferChanged += OnTransfer;
             RefreshFilters();
             ApplyWallpaper();
             shareTimer.Tick+=delegate {if(!started||!network.Peers.Any(p=>p.Online))return;try{string[] files=WindowsShare.Take(store.Root);if(files==null)return;Show();WindowState=FormWindowState.Normal;Activate();using(ForwardDialog dialog=new ForwardDialog(network.Peers.Where(p=>p.Online).ToArray(),files.Length))if(dialog.ShowDialog(this)==DialogResult.OK){OpenChat(dialog.Target);ActiveChat.QueueSharedFiles(files);}}catch(Exception e){OnError("系统分享未完成："+e.Message);}};shareTimer.Start();
@@ -208,6 +208,43 @@ public sealed class MainForm : ModernWindow
             });
         }
         private void OnDelivery(ChatRecord record) { diagnostics.Record(DiagnosticEvent.DeliveryChanged); Ui(() => { TrySave(record); ChatForm chat; if (chats.TryGetValue(record.PeerId, out chat) && !chat.IsDisposed) chat.Delivery(record); }); }
+        private void OnOfferCanceled(Peer peer, long packet)
+        {
+            Ui(() => {
+                try
+                {
+                    ChatForm chat;
+                    if (chats.TryGetValue(peer.Id, out chat) && !chat.IsDisposed) chat.OfferCanceled(packet);
+                    else foreach (ChatRecord record in store.IncomingAttachments(peer.Id, packet)) CancelIncomingOffer(peer, record, true);
+                }
+                catch (Exception e) { FileReceiveStatus("对方已取消发送；本地处理未完成：" + e.Message); }
+            });
+        }
+        internal void DeleteIncomingPartials(Peer peer, ChatRecord record)
+        {
+            if (record.Outgoing || record.PeerId != peer.Id) return;
+            foreach (FileTransferState state in record.Transfers ?? new FileTransferState[0])
+            {
+                if (!String.IsNullOrEmpty(state.LocalPath)) continue;
+                Attachment file = new Attachment { Id = state.Id, Name = state.Name, Size = state.Size, Modified = state.Modified, Sha256 = state.Sha256, RelativePath = state.RelativePath };
+                string destination = SendBatch.DestinationPath(network.Settings.ReceiveFolder, file);
+                ReceiveStorage.DeletePartialAndEmptyParents(network.Settings.ReceiveFolder, LanService.PartialPath(peer, record.Packet, file, destination), file.RelativePath);
+            }
+        }
+        internal void CancelIncomingOffer(Peer peer, ChatRecord record, bool cleanup)
+        {
+            FileReceiveStatus("对方已取消发送；未完成附件不再接收。");
+            if (cleanup)
+                try { DeleteIncomingPartials(peer, record); }
+                catch (Exception e) { FileReceiveStatus("对方已取消发送；断点清理未完成：" + e.Message); }
+            bool changed = false;
+            foreach (FileTransferState file in record.Transfers ?? new FileTransferState[0])
+            {
+                if (!String.IsNullOrEmpty(file.LocalPath) || file.Status == "本机文件已删除" || file.Status == "已拒绝") continue;
+                file.Percent = 0; file.Status = "对方已取消发送"; file.BytesPerSecond = 0; changed = true;
+            }
+            if (changed) { record.State = "对方已取消发送"; TrySave(record); }
+        }
         private void OnTransfer(ChatRecord record, int id, int percent, string status, double bytesPerSecond)
         {
             Ui(() => {
@@ -236,6 +273,9 @@ public sealed class MainForm : ModernWindow
                     using(NoticeDialog notice=new NoticeDialog("删除未完成","传输已开始，请等待、拒绝或取消发送后再删除。"))notice.ShowDialog(this);return false;
                 }
                 foreach(ChatRecord record in records)if(record.Outgoing)network.CancelUndeliveredOutgoing(peer.Id,record.Packet,record.State,false);
+                HashSet<long> incomingPackets = new HashSet<long>(records.Where(record => !record.Outgoing).Select(record => record.Packet));
+                if (incomingPackets.Count > 0)
+                    foreach (ChatRecord record in store.IncomingAttachments(peer.Id).Where(record => incomingPackets.Contains(record.Packet))) DeleteIncomingPartials(peer, record);
                 // 持久化成功后再更新界面，写入失败时仍保留原选区和消息。
                 store.DeleteRecords(peer.Id, records);
                 if(chat != null) chat.RemoveMessages(records);
@@ -357,7 +397,7 @@ public sealed class MainForm : ModernWindow
                 ChatForm chat;chats.TryGetValue(peer.Id,out chat);
                 if(dialog.DeleteHistory&&((chat!=null&&chat.PendingFileCount>0)||network.HasActiveOutgoingTransfer(peer.Id))){using(NoticeDialog notice=new NoticeDialog("请先处理文件","此会话还有待接收或传输中的文件。请完成、拒绝或取消发送后再清空记录。"))notice.ShowDialog(this);return;}
                 try {
-                    if(dialog.DeleteHistory){network.CancelUndeliveredOutgoingForPeer(peer.Id);store.ClearHistory(peer.Id);if(chat!=null)chat.ClearHistory();previews.Remove(peer.Id);times.Remove(peer.Id);recent.Remove(peer.Id);}
+                    if(dialog.DeleteHistory){network.CancelUndeliveredOutgoingForPeer(peer.Id);foreach(ChatRecord record in store.IncomingAttachments(peer.Id))DeleteIncomingPartials(peer,record);store.ClearHistory(peer.Id);if(chat!=null)chat.ClearHistory();previews.Remove(peer.Id);times.Remove(peer.Id);recent.Remove(peer.Id);}
                     bool hidden=peer.Hidden;peer.Hidden=!clearOnly;unread.Remove(peer.Id);
                     if(!RememberPeerAddresses()){peer.Hidden=hidden;fingerprint=null;RefreshPeers();return;}
                     if(!clearOnly&&chat!=null)CloseChat(chat);
@@ -579,7 +619,7 @@ public sealed class MainForm : ModernWindow
                 try { store.CompletePending(); } catch (IOException e) { status.Text = "记录保存失败：" + e.Message; }
                 catch (UnauthorizedAccessException e) { status.Text = "记录保存失败：" + e.Message; }
             }
-            if (disposing) { Microsoft.Win32.SystemEvents.UserPreferenceChanged -= SystemThemeChanged; Theme.Changed -= ApplyWallpaper; network.PeersChanged -= OnPeersChanged; network.MessageReceived -= OnMessage; network.DeliveryChanged -= OnDelivery; network.Error -= OnError; network.TransferChanged -= OnTransfer; if (mainMenu != null) mainMenu.Dispose(); if(conversationMenu!=null)conversationMenu.Dispose(); if (tray != null) { tray.Visible = false; if (tray.ContextMenuStrip != null) tray.ContextMenuStrip.Dispose(); tray.Dispose(); } foreach (ChatForm chat in chats.Values) chat.Dispose(); }
+            if (disposing) { Microsoft.Win32.SystemEvents.UserPreferenceChanged -= SystemThemeChanged; Theme.Changed -= ApplyWallpaper; network.PeersChanged -= OnPeersChanged; network.MessageReceived -= OnMessage; network.OfferCanceled -= OnOfferCanceled; network.DeliveryChanged -= OnDelivery; network.Error -= OnError; network.TransferChanged -= OnTransfer; if (mainMenu != null) mainMenu.Dispose(); if(conversationMenu!=null)conversationMenu.Dispose(); if (tray != null) { tray.Visible = false; if (tray.ContextMenuStrip != null) tray.ContextMenuStrip.Dispose(); tray.Dispose(); } foreach (ChatForm chat in chats.Values) chat.Dispose(); }
             base.Dispose(disposing);
         }
     }

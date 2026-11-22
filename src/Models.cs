@@ -136,6 +136,75 @@ namespace FeiqLight
             string probe = Path.Combine(path, ".feiq-write-" + Guid.NewGuid().ToString("N") + ".tmp");
             using (FileStream stream = new FileStream(probe, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1, FileOptions.DeleteOnClose)) { }
         }
+        private static bool LinkedDirectory(string directory)
+        {
+            for (string current = directory; current != null; current = Path.GetDirectoryName(current))
+                if (Directory.Exists(current) && (File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0) return true;
+            return false;
+        }
+        public static void DeletePartialAndEmptyParents(string receiveRoot, string partPath, string relativePath)
+        {
+            string root = Folder(receiveRoot);
+            if (root.Length > Path.GetPathRoot(root).Length) root = root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            string prefix = root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            string part = Path.GetFullPath(partPath);
+            if (!part.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ||
+                relativePath != null && !Protocol.SafeRelativePath(relativePath) || LinkedDirectory(Path.GetDirectoryName(part)))
+                throw new IOException("断点路径不在接收目录内或包含链接，未清理。");
+            if (File.Exists(part))
+            {
+                if ((File.GetAttributes(part) & FileAttributes.ReparsePoint) != 0) throw new IOException("断点文件不能是链接，未清理。");
+                File.Delete(part);
+            }
+            if (relativePath == null) return;
+            string directory = Path.GetDirectoryName(part);
+            while (!String.Equals(directory, root, StringComparison.OrdinalIgnoreCase))
+            {
+                if (directory == null || !directory.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return;
+                try
+                {
+                    if (!Directory.Exists(directory)) { directory = Path.GetDirectoryName(directory); continue; }
+                    if ((File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0 || Directory.EnumerateFileSystemEntries(directory).Any()) return;
+                    Directory.Delete(directory);
+                    directory = Path.GetDirectoryName(directory);
+                }
+                catch (IOException) { return; }
+                catch (UnauthorizedAccessException) { return; }
+            }
+        }
+        public static int CleanExpiredPartials(string receiveRoot, DateTime utcNow)
+        {
+            string root = Folder(receiveRoot);
+            if (!Directory.Exists(root) || LinkedDirectory(root)) return 0;
+            int removed = 0;
+            Stack<string> folders = new Stack<string>(); folders.Push(root);
+            while (folders.Count > 0)
+            {
+                string[] entries;
+                try { entries = Directory.GetFileSystemEntries(folders.Pop()); }
+                catch (IOException) { continue; }
+                catch (UnauthorizedAccessException) { continue; }
+                foreach (string path in entries)
+                {
+                    try
+                    {
+                        FileAttributes attributes = File.GetAttributes(path);
+                        if ((attributes & FileAttributes.ReparsePoint) != 0) continue;
+                        if ((attributes & FileAttributes.Directory) != 0) { folders.Push(path); continue; }
+                        string name = Path.GetFileName(path);
+                        if (name.Length != 75 || !name.StartsWith(".feiq-", StringComparison.Ordinal) || !name.EndsWith(".part", StringComparison.Ordinal) ||
+                            name.Substring(6, 64).Any(c => !Uri.IsHexDigit(c)) || File.GetLastWriteTimeUtc(path) >= utcNow.AddHours(-24)) continue;
+                        // 活跃接收持有独占句柄；占用、权限不足或并发变更均留给下一次清理。
+                        using (FileStream probe = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None)) { }
+                        if (File.GetLastWriteTimeUtc(path) >= utcNow.AddHours(-24)) continue;
+                        File.Delete(path); removed++;
+                    }
+                    catch (IOException) { }
+                    catch (UnauthorizedAccessException) { }
+                }
+            }
+            return removed;
+        }
     }
     public sealed class Peer
     {
@@ -457,7 +526,8 @@ namespace FeiqLight
             {
                 string path = HistoryPath(peerId);
                 if (!File.Exists(path)) return;
-                string temporary = path + ".delete-" + Guid.NewGuid().ToString("N") + ".tmp";
+                // 历史文件名含 64 位摘要；追加临时后缀会让原本可用的资料目录超过 Windows 路径上限。
+                string temporary = Path.Combine(Root, "history-delete-" + Guid.NewGuid().ToString("N") + ".tmp");
                 HashSet<string> written = new HashSet<string>();
                 try
                 {
@@ -515,6 +585,30 @@ namespace FeiqLight
             }
             if (deletedRecords.Count >= 32) deletedRecords.Clear();
             deletedRecords[peerId] = keys; return keys;
+        }
+        internal List<ChatRecord> IncomingAttachments(string peerId, long? packet = null)
+        {
+            lock (gate)
+            {
+                string path = HistoryPath(peerId);
+                var records = new Dictionary<long, ChatRecord>();
+                if (!File.Exists(path)) return records.Values.ToList();
+                HashSet<string> deleted = DeletedKeys(peerId);
+                // 清空与后台取消必须覆盖全部历史，不能沿用聊天页的尾部读取上限。
+                foreach (string line in File.ReadLines(path, Encoding.UTF8))
+                {
+                    try
+                    {
+                        ChatRecord record = json.Deserialize<ChatRecord>(line);
+                        if (record == null || record.PeerId != peerId || record.Outgoing || packet.HasValue && record.Packet != packet.Value) continue;
+                        if (record.Deleted || deleted.Contains(RecordKey(record))) { records.Remove(record.Packet); continue; }
+                        records[record.Packet] = record;
+                    }
+                    catch (ArgumentException) { }
+                    catch (InvalidOperationException) { }
+                }
+                return records.Values.Where(record => record.Transfers != null && record.Transfers.Length > 0).ToList();
+            }
         }
         public List<ChatRecord> History(string peerId, int limit)
         {

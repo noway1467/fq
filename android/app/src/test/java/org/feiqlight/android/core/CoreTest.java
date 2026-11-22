@@ -81,6 +81,8 @@ public final class CoreTest {
         final BlockingQueue<LanNode.Message> messages=new LinkedBlockingQueue<>();
         final BlockingQueue<LanNode.Message> updates=new LinkedBlockingQueue<>();
         final BlockingQueue<String> progress=new LinkedBlockingQueue<>();
+        final BlockingQueue<String> canceled=new LinkedBlockingQueue<>();
+        public void offerCanceled(LanNode.Peer peer,long packet) {canceled.add(peer.id()+"/"+packet);}
         public void fileProgress(LanNode.Peer peer,long packet,long file,int percent,String state) {progress.add(packet+"/"+file+"/"+percent+"/"+state);}
         public void peersChanged() { }
         public void error(String text) { }
@@ -373,6 +375,35 @@ public final class CoreTest {
                 catch(IOException expected) { }
             }
         } finally { try(java.util.stream.Stream<Path> paths=Files.walk(dir)) { paths.sorted(Comparator.reverseOrder()).forEach(p->{try{Files.delete(p);}catch(IOException e){throw new UncheckedIOException(e);}}); } }
+    }
+    @Test public void cancelReleaseUsesIdentity() throws Exception {
+        Inbox inbox=new Inbox();
+        try(LanNode receiver=node(inbox,port(),"receiver")) {
+            LanNode.Peer sender=new LanNode.Peer(LanNode.endpoint("127.0.0.1:"+port()),"sender","host","发送方","");sender.deviceId="1".repeat(32);
+            LanNode.Peer other=new LanNode.Peer(LanNode.endpoint("127.0.0.1:"+port()),"other","host","其他设备","");other.deviceId="2".repeat(32);
+            receiver.rememberPeers(Arrays.asList(sender,other));
+            java.lang.reflect.Method handle=LanNode.class.getDeclaredMethod("handle",Protocol.Packet.class,InetSocketAddress.class,boolean.class);handle.setAccessible(true);
+            for(String body:new String[]{"cancel:","cancel:0","cancel:-1","cancel:+12","cancel: 12","cancel:9223372036854775808"})handle.invoke(receiver,Protocol.parse(Protocol.encode(10,"sender","host",Protocol.RELEASE|Protocol.UTF8,body,null,sender.deviceId)),sender.endpoint,false);
+            handle.invoke(receiver,Protocol.parse(Protocol.encode(11,"sender","host",Protocol.RELEASE|Protocol.UTF8,"cancel:12",null,other.deviceId)),sender.endpoint,false);
+            handle.invoke(receiver,Protocol.parse(Protocol.encode(12,"other","host",Protocol.RELEASE|Protocol.UTF8,"cancel:12",null,sender.deviceId)),sender.endpoint,false);
+            handle.invoke(receiver,Protocol.parse(Protocol.encode(13,"sender","host",Protocol.RELEASE|Protocol.UTF8,"cancel:12",null,sender.deviceId,null,"a".repeat(64))),sender.endpoint,false);
+            assertTrue("无效或冒用报文触发了取消",inbox.canceled.isEmpty());
+            handle.invoke(receiver,Protocol.parse(Protocol.encode(14,"sender","host",Protocol.RELEASE|Protocol.UTF8,"cancel:12",null,sender.deviceId)),sender.endpoint,false);
+            assertEquals(sender.id()+"/12",inbox.canceled.poll(1,TimeUnit.SECONDS));assertTrue(inbox.canceled.isEmpty());
+            sender.fingerprint="b".repeat(64);
+            handle.invoke(receiver,Protocol.parse(Protocol.encode(15,"sender","host",Protocol.RELEASE|Protocol.UTF8,"cancel:12",null,sender.deviceId)),sender.endpoint,false);
+            assertTrue("明文取消进入了已具备证书的会话",inbox.canceled.isEmpty());
+        }
+    }
+    @Test public void numericReleaseStillRejects() throws Exception {
+        Path dir=Files.createTempDirectory("feiq-release-");Inbox out=new Inbox(),in=new Inbox();
+        try(LanNode sender=node(out,port(),"sender");LanNode receiver=node(in,port(),"receiver")) {
+            File file=dir.resolve("source.bin").toFile();Files.write(file.toPath(),new byte[]{1,2,3});sender.probe(LanNode.endpoint("127.0.0.1:"+receiver.port()));LanNode.Peer target=waitPeer(sender,"receiver"),back=waitPeer(receiver,"sender");
+            LanNode.Message sent=sender.sendMessage(target,"拒绝兼容",Collections.singletonList(file));assertNotNull(in.messages.poll(3,TimeUnit.SECONDS));receiver.reject(back,sent.number);
+            long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(3);while(sender.offering(target.id(),sent.number,0)&&System.nanoTime()<deadline)Thread.sleep(10);
+            assertFalse(sender.offering(target.id(),sent.number,0));assertTrue(out.progress.stream().anyMatch(value->value.endsWith("/对方已拒绝")));assertTrue(in.canceled.isEmpty());assertTrue(file.isFile());
+            try {Long.parseLong("cancel:"+sent.number);fail("旧版纯数字分支不应解析新取消编码");}catch(NumberFormatException expected){ }
+        } finally {Files.deleteIfExists(dir.resolve("source.bin"));Files.delete(dir);}
     }
     @Test public void plaintextCompletionClearsActiveStreamAndActiveTransferAbortsCleanlyOnCancel() throws Exception {
         Path dir=Files.createTempDirectory("feiq-java-active-cancel-");

@@ -14,8 +14,10 @@ public final class SecureUpgrade {
     private static int toolPorts()throws IOException{for(int port=21000;port<45000;port+=3){List<ServerSocket> sockets=new ArrayList<>();try{for(int i=0;i<3;i++)sockets.add(new ServerSocket(port+i,1,InetAddress.getLoopbackAddress()));return port;}catch(IOException ignored){}finally{for(ServerSocket socket:sockets)socket.close();}}throw new IOException("没有可用测试端口");}
     private static final class Node implements AutoCloseable {
         final LanNode node;final BlockingQueue<LanNode.Message> incoming=new LinkedBlockingQueue<>();
+        final BlockingQueue<String> canceled=new LinkedBlockingQueue<>(),states=new LinkedBlockingQueue<>();
+        volatile java.util.function.BiConsumer<LanNode.Peer,Long> cancellation;
         Node(File root,int port,String id)throws IOException{
-            node=new LanNode(port,true,id,"Android",id,"test",new LanNode.Listener(){public void peersChanged(){}public void error(String text){System.out.println("NOTICE "+text);}public void message(LanNode.Peer peer,LanNode.Message message,boolean update){if(!message.outgoing)incoming.add(message);}});
+            node=new LanNode(port,true,id,"Android",id,"test",new LanNode.Listener(){public void peersChanged(){}public void error(String text){System.out.println("NOTICE "+text);}public void message(LanNode.Peer peer,LanNode.Message message,boolean update){if(!message.outgoing)incoming.add(message);}public void offerCanceled(LanNode.Peer peer,long packet){canceled.add(peer.id()+"/"+packet);java.util.function.BiConsumer<LanNode.Peer,Long> callback=cancellation;if(callback!=null)callback.accept(peer,packet);}public void fileProgress(LanNode.Peer peer,long packet,long file,int percent,String state,double rate){states.add(packet+"/"+file+"/"+state);}});
             node.setDeviceId(id);node.configureSecurity(root,(name,code)->true);node.start();
         }
         public void close(){node.close();}
@@ -27,6 +29,7 @@ public final class SecureUpgrade {
     private static String delayedLogin(int port,String cookie)throws IOException{try(Socket socket=new Socket("127.0.0.1",port)){socket.setSoTimeout(25000);socket.getOutputStream().write(("POST /api/login HTTP/1.1\r\nHost: 127.0.0.1:"+port+"\r\nCookie: "+cookie+"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").getBytes(java.nio.charset.StandardCharsets.US_ASCII));return new String(socket.getInputStream().readAllBytes(),java.nio.charset.StandardCharsets.UTF_8);}}
     public static void main(String[] args)throws Exception {
         Path root=Paths.get(args[0]);Files.createDirectories(root);
+        if(args.length>1&&args[1].equals("partial")){partialTests(root);System.out.println("ANDROID PARTIAL TLS: "+passed+" passed, "+failed+" failed");System.exit(failed==0?0:1);return;}
         run("目录协议与恶意路径拒绝",()->{Protocol.Attachment file=new Protocol.Attachment(0,"中文😀.txt",5,1);file.sha256="a".repeat(64);file.relativePath="目录/子目录/中文😀.txt";check(Protocol.parseFiles(Protocol.files(Collections.singletonList(file))).get(0).relativePath.equals(file.relativePath),"目录丢失");for(String value:new String[]{"../secret","/root/a","a//b","a/CON","a/../b","a\\b"})check(!Protocol.safeRelativePath(value),"接受危险路径");});
         run("TLS 配对、双重启恢复、哈希失败不提交与拒绝持久化",()->{
             int ap=port(),bp=port();String aid="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",bid="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";byte[] bytes=new byte[1024*1024+7];for(int i=0;i<bytes.length;i++)bytes[i]=(byte)(i*17);File source=root.resolve("source.bin").toFile();Files.write(source.toPath(),bytes);LanNode.Message message;String fingerprint;
@@ -215,5 +218,107 @@ public final class SecureUpgrade {
             }
         });
         System.out.println("ANDROID SECURE: "+passed+" passed, "+failed+" failed");System.exit(failed==0?0:1);
+    }
+    private static void waitFor(java.util.function.BooleanSupplier condition,String message)throws Exception {
+        long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(8);
+        while(!condition.getAsBoolean()&&System.nanoTime()<deadline)Thread.sleep(10);check(condition.getAsBoolean(),message);
+    }
+    private static final class PausedSource implements LanNode.Source {
+        final byte[] bytes=new byte[8*1024*1024];
+        final java.util.concurrent.atomic.AtomicBoolean pause=new java.util.concurrent.atomic.AtomicBoolean();
+        final java.util.concurrent.atomic.AtomicLong openedOffset=new java.util.concurrent.atomic.AtomicLong();
+        final CountDownLatch entered=new CountDownLatch(1),release=new CountDownLatch(1);
+        PausedSource(){new Random(79).nextBytes(bytes);}
+        public String key(){return "partial-test-source";}public String name(){return "partial.bin";}public long size(){return bytes.length;}public long modified(){return 123000;}
+        public InputStream open(long offset) {
+            openedOffset.set(offset);
+            return new InputStream(){int position=(int)offset;
+                private void waitAtBoundary()throws IOException {
+                    if(pause.get()&&position>=131072){entered.countDown();try{if(!release.await(10,TimeUnit.SECONDS))throw new IOException("测试未解除源流暂停");}catch(InterruptedException e){Thread.currentThread().interrupt();throw new IOException(e);}}
+                }
+                public int read()throws IOException {waitAtBoundary();return position>=bytes.length?-1:bytes[position++]&255;}
+                public int read(byte[] target,int start,int count)throws IOException {waitAtBoundary();if(position>=bytes.length)return -1;int size=Math.min(count,bytes.length-position);System.arraycopy(bytes,position,target,start,size);position+=size;return size;}
+            };
+        }
+    }
+    private static void sendRelease(Node sender,LanNode.Peer peer,String body)throws Exception {
+        java.lang.reflect.Method method=LanNode.class.getDeclaredMethod("sendReleaseFiles",LanNode.Peer.class,String.class);method.setAccessible(true);
+        try{method.invoke(sender.node,peer,body);}catch(java.lang.reflect.InvocationTargetException e){if(e.getCause() instanceof Exception)throw (Exception)e.getCause();throw e;}
+    }
+    private static void partialTests(Path root)throws Exception {
+        run("TLS 活跃下载取消通过安全 M 通道通知并删除非空断点，保留同批正式文件",()->{
+            ExecutorService worker=Executors.newSingleThreadExecutor();PausedSource source=new PausedSource();
+            try(Node sender=new Node(root.resolve("live-a").toFile(),port(),"11111111111111111111111111111111");Node receiver=new Node(root.resolve("live-b").toFile(),port(),"22222222222222222222222222222222")) {
+                LanNode.Peer target=find(sender,receiver),back=find(receiver,sender);sender.node.verifyPeer(target);
+                File small=root.resolve("live-small.txt").toFile();Files.writeString(small.toPath(),"保留已保存正式文件");
+                LanNode.Source completed=new LanNode.Source(){public String key(){return "completed-source";}public String name(){return small.getName();}public long size(){return small.length();}public long modified(){return small.lastModified();}public InputStream open(long offset)throws IOException{FileInputStream input=new FileInputStream(small);input.getChannel().position(offset);return input;}};
+                LanNode.Message sent=sender.node.sendSources(target,Arrays.asList(completed,source));LanNode.Message message=receiver.incoming.poll(5,TimeUnit.SECONDS);check(message!=null,"邀请未到达");
+                File saved=root.resolve("live-saved.txt").toFile();receiver.node.receiveFile(back,message.number,message.files.get(0),saved,new LanNode.Transfer(),null);waitFor(()->sender.states.stream().anyMatch(state->state.equals(sent.number+"/0/对方已校验保存")),"第一份文件未确认保存");
+                File destination=root.resolve("live-partial.bin").toFile(),part=LanNode.partialFile(back,message.number,message.files.get(1),destination);LanNode.Transfer task=new LanNode.Transfer();
+                java.util.concurrent.atomic.AtomicReference<Future<?>> cleanup=new java.util.concurrent.atomic.AtomicReference<>();
+                receiver.cancellation=(peer,packet)->{if(peer.id().equals(back.id())&&packet==message.number){task.close();cleanup.set(worker.submit(()->{try{Files.deleteIfExists(part.toPath());}catch(IOException e){throw new UncheckedIOException(e);}}));}};source.pause.set(true);
+                Future<?> download=worker.submit(()->{try{receiver.node.receiveFile(back,message.number,message.files.get(1),destination,task,null);throw new AssertionError("活跃取消仍提交了文件");}catch(IOException expected){ }});
+                check(source.entered.await(5,TimeUnit.SECONDS),"发送源未进入可控暂停");waitFor(()->part.length()>0,"取消前未写入非空断点");check(sender.node.hasActiveOutgoingTransfer(target.id(),sent.number),"没有真实活跃发送流");
+                check(sender.node.cancelOutgoing(target.id(),sent.number,"已送达",true),"取消失败");source.release.countDown();download.get(8,TimeUnit.SECONDS);waitFor(task::isCancelled,"下载中止后未收到取消通知");
+                waitFor(()->cleanup.get()!=null,"取消回调没有安排释放句柄后的清理");cleanup.get().get(5,TimeUnit.SECONDS);
+                check(receiver.canceled.contains(back.id()+"/"+sent.number),"未收到经过鉴权的 TLS 取消通知");check(!part.exists()&&!destination.exists(),"取消后残留断点或未完成正式文件");
+                check(Arrays.equals(Files.readAllBytes(small.toPath()),Files.readAllBytes(saved.toPath())),"取消误删同批已保存文件");check(sender.node.offering(target.id(),sent.number,0)&&!sender.node.offering(target.id(),sent.number,1),"取消误撤完成报价或保留未完成报价");
+            } finally {source.release.countDown();worker.shutdownNow();check(worker.awaitTermination(5,TimeUnit.SECONDS),"下载测试线程未退出");}
+        });
+        run("取消通知丢失与发送方重启后，续传读取 REVOKED 清断点且保留正式文件",()->{
+            int senderPort=port();String aid="33333333333333333333333333333333",bid="44444444444444444444444444444444";File folder=root.resolve("revoked-a").toFile();PausedSource source=new PausedSource();
+            try(Node receiver=new Node(root.resolve("revoked-b").toFile(),port(),bid)) {
+                LanNode.Message message;LanNode.Peer back;
+                try(Node sender=new Node(folder,senderPort,aid)) {
+                    LanNode.Peer target=find(sender,receiver);back=find(receiver,sender);sender.node.verifyPeer(target);sender.node.sendSources(target,Collections.singletonList(source));message=receiver.incoming.poll(5,TimeUnit.SECONDS);check(message!=null,"邀请未到达");
+                    check(sender.node.cancelOutgoing(target.id(),message.number,"已送达",false),"丢通知撤报价失败");
+                }
+                try(Node restored=new Node(folder,senderPort,aid)) {
+                    File target=root.resolve("revoked-destination.bin").toFile(),part=LanNode.partialFile(back,message.number,message.files.get(0),target),saved=root.resolve("revoked-saved.txt").toFile();Files.writeString(saved.toPath(),"已保存");Files.write(part.toPath(),Arrays.copyOf(source.bytes,8192));
+                    boolean revoked=false;try{receiver.node.receiveFile(back,message.number,message.files.get(0),target,new LanNode.Transfer(),null);}catch(LanNode.OfferRevokedException expected){revoked=true;}
+                    check(revoked&&!part.exists()&&!target.exists(),"REVOKED 未识别或残留断点");check(Files.readString(saved.toPath()).equals("已保存"),"REVOKED 误删正式文件");check(receiver.canceled.isEmpty(),"无通知场景意外依赖了在线通知");
+                    // 同一终态到来前若未取得文件锁，绝不删除另一任务持有的断点。
+                    Files.write(part.toPath(),new byte[128]);try(java.nio.channels.FileChannel owner=java.nio.channels.FileChannel.open(part.toPath(),StandardOpenOption.READ,StandardOpenOption.WRITE);java.nio.channels.FileLock lock=owner.lock()) {
+                        boolean owned=false;try{receiver.node.receiveFile(back,message.number,message.files.get(0),target,new LanNode.Transfer(),null);}catch(IOException|java.nio.channels.OverlappingFileLockException expected){owned=true;}
+                        check(owned&&part.isFile()&&owner.size()==128,"没有断点所有权却删除了文件");
+                    }
+                }
+            }
+        });
+        run("普通 TLS 流断开保留非空断点并从同一报价续传通过 SHA-256",()->{
+            ExecutorService worker=Executors.newSingleThreadExecutor();PausedSource source=new PausedSource();
+            try(Node sender=new Node(root.resolve("network-a").toFile(),port(),"55555555555555555555555555555555");Node receiver=new Node(root.resolve("network-b").toFile(),port(),"66666666666666666666666666666666")) {
+                LanNode.Peer target=find(sender,receiver),back=find(receiver,sender);sender.node.verifyPeer(target);sender.node.sendSources(target,Collections.singletonList(source));LanNode.Message message=receiver.incoming.poll(5,TimeUnit.SECONDS);check(message!=null,"邀请未到达");
+                File destination=root.resolve("network-resume.bin").toFile(),part=LanNode.partialFile(back,message.number,message.files.get(0),destination);LanNode.Transfer task=new LanNode.Transfer();source.pause.set(true);
+                Future<?> download=worker.submit(()->{try{receiver.node.receiveFile(back,message.number,message.files.get(0),destination,task,null);throw new AssertionError("测试没有中断下载");}catch(IOException expected){check(!(expected instanceof LanNode.OfferRevokedException),"普通断网误报取消");}});
+                check(source.entered.await(5,TimeUnit.SECONDS),"发送源未暂停");waitFor(()->part.length()>0,"普通断网前没有断点");
+                Object gate=field(sender.node,"gate");List<Socket> active;
+                synchronized(gate){Object offer=((Map<?,?>)field(sender.node,"offers")).get(message.number+":0");java.lang.reflect.Field sockets=offer.getClass().getDeclaredField("activeSockets");sockets.setAccessible(true);active=new ArrayList<>();for(Object socket:(Set<?>)sockets.get(offer))active.add((Socket)socket);}
+                check(!active.isEmpty(),"没有真实发送连接");for(Socket socket:active)socket.close();source.release.countDown();download.get(8,TimeUnit.SECONDS);
+                long offset=part.length();check(offset>0&&offset<source.bytes.length&&!task.isCancelled()&&receiver.canceled.isEmpty(),"普通断网误删断点或触发取消");source.pause.set(false);
+                receiver.node.receiveFile(back,message.number,message.files.get(0),destination,new LanNode.Transfer(),null);
+                check(source.openedOffset.get()==offset,"没有从实际断点偏移继续");check(!part.exists()&&Arrays.equals(source.bytes,Files.readAllBytes(destination.toPath()))&&SecureIdentity.hashFile(destination).equals(message.files.get(0).sha256),"续传文件 SHA-256 不一致");System.out.println("DETAIL TLS 续传偏移="+offset);
+            } finally {source.release.countDown();worker.shutdownNow();check(worker.awaitTermination(5,TimeUnit.SECONDS),"断网测试线程未退出");}
+        });
+        run("取消消息拦截明文冒用、未配对与证书冒用；有效但未授权报价不误报 REVOKED；数字拒绝兼容",()->{
+            String aid="77777777777777777777777777777777",bid="88888888888888888888888888888888",cid="99999999999999999999999999999999";PausedSource source=new PausedSource();
+            try(Node sender=new Node(root.resolve("auth-a").toFile(),port(),aid);Node receiver=new Node(root.resolve("auth-b").toFile(),port(),bid);Node attacker=new Node(root.resolve("auth-c").toFile(),port(),cid)) {
+                LanNode.Peer target=find(sender,receiver),back=find(receiver,sender),victim=find(attacker,receiver);sender.node.verifyPeer(target);sender.node.sendSources(target,Collections.singletonList(source));LanNode.Message message=receiver.incoming.poll(5,TimeUnit.SECONDS);check(message!=null,"邀请未到达");
+                File destination=root.resolve("auth-destination.bin").toFile(),part=LanNode.partialFile(back,message.number,message.files.get(0),destination);Files.write(part.toPath(),new byte[128]);
+                for(String fingerprint:new String[]{sender.node.security().fingerprint,null})raw(attacker,receiver,Protocol.encode(72001,aid,"Android",Protocol.RELEASE|Protocol.UTF8,"cancel:"+message.number,null,aid,null,fingerprint));
+                raw(attacker,receiver,Protocol.encode(72002,aid,"Android",Protocol.RELEASE|Protocol.UTF8,"cancel:"+message.number,null));raw(attacker,receiver,Protocol.encode(72003,"barrier","Android",Protocol.MESSAGE|Protocol.UTF8,"cancel-barrier",null,"abababababababababababababababab"));
+                LanNode.Message barrier=receiver.incoming.poll(5,TimeUnit.SECONDS);check(barrier!=null&&barrier.text.equals("cancel-barrier"),"未完成明文攻击处理");check(receiver.canceled.isEmpty()&&part.length()==128,"明文取消进入 TLS 会话");
+                receiver.node.security().confirmation=(name,code)->false;boolean unpaired=false;try{sendRelease(attacker,victim,"cancel:"+message.number);}catch(IOException expected){unpaired=true;}check(unpaired&&receiver.canceled.isEmpty()&&part.length()==128,"未配对设备清理了受害者断点");
+                receiver.node.security().confirmation=(name,code)->true;
+                try(Node impostor=new Node(root.resolve("auth-impostor").toFile(),port(),aid)) {
+                    boolean blocked=false;try{sendRelease(impostor,victim,"cancel:"+message.number);}catch(IOException expected){blocked=true;}check(blocked&&receiver.node.security().isTrusted(aid,sender.node.security().fingerprint)&&receiver.canceled.isEmpty()&&part.length()==128,"冒用设备 ID/证书修改了原会话");
+                }
+                LanNode.Peer unauthorized=find(attacker,sender);attacker.node.verifyPeer(unauthorized);File unowned=root.resolve("unauthorized.bin").toFile(),kept=LanNode.partialFile(unauthorized,message.number,message.files.get(0),unowned);Files.write(kept.toPath(),new byte[128]);
+                boolean rejected=false;try{attacker.node.receiveFile(unauthorized,message.number,message.files.get(0),unowned,new LanNode.Transfer(),null);}catch(IOException expected){check(!(expected instanceof LanNode.OfferRevokedException),"有效但未授权报价误报 REVOKED");rejected=true;}check(rejected&&kept.length()==128,"未授权请求误删断点或泄露文件");
+                attacker.node.verifyPeer(victim);sendRelease(attacker,victim,"cancel:"+message.number);check(receiver.canceled.poll(3,TimeUnit.SECONDS).equals("device:"+cid+"/"+message.number)&&part.length()==128,"另一已配对设备的同包号取消混入受害者会话");
+                receiver.node.reject(back,message.number);waitFor(()->!sender.node.offering(target.id(),message.number,0),"数字拒绝未撤报价");check(sender.states.stream().anyMatch(state->state.endsWith("/对方已拒绝")),"数字拒绝没有保持对方已拒绝状态");
+                try{Long.parseLong("cancel:"+message.number);throw new AssertionError("旧版数字解析误处理取消编码");}catch(NumberFormatException expected){ }
+            }
+        });
     }
 }
