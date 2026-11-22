@@ -1411,8 +1411,7 @@ namespace FeiqLight.Tests
                             {
                                 Find<Button>(chatA, "表情").PerformClick(); ToolStripDropDown menu = OpenMenu();
                                 if (first == null) { first = menu; ownedMenus.Add(first); } else Check(Object.ReferenceEquals(first, menu), "表情菜单未复用");
-                                Control panel=((ToolStripControlHost)menu.Items[0]).Control;
-                                Find<Button>(panel,"😊").PerformClick(); Check(!menu.Visible&&!menu.IsDisposed, "选择表情后未关闭或错误释放面板");
+                                Check(((EmojiPicker)menu).PickItemByText("😊"), "表情面板点击 😊 失败"); Check(!menu.Visible&&!menu.IsDisposed, "选择表情后未关闭或错误释放面板");
                             }
                             Check(editor.Text == String.Concat(Enumerable.Repeat("😊", 6)), "表情漏插入或重复绑定事件");
                             Find<Button>(chatA, "会话菜单").PerformClick(); ToolStripDropDown parent = OpenMenu();
@@ -1458,26 +1457,29 @@ namespace FeiqLight.Tests
                         // 大输入产生的布局消息先完成，再让被测窗口获得焦点；菜单测试不能依赖桌面当前前台窗口。
                         mainA.Activate();input.Focus();Application.DoEvents();
                         Find<Button>(chatA,"表情").PerformClick();Application.DoEvents();
-                        ToolStripDropDown menu=OpenMenu();Control panel=((ToolStripControlHost)menu.Items[0]).Control;
-                        FlowLayoutPanel grid=Find<FlowLayoutPanel>(panel,"表情网格");
+                        EmojiPicker menu=(EmojiPicker)OpenMenu();Control panel=((ToolStripControlHost)menu.Items[0]).Control;
+                        Control grid=Find<Control>(panel,"表情网格");
                         Check(!All(panel).OfType<ComboBox>().Any(),"表情仍使用下拉选择");
-                        Check(grid.Controls.OfType<Label>().Count()==7&&grid.Controls.OfType<Button>().Count()==152,"连续表情列表不完整");
-                        Check(grid.Controls.OfType<Button>().Take(24).Select(c=>c.Left).Distinct().Count()>=6,"表情仍然排成长竖条");
-                        Check(grid.Controls.Cast<Control>().All(c=>c.Right<=grid.ClientSize.Width),"表情列表横向溢出");
+                        Check(grid.Controls.Count==0,"表情画布仍创建大量子控件");
+                        Check(menu.CategoryCount==7&&menu.ItemCount==152,"连续表情列表不完整");
+                        Check(menu.FirstGroupColumnCount>=6,"表情仍然排成长竖条");
+                        Check(!menu.HasHorizontalOverflow,"表情列表横向溢出");
                         input.Text="👩🏽‍💻 👨‍👩‍👧‍👦 🇨🇳 1️⃣ (๑•̀ㅂ•́)و✧";Render(mainA,"preview-emoji-chat");
                         using(Bitmap preview=new Bitmap(menu.Width,menu.Height)) {menu.DrawToBitmap(preview,new Rectangle(Point.Empty,preview.Size));preview.Save(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"preview-emoji-grid.png"),ImageFormat.Png);}
-                        Button last=grid.Controls.OfType<Button>().Last();grid.ScrollControlIntoView(last);Application.DoEvents();Check(grid.AutoScrollPosition.Y<0&&grid.ClientRectangle.Contains(last.Bounds),"不能向下滚动至末尾表情");
-                        input.Clear();last.PerformClick();Check(input.Text==last.Text,"滚动后选择颜文字失败");
+                        Check(menu.ScrollToLastAndCheckVisible(),"无法显示末尾表情");
+                        string lastText=menu.LastItemText;
+                        input.Clear();Check(menu.PickItemByText(lastText)&&input.Text==lastText,"选择末尾颜文字失败");
                         menu.Close();input.Clear();
                     });
                     test("表情网格：缩放尺寸约束、屏幕边缘与颜文字",()=>{
-                        Type pickerType=typeof(ChatForm).Assembly.GetType("FeiqLight.EmojiPicker",true);
-                        using(ToolStripDropDown picker=(ToolStripDropDown)Activator.CreateInstance(pickerType,new object[]{(Action<string>)delegate(string value){}})) {
-                            Control panel=((ToolStripControlHost)picker.Items[0]).Control;FlowLayoutPanel grid=Find<FlowLayoutPanel>(panel,"表情网格");
+                        using(EmojiPicker picker=new EmojiPicker(delegate(string value){})) {
+                            picker.Prepare(new Size(1280,720),96);picker.PerformLayout();
+                            Check(picker.AllItemsVisibleWithoutScroll&&!picker.NeedsScroll,"常规桌面工作区未能一页显示全部表情");
                             foreach(int dpi in new[]{96,144,192}) {
-                                pickerType.GetMethod("Prepare",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(picker,new object[]{new Size(320,220),dpi});picker.PerformLayout();grid.PerformLayout();
-                                Check(picker.Width<=320&&picker.Height<=220,"小工作区弹层越界");Check(grid.Controls.Cast<Control>().All(c=>c.Right<=grid.ClientSize.Width),"网格产生横向溢出");
-                                Rectangle work=new Rectangle(-320,20,320,220);Point location=(Point)pickerType.GetMethod("Fit",BindingFlags.Static|BindingFlags.NonPublic).Invoke(null,new object[]{new Rectangle(-8,230,8,8),picker.Size,work});Check(work.Contains(new Rectangle(location,picker.Size)),"负坐标屏幕边缘弹层出界");
+                                picker.Prepare(new Size(320,220),dpi);picker.PerformLayout();
+                                Check(picker.Width<=320&&picker.Height<=220,"小工作区弹层越界");Check(!picker.HasHorizontalOverflow,"网格产生横向溢出");
+                                Check(picker.ScrollToLastAndCheckVisible(),"小工作区平滑滚动无法到达末尾颜文字");
+                                Rectangle work=new Rectangle(-320,20,320,220);Point location=EmojiPicker.Fit(new Rectangle(-8,230,8,8),picker.Size,work);Check(work.Contains(new Rectangle(location,picker.Size)),"负坐标屏幕边缘弹层出界");
                             }
                         }
                     });

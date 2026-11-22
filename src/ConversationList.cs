@@ -61,7 +61,7 @@ namespace FeiqLight
             if (hover >= 0) MotionFor(items[hover].Peer.Id).Hover.Set(0);
             hover = index;
             if (hover >= 0) MotionFor(items[hover].Peer.Id).Hover.Set(1);
-            rowHint.SetToolTip(this, hover < 0 ? null : items[hover].Peer.DisplayName + "\n" + items[hover].Preview); Invalidate();
+            rowHint.SetToolTip(this, hover < 0 ? null : items[hover].Peer.DisplayName); Invalidate();
         }
         public void ActivatePeer(int index)
         {

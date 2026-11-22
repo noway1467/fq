@@ -422,6 +422,88 @@ namespace FeiqLight.Tests
                 }
                 finally { Theme.Configure(false, "blue"); RestoreClipboard(clipboard); }
             });
+            Run("联系人悬停提示：只显示联系人名称，不展示长最近消息", () => {
+                using (Form host = new Form { ClientSize = new Size(300, 260) })
+                using (ConversationList list = new ConversationList { Dock = DockStyle.Fill })
+                {
+                    host.Controls.Add(list); host.Show();
+                    Peer first = new Peer { Endpoint = new IPEndPoint(IPAddress.Loopback, 24495), Login = "hover1", Nickname = "好友甲" };
+                    Peer second = new Peer { Endpoint = new IPEndPoint(IPAddress.Loopback, 24496), Login = "hover2", Nickname = "phone", DuplicateName = true, ConversationNumber = 3 };
+                    string longPreview = "你：" + new string('长', 180) + "尾段消息";
+                    list.SetItems(new[] {
+                        new ConversationList.Item { Peer = first, Preview = longPreview, Time = DateTime.Now },
+                        new ConversationList.Item { Peer = second, Preview = "https://example.com/very/long/url", Time = DateTime.Now }
+                    });
+                    Application.DoEvents();
+                    ToolTip hint = (ToolTip)Field(list, "rowHint");
+                    int rowHeight = (int)typeof(ConversationList).GetProperty("RowHeight", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(list, null);
+                    var move = typeof(ConversationList).GetMethod("OnMouseMove", BindingFlags.Instance | BindingFlags.NonPublic);
+                    var leave = typeof(ConversationList).GetMethod("OnMouseLeave", BindingFlags.Instance | BindingFlags.NonPublic);
+                    move.Invoke(list, new object[] { new MouseEventArgs(MouseButtons.None, 0, 40, rowHeight / 2, 0) });
+                    string tip0 = hint.GetToolTip(list);
+                    Check(tip0 == first.DisplayName && !tip0.Contains("尾段消息") && !tip0.Contains("\n"), "联系人悬停提示仍包含最近消息：" + tip0);
+                    move.Invoke(list, new object[] { new MouseEventArgs(MouseButtons.None, 0, 40, rowHeight + rowHeight / 2, 0) });
+                    string tip1 = hint.GetToolTip(list);
+                    Check(tip1 == "phone · #3" && !tip1.Contains("https://"), "同名编号联系人悬停提示错误：" + tip1);
+                    move.Invoke(list, new object[] { new MouseEventArgs(MouseButtons.None, 0, 40, rowHeight * 3, 0) });
+                    Check(String.IsNullOrEmpty(hint.GetToolTip(list)), "移入列表空白处未清除提示");
+                    move.Invoke(list, new object[] { new MouseEventArgs(MouseButtons.None, 0, 40, rowHeight / 2, 0) });
+                    leave.Invoke(list, new object[] { EventArgs.Empty });
+                    Check(String.IsNullOrEmpty(hint.GetToolTip(list)), "移出联系人列表未清除提示");
+                    host.Close();
+                }
+            });
+            Run("内置表情面板：单页展示全部表情零子控件、小屏平滑滚动、键盘导航与明暗主题渲染", () => {
+                try
+                {
+                    foreach (bool dark in new[] { false, true })
+                    {
+                        Theme.Configure(dark, "blue");
+                        string chosen = null;
+                        using (EmojiPicker picker = new EmojiPicker(v => chosen = v))
+                        {
+                            picker.Prepare(new Size(1280, 720), 96);
+                            picker.Show(new Point(40, 40)); Application.DoEvents();
+                            Control surface = ((ToolStripControlHost)picker.Items[0]).Control;
+                            Control canvas = surface.Controls[0];
+                            Check(canvas.Controls.Count == 0, "表情画布不应创建子控件句柄");
+                            Check(picker.CategoryCount == 7 && picker.ItemCount == 152, "表情分类或数量不完整");
+                            Check(picker.AllItemsVisibleWithoutScroll && !picker.NeedsScroll, "常规桌面工作区未能一页显示全部表情");
+                            Check(!picker.HasHorizontalOverflow, "单页表情面板存在横向溢出");
+                            using (Bitmap image = Render(picker))
+                            {
+                                int warm = 0;
+                                for (int y = 0; y < image.Height; y++)
+                                    for (int x = 0; x < image.Width; x++)
+                                    {
+                                        Color c = image.GetPixel(x, y);
+                                        if (c.R > 180 && c.G > 90 && c.G < 220 && c.B < 100) warm++;
+                                    }
+                                Check(warm > 200, "单页表情面板未绘制彩色表情像素");
+                                image.Save(Path.Combine(output, "emoji-picker-" + (dark ? "dark" : "light") + ".png"), ImageFormat.Png);
+                            }
+                            Check(picker.PickItemByText("😀") && chosen == "😀", "点击表情未回传正确字符");
+                            Check(picker.PickItemByText(picker.LastItemText) && chosen == picker.LastItemText, "点击颜文字未回传正确字符");
+                            // 键盘 Home + 方向键与回车选择。
+                            var keyDown = canvas.GetType().GetMethod("OnKeyDown", BindingFlags.Instance | BindingFlags.NonPublic);
+                            chosen = null;
+                            keyDown.Invoke(canvas, new object[] { new KeyEventArgs(Keys.Home) });
+                            keyDown.Invoke(canvas, new object[] { new KeyEventArgs(Keys.Right) });
+                            keyDown.Invoke(canvas, new object[] { new KeyEventArgs(Keys.Enter) });
+                            Check(chosen == "😃", "方向键加回车未选中相邻表情：" + chosen);
+                            // 极小工作区回退平滑滚动且不横向溢出。
+                            foreach (int dpi in new[] { 96, 144, 192 })
+                            {
+                                picker.Prepare(new Size(320, 220), dpi);
+                                Check(picker.Width <= 320 && picker.Height <= 220 && !picker.HasHorizontalOverflow, "小工作区越界或溢出");
+                                Check(picker.NeedsScroll && picker.ScrollToLastAndCheckVisible(), "小工作区未能平滑滚动到底部颜文字");
+                            }
+                            picker.Close();
+                        }
+                    }
+                }
+                finally { Theme.Configure(false, "blue"); }
+            });
             Console.WriteLine("CHAT REGRESSION: "+passed+" passed, "+failed+" failed");return failed==0?0:1;
         }
     }
