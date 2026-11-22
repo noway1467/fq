@@ -55,6 +55,15 @@ namespace FeiqLight.Tests
         {
             Bitmap image = new Bitmap(control.Width, control.Height); control.DrawToBitmap(image, new Rectangle(Point.Empty, image.Size)); return image;
         }
+        private static string SaveClipboard()
+        {
+            for (int attempt = 0; attempt < 5; attempt++) { try { return Clipboard.ContainsText() ? Clipboard.GetText() : null; } catch (ExternalException) { System.Threading.Thread.Sleep(30); } }
+            return null;
+        }
+        private static void RestoreClipboard(string text)
+        {
+            for (int attempt = 0; attempt < 5; attempt++) { try { if (text != null) Clipboard.SetText(text); else Clipboard.Clear(); return; } catch (ExternalException) { System.Threading.Thread.Sleep(30); } }
+        }
         private static void SamePixels(Bitmap actual, Bitmap expected, string reason)
         {
             Check(actual.Size == expected.Size, reason + "：图片尺寸不同");
@@ -120,7 +129,7 @@ namespace FeiqLight.Tests
                 Peer peer = new Peer { Endpoint = new IPEndPoint(IPAddress.Loopback, 24481), Login = "line-input", Nickname = "换行输入回归", Online = false };
                 store.SaveDraft(peer.Id, "seed"); string draft = Directory.GetFiles(store.Root, "*.draft.txt", SearchOption.AllDirectories).Single();
                 File.WriteAllText(draft, legacy, new System.Text.UTF8Encoding(false));
-                IDataObject clipboard = Clipboard.GetDataObject();
+                string clipboard = SaveClipboard();
                 try
                 {
                     using (LanService node = new LanService(new AppSettings { Notifications = false, AutoReceiveFiles = false }, 24480, true, "line-local"))
@@ -157,7 +166,7 @@ namespace FeiqLight.Tests
                     File.WriteAllText(draft, new string('a', MessageText.InputLimit - 1) + "😀", new System.Text.UTF8Encoding(false));
                     string loaded = store.LoadDraft(peer.Id); Check(loaded.Length == MessageText.InputLimit - 1 && !Char.IsSurrogate(loaded[loaded.Length - 1]), "旧长草稿截断留下了半个代理对");
                 }
-                finally { if (clipboard != null) Clipboard.SetDataObject(clipboard, true); else Clipboard.Clear(); }
+                finally { RestoreClipboard(clipboard); }
             });
             Run("换行摘要和布局：六种分隔符、URL、表情及高亮与标准 LF 渲染完全一致", () => {
                 string[] separators = { "\n", "\r\n", "\r", "\v", "\u2028", "\u2029" };
@@ -186,7 +195,7 @@ namespace FeiqLight.Tests
             Run("旧历史显示：纯文本和富文本气泡、会话预览、复制及全文均不传播软换行", () => {
                 string raw = "首行\v第二行\r第三行\u2028第四行\u2029末行", rich = "https://example.com/\r\n定位😀\vwww.example.org/";
                 string plain = "首行\n第二行\n第三行\n第四行\n末行", richPlain = "https://example.com/\n定位😀\nwww.example.org/";
-                IDataObject clipboard = Clipboard.GetDataObject();
+                string clipboard = SaveClipboard();
                 try
                 {
                     using (Form host = new Form { ClientSize = new Size(768, 600) }) using (BubbleHistory history = new BubbleHistory { Dock = DockStyle.Fill })
@@ -195,8 +204,8 @@ namespace FeiqLight.Tests
                         ChatRecord[] legacy = { new ChatRecord { Text = raw }, new ChatRecord { Text = rich } };
                         history.SetRecords(legacy); Application.DoEvents();
                         var items = (System.Collections.IList)Field(history, "items");
-                        Check((string)Field(Field(items[0], "M"), "Text") == plain && Field(Field(items[0], "M"), "Layout") == null, "纯文本显示未规范化");
-                        Check(Field(Field(items[1], "M"), "Layout") != null, "链接与表情没有走富文本路径");
+                        Check(((MessageLayout)Field(Field(items[0], "M"), "Layout")).SourceText == plain, "纯文本显示未规范化");
+                        Check(((MessageLayout)Field(Field(items[1], "M"), "Layout")).SourceText == richPlain, "链接与表情显示未规范化");
                         using (Bitmap actual = Render(history))
                         {
                             history.SetRecords(new[] { new ChatRecord { Text = plain }, new ChatRecord { Text = richPlain } }); Application.DoEvents();
@@ -230,7 +239,7 @@ namespace FeiqLight.Tests
                         Check(saved.Preview == plain.Replace('\n', ' ') && Protocol.Field(raw) == saved.Preview, "持久化预览或单行协议字段遗漏换行"); host.Close();
                     }
                 }
-                finally { if (clipboard != null) Clipboard.SetDataObject(clipboard, true); else Clipboard.Clear(); }
+                finally { RestoreClipboard(clipboard); }
             });
             Run("历史文件：重启后气泡可以继续接收，已拒绝或已保存文件不复活", () => {
                 LocalStore store=new LocalStore(Path.Combine(root,"history"));Peer peer=new Peer {Endpoint=new IPEndPoint(IPAddress.Loopback,24351),Login="history",Nickname="历史文件"};
@@ -320,6 +329,98 @@ namespace FeiqLight.Tests
                     }
                 }
                 Theme.Configure(false, "blue");
+            });
+            Run("气泡选字复制：正文拖选中文/英文/URL/表情/制表符/空行、右键菜单、快捷键、重排和主题渲染", () => {
+                string clipboard = SaveClipboard();
+                try
+                {
+                    Action<BubbleHistory, string, MouseEventArgs> mouse = (target, name, ev) => typeof(BubbleHistory).GetMethod(name, BindingFlags.Instance | BindingFlags.NonPublic).Invoke(target, new object[] { ev });
+                    foreach (bool dark in new[] { false, true })
+                    {
+                        Theme.Configure(dark, "blue");
+                        using (Form host = new Form { ClientSize = new Size(760, 520) })
+                        using (BubbleHistory history = new BubbleHistory { Dock = DockStyle.Fill })
+                        {
+                            host.Controls.Add(history); host.Show(); history.SetAvatars("peer", "builtin:1", "own", "builtin:2");
+                            history.DeleteRequested += delegate { };
+                            ChatRecord[] records = {
+                                new ChatRecord { Packet = 1, Outgoing = false, Text = "中文拖选 English\n\nhttps://example.com/path\t😀结束", Time = DateTime.Now },
+                                new ChatRecord { Packet = 2, Outgoing = true, Text = "发出气泡直接选字 ABC123", State = "已送达", Time = DateTime.Now }
+                            };
+                            history.SetRecords(records); Application.DoEvents(); history.Refresh();
+                            var bounds = (List<Rectangle>)Field(history, "bounds");
+                            var items = (System.Collections.IList)Field(history, "items");
+                            int padX = (int)typeof(BubbleHistory).GetProperty("PadX", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(history, null);
+                            int padTop = (int)typeof(BubbleHistory).GetProperty("PadTop", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(history, null);
+                            MessageLayout firstLayout = (MessageLayout)Field(Field(items[0], "M"), "Layout");
+                            int top0 = bounds[0].Y + history.AutoScrollPosition.Y;
+                            Point origin0 = new Point(bounds[0].X + padX, top0 + padTop);
+                            // 鼠标移到正文上显示工字光标，移到链接上保持手形光标。
+                            Point plainHover = new Point(origin0.X + 8, origin0.Y + firstLayout.LineHeight / 2);
+                            mouse(history, "OnMouseMove", new MouseEventArgs(MouseButtons.None, 0, plainHover.X, plainHover.Y, 0));
+                            Check(history.Cursor == Cursors.IBeam, "正文悬停未显示工字光标");
+                            var links = (List<Tuple<Rectangle, string>>)Field(history, "linkHits");
+                            Point linkPoint = new Point(links[0].Item1.X + 10, links[0].Item1.Y + links[0].Item1.Height / 2);
+                            mouse(history, "OnMouseMove", new MouseEventArgs(MouseButtons.None, 0, linkPoint.X, linkPoint.Y, 0));
+                            Check(history.Cursor == Cursors.Hand, "链接悬停未保持手形光标");
+
+                            // 跨空行、URL、制表符和表情拖选，验证精确切片且保留原始制表符和完整代理对。
+                            Point dragEnd = new Point(origin0.X + firstLayout.Width + 10, origin0.Y + firstLayout.Height - firstLayout.LineHeight / 2);
+                            mouse(history, "OnMouseDown", new MouseEventArgs(MouseButtons.Left, 1, origin0.X, origin0.Y + 4, 0));
+                            mouse(history, "OnMouseMove", new MouseEventArgs(MouseButtons.Left, 0, dragEnd.X, dragEnd.Y, 0));
+                            mouse(history, "OnMouseUp", new MouseEventArgs(MouseButtons.Left, 1, dragEnd.X, dragEnd.Y, 0));
+                            Check(history.HasTextSelection && history.SelectedTextValue == records[0].Text, "跨行拖选正文不完整：" + history.SelectedTextValue);
+
+                            // 从链接内部起拖只选字，不触发打开链接。
+                            Point linkEnd = new Point(links[0].Item1.Right - 4, linkPoint.Y);
+                            mouse(history, "OnMouseDown", new MouseEventArgs(MouseButtons.Left, 1, linkPoint.X, linkPoint.Y, 0));
+                            mouse(history, "OnMouseMove", new MouseEventArgs(MouseButtons.Left, 0, linkEnd.X, linkEnd.Y, 0));
+                            Check(Field(history, "pressedAction") == null, "在链接上拖选没有取消链接点击");
+                            mouse(history, "OnMouseUp", new MouseEventArgs(MouseButtons.Left, 1, linkEnd.X, linkEnd.Y, 0));
+                            Check(history.HasTextSelection && history.SelectedTextValue.Length > 0 && "https://example.com/path".Contains(history.SelectedTextValue), "链接局部拖选结果错误：" + history.SelectedTextValue);
+
+                            // 发出气泡反向从右向左拖选部分文字，验证 Ctrl+C、右键菜单与缩放重排保持选区。
+                            MessageLayout secondLayout = (MessageLayout)Field(Field(items[1], "M"), "Layout");
+                            int top1 = bounds[1].Y + history.AutoScrollPosition.Y;
+                            Point origin1 = new Point(bounds[1].X + padX, top1 + padTop);
+                            Point rightPt = new Point(origin1.X + secondLayout.Width, origin1.Y + secondLayout.LineHeight / 2);
+                            Point midPt = new Point(origin1.X + secondLayout.Width / 2, origin1.Y + secondLayout.LineHeight / 2);
+                            mouse(history, "OnMouseDown", new MouseEventArgs(MouseButtons.Left, 1, rightPt.X, rightPt.Y, 0));
+                            mouse(history, "OnMouseMove", new MouseEventArgs(MouseButtons.Left, 0, midPt.X, midPt.Y, 0));
+                            mouse(history, "OnMouseUp", new MouseEventArgs(MouseButtons.Left, 1, midPt.X, midPt.Y, 0));
+                            string picked = history.SelectedTextValue;
+                            Check(history.HasTextSelection && picked.Length > 0 && picked.Length < records[1].Text.Length && records[1].Text.EndsWith(picked), "反向局部拖选失败：" + picked);
+                            using (Bitmap image = Render(history)) image.Save(Path.Combine(output, "inline-text-selection-" + (dark ? "dark" : "light") + ".png"), ImageFormat.Png);
+
+                            // 同一气泡右键保留选区并提供「复制所选文字」与「复制整条消息」。
+                            mouse(history, "OnMouseDown", new MouseEventArgs(MouseButtons.Right, 1, midPt.X, midPt.Y, 0));
+                            Check(history.HasTextSelection && history.SelectedTextValue == picked, "同一气泡右键清除了文字选区");
+                            history.ContextMenuStrip.Show(history, midPt); Application.DoEvents();
+                            ToolStripItem copyPicked = history.ContextMenuStrip.Items.Cast<ToolStripItem>().Single(item => item.Text == "复制所选文字");
+                            ToolStripItem copyWhole = history.ContextMenuStrip.Items.Cast<ToolStripItem>().Single(item => item.Text == "复制整条消息");
+                            Check(copyPicked.Visible && copyPicked.Enabled && copyWhole.Visible && copyWhole.Enabled, "右键菜单缺少选段/整条复制项");
+                            copyPicked.PerformClick(); history.ContextMenuStrip.Close();
+                            Check(Clipboard.GetText() == picked, "右键复制所选文字与选区不一致");
+
+                            // 缩放窗口后选区仍指向同一段文字，Ctrl+C 仍复制选段。
+                            Clipboard.SetText("placeholder");
+                            host.ClientSize = new Size(460, 520); Application.DoEvents();
+                            Check(history.HasTextSelection && history.SelectedTextValue == picked, "缩放后丢失或偏移了文字选区");
+                            typeof(BubbleHistory).GetMethod("OnKeyDown", BindingFlags.Instance | BindingFlags.NonPublic).Invoke(history, new object[] { new KeyEventArgs(Keys.Control | Keys.C) });
+                            Check(Clipboard.GetText() == picked, "Ctrl+C 没有复制所选文字");
+
+                            // Esc 清除文字选区后，右键恢复「复制消息」，Ctrl+C 复制整条。
+                            typeof(BubbleHistory).GetMethod("OnKeyDown", BindingFlags.Instance | BindingFlags.NonPublic).Invoke(history, new object[] { new KeyEventArgs(Keys.Escape) });
+                            Check(!history.HasTextSelection, "Esc 未清除文字选区");
+                            typeof(BubbleHistory).GetMethod("OnKeyDown", BindingFlags.Instance | BindingFlags.NonPublic).Invoke(history, new object[] { new KeyEventArgs(Keys.Control | Keys.C) });
+                            Check(Clipboard.GetText() == records[1].Text, "清除选区后 Ctrl+C 未恢复复制整条消息");
+                            history.ContextMenuStrip.Show(history, midPt); Application.DoEvents();
+                            Check(history.ContextMenuStrip.Items.Cast<ToolStripItem>().Any(item => item.Text == "复制消息") && !copyWhole.Visible, "清除选区后菜单未恢复");
+                            history.ContextMenuStrip.Close(); host.Close();
+                        }
+                    }
+                }
+                finally { Theme.Configure(false, "blue"); RestoreClipboard(clipboard); }
             });
             Console.WriteLine("CHAT REGRESSION: "+passed+" passed, "+failed+" failed");return failed==0?0:1;
         }
