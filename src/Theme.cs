@@ -101,7 +101,8 @@ namespace FeiqLight
             if(fore.ToArgb()==old[2].ToArgb())control.ForeColor=next[2];
             else if(fore.ToArgb()==old[3].ToArgb())control.ForeColor=next[3];
             else if(fore.ToArgb()==old[0].ToArgb())control.ForeColor=next[0];
-            RoundedPanel panel=control as RoundedPanel;if(panel!=null)for(int i=0;i<old.Length;i++)if(panel.Fill==old[i]){panel.Fill=next[i];break;}
+            RoundedPanel panel=control as RoundedPanel;if(panel!=null){for(int i=0;i<old.Length;i++){if(panel.Fill==old[i])panel.Fill=next[i];if(panel.Border==old[i])panel.Border=next[i];}}
+            RoundedButton rounded=control as RoundedButton;if(rounded!=null){Color buttonBorder=rounded.Border;if(!buttonBorder.IsEmpty)for(int i=0;i<old.Length;i++)if(buttonBorder==old[i]){rounded.Border=next[i];break;}}
             if(control.ContextMenuStrip!=null){control.ContextMenuStrip.BackColor=Surface;control.ContextMenuStrip.ForeColor=Ink;}
             if(control.IsHandleCreated&&(control is TextBoxBase||control is ListBox||(control is ScrollableControl&&((ScrollableControl)control).AutoScroll)))ApplyScrollTheme(control);
             foreach(Control child in control.Controls)Recolor(child,old,next);control.Invalidate();
@@ -333,6 +334,8 @@ namespace FeiqLight
                     case "download": g.DrawLine(p, 12, 4, 12, 14.5F); g.DrawLines(p, new[] { new PointF(8, 10.5F), new PointF(12, 14.5F), new PointF(16, 10.5F) }); g.DrawLines(p, new[] { new PointF(4, 14.5F), new PointF(4, 18.5F), new PointF(5.5F, 20), new PointF(18.5F, 20), new PointF(20, 18.5F), new PointF(20, 14.5F) }); break;
                     case "pin": g.DrawLines(p, new[] { new PointF(9, 3.5F), new PointF(15, 3.5F), new PointF(14.2F, 9.6F), new PointF(17.5F, 13.6F), new PointF(6.5F, 13.6F), new PointF(9.8F, 9.6F), new PointF(9, 3.5F) }); g.DrawLine(p, 12, 13.6F, 12, 20.5F); break;
                     case "info": g.DrawEllipse(p, 3, 3, 18, 18); g.DrawLine(p, 12, 11, 12, 16.5F); g.FillEllipse(b, 10.9F, 6.6F, 2.2F, 2.2F); break;
+                    case "alert": using (GraphicsPath tri = new GraphicsPath()) { tri.AddLines(new[] { new PointF(12, 3.8F), new PointF(20.6F, 19.2F), new PointF(3.4F, 19.2F) }); tri.CloseFigure(); g.DrawPath(p, tri); } g.DrawLine(p, 12, 9.2F, 12, 13.6F); g.FillEllipse(b, 10.9F, 15.6F, 2.2F, 2.2F); break;
+                    case "shield": using (GraphicsPath sh = new GraphicsPath()) { sh.AddLines(new[] { new PointF(12, 3.2F), new PointF(19.2F, 6.2F), new PointF(19.2F, 11.8F) }); sh.AddBezier(19.2F, 11.8F, 19.2F, 16.2F, 16F, 19.2F, 12, 20.8F); sh.AddBezier(12, 20.8F, 8, 19.2F, 4.8F, 16.2F, 4.8F, 11.8F); sh.AddLines(new[] { new PointF(4.8F, 11.8F), new PointF(4.8F, 6.2F), new PointF(12, 3.2F) }); sh.CloseFigure(); g.DrawPath(p, sh); } g.DrawLines(p, new[] { new PointF(8.8F, 12.2F), new PointF(11.1F, 14.5F), new PointF(15.6F, 9.8F) }); break;
                     case "error": g.FillEllipse(b, 2.5F, 2.5F, 19, 19); using (Pen white = new Pen(Color.White, 2.2F) { StartCap = LineCap.Round, EndCap = LineCap.Round }) g.DrawLine(white, 12, 7, 12, 13); using (SolidBrush white = new SolidBrush(Color.White)) g.FillEllipse(white, 10.8F, 15.4F, 2.4F, 2.4F); break;
                     case "check": g.DrawLines(p, new[] { new PointF(5, 12.5F), new PointF(10, 17.5F), new PointF(19, 7) }); break;
                     case "chevron-down": g.DrawLines(p, new[] { new PointF(6, 9.5F), new PointF(12, 15.5F), new PointF(18, 9.5F) }); break;
@@ -520,8 +523,8 @@ namespace FeiqLight
         // 标签样式：无底色，激活时强调色文字与指示条由容器绘制；Badge 为未读计数；PlainHover 仅调整前景色不画悬停底色。
         public bool Tab, Active, PlainHover;
         public int Badge;
-        // 窗口关闭键等特殊悬停色；为空时按底色自动加深。
-        public Color HoverBack = Color.Empty, HoverFore = Color.Empty;
+        // 窗口关闭键等特殊悬停色与可选圆角边框；为空时按底色自动加深、不画外框。
+        public Color HoverBack = Color.Empty, HoverFore = Color.Empty, Border = Color.Empty;
         private readonly Tween hover, press;
         private Point ripple;
         private double rippleStart = -100000, rippleEnd = -100000;
@@ -577,7 +580,7 @@ namespace FeiqLight
         {
             Graphics g = e.Graphics; Color back = ParentBack(); g.Clear(back); g.SmoothingMode = SmoothingMode.AntiAlias;
             float scale = g.DpiX / 96F; double h = hover.Value;
-            bool primary = !Tab && BackColor.ToArgb() == Theme.Blue.ToArgb();
+            bool primary = !Tab && (BackColor.ToArgb() == Theme.Blue.ToArgb() || BackColor.ToArgb() == Theme.Danger.ToArgb());
             Color fill = Tab ? back : BackColor;
             Color hovered = !HoverBack.IsEmpty ? HoverBack : primary ? Theme.Blend(Color.Black, fill, .12F) : Theme.Blend(Theme.Ink, fill, Theme.Dark ? .10F : .06F);
             // 禁用态与容器底色混合而不是统一刷成灰块，按钮轮廓仍可辨认。
@@ -588,6 +591,11 @@ namespace FeiqLight
             using (GraphicsPath path = Theme.RoundedF(area, radius))
             {
                 if (fill.ToArgb() != back.ToArgb()) using (SolidBrush b = new SolidBrush(fill)) g.FillPath(b, path);
+                if (!Tab && !Border.IsEmpty)
+                {
+                    Color stroke = Enabled ? Motion.Mix(Border, Theme.Blend(Theme.Ink, Border, Theme.Dark ? .18F : .12F), h) : Theme.Blend(Border, back, .55F);
+                    using (Pen edge = new Pen(stroke, 1F)) g.DrawPath(edge, path);
+                }
                 double since = Motion.Now - rippleStart;
                 if (!PlainHover && since >= 0 && since < 100000 && (pressed || Motion.Now - rippleEnd < 220))
                 {
@@ -671,7 +679,9 @@ namespace FeiqLight
             using (GraphicsPath path = Theme.RoundedF(new RectangleF(.5F, .5F, Width - 1, Height - 1), Math.Min(Theme.ControlRadius * scale, Math.Min(Width, Height) / 2F)))
             {
                 using (SolidBrush b = new SolidBrush(Input.BackColor)) e.Graphics.FillPath(b, path);
-                double f = focus.Value; if (f > 0) using (Pen pen = new Pen(Color.FromArgb((int)(255 * f), Theme.Blue), 1.5F * scale)) e.Graphics.DrawPath(pen, path);
+                double f = focus.Value;
+                if (f < 1) using (Pen idle = new Pen(Theme.Line, 1F)) e.Graphics.DrawPath(idle, path);
+                if (f > 0) using (Pen pen = new Pen(Color.FromArgb((int)(255 * f), Theme.Blue), 1.5F * scale)) e.Graphics.DrawPath(pen, path);
             }
         }
         public string Placeholder { set { if (!Input.IsHandleCreated) Input.CreateControl(); SendMessage(Input.Handle, 0x1501, new IntPtr(1), value); } }
@@ -805,7 +815,7 @@ namespace FeiqLight
         public readonly Panel Surface = new BufferedPanel { Dock = DockStyle.Fill, BackColor = Theme.Surface };
         private readonly TableLayoutPanel chrome = new BufferedTable { Dock = DockStyle.Top, Height = 36, BackColor = Theme.Surface, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty };
         private readonly Label caption = Theme.Label("", Theme.Small, Theme.Muted);
-        private readonly Button minimize, maximize;
+        private readonly Button minimize, maximize, closeButton;
         private bool secondaryWindow;
         private ResizeEdges manualResize;
         private Point manualResizeOrigin;
@@ -835,7 +845,30 @@ namespace FeiqLight
         public bool ResizeWindow
         {
             get { return resizeWindow; }
-            set { resizeWindow = value; UpdateResizePadding(); if (minimize != null) { minimize.Visible = maximize.Visible = value; chrome.ColumnStyles[1].Width = value ? 138 : 46; chrome.Height = value ? 36 : 54; caption.Font = value ? Theme.Small : Theme.Title; caption.ForeColor = value ? Theme.Muted : Theme.Ink; caption.Padding = new Padding(value ? 15 : 24, 0, 0, 0); Control actions = chrome.GetControlFromPosition(1, 0); if (actions != null) actions.Padding = new Padding(0, value ? 0 : 11, 0, 0); } if(IsHandleCreated)UpdateStyles(); }
+            set
+            {
+                resizeWindow = value; UpdateResizePadding();
+                if (minimize != null)
+                {
+                    minimize.Visible = maximize.Visible = value;
+                    chrome.ColumnStyles[1].Width = value ? 138 : 54;
+                    chrome.Height = value ? 36 : 52;
+                    caption.Font = value ? Theme.Small : Theme.Title;
+                    caption.ForeColor = value ? Theme.Muted : Theme.Ink;
+                    caption.Padding = new Padding(value ? 15 : 24, value ? 0 : 4, 0, 0);
+                    Control actions = chrome.GetControlFromPosition(1, 0);
+                    if (actions != null) actions.Padding = new Padding(value ? 0 : 10, value ? 0 : 10, value ? 0 : 12, 0);
+                    if (closeButton != null)
+                    {
+                        RoundedButton close = (RoundedButton)closeButton;
+                        close.Size = value ? new Size(46, 32) : new Size(32, 32);
+                        close.Radius = value ? 0 : 8;
+                        close.HoverBack = value ? Color.FromArgb(232, 17, 35) : Theme.Hover;
+                        close.HoverFore = value ? Color.White : Theme.Ink;
+                    }
+                }
+                if (IsHandleCreated) UpdateStyles();
+            }
         }
         private int ResizeBorder { get { return Math.Max(6, (int)Math.Ceiling(6 * DeviceDpi / 96F)); } }
         private void UpdateResizePadding()
@@ -860,6 +893,7 @@ namespace FeiqLight
             minimize = Theme.IconButton("min", "最小化", delegate { WindowState = FormWindowState.Minimized; }, false);
             maximize = Theme.IconButton("max", "最大化", delegate { if (ResizeWindow) WindowState = WindowState == FormWindowState.Maximized ? FormWindowState.Normal : FormWindowState.Maximized; }, false);
             RoundedButton close = (RoundedButton)Theme.IconButton("close", "关闭窗口", delegate { Close(); }, false);
+            closeButton = close;
             // 标题栏按钮沿用系统惯例：直角、关闭键悬停为红底白字。
             close.HoverBack = Color.FromArgb(232, 17, 35); close.HoverFore = Color.White;
             foreach (Button button in new[] { minimize, maximize, close }) { button.Margin = Padding.Empty; button.Size = new Size(46, 32); ((RoundedButton)button).Radius = 0; actions.Controls.Add(button); }

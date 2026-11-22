@@ -190,9 +190,18 @@
     if (gatewayAccess) u += '&gateway=' + encodeURIComponent(gatewayAccess);
     return u;
   }
+  const kindIcons = {
+    dir: '<path d="M3.5 18V6.5L5 5h4.2l2 2.5H19L20.5 9v9L19 19.5H5z"/>',
+    video: '<rect x="3.5" y="5.5" width="17" height="13" rx="2.5"/><path d="M10 9.5l5 2.5-5 2.5z"/>',
+    audio: '<circle cx="8" cy="17.5" r="2.5"/><circle cx="17" cy="15.5" r="2.5"/><path d="M10.5 17.5V6.5l9-2v11"/>',
+    image: '<rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><circle cx="8.5" cy="9.5" r="1.5"/><path d="M4.5 17.5l5-4.5 3.3 2.8 2.5-2.3 4.2 3.5"/>',
+    archive: '<rect x="4" y="4.5" width="16" height="15" rx="2.5"/><path d="M12 4.5v15M9.5 8h5M9.5 11.5h5M9.5 15h5"/>',
+    doc: '<path d="M13.5 3.5H7L5.5 5v14L7 20.5h10l1.5-1.5V8.5z"/><path d="M13.5 3.5v5h5M8.5 12.5h7M8.5 16h5"/>',
+    file: '<path d="M13.5 3.5H7L5.5 5v14L7 20.5h10l1.5-1.5V8.5z"/><path d="M13.5 3.5v5h5"/>'
+  };
   function renderFiles() {
     const filter = $('search').value.toLocaleLowerCase(), list = items.filter(item => item.name.toLocaleLowerCase().includes(filter)).sort((a,b) => Number(b.dir) - Number(a.dir) || a.name.localeCompare(b.name));
-    $('count').textContent = `${list.length} 项`; $('file-list').replaceChildren();
+    $('count').textContent = filter ? `匹配 ${list.length} / ${items.length} 项` : `共 ${list.length} 项`; $('file-list').replaceChildren();
     if (!list.length) { const empty = document.createElement('p'); empty.className = 'empty'; empty.textContent = filter ? '没有匹配的文件' : '这个文件夹是空的'; $('file-list').append(empty); }
     list.forEach(item => {
       const meta = classifyItem(item);
@@ -201,10 +210,11 @@
         row.dataset.dir = '1'; row.title = '双击进入文件夹';
         row.ondblclick = event => { if (event.target && event.target.closest('button, a')) return; enterDirectory(item); };
       }
-      const kind = document.createElement('span'); kind.className = 'file-kind'; kind.dataset.kind = meta.kind; kind.textContent = meta.label; row.append(kind);
+      const kind = document.createElement('span'); kind.className = 'file-kind'; kind.dataset.kind = meta.kind; kind.title = meta.label; kind.setAttribute('aria-hidden', 'true');
+      const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); icon.setAttribute('viewBox', '0 0 24 24'); icon.innerHTML = kindIcons[meta.kind] || kindIcons.file; kind.append(icon); row.append(kind);
       const detail = document.createElement('div'); detail.className = 'file-detail';
       const name = document.createElement('div'); name.className = 'file-name'; name.textContent = item.name; name.title = item.name;
-      const info = document.createElement('div'); info.className = 'file-size'; info.textContent = item.dir ? '文件夹 · 双击进入' : size(item.size); detail.append(name, info); row.append(detail);
+      const info = document.createElement('div'); info.className = 'file-size'; info.textContent = item.dir ? '文件夹 · 双击进入' : `${meta.label} · ${size(item.size)}`; detail.append(name, info); row.append(detail);
       const actions = document.createElement('div'); actions.className = 'file-actions';
       if (item.dir || meta.media) {
         const open = document.createElement('button'); open.type = 'button'; open.className = item.dir ? 'btn-enter' : 'btn-play';

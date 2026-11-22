@@ -12,13 +12,47 @@ namespace FeiqLight
 {
     internal sealed class ToolsWindow : ModernWindow
     {
+        // 圆角状态胶囊：带柔和底色与小状态点，随共享/远控状态更新。
+        private sealed class StatusPill : Control
+        {
+            private string caption = "";
+            private Color tone = Theme.Muted;
+            internal StatusPill() { DoubleBuffered = true; ResizeRedraw = true; Height = 26; BackColor = Theme.Ice; }
+            internal void Set(string text, Color accent)
+            {
+                if (caption == text && tone.ToArgb() == accent.ToArgb()) return;
+                caption = text ?? ""; tone = accent;
+                using (Graphics g = CreateGraphics())
+                {
+                    float scale = g.DpiX / 96F;
+                    int textW = TextRenderer.MeasureText(g, caption, Theme.Small, Size.Empty, TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width;
+                    Width = Math.Max((int)(64 * scale), textW + (int)(28 * scale));
+                }
+                Invalidate();
+            }
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                Graphics g = e.Graphics; g.Clear(Parent == null ? BackColor : Parent.BackColor); g.SmoothingMode = SmoothingMode.AntiAlias;
+                float scale = g.DpiX / 96F;
+                RectangleF pill = new RectangleF(.5F, (Height - 22F * scale) / 2F, Width - 1F, 22F * scale);
+                Color fill = Theme.Blend(tone, Theme.Surface, Theme.Dark ? .26F : .14F);
+                using (GraphicsPath path = Theme.RoundedF(pill, pill.Height / 2F)) using (SolidBrush brush = new SolidBrush(fill)) g.FillPath(brush, path);
+                float dot = 6F * scale;
+                Color labelTone = Theme.Dark ? Theme.Blend(Color.White, tone, .18F) : tone;
+                using (SolidBrush brush = new SolidBrush(labelTone)) g.FillEllipse(brush, pill.Left + 8F * scale, pill.Top + (pill.Height - dot) / 2F, dot, dot);
+                Rectangle text = new Rectangle((int)(pill.Left + 18F * scale), (int)pill.Top, Math.Max(1, (int)(pill.Width - 24F * scale)), (int)pill.Height);
+                TextRenderer.DrawText(g, caption, Theme.Small, text, labelTone, TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
+            }
+        }
         private readonly ToolsService service;
         private readonly RemoteDesktop desktop = new RemoteDesktop();
-        private readonly Label share, shareCode, remote, connection, empty;
+        private readonly StatusPill sharePill, remotePill;
+        private readonly Label shareCode, remoteCode, connection;
+        private readonly Panel emptyPanel;
         private readonly ListBox folders = new ListBox();
         private readonly Button startShare, stopShare, removeFolder, copyCode, stopControl;
         private readonly ToolTip tips = new ToolTip();
-        private readonly Font codeFont = new Font("Consolas", 20F, FontStyle.Bold);
+        private readonly Font codeFont = new Font("Consolas", 17F, FontStyle.Bold);
         private readonly Timer timer = new Timer { Interval = 1000 };
         private Form banner;
         private bool hotkey;
@@ -27,47 +61,112 @@ namespace FeiqLight
         [DllImport("user32.dll")] private static extern bool UnregisterHotKey(IntPtr window, int id);
         internal ToolsWindow(int port, bool loopback, string root = null,SecureIdentity security=null)
         {
-            Text = "共享与远控"; ClientSize = new Size(840, 740); MinimumSize = new Size(680, 620); UseSecondaryChrome();
+            Text = "共享与远控"; ClientSize = new Size(820, 720); MinimumSize = new Size(640, 560); UseSecondaryChrome();
             service = new ToolsService(ToolsHttp.PortFor(port), loopback, root,security); service.Capture = desktop.Capture; service.Displays = desktop.Displays; service.Input = desktop.Apply; service.ReleaseInput = desktop.Release; service.ConfirmRemoteDevice = Confirm;
-            TableLayoutPanel body = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 7, Padding = new Padding(24, 16, 24, 12), Margin = Padding.Empty };
+            // 保持 Surface 下仅包含 body 一个顶层 Panel，兼容窗口布局回归检测。
+            TableLayoutPanel body = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5, Padding = new Padding(24, 16, 24, 14), Margin = Padding.Empty };
             body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            foreach (int height in new[] { 36, 80, -1, 52, 24, 152, 44 }) body.RowStyles.Add(new RowStyle(height < 0 ? SizeType.Percent : SizeType.Absolute, height < 0 ? 100 : height));
+            foreach (int height in new[] { 90, 48, -1, 114, 52 }) body.RowStyles.Add(new RowStyle(height < 0 ? SizeType.Percent : SizeType.Absolute, height < 0 ? 100 : height));
             Surface.Controls.Add(body);
-            AddLabel(body, "共享文件夹", true);
-            RoundedPanel summary = new RoundedPanel { Dock = DockStyle.Fill, Fill = Theme.Ice, Border = Theme.Line, Radius = Theme.ControlRadius, Padding = new Padding(16, 8, 12, 8), Margin = new Padding(0, 0, 0, 12) };
-            TableLayoutPanel summaryRow = new TableLayoutPanel { Dock = DockStyle.Fill, BackColor = Theme.Ice, ColumnCount = 3, RowCount = 1, Margin = Padding.Empty };
-            summaryRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); summaryRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 156)); summaryRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 104)); summaryRow.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            share = Theme.Label("未共享", Theme.Body, Theme.Ink); share.Dock = DockStyle.Fill; share.Margin = Padding.Empty; summaryRow.Controls.Add(share, 0, 0);
-            shareCode = Theme.Label("—", codeFont, Theme.Ink); shareCode.Dock = DockStyle.Fill; shareCode.TextAlign = ContentAlignment.MiddleCenter; shareCode.Margin = Padding.Empty; shareCode.AccessibleName = "共享连接码"; summaryRow.Controls.Add(shareCode, 1, 0);
-            copyCode = Theme.Button("复制连接码", delegate { try { Clipboard.SetText(service.ShareCode); } catch (ExternalException) { using (NoticeDialog notice = new NoticeDialog("复制失败", "剪贴板正被其他程序占用，请稍后重试。")) notice.ShowDialog(this); } }, false); copyCode.Dock = DockStyle.Fill; copyCode.Margin = new Padding(4, 4, 0, 4); summaryRow.Controls.Add(copyCode, 2, 0); summary.Controls.Add(summaryRow); body.Controls.Add(summary, 0, 1);
-            RoundedPanel listFrame = new RoundedPanel { Dock = DockStyle.Fill, Fill = Theme.Surface, Border = Theme.Line, Radius = Theme.ControlRadius, Padding = new Padding(8), Margin = Padding.Empty };
-            folders.Dock = DockStyle.Fill; folders.BorderStyle = BorderStyle.None; folders.BackColor = Theme.Surface; folders.ForeColor = Theme.Ink; folders.IntegralHeight = false; folders.DrawMode = DrawMode.OwnerDrawFixed; folders.ItemHeight = 60; folders.AccessibleName = "共享文件夹列表";
+
+            // 区块一：共享文件夹状态与 6 位连接码卡片
+            RoundedPanel summary = new RoundedPanel { Dock = DockStyle.Fill, Fill = Theme.Ice, Border = Theme.Line, Radius = 12, Padding = new Padding(16, 10, 14, 10), Margin = new Padding(0, 0, 0, 10) };
+            TableLayoutPanel summaryRow = new TableLayoutPanel { Dock = DockStyle.Fill, BackColor = Theme.Ice, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty };
+            summaryRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); summaryRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 270)); summaryRow.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            TableLayoutPanel shareMeta = new TableLayoutPanel { Dock = DockStyle.Fill, BackColor = Theme.Ice, ColumnCount = 1, RowCount = 2, Margin = new Padding(0, 0, 12, 0) };
+            shareMeta.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); shareMeta.RowStyles.Add(new RowStyle(SizeType.Percent, 56)); shareMeta.RowStyles.Add(new RowStyle(SizeType.Percent, 44));
+            FlowLayoutPanel shareHeader = new FlowLayoutPanel { Dock = DockStyle.Fill, BackColor = Theme.Ice, FlowDirection = FlowDirection.LeftToRight, WrapContents = false, Margin = Padding.Empty, Padding = Padding.Empty };
+            Label shareTitle = Theme.Label("共享文件夹", Theme.Strong, Theme.Ink); shareTitle.AutoSize = true; shareTitle.Margin = new Padding(0, 4, 10, 0); shareHeader.Controls.Add(shareTitle);
+            sharePill = new StatusPill { Margin = new Padding(0, 2, 0, 0) }; shareHeader.Controls.Add(sharePill);
+            shareMeta.Controls.Add(shareHeader, 0, 0);
+            Label shareHint = Theme.Label("只读共享 · 最多 20 个文件夹 · 双击目录项打开本地位置", Theme.Small, Theme.Muted); shareHint.Dock = DockStyle.Fill; shareHint.AutoEllipsis = true; shareHint.Margin = Padding.Empty;
+            shareMeta.Controls.Add(shareHint, 0, 1);
+            summaryRow.Controls.Add(shareMeta, 0, 0);
+
+            RoundedPanel codeBox = new RoundedPanel { Dock = DockStyle.Fill, BackColor = Theme.Ice, Fill = Theme.Surface, Border = Theme.Line, Radius = Theme.ControlRadius, Padding = new Padding(12, 6, 8, 6), Margin = Padding.Empty };
+            TableLayoutPanel codeRow = new TableLayoutPanel { Dock = DockStyle.Fill, BackColor = Theme.Surface, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty };
+            codeRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); codeRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 104)); codeRow.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            TableLayoutPanel codeText = new TableLayoutPanel { Dock = DockStyle.Fill, BackColor = Theme.Surface, ColumnCount = 1, RowCount = 2, Margin = Padding.Empty };
+            codeText.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); codeText.RowStyles.Add(new RowStyle(SizeType.Absolute, 16)); codeText.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            Label codeCaption = Theme.Label("6 位连接码", Theme.Small, Theme.Muted); codeCaption.Dock = DockStyle.Fill; codeCaption.Margin = Padding.Empty; codeText.Controls.Add(codeCaption, 0, 0);
+            shareCode = Theme.Label("—", codeFont, Theme.Ink); shareCode.Dock = DockStyle.Fill; shareCode.TextAlign = ContentAlignment.MiddleLeft; shareCode.Margin = Padding.Empty; shareCode.AccessibleName = "共享连接码"; codeText.Controls.Add(shareCode, 0, 1);
+            codeRow.Controls.Add(codeText, 0, 0);
+            copyCode = Theme.Button("复制连接码", delegate { try { Clipboard.SetText(service.ShareCode); } catch (ExternalException) { using (NoticeDialog notice = new NoticeDialog("复制失败", "剪贴板正被其他程序占用，请稍后重试。")) notice.ShowDialog(this); } }, false);
+            copyCode.Dock = DockStyle.Fill; copyCode.Margin = new Padding(6, 5, 0, 5); StyleCardButton(copyCode, true);
+            codeRow.Controls.Add(copyCode, 1, 0); codeBox.Controls.Add(codeRow);
+            summaryRow.Controls.Add(codeBox, 1, 0); summary.Controls.Add(summaryRow); body.Controls.Add(summary, 0, 0);
+
+            // 操作工具栏：左侧主/次操作，右侧移除所选
+            TableLayoutPanel toolbar = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = new Padding(0, 0, 0, 8), BackColor = Theme.Surface };
+            toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 104)); toolbar.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            FlowLayoutPanel shareActions = new FlowLayoutPanel { Dock = DockStyle.Fill, Margin = Padding.Empty, Padding = new Padding(0, 2, 0, 2), WrapContents = false, BackColor = Theme.Surface };
+            Button addFolder = AddButton(shareActions, "添加文件夹", Choose, true, 112);
+            startShare = AddButton(shareActions, "开启共享", delegate { ChangeSettings(service.StartSavedSharing); }, false, 108);
+            stopShare = AddButton(shareActions, "停止共享", delegate { ChangeSettings(service.StopSharing); }, false, 96);
+            toolbar.Controls.Add(shareActions, 0, 0);
+            removeFolder = Theme.Button("移除所选", delegate { string path = folders.SelectedItem as string; if (path != null) ChangeSettings(() => service.RemoveFolder(path)); }, false);
+            removeFolder.Dock = DockStyle.Fill; removeFolder.Margin = new Padding(4, 2, 0, 2); StyleCardButton(removeFolder, false);
+            toolbar.Controls.Add(removeFolder, 1, 0);
+            body.Controls.Add(toolbar, 0, 1);
+
+            // 共享目录列表卡片
+            RoundedPanel listFrame = new RoundedPanel { Dock = DockStyle.Fill, Fill = Theme.Surface, Border = Theme.Line, Radius = 12, Padding = new Padding(8), Margin = new Padding(0, 0, 0, 12) };
+            folders.Dock = DockStyle.Fill; folders.BorderStyle = BorderStyle.None; folders.BackColor = Theme.Surface; folders.ForeColor = Theme.Ink; folders.IntegralHeight = false; folders.DrawMode = DrawMode.OwnerDrawFixed; folders.ItemHeight = 62; folders.AccessibleName = "共享文件夹列表";
             folders.DrawItem += DrawFolder; folders.SelectedIndexChanged += delegate { removeFolder.Enabled = folders.SelectedItem != null; tips.SetToolTip(folders, folders.SelectedItem as string); };
             folders.DoubleClick += delegate { OpenSelectedFolder(); };
             folders.MouseMove += delegate(object sender, MouseEventArgs e) { int index = folders.IndexFromPoint(e.Location); string path = index < 0 ? "" : (string)folders.Items[index]; if (tips.GetToolTip(folders) != path) tips.SetToolTip(folders, path); };
             Theme.ThemeScrollbars(folders); listFrame.Controls.Add(folders);
-            empty = Theme.Label("暂无共享文件夹", Theme.Body, Theme.Muted); empty.TextAlign = ContentAlignment.MiddleCenter; empty.Dock = DockStyle.Fill; listFrame.Controls.Add(empty); body.Controls.Add(listFrame, 0, 2);
-            FlowLayoutPanel shareActions = Actions();
-            Button addFolder = AddButton(shareActions, "添加文件夹", Choose, true, 128);
-            startShare = AddButton(shareActions, "开启共享", delegate { ChangeSettings(service.StartSavedSharing); }, false, 128);
-            stopShare = AddButton(shareActions, "停止共享", delegate { ChangeSettings(service.StopSharing); }, false, 108);
-            removeFolder = AddButton(shareActions, "移除所选", delegate { string path = folders.SelectedItem as string; if (path != null) ChangeSettings(() => service.RemoveFolder(path)); }, false, 108);
-            body.Controls.Add(shareActions, 0, 3);
-            Label hint = AddLabel(body, "只读共享 · 最多 20 个文件夹 · 双击列表项可打开本地目录", false); hint.Font = Theme.Small;
+            emptyPanel = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Surface };
+            emptyPanel.Paint += delegate(object sender, PaintEventArgs e)
+            {
+                Graphics g = e.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias; float scale = g.DpiX / 96F;
+                float chipSize = 48F * scale;
+                float cx = emptyPanel.Width / 2F, cy = Math.Max(chipSize / 2F + 8F * scale, emptyPanel.Height / 2F - 22F * scale);
+                RectangleF chip = new RectangleF(cx - chipSize / 2F, cy - chipSize / 2F, chipSize, chipSize);
+                using (GraphicsPath path = Theme.RoundedF(chip, 14F * scale)) using (SolidBrush brush = new SolidBrush(Theme.Ice)) g.FillPath(brush, path);
+                float inset = 11F * scale;
+                Theme.Glyph(g, "folder", new RectangleF(chip.Left + inset, chip.Top + inset, chip.Width - inset * 2F, chip.Height - inset * 2F), Theme.Muted);
+                Rectangle titleRect = new Rectangle(16, (int)(chip.Bottom + 10F * scale), Math.Max(1, emptyPanel.Width - 32), (int)(22 * scale));
+                TextRenderer.DrawText(g, "暂无共享文件夹", Theme.Section, titleRect, Theme.Ink, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+                Rectangle subRect = new Rectangle(16, titleRect.Bottom + (int)(2 * scale), Math.Max(1, emptyPanel.Width - 32), (int)(20 * scale));
+                TextRenderer.DrawText(g, "点击「添加文件夹」选择需要局域网只读共享的本地目录", Theme.Small, subRect, Theme.Muted, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+            };
+            listFrame.Controls.Add(emptyPanel); body.Controls.Add(listFrame, 0, 2);
+
             tips.SetToolTip(addFolder, "支持多选；增减目录后需重新配对。");
             tips.SetToolTip(removeFolder, "仅取消共享，不删除文件；现有连接会断开。");
             tips.SetToolTip(startShare, "连接码有效 10 分钟；更新后现有连接会断开。");
             tips.SetToolTip(shareCode, "共享连接码 · 有效 10 分钟");
-            RoundedPanel remoteCard = new RoundedPanel { Dock = DockStyle.Fill, Fill = Theme.Ice, Radius = Theme.ControlRadius, Padding = new Padding(16, 8, 16, 8), Margin = new Padding(0, 8, 0, 8) };
-            TableLayoutPanel remoteBody = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, BackColor = Theme.Ice, Margin = Padding.Empty }; remoteBody.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); foreach (int height in new[] { 28, 36, 48 }) remoteBody.RowStyles.Add(new RowStyle(SizeType.Absolute, height));
-            AddLabel(remoteBody, "远程控制", true); remote = AddLabel(remoteBody, "未开启", false);
-            tips.SetToolTip(remote, "连接需本机确认，已信任的设备除外。Ctrl+Alt+F12 停止。");
-            FlowLayoutPanel remoteActions = Actions(); remoteActions.BackColor = Theme.Ice; AddButton(remoteActions, "生成远控连接码", delegate { ChangeSettings(service.AllowRemote); }, false, 156); stopControl = AddButton(remoteActions, "立即停止远控", StopRemote, false, 144); remoteBody.Controls.Add(remoteActions); remoteCard.Controls.Add(remoteBody); body.Controls.Add(remoteCard, 0, 5);
-            Panel footer = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty };
+
+            // 区块二：远程控制卡片（所有卡片内按钮均使用 Surface 底 + Line 描边，绝不与卡片底色融在一起）
+            RoundedPanel remoteCard = new RoundedPanel { Dock = DockStyle.Fill, Fill = Theme.Ice, Border = Theme.Line, Radius = 12, Padding = new Padding(16, 12, 16, 12), Margin = new Padding(0, 0, 0, 10) };
+            TableLayoutPanel remoteBody = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, BackColor = Theme.Ice, Margin = Padding.Empty };
+            remoteBody.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); remoteBody.RowStyles.Add(new RowStyle(SizeType.Absolute, 34)); remoteBody.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            TableLayoutPanel remoteHeader = new TableLayoutPanel { Dock = DockStyle.Fill, BackColor = Theme.Ice, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty };
+            remoteHeader.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); remoteHeader.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 160)); remoteHeader.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            FlowLayoutPanel remoteTitleRow = new FlowLayoutPanel { Dock = DockStyle.Fill, BackColor = Theme.Ice, FlowDirection = FlowDirection.LeftToRight, WrapContents = false, Margin = Padding.Empty };
+            Label remoteTitle = Theme.Label("远程控制", Theme.Strong, Theme.Ink); remoteTitle.AutoSize = true; remoteTitle.Margin = new Padding(0, 4, 10, 0); remoteTitleRow.Controls.Add(remoteTitle);
+            remotePill = new StatusPill { Margin = new Padding(0, 2, 8, 0) }; remoteTitleRow.Controls.Add(remotePill);
+            remoteCode = Theme.Label("", codeFont, Theme.Blue); remoteCode.AutoSize = true; remoteCode.Margin = new Padding(4, 0, 0, 0); remoteTitleRow.Controls.Add(remoteCode);
+            remoteHeader.Controls.Add(remoteTitleRow, 0, 0);
+            Label remoteHint = Theme.Label("Ctrl+Alt+F12 随时停止", Theme.Small, Theme.Muted); remoteHint.Dock = DockStyle.Fill; remoteHint.TextAlign = ContentAlignment.MiddleRight; remoteHint.Margin = Padding.Empty;
+            remoteHeader.Controls.Add(remoteHint, 1, 0);
+            remoteBody.Controls.Add(remoteHeader, 0, 0);
+            tips.SetToolTip(remotePill, "连接需本机确认，已信任的设备除外。Ctrl+Alt+F12 停止。");
+            FlowLayoutPanel remoteActions = new FlowLayoutPanel { Dock = DockStyle.Fill, Margin = Padding.Empty, Padding = new Padding(0, 10, 0, 0), WrapContents = false, BackColor = Theme.Ice };
+            AddButton(remoteActions, "生成远控连接码", delegate { ChangeSettings(service.AllowRemote); }, false, 148);
+            stopControl = AddButton(remoteActions, "立即停止远控", StopRemote, false, 134);
+            remoteBody.Controls.Add(remoteActions, 0, 1); remoteCard.Controls.Add(remoteBody); body.Controls.Add(remoteCard, 0, 3);
+
+            // 底栏：顶部 1px 细线 + 充足上下间距，彻底避免按钮贴底裁切
+            Panel footer = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty, Padding = new Padding(0, 12, 0, 2), BackColor = Theme.Surface };
+            footer.Paint += delegate(object sender, PaintEventArgs e) { using (Pen line = new Pen(Theme.Line)) e.Graphics.DrawLine(line, 0, 0, footer.Width, 0); };
             Button forget = Theme.Button("清除已配对设备", delegate { using (ConfirmDialog prompt = new ConfirmDialog("清除已配对设备？", "将断开连接并撤销信任，下次需重新配对。", "清除配对", true)) if (prompt.ShowDialog(this) == DialogResult.OK) ChangeSettings(service.ForgetPairings); }, false);
-            forget.Dock = DockStyle.Right; forget.Width = 156; forget.Margin = Padding.Empty; footer.Controls.Add(forget);
-            connection = Theme.Label("", Theme.Small, Theme.Muted); connection.Dock = DockStyle.Fill; connection.AutoEllipsis = true; footer.Controls.Add(connection); connection.BringToFront(); body.Controls.Add(footer, 0, 6);
-            Shown += delegate { using (Graphics graphics = folders.CreateGraphics()) folders.ItemHeight = (int)(60 * graphics.DpiX / 96F); UpdateState(); };
+            StyleCardButton(forget, false); forget.Dock = DockStyle.Right; forget.Width = 148; forget.Margin = Padding.Empty; footer.Controls.Add(forget);
+            connection = Theme.Label("", Theme.Small, Theme.Muted); connection.Dock = DockStyle.Fill; connection.AutoEllipsis = true; connection.Padding = new Padding(0, 0, 12, 0); footer.Controls.Add(connection); connection.BringToFront();
+            body.Controls.Add(footer, 0, 4);
+
+            Shown += delegate { using (Graphics graphics = folders.CreateGraphics()) folders.ItemHeight = (int)(62 * graphics.DpiX / 96F); UpdateState(); };
             SystemEvents.SessionSwitch += OnSessionSwitch;
             SystemEvents.DisplaySettingsChanging += OnDisplayChange;
             SystemEvents.DisplaySettingsChanged += OnDisplayChanged;
@@ -78,6 +177,13 @@ namespace FeiqLight
             catch (UnauthorizedAccessException e) { restoreError = e.Message; }
             UpdateState();
         }
+        private static void StyleCardButton(Button button, bool accentSoft)
+        {
+            RoundedButton rounded = button as RoundedButton;
+            button.BackColor = accentSoft ? Theme.Sky : Theme.Surface;
+            button.ForeColor = accentSoft ? Theme.Blue : Theme.Ink;
+            if (rounded != null) rounded.Border = accentSoft ? Theme.Blend(Theme.Blue, Theme.Line, .35F) : Theme.Line;
+        }
         internal void PrepareRestoredWindow() { if (!IsHandleCreated) CreateHandle(); }
         internal void NetworkReset(){service.NetworkReset();}
         protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); hotkey = RegisterHotKey(Handle, 941, 0x4003, 0x7b); }
@@ -86,14 +192,11 @@ namespace FeiqLight
             try { change(); restoreError = null; UpdateState(); }
             catch (Exception e) { if (!(e is System.IO.IOException || e is UnauthorizedAccessException || e is ToolsHttp.HttpError || e is ArgumentException)) throw; UpdateState(); using (NoticeDialog notice = new NoticeDialog("操作未完成", e.Message)) notice.ShowDialog(this); }
         }
-        private static Label AddLabel(TableLayoutPanel panel, string text, bool heading)
-        {
-            Label label = Theme.Label(text, heading ? Theme.Strong : Theme.Body, heading ? Theme.Ink : Theme.Muted); label.Dock = DockStyle.Fill; label.Margin = Padding.Empty; panel.Controls.Add(label); return label;
-        }
-        private static FlowLayoutPanel Actions() { return new FlowLayoutPanel { Dock = DockStyle.Fill, Margin = Padding.Empty, Padding = new Padding(0, 8, 0, 4), WrapContents = false }; }
         private static Button AddButton(FlowLayoutPanel row, string text, Action action, bool primary, int width)
         {
-            Button button = Theme.Button(text, delegate { action(); }, primary); button.Size = new Size(width, 36); button.Margin = new Padding(0, 0, 8, 0); row.Controls.Add(button); return button;
+            Button button = Theme.Button(text, delegate { action(); }, primary);
+            if (!primary) StyleCardButton(button, false);
+            button.Size = new Size(width, 36); button.Margin = new Padding(0, 0, 8, 0); row.Controls.Add(button); return button;
         }
         private void Choose()
         {
@@ -119,13 +222,13 @@ namespace FeiqLight
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
             using (Brush back = new SolidBrush(Theme.Surface)) e.Graphics.FillRectangle(back, e.Bounds);
             RectangleF card = new RectangleF(e.Bounds.Left + 2F * scale, e.Bounds.Top + 3F * scale, Math.Max(4F, e.Bounds.Width - 4F * scale), Math.Max(4F, e.Bounds.Height - 6F * scale));
-            using (GraphicsPath cardPath = Theme.RoundedF(card, 8F * scale))
+            using (GraphicsPath cardPath = Theme.RoundedF(card, 9F * scale))
             {
                 using (Brush fill = new SolidBrush(selected ? Theme.Sky : Theme.Ice)) e.Graphics.FillPath(fill, cardPath);
-                using (Pen border = new Pen(selected ? Theme.Blend(Theme.Blue, Theme.Surface, .45F) : Theme.Line)) e.Graphics.DrawPath(border, cardPath);
+                using (Pen border = new Pen(selected ? Theme.Blend(Theme.Blue, Theme.Surface, .48F) : Theme.Line)) e.Graphics.DrawPath(border, cardPath);
             }
-            RectangleF badge = new RectangleF(card.Left + 10F * scale, card.Top + (card.Height - 36F * scale) / 2F, 36F * scale, 36F * scale);
-            using (GraphicsPath badgePath = Theme.RoundedF(badge, 8F * scale))
+            RectangleF badge = new RectangleF(card.Left + 11F * scale, card.Top + (card.Height - 36F * scale) / 2F, 36F * scale, 36F * scale);
+            using (GraphicsPath badgePath = Theme.RoundedF(badge, 9F * scale))
             using (Brush badgeFill = new SolidBrush(selected ? Theme.Surface : Theme.Outgoing))
             {
                 e.Graphics.FillPath(badgeFill, badgePath);
@@ -135,13 +238,14 @@ namespace FeiqLight
             int hintWidth = e.Bounds.Width >= (int)(360 * scale) ? (int)(74 * scale) : 0;
             int textLeft = (int)(badge.Right + 12F * scale);
             int textWidth = Math.Max(1, (int)(card.Right - textLeft - 12F * scale - hintWidth));
-            Rectangle text = new Rectangle(textLeft, (int)(card.Top + 7F * scale), textWidth, (int)(22 * scale));
+            Rectangle text = new Rectangle(textLeft, (int)(card.Top + 8F * scale), textWidth, (int)(22 * scale));
             TextRenderer.DrawText(e.Graphics, ToolsService.FolderName(path), Theme.Section, text, Theme.Ink, TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
             text.Y += (int)(21 * scale); text.Height = (int)(18 * scale); TextRenderer.DrawText(e.Graphics, path, Theme.Small, text, Theme.Muted, TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.PathEllipsis);
             if (hintWidth > 0)
             {
-                Rectangle hintRect = new Rectangle((int)(card.Right - hintWidth - 10F * scale), (int)card.Top, hintWidth, (int)card.Height);
-                TextRenderer.DrawText(e.Graphics, "双击打开", Theme.Small, hintRect, selected ? Theme.Blue : Theme.Muted, TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
+                RectangleF chip = new RectangleF(card.Right - hintWidth - 10F * scale, card.Top + (card.Height - 24F * scale) / 2F, hintWidth, 24F * scale);
+                if (selected) using (GraphicsPath chipPath = Theme.RoundedF(chip, 12F * scale)) using (Brush chipFill = new SolidBrush(Theme.Surface)) e.Graphics.FillPath(chipFill, chipPath);
+                TextRenderer.DrawText(e.Graphics, "双击打开", Theme.Small, Rectangle.Round(chip), selected ? Theme.Blue : Theme.Muted, TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
             }
             if ((e.State & DrawItemState.Focus) != 0) e.DrawFocusRectangle();
         }
@@ -191,10 +295,19 @@ namespace FeiqLight
             bool active = service.RemoteActive;
             if (active && banner == null) ShowBanner();
             string[] saved = service.SavedFolders; bool sharing = service.Folders.Length > 0; string code = service.ShareCode;
-            share.Text = sharing ? "共享中 · " + saved.Length + " 个文件夹" : saved.Length == 0 ? "未共享" : "已停止 · " + saved.Length + " 个文件夹";
-            shareCode.Text = sharing && code.Length == 6 ? code : "—"; copyCode.Enabled = sharing && code.Length == 6;
-            if (sharing && code.Length != 6) share.Text = "共享中 · 连接码已过期";
-            startShare.Enabled = saved.Length > 0; startShare.Text = sharing ? "更新连接码" : "开启共享"; stopShare.Enabled = sharing; stopControl.Enabled = service.RemoteEnabled;
+            bool validShareCode = sharing && code.Length == 6;
+            if (sharing && !validShareCode) sharePill.Set("共享中 · 连接码已过期", Theme.Danger);
+            else if (sharing) sharePill.Set("共享中 · " + saved.Length + " 个文件夹", Theme.Online);
+            else if (saved.Length == 0) sharePill.Set("未共享", Theme.Muted);
+            else sharePill.Set("已停止 · " + saved.Length + " 个文件夹", Theme.Muted);
+            shareCode.Text = validShareCode ? code : "—";
+            shareCode.ForeColor = validShareCode ? Theme.Ink : Theme.Muted;
+            copyCode.Enabled = validShareCode;
+            startShare.Enabled = saved.Length > 0; startShare.Text = sharing ? "更新连接码" : "开启共享";
+            stopShare.Enabled = sharing; stopControl.Enabled = service.RemoteEnabled;
+            RoundedButton stopControlButton = stopControl as RoundedButton;
+            stopControl.ForeColor = service.RemoteEnabled ? Theme.Danger : Theme.Ink;
+            if (stopControlButton != null) stopControlButton.Border = service.RemoteEnabled ? Theme.Blend(Theme.Danger, Theme.Line, .45F) : Theme.Line;
             if (!folders.Items.Cast<string>().SequenceEqual(saved))
             {
                 string selected = folders.SelectedItem as string; int index = folders.SelectedIndex;
@@ -202,8 +315,11 @@ namespace FeiqLight
                 if (saved.Length > 0) folders.SelectedIndex = selected != null && Array.IndexOf(saved, selected) >= 0 ? Array.IndexOf(saved, selected) : Math.Min(Math.Max(0, index), saved.Length - 1);
                 folders.EndUpdate();
             }
-            removeFolder.Enabled = folders.SelectedItem != null; empty.Visible = saved.Length == 0; folders.Visible = saved.Length > 0;
-            remote.Text = active ? "已连接 · " + service.RemoteAddress : !service.RemoteEnabled ? "未开启" : service.RemoteCode.Length == 6 ? "连接码  " + service.RemoteCode : "等待已配对设备";
+            removeFolder.Enabled = folders.SelectedItem != null; emptyPanel.Visible = saved.Length == 0; folders.Visible = saved.Length > 0;
+            if (active) { remotePill.Set("已连接 · " + service.RemoteAddress, Theme.Online); remoteCode.Text = ""; }
+            else if (!service.RemoteEnabled) { remotePill.Set("未开启", Theme.Muted); remoteCode.Text = ""; }
+            else if (service.RemoteCode.Length == 6) { remotePill.Set("等待连接 · 连接码", Theme.Blue); remoteCode.Text = service.RemoteCode; }
+            else { remotePill.Set("等待已配对设备", Theme.Blue); remoteCode.Text = ""; }
             connection.Text = restoreError ?? "TCP " + service.Port + " · 关闭窗口后继续运行"; connection.ForeColor = restoreError == null ? Theme.Muted : Theme.Danger; tips.SetToolTip(connection, restoreError ?? "关闭窗口只隐藏，需在此处或远控浮条手动停止。已配对设备可在电脑重启后连接上次。");
             if (!active && banner != null) { Form old = banner; banner = null; old.Dispose(); }
         }

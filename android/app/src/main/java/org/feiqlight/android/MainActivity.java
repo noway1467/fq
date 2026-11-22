@@ -1188,10 +1188,17 @@ public final class MainActivity extends Activity implements ChatService.Observer
             @Override public boolean dispatchTouchEvent(MotionEvent event) { dismissSelectionOutside(event); return super.dispatchTouchEvent(event); }
         }; dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
         dialog.setOnDismissListener(d->{ if(selectionOwner!=null&&selectionOwner.getRootView()==dialog.getWindow().getDecorView()) finishSelection(); });
-        LinearLayout box=column(); box.setPadding(dp(18),dp(12),dp(18),dp(22)); box.setBackground(shape(SURFACE,18));
-        LinearLayout heading=row(); heading.setPadding(dp(8),0,0,dp(10)); TextView caption=text(name,18,INK); caption.setTypeface(null,Typeface.BOLD); caption.setMaxLines(2); caption.setEllipsize(TextUtils.TruncateAt.END); caption.setContentDescription(name); heading.addView(caption,weight()); IconButton close=new IconButton("close","关闭",MUTED); heading.addView(close,new LinearLayout.LayoutParams(dp(44),dp(44))); close.setOnClickListener(v->dialog.dismiss()); box.addView(heading);
+        LinearLayout box=column(); box.setPadding(dp(20),dp(10),dp(20),dp(22)); box.setBackground(shape(SURFACE,20));
+        View handle=new View(this); handle.setBackground(shape(blend(INK,SURFACE,DARK?.22f:.14f),99));
+        LinearLayout.LayoutParams handleParams=new LinearLayout.LayoutParams(dp(36),dp(4)); handleParams.gravity=Gravity.CENTER_HORIZONTAL; handleParams.bottomMargin=dp(8); box.addView(handle,handleParams);
+        LinearLayout heading=row(); heading.setPadding(dp(4),0,0,dp(10)); TextView caption=text(name,18,INK); caption.setTypeface(null,Typeface.BOLD); caption.setMaxLines(2); caption.setEllipsize(TextUtils.TruncateAt.END); caption.setContentDescription(name); heading.addView(caption,weight()); IconButton close=new IconButton("close","关闭",MUTED); heading.addView(close,new LinearLayout.LayoutParams(dp(44),dp(44))); close.setOnClickListener(v->dialog.dismiss()); box.addView(heading);
         box.addView(content,new LinearLayout.LayoutParams(-1,-2));
-        if(action!=null) { Button done=button(action,true); done.setTag("sheet-primary"); LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(-1,-2); p.topMargin=dp(20); box.addView(done,p); done.setOnClickListener(v->{ if(handler!=null) handler.accept(dialog); }); }
+        if(action!=null) {
+            boolean danger=action.contains("删除")||action.contains("清空")||action.contains("取消发送")||action.contains("清除")||action.contains("撤销")||action.contains("拒绝");
+            Button done=button(action,true); done.setTag("sheet-primary");
+            if(danger){int tone=DARK?0xffe06066:0xffd24e54;done.setBackground(new android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(0x33ffffff),shape(tone,CONTROL_RADIUS),null));done.setTextColor(Color.WHITE);}
+            LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(-1,-2); p.topMargin=dp(20); box.addView(done,p); done.setOnClickListener(v->{ if(handler!=null) handler.accept(dialog); });
+        }
         // 整张操作面板可滚动；遵守父窗口实际给出的高度，避免键盘、横屏或长标题把底部按钮挤到屏外。
         ScrollView scroller=new ScrollView(this) { @Override protected void onMeasure(int width,int height) {
             int visible=root!=null&&root.getHeight()>0?root.getHeight()-root.getPaddingTop()-root.getPaddingBottom():getResources().getDisplayMetrics().heightPixels;
@@ -1202,7 +1209,23 @@ public final class MainActivity extends Activity implements ChatService.Observer
         dialog.setContentView(scroller); Window window=dialog.getWindow(); if(window!=null) { window.setBackgroundDrawableResource(android.R.color.transparent); window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND); window.setDimAmount(.32f); window.setGravity(Gravity.BOTTOM); window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE); SystemBars.applyOverlay(window,DARK); }
         dialog.show(); if(window!=null) { window.setLayout(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.WRAP_CONTENT); SystemBars.applyOverlay(window,DARK); } return dialog;
     }
-    private void confirm(String title,String body,String action,Runnable confirm) { TextView content=text(body,15,INK); content.setPadding(0,dp(14),0,dp(4)); sheet(title,content,action,dialog->{ dialog.dismiss(); confirm.run(); }); }
+    private void confirm(String title,String body,String action,Runnable confirm) {
+        LinearLayout panel=column();
+        TextView content=text(body,15,MUTED); content.setLineSpacing(dp(3),1f); content.setPadding(dp(4),dp(6),dp(4),dp(20)); panel.addView(content);
+        LinearLayout actions=row();
+        Button cancel=button("取消",false);
+        GradientDrawable cancelBg=shape(PALE,CONTROL_RADIUS); cancelBg.setStroke(dp(1),LINE);
+        cancel.setBackground(new android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(BUBBLE),cancelBg,null));
+        Button done=button(action,true); done.setTag("sheet-primary");
+        boolean danger=action.contains("删除")||action.contains("清空")||action.contains("取消发送")||action.contains("清除")||action.contains("撤销")||action.contains("拒绝");
+        if(danger){int tone=DARK?0xffe06066:0xffd24e54;done.setBackground(new android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(0x33ffffff),shape(tone,CONTROL_RADIUS),null));done.setTextColor(Color.WHITE);}
+        LinearLayout.LayoutParams left=weight(); left.rightMargin=dp(10); actions.addView(cancel,left);
+        actions.addView(done,weight());
+        panel.addView(actions);
+        Dialog dialog=sheet(title,panel,null,null);
+        cancel.setOnClickListener(v->dialog.dismiss());
+        done.setOnClickListener(v->{ dialog.dismiss(); confirm.run(); });
+    }
     private void copyText(String label,String value) { getSystemService(ClipboardManager.class).setPrimaryClip(ClipData.newPlainText(label,value)); error("已复制"+label); }
     private void fileAction(LinearLayout options,Dialog dialog,String label,Runnable action) {
         boolean danger=label.equals("断开")||label.equals("取消发送")||label.startsWith("拒绝")||label.startsWith("删除")||label.startsWith("清空");

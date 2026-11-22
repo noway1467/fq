@@ -37,14 +37,22 @@
     </section>
     <section id="files" hidden>
       <div class="files-header-card">
-        <div class="file-toolbar"><nav id="breadcrumbs" aria-label="目录位置"></nav><button id="refresh" type="button">刷新</button></div>
-        <div class="search-wrap">
-          <label class="search-label" for="search">筛选当前文件夹</label>
-          <input id="search" type="search" placeholder="输入文件名或文件夹名筛选…" autocomplete="off">
+        <div class="file-toolbar">
+          <nav id="breadcrumbs" aria-label="目录位置"></nav>
+          <div class="toolbar-controls">
+            <div class="search-wrap">
+              <label class="sr-only" for="search">筛选当前文件夹</label>
+              <svg class="search-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5L20 20"/></svg>
+              <input id="search" type="search" placeholder="筛选当前文件夹…" autocomplete="off">
+            </div>
+            <button id="refresh" type="button" title="刷新当前目录"><svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v5h-5"/></svg><span>刷新</span></button>
+          </div>
         </div>
       </div>
-      <div class="list-heading"><span id="count">正在加载</span><span class="readonly-pill">只读共享 · 双击目录进入</span></div>
-      <div id="file-list"></div>
+      <div class="files-card">
+        <div class="list-heading"><span id="count">正在加载</span><span class="readonly-pill">只读共享 · 双击目录进入</span></div>
+        <div id="file-list"></div>
+      </div>
       <section id="player-panel" hidden>
         <div class="player-heading"><h2 id="player-title"></h2><button id="close-player" type="button">关闭播放</button></div>
         <video id="player" controls playsinline preload="auto"></video>
