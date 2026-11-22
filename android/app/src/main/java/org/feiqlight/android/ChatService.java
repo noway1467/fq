@@ -110,7 +110,11 @@ public final class ChatService extends Service {
     void cancelFile(String peer,long packet,long file) {FileProgress p=progress(peer,packet,file,false);if(p!=null&&p.task!=null&&p.task==transfer)p.task.close();}
     boolean offering(String peer,long packet,long file) {LanNode current=node;return current!=null&&current.offering(peer,packet,file);}
     boolean canCancelOutgoing(String peer,long packet) {LanNode current=node;return current!=null&&current.canCancelOutgoing(peer,packet);}
-    boolean hasUndeliveredOutgoing(String peer,LanNode.Message message) {LanNode current=node;return current!=null&&current.hasUndeliveredOutgoing(peer,message.number,message.state);}
+    boolean hasUndeliveredOutgoing(String peer,LanNode.Message message) {
+        if(message==null)return false;
+        LanNode current=node;
+        return current==null?message.outgoing&&!message.files.isEmpty()&&LanNode.isUnconfirmedState(message.state):current.hasUndeliveredOutgoing(peer,message.number,message.state);
+    }
     void cancelOutgoing(String peer,LanNode.Message message,Consumer<Boolean> done) {
         queue(()->{
             try {

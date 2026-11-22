@@ -151,7 +151,7 @@ public final class LanNode implements AutoCloseable {
     private static void closeSocket(Socket socket){try{socket.close();}catch(IOException ignored){}}
     private static boolean isCompletedState(String state){return "已发送（非保存确认）".equals(state)||"对方已校验保存".equals(state);}
     private static boolean isOfferCompleted(Offer offer){return offer!=null&&isCompletedState(offer.state);}
-    private static boolean isUnconfirmedState(String state){String value=state==null?"":state;return "等待确认".equals(value)||value.contains("未确认")||value.contains("失败");}
+    public static boolean isUnconfirmedState(String state){String value=state==null?"":state;return "等待确认".equals(value)||value.contains("未确认")||value.contains("失败");}
     private boolean tryBeginOfferStream(String key,java.util.function.Predicate<Offer> authorize,Socket client,long[] version,Offer[] selected) {
         synchronized(gate){Offer offer=offers.get(key);if(!closed&&offer!=null&&!offer.canceled&&offer.expires>=System.nanoTime()&&authorize.test(offer)){version[0]=++offer.progressVersion;offer.activeSockets.add(client);selected[0]=offer;return true;}version[0]=0;selected[0]=null;return false;}
     }
@@ -263,7 +263,16 @@ public final class LanNode implements AutoCloseable {
             spans.removeIf(span->{StoredOfferState state=states.get(span.packet+":"+span.file);return span.peer.equals(peerId)&&selectedPackets.contains(span.packet)&&(state==null||!isCompletedState(state.state)&&!"已送达".equals(state.messageState));});
             if(spans.size()==count)return;
             ByteArrayOutputStream buffer=new ByteArrayOutputStream();
-            try(DataOutputStream output=new DataOutputStream(buffer)){output.writeInt(format);output.writeInt(spans.size());for(StoredOfferSpan span:spans)output.write(bytes,span.start,span.length);output.write(bytes,metadataStart,bytes.length-metadataStart);}
+            try(DataOutputStream output=new DataOutputStream(buffer)){
+                output.writeInt(format);output.writeInt(spans.size());for(StoredOfferSpan span:spans)output.write(bytes,span.start,span.length);
+                if(metadataStart<bytes.length){
+                    output.writeInt(OFFER_STATES_MARKER);output.writeInt((int)spans.stream().filter(span->states.containsKey(span.packet+":"+span.file)).count());
+                    for(StoredOfferSpan span:spans){
+                        StoredOfferState state=states.get(span.packet+":"+span.file);if(state==null)continue;
+                        output.writeLong(span.packet);output.writeInt((int)span.file);output.writeUTF(state.state);output.writeInt(state.percent);output.writeUTF(state.messageState);
+                    }
+                }
+            }
             SecureIdentity.atomic(saved,buffer.toByteArray());
         }
     }

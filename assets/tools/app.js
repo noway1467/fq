@@ -80,6 +80,7 @@
     points.clear(); previous = null; start = null; $('drag').textContent = '拖拽';
     resetWheel();
     $('type-text').disabled = false;
+    $('connect').disabled = $('reconnect').disabled = false;
     document.body.classList.remove('remote-active','controls-hidden','typing-mode'); $('restore-panel').hidden = true; $('remote-text').blur(); $('keyboard').textContent = '键盘'; $('keyboard').setAttribute('aria-pressed','false');
     zoomLevel=0; $('screen-wrap').classList.remove('zoomed','zoom-large'); $('zoom').textContent='放大';
     scale=1; fillHeight=false; screenPoints.clear(); screenDown=null; pinch=null;

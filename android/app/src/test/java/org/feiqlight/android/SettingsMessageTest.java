@@ -349,6 +349,13 @@ public final class SettingsMessageTest {
                 writeLegacyOffers(security,original,target,other);
                 LanNode.Message pending=new LanNode.Message();pending.number=10;pending.time=1;pending.outgoing=true;pending.state="上次退出，未确认送达";pending.text="离线附件";pending.files.add(new Protocol.Attachment(0,original.getName(),3,0));
                 LanNode.Message delivered=pending.copy();delivered.number=11;delivered.state="已送达";
+                assertTrue("未连接时删除未送达附件必须提示撤销邀请",service.hasUndeliveredOutgoing(target.id(),pending));
+                for(String state:new String[]{"等待确认","发送失败","网络已切换，未确认送达"}){LanNode.Message unconfirmed=pending.copy();unconfirmed.state=state;assertTrue(service.hasUndeliveredOutgoing(target.id(),unconfirmed));}
+                assertFalse(service.hasUndeliveredOutgoing(target.id(),delivered));
+                LanNode.Message completed=pending.copy();completed.state="对方已校验保存";assertFalse(service.hasUndeliveredOutgoing(target.id(),completed));
+                LanNode.Message text=pending.copy();text.files.clear();assertFalse(service.hasUndeliveredOutgoing(target.id(),text));
+                LanNode.Message incoming=pending.copy();incoming.outgoing=false;assertFalse(service.hasUndeliveredOutgoing(target.id(),incoming));
+                assertFalse(service.hasUndeliveredOutgoing(target.id(),null));
                 service.incoming(target,pending,false);service.incoming(target,delivered,false);settle(service);
                 assertNotNull("测试用未送达消息必须已入库",((ChatStore)field(service,"store")).findMessage(target.id(),10,true));
                 List<Boolean> results=new ArrayList<>();
@@ -360,6 +367,26 @@ public final class SettingsMessageTest {
                     restored.configureSecurity(security,identity,(name,code)->true);assertFalse(restored.offering(target.id(),10,0));assertTrue(restored.offering(target.id(),11,0));assertTrue(restored.offering(other.id(),12,0));
                 }
             } finally {controller.destroy();}
+        }
+    }
+    @Test public void canceledOfferStatesAreFiltered()throws Exception {
+        Context context=RuntimeEnvironment.getApplication();File root=new File(context.getFilesDir(),"filtered-offers");File original=new File(context.getFilesDir(),"状态尾段.bin");java.nio.file.Files.write(original.toPath(),new byte[]{1,2,3});
+        LanNode.Peer target=new LanNode.Peer(LanNode.endpoint("127.0.0.1:34251"),"target","host","target","");target.deviceId="1".repeat(32);target.fingerprint="a".repeat(64);
+        LanNode.Peer other=new LanNode.Peer(LanNode.endpoint("127.0.0.1:34252"),"other","host","other","");other.deviceId="2".repeat(32);other.fingerprint="b".repeat(64);
+        writeLegacyOffers(root,original,target,other);
+        File saved=new File(root,"transfer-offers.dat");
+        try(DataOutputStream output=new DataOutputStream(new FileOutputStream(saved,true))){
+            output.writeInt(0x46515331);output.writeInt(4);
+            for(int index=0;index<4;index++){output.writeLong(10+index);output.writeInt(0);output.writeUTF(index==2?"对方已校验保存":"等待对方接收");output.writeInt(index==2?100:20+index);output.writeUTF(index==1?"已送达":"未确认送达");}
+        }
+        LanNode.cancelStoredOffers(root,target.id(),Arrays.asList(10L,11L));
+        assertEquals(Arrays.asList(11L,12L),storedPackets(root));
+        try(DataInputStream input=new DataInputStream(new FileInputStream(saved))){
+            assertEquals(2,input.readInt());assertEquals(2,input.readInt());
+            for(int index=0;index<2;index++){input.readLong();input.readInt();input.readUTF();input.readLong();input.readLong();input.readLong();for(int field=0;field<9;field++)input.readUTF();}
+            assertEquals(0x46515331,input.readInt());assertEquals("只保留现存报价的状态",2,input.readInt());
+            for(int index=1;index<=2;index++){assertEquals(10+index,input.readLong());assertEquals(0,input.readInt());assertEquals(index==2?"对方已校验保存":"等待对方接收",input.readUTF());assertEquals(index==2?100:21,input.readInt());assertEquals(index==1?"已送达":"未确认送达",input.readUTF());}
+            assertEquals("不存在已删除报价或旧孤儿状态",-1,input.read());
         }
     }
     @Test public void legacyCompletionMigrates()throws Exception {

@@ -331,7 +331,9 @@ namespace FeiqLight.Tests
                     sender.Probe(new IPEndPoint(IPAddress.Loopback,receiver.Port));Pump(()=>sender.Peers.Any(peer=>peer.Login=="completed-receiver"),"接收端未发现");Peer target=sender.Peers.Single(peer=>peer.Login=="completed-receiver");sender.VerifyPeer(target);peerId=target.Id;
                     ChatRecord sent=sender.SendMessage(target,"保存确认",new[]{source});packet=sent.Packet;Pump(()=>incoming!=null&&sent.State=="已送达","邀请未送达");Peer back=receiver.Peers.Single(peer=>peer.Login=="completed-sender");
                     Await(receiver.ReceiveFileAsync(back,packet,incoming.Files[0],Path.Combine(root,"completed-restart-copy.bin"),null,CancellationToken.None));
-                    Pump(()=>File.ReadAllText(Path.Combine(senderRoot,"transfer-offers.json"),Encoding.UTF8).Contains("\"TransferState\":\"对方已校验保存\""),"完成状态未落盘");Check(!sender.CanCancelOutgoing(peerId,packet),"已完成文件仍可取消");
+                    object offersGate=typeof(LanService).GetField("gate",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(sender);
+                    // 与后台原子落盘共用锁，避免检查文件时碰到写入句柄；仍等待实际完成状态进入文件。
+                    Pump(()=>{lock(offersGate)return File.ReadAllText(Path.Combine(senderRoot,"transfer-offers.json"),Encoding.UTF8).Contains("\"TransferState\":\"对方已校验保存\"");},"完成状态未落盘");Check(!sender.CanCancelOutgoing(peerId,packet),"已完成文件仍可取消");
                 }
                 for(int generation=0;generation<2;generation++){
                     using(LanService restored=new LanService(senderSettings,FreePort(),true,"completed-sender")){

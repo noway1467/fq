@@ -26,6 +26,7 @@ const server = http.createServer((request, response) => {
   }
   if (url.pathname === '/api/status') return json(200, {remote:true, remotePaired:true});
   if (url.pathname === '/api/displays') return json(200, {platform:'windows', items:[{id:0, name:'测试屏幕'}]});
+  if (url.pathname === '/api/list') return json(200, {items:[]});
   if (url.pathname === '/api/screen') {
     const image = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
     response.writeHead(200, {'Content-Type':'image/gif'});
@@ -190,6 +191,45 @@ async function countRequest(page, pathname) {
     const oldResponse=latePage.waitForResponse(response=>new URL(response.url()).pathname==='/api/input');releaseInput();await oldResponse;await latePage.waitForTimeout(80);
     check('old input success cannot clear new session warning',await latePage.locator('#remote-error').isVisible()&&(await latePage.locator('#remote-error').innerText()).includes('保持中'));
     await latePage.evaluate(()=>window.feiqStop());await latePage.close();
+
+    const stoppedPage=await browser.newPage();
+    await stoppedPage.goto(`http://127.0.0.1:${server.address().port}/#remote`);
+    let releaseReconnect,reconnectEntered;
+    const pendingReconnect=new Promise(resolve=>reconnectEntered=resolve);
+    await stoppedPage.route('**/api/reconnect',async route=>{
+      const gate=new Promise(resolve=>releaseReconnect=resolve);reconnectEntered();await gate;await route.continue();
+    },{times:1});
+    await stoppedPage.locator('#reconnect').click();await pendingReconnect;
+    assert.ok(await stoppedPage.locator('#connect').isDisabled()&&await stoppedPage.locator('#reconnect').isDisabled());
+    await stoppedPage.evaluate(()=>window.feiqStop());
+    assert.ok(await stoppedPage.locator('#connect').isEnabled()&&await stoppedPage.locator('#reconnect').isEnabled(),'external stop immediately unlocks connection buttons');
+    const stoppedResponse=stoppedPage.waitForResponse(response=>new URL(response.url()).pathname==='/api/reconnect');releaseReconnect();await stoppedResponse;await stoppedPage.waitForTimeout(80);
+    assert.ok(await stoppedPage.locator('#connect').isEnabled()&&await stoppedPage.locator('#reconnect').isEnabled()&&await stoppedPage.locator('#login').isVisible(),'old connect response cannot lock buttons or reopen the stopped session');
+    const recoveredRequest=stoppedPage.waitForRequest(request=>new URL(request.url()).pathname==='/api/reconnect');
+    await stoppedPage.evaluate(()=>window.feiqCheck());await recoveredRequest;
+    await stoppedPage.waitForFunction(()=>document.querySelector('#screen').naturalWidth>0);
+    check('external stop during reconnect unlocks buttons and foreground check restores pairing',await stoppedPage.locator('#remote').isVisible()&&await stoppedPage.locator('#reconnect').isEnabled());
+    await stoppedPage.evaluate(()=>window.feiqStop());await stoppedPage.close();
+
+    for(const mode of ['remote','share']){
+      const loadingPage=await browser.newPage(),pathname=mode==='remote'?'/api/displays':'/api/list';
+      let releaseLoad,loadEntered;
+      const pendingLoad=new Promise(resolve=>loadEntered=resolve);
+      await loadingPage.route('**'+pathname+'*',async route=>{
+        const gate=new Promise(resolve=>releaseLoad=resolve);loadEntered();await gate;await route.continue();
+      },{times:1});
+      await loadingPage.goto(`http://127.0.0.1:${server.address().port}/#${mode}`);
+      await loadingPage.locator('#code').fill('123456');await loadingPage.locator('#connect').click();await pendingLoad;
+      assert.ok(await loadingPage.locator('#connect').isDisabled(),'connection remains pending while loading '+pathname);
+      await loadingPage.locator(mode==='remote'?'#remote-disconnect':'#disconnect').click();
+      assert.ok(await loadingPage.locator('#connect').isEnabled()&&await loadingPage.locator('#reconnect').isEnabled(),'disconnect immediately unlocks buttons during '+pathname);
+      const loadedResponse=loadingPage.waitForResponse(response=>new URL(response.url()).pathname===pathname);releaseLoad();await loadedResponse;await loadingPage.waitForTimeout(80);
+      assert.ok(await loadingPage.locator('#connect').isEnabled()&&await loadingPage.locator('#reconnect').isEnabled()&&await loadingPage.locator('#login').isVisible(),'old load response cannot lock buttons during '+pathname);
+      await loadingPage.locator('#reconnect').click();await loadingPage.locator(mode==='remote'?'#remote':'#files').waitFor({state:'visible'});
+      await loadingPage.waitForFunction(()=>!document.querySelector('#connect').disabled);
+      check('disconnect during '+pathname+' leaves manual reconnect available',await loadingPage.locator('#reconnect').isEnabled());
+      await loadingPage.evaluate(()=>window.feiqStop());await loadingPage.close();
+    }
     fs.writeFileSync(path.join(output, 'browser-results.json'), JSON.stringify({passed:results.length, results}, null, 2)+'\n');
     console.log(`${results.length} remote disconnect browser checks passed`);
   } finally {
