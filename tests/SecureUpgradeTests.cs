@@ -30,6 +30,34 @@ namespace FeiqLight.Tests
         public static int Main(string[] args)
         {
             SetErrorMode(3);Console.OutputEncoding=Encoding.UTF8;only=args.Length>1?args[1]:null;string root=Path.GetFullPath(args[0]);Directory.CreateDirectory(root);
+            Run("断开：迟到的配对确认不能保存信任",()=>{
+                foreach(bool outgoing in new[]{false,true})
+                {
+                    string profile=Path.Combine(root,"disconnect-pair-"+outgoing);
+                    using(LanService a=Node(profile,Port(),"15151515151515151515151515151515"))
+                    using(LanService b=Node(Path.Combine(root,"disconnect-remote-"+outgoing),Port(),"16161616161616161616161616161616"))
+                    using(ManualResetEventSlim entered=new ManualResetEventSlim(false))
+                    using(ManualResetEventSlim release=new ManualResetEventSlim(false))
+                    {
+                        Peer peerB=Find(a,b),peerA=Find(b,a);string fingerprint=b.Security.Fingerprint;
+                        a.Security.ConfirmPeer=(name,code)=>{entered.Set();Check(release.Wait(5000),"配对确认未放行");return true;};
+                        Task pairing=Task.Run(()=>{try{if(outgoing)a.VerifyPeer(peerB);else b.VerifyPeer(peerA);}catch(IOException){}catch(ObjectDisposedException){}catch(System.Security.Authentication.AuthenticationException){}});
+                        try
+                        {
+                            Check(entered.Wait(5000),"未进入真实 TLS 配对确认");
+                            a.Dispose();release.Set();Check(pairing.Wait(5000),"断开后配对任务未退出");
+                            var flags=System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic;
+                            object sync=typeof(LanService).GetField("gate",flags).GetValue(a);
+                            var sockets=(HashSet<TcpClient>)typeof(LanService).GetField("connections",flags).GetValue(a);
+                            Wait(()=>{lock(sync)return sockets.Count==0;},"旧 TLS 处理未结束");
+                            Check(!a.Security.IsTrusted(b.Settings.DeviceId,fingerprint),"断开后的旧确认仍建立了信任");
+                            using(SecureIdentity restored=new SecureIdentity(profile))
+                                Check(!restored.IsTrusted(b.Settings.DeviceId,fingerprint),"重启后恢复了断开时失效的配对");
+                        }
+                        finally {release.Set();Check(pairing.Wait(5000),"配对测试线程未退出");}
+                    }
+                }
+            });
             Run("物理网络筛选、热点支持、最长子网匹配",()=>{
                 Check(LanNetwork.Eligible(System.Net.NetworkInformation.NetworkInterfaceType.Wireless80211,"Microsoft Wi-Fi Direct Virtual Adapter"),"热点被排除");
                 Check(!LanNetwork.Eligible(System.Net.NetworkInformation.NetworkInterfaceType.Ethernet,"WireGuard Tunnel"),"VPN 被选用");

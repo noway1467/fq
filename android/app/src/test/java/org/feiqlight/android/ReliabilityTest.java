@@ -156,6 +156,47 @@ public final class ReliabilityTest {
             assertTrue(io(old).awaitTermination(5,TimeUnit.SECONDS));if(next!=null)assertTrue(io(next).awaitTermination(5,TimeUnit.SECONDS));
         }
     }
+    @Test public void disconnectReleasesPortsWhileIoIsBlocked()throws Exception {
+        ServiceController<ChatService> controller=Robolectric.buildService(ChatService.class).create();ChatService service=controller.get();
+        CountDownLatch entered=new CountDownLatch(1),release=new CountDownLatch(1);int port=freePort();
+        try {
+            settle(service);service.connectionFactory=(prefs,listener)->new LanNode(port,true,"disconnect-busy","host","断开测试","",listener);
+            service.onStartCommand(new Intent(),0,1);settle(service);assertTrue(service.online());
+            LanNode old=(LanNode)field(service,"node");block(io(service),entered,release);assertTrue(entered.await(3,TimeUnit.SECONDS));
+            service.disconnect();assertFalse(service.online());assertFalse(ChatService.shouldRestoreConnection(service));
+            try(ServerSocket tcp=new ServerSocket(port,1,InetAddress.getLoopbackAddress());DatagramSocket udp=new DatagramSocket(port,InetAddress.getLoopbackAddress())) {
+                assertEquals("端口释放不能等待文件 I/O",1,release.getCount());assertFalse(old.networkAvailable());
+                release.countDown();settle(service);assertEquals("已断开",service.status());assertFalse(tcp.isClosed());assertFalse(udp.isClosed());
+            }
+            service.onStartCommand(new Intent(),0,2);settle(service);assertTrue(service.online());assertNotSame(old,field(service,"node"));
+            old.close();assertTrue("迟到清理关闭了新节点",service.online());
+        } finally {release.countDown();controller.destroy();assertTrue(io(service).awaitTermination(5,TimeUnit.SECONDS));}
+    }
+    @Test public void stopDuringStartupReleasesPorts()throws Exception {
+        for(boolean destroy:new boolean[]{false,true}) {
+            ServiceController<ChatService> controller=Robolectric.buildService(ChatService.class).create();ChatService service=controller.get();
+            CountDownLatch entered=new CountDownLatch(1),release=new CountDownLatch(1);int port=freePort();boolean destroyed=false;
+            try {
+                settle(service);
+                service.connectionFactory=(prefs,listener)->new LanNode(port,true,"starting-stop","host","启动测试","",new LanNode.Listener(){
+                    public void peersChanged(){listener.peersChanged();}
+                    public void message(LanNode.Peer peer,LanNode.Message message,boolean update){listener.message(peer,message,update);}
+                    public void error(String text){listener.error(text);}
+                    public void networkStateChanged(boolean available,String reason){
+                        listener.networkStateChanged(available,reason);
+                        if(available){entered.countDown();try{if(!release.await(5,TimeUnit.SECONDS))throw new AssertionError("初始化未放行");}catch(InterruptedException e){Thread.currentThread().interrupt();throw new AssertionError(e);}}
+                    }
+                });
+                service.onStartCommand(new Intent(),0,1);assertTrue(entered.await(5,TimeUnit.SECONDS));assertNull(field(service,"node"));
+                if(destroy){controller.destroy();destroyed=true;}else service.disconnect();
+                try(ServerSocket tcp=new ServerSocket(port,1,InetAddress.getLoopbackAddress());DatagramSocket udp=new DatagramSocket(port,InetAddress.getLoopbackAddress())) {
+                    assertEquals("未发布的节点也须立即释放监听",1,release.getCount());release.countDown();
+                    if(destroy)assertTrue(io(service).awaitTermination(5,TimeUnit.SECONDS));else settle(service);
+                    shadowOf(Looper.getMainLooper()).idle();assertNull(field(service,"node"));assertFalse(service.online());assertFalse(tcp.isClosed());assertFalse(udp.isClosed());
+                }
+            } finally {release.countDown();if(!destroyed)controller.destroy();assertTrue(io(service).awaitTermination(5,TimeUnit.SECONDS));}
+        }
+    }
     @Test public void portWaitLogsActualReadinessAndRepeatedRestoreKeepsOneNode() throws Exception {
         ServiceController<ChatService> controller=Robolectric.buildService(ChatService.class).create();ChatService service=controller.get();
         java.util.concurrent.atomic.AtomicInteger created=new java.util.concurrent.atomic.AtomicInteger();

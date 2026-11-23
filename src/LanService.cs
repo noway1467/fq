@@ -350,6 +350,7 @@ namespace FeiqLight
             bool entry = packet.Mode == Protocol.Entry || packet.Mode == Protocol.AnswerEntry || packet.Mode == Protocol.Absence;
             lock (gate)
             {
+                if (disposed) return null;
                 peer = packet.DeviceId == null ? null : peers.Values.FirstOrDefault(p => p.DeviceId == packet.DeviceId);
                 if(Security!=null&&packet.DeviceId!=null) {
                     string pin=Security.TrustedFingerprint(packet.DeviceId);
@@ -1461,6 +1462,7 @@ namespace FeiqLight
                     try { Send(Encode(Protocol.Exit, Settings.Nickname, null), peer.Endpoint); } catch (Exception) { }
             }
             disposed = true;
+            if (Security != null) Security.CancelConfirmations();
             NetworkChange.NetworkAddressChanged -= OnNetworkChanged; NetworkChange.NetworkAvailabilityChanged -= OnNetworkChanged;
             if (timer != null) timer.Dispose();
             if (udp != null) udp.Close();

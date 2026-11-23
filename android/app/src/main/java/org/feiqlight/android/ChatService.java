@@ -43,6 +43,7 @@ public final class ChatService extends Service {
         ReceiveRequest(LanNode.Peer peer,long packet,Protocol.Attachment file) { this.peer=peer; this.packet=packet; this.file=file; }
     }
     private volatile LanNode node;
+    private volatile LanNode startingNode;
     private final List<ToolsGateway> gateways=new ArrayList<>();
     static Intent toolIntent(Context context,Uri url,String peerId,String mode,boolean phone) {
         if("share".equals(mode)) {
@@ -210,10 +211,15 @@ public final class ChatService extends Service {
                 next.rememberPeers(store.conversations().stream().map(c->c.peer).collect(java.util.stream.Collectors.toList()));
                 next.rememberEndpoints(store.conversations().stream().map(c->c.peer.endpoint).collect(java.util.stream.Collectors.toList()));
                 next.setSocketBinding(new LanNetwork(getSystemService(ConnectivityManager.class)));
+                // 先登记再复核请求，断开/销毁才能释放 start() 尚未返回的监听。
+                startingNode=next;
                 if(!currentConnection(epoch)) { next.close(); return; }
                 next.start();
                 // 节点只在成功启动且仍属于本次请求时发布；销毁/断开不能漏掉尚未发布的节点。
-                synchronized(connectionLock) { if(currentConnection(epoch)) node=next; }
+                synchronized(connectionLock) {
+                    if(currentConnection(epoch))node=next;
+                    if(startingNode==next)startingNode=null;
+                }
                 if(node!=next) { next.close(); return; }
                 final LanNode connected=next;
                 main.post(()->{
@@ -257,6 +263,8 @@ public final class ChatService extends Service {
                 if(next!=null) next.close();
                 synchronized(connectionLock) { if(node==next) node=null; }
                 main.post(()->{ if(!currentConnection(epoch)) return; connecting=false; status="连接失败"; stopForeground(STOP_FOREGROUND_REMOVE); stopSelf(); changed(); fail(e); });
+            } finally {
+                synchronized(connectionLock) { if(startingNode==next)startingNode=null; }
             }
     }
     void incoming(LanNode.Peer peer,LanNode.Message message,boolean update) {
@@ -569,7 +577,10 @@ public final class ChatService extends Service {
         synchronized(connectionLock) {
             if(stopped) return;
             long epoch=++connectionEpoch; LanNode old=node; node=null; disconnecting=true; connecting=false; networkReady=false;status="正在断开…";
-            // 与建连共用串行队列；旧完成回调不得停止随后发起的新连接。
+            if(old!=null)old.stopListening();
+            LanNode starting=startingNode;startingNode=null;
+            if(starting!=null)starting.stopListening();
+            // 网络立即停止；记录落盘仍与建连串行，旧完成回调不得停止新连接。
             io.execute(()->{ if(old!=null) old.close(); try { publish(); } catch(Exception e) { fail(e); }
                 main.post(()->{ if(!currentConnection(epoch)) return; disconnecting=false; status="已断开"; stopForeground(STOP_FOREGROUND_REMOVE); stopSelf(); changed(); }); });
         }
@@ -906,6 +917,8 @@ public final class ChatService extends Service {
             LanNode old=node; node=null;
             // 文档 I/O 可能仍在等待，监听端口不能跟着排队，否则新服务会撞上旧服务的 2425。
             if(old!=null)old.stopListening();
+            LanNode starting=startingNode;startingNode=null;
+            if(starting!=null)starting.stopListening();
             // 先使全部旧任务失效，再在队列末尾关闭节点/数据库；不能先读取 null 再让排队任务打开端口。
             io.execute(()->{ try { if(old!=null) old.close(); } finally { try { store.recoverPending(); } finally { store.close(); } } }); io.shutdown();
         }

@@ -198,8 +198,9 @@ public final class LanNode implements AutoCloseable {
         for(Map.Entry<Long,String> entry:messages)cancelUndeliveredOutgoing(peerId,entry.getKey(),entry.getValue(),false);
     }
     private void cancelReverseRequests(){transportEpoch++;for(ReverseRequest request:reverseRequests.values())request.ready.countDown();reverseRequests.clear();}
-    private final Set<Socket> connections=new HashSet<>();
-    private final Set<Socket> probeSockets=new HashSet<>();
+    // 停止网络不能等待 gate 内尚未返回的系统绑定，连接集合支持独立关闭。
+    private final Set<Socket> connections=ConcurrentHashMap.newKeySet();
+    private final Set<Socket> probeSockets=ConcurrentHashMap.newKeySet();
     private final java.util.function.Consumer<String> transportRevoked=fingerprint->{ synchronized(gate){ for(Socket socket:connections)closeSocket(socket); for(Socket socket:probeSockets)closeSocket(socket); cancelReverseRequests(); } };
     private final Set<InetSocketAddress> pendingTcpTargets=new LinkedHashSet<>();
     private final Set<InetSocketAddress> activeTcpProbes=new HashSet<>();
@@ -327,6 +328,7 @@ public final class LanNode implements AutoCloseable {
     private volatile DatagramSocket udp;
     private volatile ServerSocket tcp;
     private volatile boolean closed,started,networkAvailable;
+    private final AtomicBoolean transportStopped=new AtomicBoolean();
     private boolean cleanupStarted;
     private volatile String networkStatus="网络已断开，等待 Wi-Fi、热点或以太网恢复";
     private Object networkKey;
@@ -533,6 +535,7 @@ public final class LanNode implements AutoCloseable {
     }
     private Peer upsertPeer(Protocol.Packet p,InetSocketAddress from) {
         synchronized (gate) {
+            if(closed)return null;
             if(security!=null&&p.deviceId!=null){String pin=security.trustedFingerprint(p.deviceId);if(pin!=null&&!pin.equals(p.fingerprint))return null;}
             Peer peer=new Peer(from,p.login,p.host,p.login,"我的局域网");
             Peer existing=null;
@@ -563,6 +566,7 @@ public final class LanNode implements AutoCloseable {
     }
     private void handle(Protocol.Packet p,InetSocketAddress from,boolean secure) throws IOException {
         synchronized (gate) {
+            if(closed)return;
             if (p.mode()==Protocol.ACK) {
                 try {
                     Pending item=pending.get(Long.parseLong(p.body));
@@ -747,7 +751,10 @@ public final class LanNode implements AutoCloseable {
         }
         boolean connected=false, discovered=false;
         Socket socket=new Socket(Proxy.NO_PROXY);
-        synchronized(gate){if(closed){try{socket.close();}catch(IOException ignored){}return;}probeSockets.add(socket);}
+        synchronized(gate){
+            probeSockets.add(socket);
+            if(closed){probeSockets.remove(socket);closeSocket(socket);return;}
+        }
         try(Socket active=socket) {
             if(!loopback&&socketBinding!=null)socketBinding.bind(active,target.getAddress());
             active.connect(target,1200);connected=true;active.setSoTimeout(1500);
@@ -795,7 +802,10 @@ public final class LanNode implements AutoCloseable {
         try {if(!loopback&&socketBinding!=null&&!socketBinding.allows(target.getAddress()))return;}
         catch(IOException ignored){return;}
         Socket raw=new Socket(Proxy.NO_PROXY);
-        synchronized(gate){if(closed){try{raw.close();}catch(IOException ignored){}return;}probeSockets.add(raw);}
+        synchronized(gate){
+            probeSockets.add(raw);
+            if(closed){probeSockets.remove(raw);closeSocket(raw);return;}
+        }
         try(Socket active=raw) {
             if(!loopback&&socketBinding!=null)socketBinding.bind(active,target.getAddress());
             active.connect(target,2500);active.setSoTimeout(5000);
@@ -857,8 +867,11 @@ public final class LanNode implements AutoCloseable {
     private void acceptLoop() {
         while (!closed && tcp!=null && !tcp.isClosed()) try {
             Socket client=tcp.accept();
+            synchronized(gate) {
+                connections.add(client);
+                if(closed||connections.size()>8){connections.remove(client);client.close();continue;}
+            }
             if(!loopback && socketBinding!=null) try { socketBinding.bindAccepted(client); } catch(IOException ignored) { }
-            synchronized (gate) { if (connections.size()>=8) { client.close(); continue; } connections.add(client); }
             try { fileWorkers.execute(()->dispatchConnection(client)); } catch (RejectedExecutionException e) { synchronized (gate) { connections.remove(client); } client.close(); }
         } catch (IOException e) { if (!closed && tcp!=null && !tcp.isClosed()) listener.error("文件监听失败："+e.getMessage()); }
     }
@@ -898,6 +911,7 @@ public final class LanNode implements AutoCloseable {
     private void dispatchConnection(Socket client) {
         boolean handedOff=false;
         try {
+            if(closed)return;
             if(!loopback&&socketBinding!=null&&!socketBinding.allows(client.getInetAddress()))return;
             client.setSoTimeout(5000);
             InputStream source=client.getInputStream();
@@ -923,7 +937,9 @@ public final class LanNode implements AutoCloseable {
     /** 回连只改变 TCP 建连方向，TLS 配对与共享、远控权限仍走原有检查。 */
     public Socket connectPeer(Peer peer,int targetPort)throws IOException {
         Socket direct=new Socket(Proxy.NO_PROXY);ReverseRequest request=null;String ticket=UUID.randomUUID().toString().replace("-","");
-        synchronized(gate){if(closed||connections.size()>=8){direct.close();throw new IOException("服务已关闭或连接任务过多");}connections.add(direct);
+        synchronized(gate){
+            connections.add(direct);
+            if(closed||connections.size()>8){connections.remove(direct);direct.close();throw new IOException("服务已关闭或连接任务过多");}
             if(security.isTrusted(peer.deviceId,peer.fingerprint)){request=new ReverseRequest();request.deviceId=peer.deviceId;request.fingerprint=peer.fingerprint;request.port=targetPort;request.direct=direct;reverseRequests.put(ticket,request);}}
         ScheduledFuture<?> nudge=null;
         try {
@@ -946,7 +962,10 @@ public final class LanNode implements AutoCloseable {
         int sharePort=port==65535?65534:port+1,phonePort=port>=65534?port-2:port+2;
         if(servicePort!=port&&servicePort!=sharePort&&servicePort!=phonePort)return;
         Socket socket=new Socket(Proxy.NO_PROXY);
-        synchronized(gate){if(closed||epoch!=transportEpoch||connections.size()>=8||!security.isTrusted(id,fingerprint)){closeSocket(socket);return;}connections.add(socket);}
+        synchronized(gate){
+            connections.add(socket);
+            if(closed||epoch!=transportEpoch||connections.size()>8||!security.isTrusted(id,fingerprint)){connections.remove(socket);closeSocket(socket);return;}
+        }
         try {
             if(!loopback&&socketBinding!=null)socketBinding.bind(socket,endpoint.getAddress());socket.connect(endpoint,8000);socket.setSoTimeout(5000);
             socket.getOutputStream().write(("FQR\n"+ticket).getBytes(java.nio.charset.StandardCharsets.US_ASCII));
@@ -972,7 +991,10 @@ public final class LanNode implements AutoCloseable {
     private Socket secureConnect(InetSocketAddress endpoint,java.util.function.Consumer<Socket> beforeConnect)throws IOException {
         if(loopback&&!endpoint.getAddress().isLoopbackAddress())throw new IOException("测试模式不能访问局域网");
         Socket socket=new Socket(Proxy.NO_PROXY);
-        synchronized(gate){if(closed||connections.size()>=8){socket.close();throw new IOException("服务已关闭或连接任务过多");}connections.add(socket);}
+        synchronized(gate){
+            connections.add(socket);
+            if(closed||connections.size()>8){connections.remove(socket);socket.close();throw new IOException("服务已关闭或连接任务过多");}
+        }
         try {
             if(beforeConnect!=null)beforeConnect.accept(socket);
             if(!loopback&&socketBinding!=null)socketBinding.bind(socket,endpoint.getAddress());
@@ -1292,7 +1314,10 @@ public final class LanNode implements AutoCloseable {
         if (destination.exists()) throw new IOException("目标已存在，不会覆盖");
         File part=partialFile(peer,packet,file,destination);
         Socket socket=new Socket(Proxy.NO_PROXY);
-        synchronized (gate) { if (closed || connections.size()>=8) { socket.close(); throw new IOException("服务已关闭或传输任务过多"); } connections.add(socket); }
+        synchronized(gate) {
+            connections.add(socket);
+            if(closed||connections.size()>8){connections.remove(socket);socket.close();throw new IOException("服务已关闭或传输任务过多");}
+        }
         boolean owned=false,complete=false;
         try (Socket active=socket;
              java.nio.channels.FileChannel output=java.nio.channels.FileChannel.open(part.toPath(),java.nio.file.StandardOpenOption.CREATE,java.nio.file.StandardOpenOption.WRITE,java.nio.file.LinkOption.NOFOLLOW_LINKS);
@@ -1342,11 +1367,15 @@ public final class LanNode implements AutoCloseable {
     public static void requireSpace(File directory,long extra) throws IOException {
         if(extra<0 || extra>availableSpace(directory)) throw new IOException("存储空间不足（保留 16 MiB 安全余量），请清理文件或更换存储位置");
     }
-    /** 服务销毁先释放监听端口，数据库及任务清理仍可在后台队列完成。 */
+    /** 先终止网络与未确认配对，数据库及任务清理仍可在后台队列完成。 */
     public void stopListening() {
+        if(!transportStopped.compareAndSet(false,true))return;
         closed=true;
+        if(security!=null)security.cancelConfirmations();
         DatagramSocket receiver=udp;if(receiver!=null)receiver.close();
         ServerSocket listener=tcp;if(listener!=null)try{listener.close();}catch(IOException ignored){ }
+        for(Socket socket:connections)closeSocket(socket);
+        for(Socket socket:probeSockets)closeSocket(socket);
     }
     @Override public void close() {
         synchronized (gate) {

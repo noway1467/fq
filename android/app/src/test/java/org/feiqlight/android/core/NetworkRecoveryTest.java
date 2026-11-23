@@ -93,6 +93,22 @@ public final class NetworkRecoveryTest {
             }
         } finally {release.countDown();worker.shutdownNow();}
     }
+    @Test public void stopListeningClosesAcceptedConnectionsBeforeCleanup()throws Exception {
+        int port=port();
+        try(LanNode node=new LanNode(port,true,"stopping","host","断开测试","",new Events());Socket client=new Socket()) {
+            node.start();client.connect(new InetSocketAddress(InetAddress.getLoopbackAddress(),port));client.setSoTimeout(1000);
+            client.getOutputStream().write(new byte[]{'F','Q','D','\n'});
+            @SuppressWarnings("unchecked") Set<Socket> active=(Set<Socket>)field(node,"connections");Object gate=field(node,"gate");
+            await(()->{synchronized(gate){return !active.isEmpty();}});
+            node.stopListening();
+            try {assertEquals("完整清理排队时旧 TCP 仍可读写",-1,client.getInputStream().read());}
+            catch(SocketTimeoutException error){fail("停止监听后已有 TCP 没有关闭");}
+            catch(SocketException closed){/* Windows 可用 RST 结束尚有未读数据的连接。 */}
+            try(ServerSocket tcp=new ServerSocket(port,1,InetAddress.getLoopbackAddress());DatagramSocket udp=new DatagramSocket(port,InetAddress.getLoopbackAddress())) {
+                node.close();assertFalse(tcp.isClosed());assertFalse(udp.isClosed());
+            }
+        }
+    }
     @Test public void tcpDiscoveryCanRestartImmediatelyOnSamePort()throws Exception {
         int port=port();InetAddress loop=InetAddress.getLoopbackAddress();
         try(DatagramSocket remote=new DatagramSocket(0,loop)) {

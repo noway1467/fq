@@ -27,10 +27,42 @@ public final class SecureUpgrade {
     private static void raw(Node sender,Node receiver,byte[] bytes)throws Exception{((DatagramSocket)field(sender.node,"udp")).send(new DatagramPacket(bytes,bytes.length,new InetSocketAddress("127.0.0.1",receiver.node.port())));}
     private static String http(int port,String path,String cookie)throws IOException {try(Socket socket=new Socket("127.0.0.1",port)){socket.setSoTimeout(10000);socket.getOutputStream().write(("GET "+path+" HTTP/1.1\r\nHost: 127.0.0.1:"+port+"\r\nCookie: "+cookie+"\r\nConnection: close\r\n\r\n").getBytes(java.nio.charset.StandardCharsets.US_ASCII));return new String(socket.getInputStream().readAllBytes(),java.nio.charset.StandardCharsets.UTF_8);}}
     private static String delayedLogin(int port,String cookie)throws IOException{try(Socket socket=new Socket("127.0.0.1",port)){socket.setSoTimeout(25000);socket.getOutputStream().write(("POST /api/login HTTP/1.1\r\nHost: 127.0.0.1:"+port+"\r\nCookie: "+cookie+"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").getBytes(java.nio.charset.StandardCharsets.US_ASCII));return new String(socket.getInputStream().readAllBytes(),java.nio.charset.StandardCharsets.UTF_8);}}
+    private static void disconnectTests(Path root) {
+        run("断开：迟到的配对确认不能保存信任",()->{
+            for(boolean outgoing:new boolean[]{false,true}) {
+                Path profile=root.resolve("disconnect-pair-"+outgoing);
+                ExecutorService worker=Executors.newSingleThreadExecutor();
+                CountDownLatch entered=new CountDownLatch(1),release=new CountDownLatch(1);
+                try(Node a=new Node(profile.toFile(),port(),"15151515151515151515151515151515");
+                    Node b=new Node(root.resolve("disconnect-remote-"+outgoing).toFile(),port(),"16161616161616161616161616161616")) {
+                    LanNode.Peer peerB=find(a,b),peerA=find(b,a);String fingerprint=b.node.security().fingerprint;
+                    a.node.security().confirmation=(name,code)->{
+                        entered.countDown();
+                        try {if(!release.await(5,TimeUnit.SECONDS))throw new IOException("配对确认未放行");}
+                        catch(InterruptedException e){Thread.currentThread().interrupt();throw new IOException(e);}
+                        return true;
+                    };
+                    Future<?> pairing=worker.submit(()->{try{if(outgoing)a.node.verifyPeer(peerB);else b.node.verifyPeer(peerA);}catch(IOException expected){}});
+                    try {
+                        check(entered.await(5,TimeUnit.SECONDS),"未进入真实 TLS 配对确认");
+                        // 服务先停止网络，完整清理仍可能在 I/O 队列中等待。
+                        a.node.stopListening();release.countDown();pairing.get(5,TimeUnit.SECONDS);
+                        Object gate=field(a.node,"gate");Set<?> sockets=(Set<?>)field(a.node,"connections");long until=System.nanoTime()+TimeUnit.SECONDS.toNanos(5);
+                        while(System.nanoTime()<until){synchronized(gate){if(sockets.isEmpty())break;}Thread.sleep(10);}
+                        synchronized(gate){check(sockets.isEmpty(),"旧 TLS 处理未结束");}
+                        check(!a.node.security().isTrusted(peerB.deviceId,fingerprint),"断开后的旧确认仍建立了信任");
+                        check(!new SecureIdentity(profile.toFile()).isTrusted(peerB.deviceId,fingerprint),"重启后恢复了断开时失效的配对");
+                    } finally {release.countDown();pairing.get(5,TimeUnit.SECONDS);}
+                } finally {release.countDown();worker.shutdownNow();check(worker.awaitTermination(5,TimeUnit.SECONDS),"配对测试线程未退出");}
+            }
+        });
+    }
     public static void main(String[] args)throws Exception {
         Path root=Paths.get(args[0]);Files.createDirectories(root);
         if(args.length>1&&args[1].equals("partial")){partialTests(root);System.out.println("ANDROID PARTIAL TLS: "+passed+" passed, "+failed+" failed");System.exit(failed==0?0:1);return;}
         if(args.length>1&&args[1].equals("text-cancel")){textCancelTests(root);System.out.println("ANDROID TEXT CANCEL TLS: "+passed+" passed, "+failed+" failed");System.exit(failed==0?0:1);return;}
+        disconnectTests(root);
+        if(args.length>1&&args[1].equals("disconnect")){System.out.println("ANDROID DISCONNECT TLS: "+passed+" passed, "+failed+" failed");System.exit(failed==0?0:1);return;}
         run("目录协议与恶意路径拒绝",()->{Protocol.Attachment file=new Protocol.Attachment(0,"中文😀.txt",5,1);file.sha256="a".repeat(64);file.relativePath="目录/子目录/中文😀.txt";check(Protocol.parseFiles(Protocol.files(Collections.singletonList(file))).get(0).relativePath.equals(file.relativePath),"目录丢失");for(String value:new String[]{"../secret","/root/a","a//b","a/CON","a/../b","a\\b"})check(!Protocol.safeRelativePath(value),"接受危险路径");});
         run("TLS 配对、双重启恢复、哈希失败不提交与拒绝持久化",()->{
             int ap=port(),bp=port();String aid="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",bid="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";byte[] bytes=new byte[1024*1024+7];for(int i=0;i<bytes.length;i++)bytes[i]=(byte)(i*17);File source=root.resolve("source.bin").toFile();Files.write(source.toPath(),bytes);LanNode.Message message;String fingerprint;
