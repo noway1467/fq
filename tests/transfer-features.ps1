@@ -1,9 +1,10 @@
-param([switch]$Server)
+param([switch]$Server,[string]$TemporaryDirectory)
 $ErrorActionPreference='Stop'
 $root=Split-Path -Parent $PSScriptRoot
-$temporary=Join-Path $root 'build/tmp/transfer-features'
+$temporary=if($TemporaryDirectory){[IO.Path]::GetFullPath($TemporaryDirectory)}else{Join-Path $root 'build/tmp/transfer-features'}
+if(!$temporary.StartsWith([IO.Path]::GetFullPath((Join-Path $root 'build/tmp')).TrimEnd('\','/')+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)){throw '临时目录必须位于项目 build/tmp 内'}
 $output=Join-Path $root 'build/transfer-feature/validation'
-$data=Join-Path $root ('build/test-data/transfer-'+[Guid]::NewGuid().ToString('N'))
+$data=Join-Path $temporary ('data-'+[Guid]::NewGuid().ToString('N').Substring(0,8))
 New-Item -ItemType Directory -Force -Path $temporary,$output,$data | Out-Null
 $env:TEMP=$temporary; $env:TMP=$temporary; $env:TMPDIR=$temporary
 $compiler=Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'

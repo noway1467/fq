@@ -203,6 +203,8 @@ namespace FeiqLight
             if(text=="全选") return "select";
             if(text=="删除") return "trash";
             if(text.StartsWith("查看全文")) return "doc";
+            if(text.Contains("传输任务")) return "transfer";
+            if(text.Contains("临时浏览器")) return "link";
             if(text.Contains("共享文件")) return "folder";
             if(text.Contains("共享与远控")) return "monitor";
             if(text.Contains("控制 Android 手机")) return "monitor";
@@ -307,6 +309,9 @@ namespace FeiqLight
                         }
                         break;
                     case "refresh": g.DrawArc(p, 4.5F, 4.5F, 15, 15, 35, 285); g.DrawLines(p, new[] { new PointF(19.6F, 4.4F), new PointF(19.4F, 8.9F), new PointF(15F, 8.6F) }); break;
+                    case "transfer":
+                        g.DrawLine(p, 4, 7, 20, 7); g.DrawLines(p, new[] { new PointF(16, 3), new PointF(20, 7), new PointF(16, 11) });
+                        g.DrawLine(p, 20, 17, 4, 17); g.DrawLines(p, new[] { new PointF(8, 13), new PointF(4, 17), new PointF(8, 21) }); break;
                     case "file": g.DrawLines(p, new[] { new PointF(13.5F, 3), new PointF(7, 3), new PointF(5.5F, 4.5F), new PointF(5.5F, 19.5F), new PointF(7, 21), new PointF(17, 21), new PointF(18.5F, 19.5F), new PointF(18.5F, 8), new PointF(13.5F, 3), new PointF(13.5F, 8), new PointF(18.5F, 8) }); break;
                     case "doc": g.DrawLine(p, 5, 6, 19, 6); g.DrawLine(p, 5, 10, 19, 10); g.DrawLine(p, 5, 14, 19, 14); g.DrawLine(p, 5, 18, 13, 18); break;
                     case "copy": using (GraphicsPath front = RoundedF(new RectangleF(8.5F, 8.5F, 11.5F, 12.5F), 2.2F)) g.DrawPath(p, front); g.DrawLines(p, new[] { new PointF(15.5F, 5), new PointF(15.5F, 4.8F), new PointF(14, 3.3F), new PointF(5.5F, 3.3F), new PointF(4, 4.8F), new PointF(4, 14.5F), new PointF(5.5F, 16), new PointF(5.8F, 16) }); break;

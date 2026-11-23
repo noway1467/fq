@@ -1,9 +1,11 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
+using System.Reflection;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -39,6 +41,52 @@ namespace FeiqLight.Tests
         private static Reply Json(GuestTransfer server,string path,object body){return Request(server.Port,path,server.Token,Encoding.UTF8.GetBytes(new JavaScriptSerializer().Serialize(body)),"POST","Content-Type: application/json\r\n");}
         private static System.Collections.Generic.Dictionary<string,object> Data(Reply reply){return (System.Collections.Generic.Dictionary<string,object>)new JavaScriptSerializer().DeserializeObject(Encoding.UTF8.GetString(reply.Body));}
         private static System.Collections.Generic.IEnumerable<Control> Controls(Control parent){foreach(Control child in parent.Controls){yield return child;foreach(Control nested in Controls(child))yield return nested;}}
+        private static T Field<T>(object target,string name){return (T)target.GetType().GetField(name,BindingFlags.Instance|BindingFlags.NonPublic).GetValue(target);}
+        private static void Tick(System.Windows.Forms.Timer timer){typeof(System.Windows.Forms.Timer).GetMethod("OnTick",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(timer,new object[]{EventArgs.Empty});}
+        private static void PumpFor(int milliseconds)
+        {
+            var clock=System.Diagnostics.Stopwatch.StartNew();
+            while(clock.ElapsedMilliseconds<milliseconds){Application.DoEvents();Thread.Sleep(10);}
+            Application.DoEvents();
+        }
+        private static void Pump(Func<bool> ready,string message)
+        {
+            var clock=System.Diagnostics.Stopwatch.StartNew();
+            while(!ready()&&clock.ElapsedMilliseconds<5000){Application.DoEvents();Thread.Sleep(10);}
+            Check(ready(),message);
+        }
+        private static void CheckPlacement(WindowPlacement placement,Rectangle bounds,bool maximized,string message)
+        {
+            Check(placement!=null&&placement.X==bounds.X&&placement.Y==bounds.Y&&placement.Width==bounds.Width&&placement.Height==bounds.Height&&placement.Maximized==maximized,message);
+        }
+        private static Bitmap EraseBackground(ListBox list)
+        {
+            var image=new Bitmap(Math.Max(1,list.ClientSize.Width),Math.Max(1,list.ClientSize.Height));
+            using(Graphics graphics=Graphics.FromImage(image))
+            {
+                graphics.Clear(Color.Magenta);IntPtr dc=graphics.GetHdc();
+                try
+                {
+                    object[] arguments={Message.Create(list.Handle,0x0014,dc,IntPtr.Zero)};
+                    list.GetType().GetMethod("WndProc",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(list,arguments);
+                    Check(((Message)arguments[0]).Result==(IntPtr)1,"背景擦除未由防闪烁列表接管");
+                }
+                finally{graphics.ReleaseHdc(dc);}
+            }
+            return image;
+        }
+        private sealed class BoundaryListMessages : NativeWindow,IDisposable
+        {
+            internal bool TopError,ZeroHeight;
+            internal BoundaryListMessages(IntPtr handle){AssignHandle(handle);}
+            protected override void WndProc(ref Message message)
+            {
+                if(message.Msg==0x018e&&TopError){message.Result=(IntPtr)(-1);return;}
+                if(message.Msg==0x01a1&&ZeroHeight){message.Result=IntPtr.Zero;return;}
+                base.WndProc(ref message);
+            }
+            public void Dispose(){ReleaseHandle();}
+        }
         private sealed class Progress : IProgress<TransferProgress> { internal Action<TransferProgress> Update;public void Report(TransferProgress value){Update(value);} }
         private static void PauseResume()
         {
@@ -114,6 +162,193 @@ namespace FeiqLight.Tests
                 for(int i=2;i<302;i++)store.Append(new ChatRecord{PeerId="test",Packet=i,Text="普通文字",Time=DateTime.Now});Check(store.AttachmentHistory("test").Count==1,"旧页附件遗漏");store.DeleteRecords("test",new[]{record});Check(store.AttachmentHistory("test").Count==0,"删除消息被任务页复活");
             });
             Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);
+            Run("传输背景边界：极小高度、原生TopIndex=-1和ItemHeight=0不崩溃",()=>{
+                Type type=typeof(TransferWindow).GetNestedType("TransferListBox",BindingFlags.NonPublic);
+                using(var host=new Form())using(var list=(ListBox)Activator.CreateInstance(type,true))
+                {
+                    list.IntegralHeight=false;list.DrawMode=DrawMode.Normal;list.Items.Add("边界任务");host.Controls.Add(list);host.Show();Application.DoEvents();
+                    using(var forced=new BoundaryListMessages(list.Handle))
+                    {
+                        foreach(int height in new[]{0,1,12})foreach(bool zero in new[]{false,true})
+                        {
+                            list.Size=new Size(120,height);forced.TopError=true;forced.ZeroHeight=zero;
+                            Check(list.TopIndex==-1,"未模拟原生LB_ERR边界");if(zero)Check(list.ItemHeight==0,"未模拟原生零行高边界");
+                            using(Bitmap image=EraseBackground(list))Check(image.Width>0,"背景边界绘制未完成");
+                        }
+                    }
+                    host.Close();
+                }
+            });
+            Run("传输排序与文件存在性：同时间稳定次序、静止和进度刷新复用缓存",()=>{
+                Theme.Configure(false,"blue");var store=new LocalStore(Path.Combine(root,"stable-actions"));DateTime time=DateTime.Now;string cached=Path.Combine(root,"cached-local.bin");File.WriteAllText(cached,"cache");
+                using(var network=new LanService(new AppSettings{CloseToTray=false,Notifications=false,ReceiveFolder=Path.Combine(store.Root,"received")},FreePort(),true,"stable"))
+                using(var main=new MainForm(network,store))using(var window=new TransferWindow(main))
+                {
+                    main.Show();var file=new FileTransferState{Id=1,Name="本地文件.bin",Size=5,Status="接收中",LocalPath=cached};
+                    main.TrackTransfer(new ChatRecord{PeerId="b",Packet=10,Sender="B",Time=time,Transfers=new[]{file}});
+                    main.TrackTransfer(new ChatRecord{PeerId="a",Packet=10,Sender="A",Time=time,Transfers=new[]{new FileTransferState{Id=1,Name="同时间.txt",Size=1,Status="已暂停"}}});
+                    main.TrackTransfer(new ChatRecord{PeerId="z",Packet=11,Sender="Z",Time=time,Transfers=new[]{new FileTransferState{Id=1,Name="较新.txt",Size=1,Status="已暂停"}}});
+                    window.Show();PumpFor(80);ListBox list=Field<ListBox>(window,"list");Check(list.Items.Cast<object>().Select(item=>Field<ChatRecord>(item,"Record").PeerId).SequenceEqual(new[]{"z","a","b"}),"相同时间的任务排序不稳定");
+                    list.SelectedIndex=2;Button action=Field<Button>(window,"action");Check(action.Text=="打开文件位置","已有文件未显示打开操作");File.Delete(cached);
+                    var timer=Field<System.Windows.Forms.Timer>(window,"timer");Tick(timer);Check(action.Text=="打开文件位置","未变化刷新仍同步查询磁盘");file.Percent=30;Tick(timer);Check(action.Text=="打开文件位置","仅进度变化重复查询本地文件");
+                    list.SelectedIndex=1;list.SelectedIndex=2;Check(action.Text=="继续接收","重新选择未核验文件存在性");File.WriteAllText(cached,"cache");file.Status="已暂停";Tick(timer);Check(action.Text=="打开文件位置","任务状态变化未重新核验文件");
+                    window.Close();main.ExitApplication();
+                }
+            });
+            Run("访客窗口：重复打开恢复同一个最小化窗口",()=>{
+                var store=new LocalStore(Path.Combine(root,"guest-restore"));
+                using(var network=new LanService(new AppSettings{CloseToTray=false,Notifications=false,ReceiveFolder=Path.Combine(store.Root,"received")},FreePort(),true,"guest-restore"))using(var main=new MainForm(network,store))
+                {
+                    main.Show();MethodInfo open=typeof(MainForm).GetMethod("OpenGuest",BindingFlags.Instance|BindingFlags.NonPublic);open.Invoke(main,null);Application.DoEvents();GuestWindow guest=Field<GuestWindow>(main,"guestWindow");Check(guest!=null&&guest.Visible,"访客窗口未打开");
+                    guest.WindowState=FormWindowState.Minimized;Application.DoEvents();open.Invoke(main,null);Application.DoEvents();Check(Object.ReferenceEquals(guest,Field<GuestWindow>(main,"guestWindow"))&&guest.WindowState==FormWindowState.Normal&&guest.Visible,"重复打开未恢复已有访客窗口");guest.Close();main.ExitApplication();
+                }
+            });
+            Run("传输定时刷新：静止零重绘、仅刷新变化行、隐藏和最小化恢复",()=>{
+                Theme.Configure(false,"blue");var store=new LocalStore(Path.Combine(root,"redraw"));
+                using(var network=new LanService(new AppSettings{CloseToTray=false,Notifications=false,ReceiveFolder=Path.Combine(store.Root,"received")},FreePort(),true,"redraw"))
+                using(var main=new MainForm(network,store))using(var window=new TransferWindow(main))
+                {
+                    main.Show();var file=new FileTransferState{Id=1,Name="中文 English-transfer.bin",Size=10485760,Percent=20,Status="接收中",BytesPerSecond=1048576};
+                    main.TrackTransfer(new ChatRecord{PeerId="browser-guests",Packet=1,Sender="浏览器访客",Time=DateTime.Now,Transfers=new[]{file}});
+                    main.TrackTransfer(new ChatRecord{PeerId="other",Packet=2,Sender="另一台设备",Time=DateTime.Now.AddMinutes(-1),Transfers=new[]{new FileTransferState{Id=1,Name="waiting.txt",Size=1024,Status="已暂停"}}});
+                    window.Show();PumpFor(650);ListBox list=Controls(window).OfType<ListBox>().Single();Check(list.Items.Count==2,"未加载两条测试任务");list.SelectedIndex=0;Application.DoEvents();
+                    var invalidated=new List<Rectangle>();int textChanges=0,visibilityChanges=0,ticks=0;
+                    list.Invalidated+=(sender,e)=>invalidated.Add(e.InvalidRect);
+                    foreach(Label label in new[]{Field<Label>(window,"summary"),Field<Label>(window,"detail"),Field<Label>(window,"empty")})label.TextChanged+=delegate{textChanges++;};
+                    Button action=Field<Button>(window,"action"),more=Field<Button>(window,"more");action.TextChanged+=delegate{textChanges++;};action.VisibleChanged+=delegate{visibilityChanges++;};more.VisibleChanged+=delegate{visibilityChanges++;};
+                    System.Windows.Forms.Timer timer=Field<System.Windows.Forms.Timer>(window,"timer");timer.Tick+=delegate{ticks++;};
+                    PumpFor(1150);Check(ticks>=2,"真实500ms定时器未运行");Check(invalidated.Count==0,"无变化仍触发列表重绘");Check(textChanges==0&&visibilityChanges==0,"静止时反复修改摘要或操作控件");Check(!more.Visible,"访客任务错误显示会话操作");
+                    file.Percent=35;Tick(timer);Check(invalidated.Count==1&&invalidated[0]==list.GetItemRectangle(0),"进度变化未局限于对应任务行");Check(Field<Label>(window,"summary").Text.Contains("3.5 MB"),"总摘要未随进度更新");
+                    invalidated.Clear();file.BytesPerSecond+=1;Tick(timer);Check(invalidated.Count==0,"显示速度与剩余时间未变仍重绘");
+                    file.Status="已暂停";Tick(timer);Check(invalidated.Count==1&&invalidated[0]==list.GetItemRectangle(0),"状态变化没有精确刷新");Check(Field<Label>(window,"detail").Text=="已暂停","任务详情未更新状态");
+                    invalidated.Clear();file.Error="连接中断，请继续接收";Tick(timer);Check(invalidated.Count==1&&Field<Label>(window,"detail").Text==file.Error,"错误变化未更新任务和详情");
+                    invalidated.Clear();file.LocalPath=sample;Tick(timer);Check(invalidated.Count==1&&action.Text=="打开文件位置","保存位置变化未更新任务操作");Check(Field<ToolTip>(window,"tips").GetToolTip(Field<Label>(window,"detail"))==sample,"保存位置提示未更新");
+                    object selected=list.SelectedItem;string fingerprint=Field<string>(selected,"Fingerprint");window.Hide();Application.DoEvents();invalidated.Clear();file.Percent++;Tick(timer);
+                    Check(invalidated.Count==0&&Field<string>(selected,"Fingerprint")==fingerprint,"隐藏时仍定时刷新");window.Show();Check(Field<string>(selected,"Fingerprint")!=fingerprint,"重新显示未立即刷新");
+                    window.WindowState=FormWindowState.Minimized;Application.DoEvents();fingerprint=Field<string>(selected,"Fingerprint");invalidated.Clear();file.Percent++;Tick(timer);
+                    Check(invalidated.Count==0&&Field<string>(selected,"Fingerprint")==fingerprint,"最小化时仍定时刷新");window.WindowState=FormWindowState.Normal;
+                    Check(Field<string>(selected,"Fingerprint")!=fingerprint,"从最小化恢复未立即刷新");Check(Object.ReferenceEquals(selected,list.SelectedItem),"进度刷新丢失选中条目");
+                    window.Close();main.ExitApplication();
+                }
+            });
+            Run("传输列表背景：保留条目像素、填充尾部与空列表、保留原生绘制",()=>{
+                foreach(bool dark in new[]{false,true})
+                {
+                    Theme.Configure(dark,"blue");var store=new LocalStore(Path.Combine(root,"erase-"+dark));
+                    using(var network=new LanService(new AppSettings{CloseToTray=false,Notifications=false,ReceiveFolder=Path.Combine(store.Root,"received")},FreePort(),true,"erase"))
+                    using(var main=new MainForm(network,store))using(var window=new TransferWindow(main))
+                    {
+                        main.Show();main.TrackTransfer(new ChatRecord{PeerId="one",Packet=1,Sender="测试设备",Time=DateTime.Now,Transfers=new[]{new FileTransferState{Id=1,Name="文件.txt",Size=5,Status="接收中"}}});
+                        window.Show();PumpFor(80);ListBox list=Controls(window).OfType<ListBox>().Single();Check(list.Items.Count==1,"背景测试任务缺失");
+                        Check(list.DrawMode==DrawMode.OwnerDrawFixed,"破坏原生OwnerDrawFixed模式");Check(!(bool)typeof(Control).GetMethod("GetStyle",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(list,new object[]{ControlStyles.UserPaint}),"错误开启UserPaint");
+                        int bottom=list.GetItemRectangle(0).Bottom;Check(bottom<list.ClientSize.Height,"测试窗口没有尾部空白");
+                        using(Bitmap image=EraseBackground(list)){Check(image.GetPixel(2,2).ToArgb()==Color.Magenta.ToArgb(),"背景擦除清空了自绘条目区域");Check(image.GetPixel(2,bottom+1).ToArgb()==list.BackColor.ToArgb(),"尾部空白未使用当前主题背景");}
+                        Controls(window).OfType<TextBox>().Single().Text="不存在";Check(list.Items.Count==0,"空列表测试过滤失败");
+                        using(Bitmap image=EraseBackground(list)){Check(image.GetPixel(2,2).ToArgb()==list.BackColor.ToArgb()&&image.GetPixel(2,image.Height-2).ToArgb()==list.BackColor.ToArgb(),"空列表未填充整个客户区");}
+                        window.Close();main.ExitApplication();
+                    }
+                }
+            });
+            Run("聊天顶部：传输入口、既有控件查找、提示、窄窗和明暗图标",()=>{
+                foreach(bool dark in new[]{false,true})
+                {
+                    Theme.Configure(dark,"blue");var store=new LocalStore(Path.Combine(root,"chat-transfer-"+dark));
+                    var settings=new AppSettings{CloseToTray=false,Notifications=false,ReceiveFolder=Path.Combine(store.Root,"received"),Conversations=new[]{new SavedConversation{Endpoint="127.0.0.1:"+FreePort(),Login="chat-peer",Nickname="中文 English 很长的聊天联系人名称"}}};
+                    using(var network=new LanService(settings,FreePort(),true,"chat-transfer"))using(var main=new MainForm(network,store))
+                    {
+                        main.Show();main.OpenChat(network.Peers.Single());ChatForm chat=main.ActiveChat;Application.DoEvents();
+                        string[] names={"传输任务","聊天记录","收到的文件","会话菜单"};Button[] buttons=names.Select(name=>Controls(chat).OfType<Button>().Single(button=>button.AccessibleName==name)).ToArray();
+                        TableLayoutPanel head=Field<TableLayoutPanel>(chat,"head");Check(head.ColumnCount==6,"顶部栏列数未更新");
+                        for(int i=0;i<buttons.Length;i++){Check(head.GetColumn(buttons[i])==i+2,"顶部按钮顺序错误");Check(Field<ToolTip>(chat,"headTips").GetToolTip(buttons[i])==names[i],"顶部按钮缺少提示");}
+                        Check(((RoundedButton)buttons[0]).Glyph=="transfer"&&Theme.MenuGlyph("传输任务…")=="transfer"&&Theme.MenuGlyph("临时浏览器传输…")=="link","传输或访客菜单图标未匹配");
+                        foreach(int width in new[]{1120,720})
+                        {
+                            main.ClientSize=new Size(width,680);Application.DoEvents();
+                            foreach(Button button in buttons)Check(button.Visible&&button.Width>0&&head.ClientRectangle.Contains(button.Bounds),"窄窗顶部按钮溢出或隐藏："+button.AccessibleName);
+                            using(var image=new Bitmap(head.Width,head.Height)){head.DrawToBitmap(image,new Rectangle(Point.Empty,head.Size));image.Save(Path.Combine(output,"chat-header-"+(dark?"dark":"light")+"-"+width+".png"));}
+                        }
+                        buttons[0].PerformClick();Application.DoEvents();TransferWindow window=Field<TransferWindow>(main,"transferWindow");Check(window!=null&&window.Visible,"聊天传输按钮未打开任务窗口");
+                        window.WindowState=FormWindowState.Minimized;buttons[0].PerformClick();Check(Object.ReferenceEquals(window,Field<TransferWindow>(main,"transferWindow"))&&window.WindowState==FormWindowState.Normal,"重复点击未恢复已有传输窗口");
+                        window.Close();main.ExitApplication();
+                    }
+                }
+            });
+            Run("传输窗口记忆：防抖、等值事件不保存、关闭落盘与重启恢复",()=>{
+                Theme.Configure(false,"blue");var store=new LocalStore(Path.Combine(root,"transfer-placement"));Rectangle area=Screen.PrimaryScreen.WorkingArea;
+                Rectangle wanted=new Rectangle(area.Left+20,area.Top+24,Math.Min(820,area.Width-40),Math.Min(580,area.Height-48));
+                using(var network=new LanService(new AppSettings{CloseToTray=false,Notifications=false,ReceiveFolder=Path.Combine(store.Root,"received")},FreePort(),true,"placement"))
+                using(var main=new MainForm(network,store))using(var window=new TransferWindow(main))
+                {
+                    main.Show();window.Show();window.Bounds=wanted;
+                    Pump(()=>store.LoadSettings().TransferWindow!=null&&store.LoadSettings().TransferWindow.X==wanted.X,"传输窗口防抖未自动落盘");CheckPlacement(store.LoadSettings().TransferWindow,wanted,false,"位置或大小未持久化");
+                    System.Windows.Forms.Timer save=Field<System.Windows.Forms.Timer>(window,"windowSaveTimer");Check(!save.Enabled,"保存后防抖定时器未停止");
+                    typeof(TransferWindow).GetMethod("TrackWindowPlacement",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(window,new object[]{window,EventArgs.Empty});Check(!save.Enabled,"等值位置事件重复启动保存");
+                    wanted.Offset(4,6);window.Bounds=wanted;window.Close();CheckPlacement(store.LoadSettings().TransferWindow,wanted,false,"关闭未立即保存最新位置");main.ExitApplication();
+                }
+                using(var network=new LanService(store.LoadSettings(),FreePort(),true,"placement-restored"))using(var main=new MainForm(network,store))using(var window=new TransferWindow(main))
+                {
+                    main.Show();window.Show();Application.DoEvents();Check(window.StartPosition==FormStartPosition.Manual&&window.Bounds==wanted,"重启未恢复普通窗口几何："+window.Bounds);window.Close();main.ExitApplication();
+                }
+            });
+            Run("传输窗口落盘边界：未变化关闭不写盘、主窗销毁后不保存",()=>{
+                var store=new LocalStore(Path.Combine(root,"placement-close-boundary"));
+                using(var network=new LanService(new AppSettings{CloseToTray=false,Notifications=false,ReceiveFolder=Path.Combine(store.Root,"received")},FreePort(),true,"close-boundary"))using(var main=new MainForm(network,store))
+                {
+                    main.Show();string settings=Path.Combine(store.Root,"settings.json");
+                    using(var window=new TransferWindow(main))
+                    {
+                        window.Show();Pump(()=>!Field<bool>(window,"placementPending"),"初始窗口位置未保存");DateTime sentinel=DateTime.UtcNow.AddHours(-2);File.SetLastWriteTimeUtc(settings,sentinel);DateTime before=File.GetLastWriteTimeUtc(settings);
+                        window.Close();Check(File.GetLastWriteTimeUtc(settings)==before,"未移动或缩放窗口仍在关闭时写盘");
+                    }
+                    using(var window=new TransferWindow(main))
+                    {
+                        window.Show();Application.DoEvents();Check(!Field<bool>(window,"placementPending"),"相同已保存位置不应待落盘");window.Location=new Point(window.Left+3,window.Top+3);Check(Field<bool>(window,"placementPending"),"移动未生成待落盘状态");
+                        main.Dispose();DateTime sentinel=DateTime.UtcNow.AddHours(-3);File.SetLastWriteTimeUtc(settings,sentinel);DateTime before=File.GetLastWriteTimeUtc(settings);
+                        window.Dispose();Check(File.GetLastWriteTimeUtc(settings)==before,"主窗已销毁时仍保存传输窗口位置");
+                    }
+                }
+            });
+            Run("传输窗口记忆：最大化、最小化关闭、重开与还原尺寸",()=>{
+                var store=new LocalStore(Path.Combine(root,"transfer-maximized"));Rectangle area=Screen.PrimaryScreen.WorkingArea;
+                Rectangle wanted=new Rectangle(area.Left+32,area.Top+32,Math.Min(800,area.Width-64),Math.Min(560,area.Height-64));
+                var settings=new AppSettings{CloseToTray=false,Notifications=false,ReceiveFolder=Path.Combine(store.Root,"received"),TransferWindow=new WindowPlacement{X=wanted.X,Y=wanted.Y,Width=wanted.Width,Height=wanted.Height}};
+                using(var network=new LanService(settings,FreePort(),true,"maximized"))using(var main=new MainForm(network,store))
+                {
+                    main.Show();main.OpenTransfers();TransferWindow window=Field<TransferWindow>(main,"transferWindow");Application.DoEvents();Check(window.Bounds==wanted,"初始记忆尺寸未恢复");
+                    window.WindowState=FormWindowState.Maximized;window.WindowState=FormWindowState.Minimized;main.OpenTransfers();Check(window.WindowState==FormWindowState.Maximized,"防抖落盘前重开丢失最大化状态");
+                    window.WindowState=FormWindowState.Minimized;Application.DoEvents();window.Close();
+                    CheckPlacement(store.LoadSettings().TransferWindow,wanted,true,"最小化关闭覆盖了最大化或普通尺寸");main.OpenTransfers();window=Field<TransferWindow>(main,"transferWindow");Application.DoEvents();Check(window.WindowState==FormWindowState.Maximized,"重开未恢复最大化");
+                    window.WindowState=FormWindowState.Minimized;main.OpenTransfers();Check(window.WindowState==FormWindowState.Maximized,"打开已有最小化窗口丢失最大化状态");
+                    window.WindowState=FormWindowState.Normal;Application.DoEvents();Check(window.Bounds==wanted,"最大化还原后尺寸变化："+window.Bounds);window.Close();CheckPlacement(store.LoadSettings().TransferWindow,wanted,false,"还原后仍保存为最大化");main.ExitApplication();
+                }
+            });
+            Run("传输窗口记忆：旧配置默认值、异常尺寸与屏外钳制",()=>{
+                var store=new LocalStore(Path.Combine(root,"transfer-offscreen"));File.WriteAllText(Path.Combine(store.Root,"settings.json"),"{\"Nickname\":\"旧配置\"}",new UTF8Encoding(false));Check(store.LoadSettings().TransferWindow==null,"旧配置未保持默认null");
+                foreach(int size in new[]{0,-1,Int32.MaxValue})
+                {
+                    var settings=new AppSettings{CloseToTray=false,Notifications=false,ReceiveFolder=Path.Combine(store.Root,"received"),TransferWindow=new WindowPlacement{X=Int32.MaxValue,Y=Int32.MinValue,Width=size,Height=size}};
+                    using(var network=new LanService(settings,FreePort(),true,"offscreen"))using(var main=new MainForm(network,store))using(var window=new TransferWindow(main))
+                    {
+                        main.Show();window.Show();Application.DoEvents();Check(window.Width>=window.MinimumSize.Width&&window.Height>=window.MinimumSize.Height,"窗口未尊重最小尺寸");
+                        if(size>0)Check(Screen.FromControl(window).WorkingArea.Contains(window.Bounds),"极大或屏外配置未钳制回工作区");else Check(window.StartPosition==FormStartPosition.CenterScreen,"无效尺寸未回退默认位置");
+                        Rectangle actual=window.Bounds;window.Close();CheckPlacement(store.LoadSettings().TransferWindow,actual,false,"校正后的窗口几何未保存");main.ExitApplication();
+                    }
+                }
+            });
+            Run("保存其他设置保留传输窗口记忆",()=>{
+                var store=new LocalStore(Path.Combine(root,"transfer-settings"));Rectangle area=Screen.PrimaryScreen.WorkingArea;Rectangle wanted=new Rectangle(area.Left+16,area.Top+16,780,540);
+                var settings=new AppSettings{CloseToTray=false,Notifications=false,ReceiveFolder=Path.Combine(store.Root,"received"),TransferWindow=new WindowPlacement{X=wanted.X,Y=wanted.Y,Width=wanted.Width,Height=wanted.Height,Maximized=true}};
+                using(var network=new LanService(settings,FreePort(),true,"settings"))using(var main=new MainForm(network,store))
+                {
+                    main.Show();Application.DoEvents();
+                    using(var save=new System.Windows.Forms.Timer{Interval=40})
+                    {
+                        save.Tick+=delegate{SettingsDialog dialog=Application.OpenForms.OfType<SettingsDialog>().FirstOrDefault();if(dialog==null)return;save.Stop();Controls(dialog).OfType<Button>().Single(button=>button.Text=="保存").PerformClick();};
+                        save.Start();main.OpenSettings();
+                    }
+                    CheckPlacement(network.Settings.TransferWindow,wanted,true,"保存设置替换了内存中的传输窗口记忆");CheckPlacement(store.LoadSettings().TransferWindow,wanted,true,"保存设置丢失持久化的传输窗口记忆");main.ExitApplication();
+                }
+            });
             Run("传输页明暗主题、窄窗、搜索与空状态",()=>{
                 foreach(bool dark in new[]{false,true}){
                     Theme.Configure(dark,"blue");var settings=new AppSettings{CloseToTray=false,ReceiveFolder=Path.Combine(root,"ui-received")};var store=new LocalStore(Path.Combine(root,"ui-"+dark));

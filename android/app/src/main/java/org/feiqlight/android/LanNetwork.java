@@ -31,9 +31,10 @@ final class LanNetwork implements LanNode.SocketBinding {
     private final InterfaceLookup interfaceLookup;
     private final DatagramFactory datagramFactory;
     private final Map<DatagramSocket,Network> bound=new WeakHashMap<>();
+    private final Set<Network> trackedNetworks=new LinkedHashSet<>();
     private Network cachedNetwork;
     private LinkProperties cachedLinks;
-    private boolean cachedLocal;
+    private boolean cachedLocal,cachedVpn,cachedBindSocketBlocked;
     private List<LocalLink> cachedLocalLinks=Collections.emptyList();
     private List<InetAddress> cachedLocalBroadcasts=Collections.emptyList();
     private Object cachedKey;
@@ -45,6 +46,9 @@ final class LanNetwork implements LanNode.SocketBinding {
     LanNetwork(ConnectivityManager manager,InterfaceLookup interfaceLookup) { this(manager,interfaceLookup,DatagramSocket::new); }
     LanNetwork(ConnectivityManager manager,InterfaceLookup interfaceLookup,DatagramFactory datagramFactory) { this.manager=manager; this.interfaceLookup=interfaceLookup;this.datagramFactory=datagramFactory; }
     @Override public void changed() {revision.incrementAndGet();}
+    synchronized void track(Network network) {trackedNetworks.add(network);changed();}
+    synchronized void lost(Network network) {trackedNetworks.remove(network);changed();}
+    synchronized void clearTrackedNetworks() {trackedNetworks.clear();bound.clear();cachedBindSocketBlocked=false;changed();}
     static boolean physical(NetworkCapabilities capabilities) {
         return capabilities!=null && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
             && !capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
@@ -87,31 +91,42 @@ final class LanNetwork implements LanNode.SocketBinding {
         long version=revision.get();
         if(version!=checkedRevision || System.nanoTime()-checkedAt>java.util.concurrent.TimeUnit.SECONDS.toNanos(5)) {
             // 网络回调主动失效，短 TTL 补漏；同一批发现/ACK 不再逐包调用系统 Binder。
-            checkedRevision=version;checkedAt=System.nanoTime();cachedFailure=null;cachedNetwork=null;cachedLinks=null;cachedLocal=false;cachedLocalLinks=Collections.emptyList();cachedLocalBroadcasts=Collections.emptyList();cachedKey=null;
+            Object previousKey=cachedKey;
+            checkedRevision=version;checkedAt=System.nanoTime();cachedFailure=null;cachedNetwork=null;cachedLinks=null;cachedLocal=false;cachedVpn=false;cachedLocalLinks=Collections.emptyList();cachedLocalBroadcasts=Collections.emptyList();cachedKey=null;
             try {
                 scan();
             }
             catch(IOException e){cachedFailure=e;}
             catch(RuntimeException e){cachedFailure=new IOException("无法读取局域网状态，请检查系统网络权限",e);}
+            if(!Objects.equals(previousKey,cachedKey))cachedBindSocketBlocked=false;
         }
         if(cachedFailure!=null)throw new IOException(cachedFailure.getMessage(),cachedFailure);
         return cachedNetwork;
     }
     @Override public synchronized Object networkKey() throws IOException {select();return cachedKey;}
     private void scan() throws IOException {
-        Network chosen=null; LinkProperties chosenLinks=null; int best=-1; boolean vpn=false;
+        Network chosen=null; LinkProperties chosenLinks=null; int best=-1;
         Set<String> nonLanInterfaces=new HashSet<>();
         if(manager!=null) {
-            for(Network network:manager.getAllNetworks()) {
+            // 回调中的底层网络可能尚未出现在全量快照中，合并后再读取当前能力，不能使用失效网络。
+            Set<Network> networks=new LinkedHashSet<>();
+            Network[] snapshot=manager.getAllNetworks();
+            if(snapshot!=null)networks.addAll(Arrays.asList(snapshot));
+            networks.addAll(trackedNetworks);
+            for(Network network:networks) {
                 NetworkCapabilities capabilities=manager.getNetworkCapabilities(network);
-                if(capabilities!=null && capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) vpn=true;
+                if(capabilities==null){trackedNetworks.remove(network);continue;}
+                if(capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN))cachedVpn=true;
                 LinkProperties links=manager.getLinkProperties(network);
+                String name=links==null||links.getInterfaceName()==null?"":links.getInterfaceName().trim().toLowerCase(Locale.ROOT);
                 if(!physical(capabilities)) {
-                    if(links!=null && links.getInterfaceName()!=null) nonLanInterfaces.add(links.getInterfaceName().trim().toLowerCase(Locale.ROOT));
+                    // 部分 VPN 的 LinkProperties 报告底层 wlan/eth；只排除确属蜂窝或隧道的接口。
+                    boolean cellular=!capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)&&capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR);
+                    if(!name.isEmpty()&&(cellular||hasPrefix(name,BLOCKED_PREFIXES)))nonLanInterfaces.add(name);
                     continue;
                 }
                 if(links==null || links.getLinkAddresses().stream().noneMatch(a->a.getAddress() instanceof Inet4Address)) {
-                    if(links!=null && links.getInterfaceName()!=null) nonLanInterfaces.add(links.getInterfaceName().trim().toLowerCase(Locale.ROOT));
+                    if(!name.isEmpty())nonLanInterfaces.add(name);
                     continue;
                 }
                 // 无互联网的局域网也能通信，不要求 INTERNET / VALIDATED 能力。
@@ -165,7 +180,7 @@ final class LanNetwork implements LanNode.SocketBinding {
             cachedKey=Arrays.asList("local",localKeys);
             return;
         }
-        if(vpn) throw new IOException("VPN 下未找到可直连的 Wi-Fi/以太网或热点。请连接局域网或开启热点，并在 VPN 中允许局域网或将飞Q排除；强制 VPN 模式可能阻止直连。");
+        if(cachedVpn) throw new IOException("VPN 下未找到可直连的 Wi-Fi/以太网或热点。请连接局域网或开启热点，并在 VPN 中允许局域网或将飞Q排除；强制 VPN 模式可能阻止直连。");
     }
     private LocalLink localLink(InetAddress destination) {
         if(!(destination instanceof Inet4Address))return null;
@@ -194,7 +209,8 @@ final class LanNetwork implements LanNode.SocketBinding {
             throw new IOException(DISCONNECTED_STATUS);
         }
         if(network.equals(bound.get(socket)))return;
-        try {network.bindSocket(socket);bound.put(socket,network);} catch(IOException e) {
+        try {network.bindSocket(socket);bound.put(socket,network);cachedBindSocketBlocked=false;} catch(IOException e) {
+            cachedBindSocketBlocked=true;
             bound.remove(socket);
             if(!cachedLocalLinks.isEmpty())return;
             changed();throw blocked(e);
@@ -206,7 +222,8 @@ final class LanNetwork implements LanNode.SocketBinding {
             if(cachedLocal) return;
             throw new IOException(DISCONNECTED_STATUS);
         }
-        try {network.bindSocket(socket);} catch(IOException e) {
+        try {network.bindSocket(socket);cachedBindSocketBlocked=false;} catch(IOException e) {
+            cachedBindSocketBlocked=true;
             if(!cachedLocalLinks.isEmpty())return;
             changed();throw blocked(e);
         }
@@ -220,8 +237,9 @@ final class LanNetwork implements LanNode.SocketBinding {
         Network network=select();
         if(network!=null){
             if(!allows(destination))throw new IOException("目标不在当前物理局域网内");
-            try {network.bindSocket(socket);return;}
+            try {network.bindSocket(socket);cachedBindSocketBlocked=false;return;}
             catch(IOException e) {
+                cachedBindSocketBlocked=true;
                 LocalLink link=localLink(destination);
                 if(link!=null){socket.bind(new InetSocketAddress(link.address,0));return;}
                 changed();throw blocked(e);
@@ -230,6 +248,11 @@ final class LanNetwork implements LanNode.SocketBinding {
         LocalLink link=localLink(destination);
         if(link==null)throw new IOException("目标不在当前热点或共享子网内，请重新发现设备");
         socket.bind(new InetSocketAddress(link.address,0));
+    }
+    @Override public synchronized boolean shouldRetryWithoutSourceBind(InetAddress destination)throws IOException {
+        select();
+        return cachedVpn&&(cachedBindSocketBlocked||cachedLocal)&&localLink(destination)!=null
+            && !cachedLocalBroadcasts.contains(destination)&&allows(destination);
     }
     @Override public synchronized void send(DatagramSocket receiver,byte[] bytes,InetSocketAddress destination)throws IOException {
         Network network=select();
@@ -249,7 +272,16 @@ final class LanNetwork implements LanNode.SocketBinding {
         }
         // 发送 socket 绑定热点本地地址，应用只使用当前共享子网；回复端口由发现报文明确提供。
         try(DatagramSocket sender=datagramFactory.create(new InetSocketAddress(link.address,0))){sender.setBroadcast(true);sender.send(new DatagramPacket(bytes,bytes.length,destination));}
-        catch(IOException error){if(boundFailure!=null)error.addSuppressed(boundFailure);throw blocked(error);}
+        catch(IOException error){
+            if(boundFailure!=null)error.addSuppressed(boundFailure);
+            InetAddress target=destination.getAddress();
+            // 无源地址的默认路由仅用于 VPN 允许的当前私网单播；广播绝不进入 TUN 或默认网关。
+            if(cachedVpn&&allows(target)&&!broadcasts().contains(target)&&!"255.255.255.255".equals(target.getHostAddress())) {
+                try(DatagramSocket sender=datagramFactory.create(null)){sender.send(new DatagramPacket(bytes,bytes.length,destination));return;}
+                catch(IOException retryError){retryError.addSuppressed(error);throw blocked(retryError);}
+            }
+            throw blocked(error);
+        }
     }
     private IOException blocked(IOException cause) { return new IOException("局域网直连被系统限制，请检查 VPN 的允许局域网/应用排除与阻止非 VPN 连接设置。",cause); }
     @Override public synchronized Collection<InetAddress> broadcasts() throws IOException {

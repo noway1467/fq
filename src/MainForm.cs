@@ -41,7 +41,7 @@ public sealed class MainForm : ModernWindow
         }
         private void OpenGuest()
         {
-            try{if(guestWindow==null||guestWindow.IsDisposed)guestWindow=new GuestWindow(this,network);guestWindow.Show();guestWindow.Activate();}
+            try{if(guestWindow==null||guestWindow.IsDisposed)guestWindow=new GuestWindow(this,network);guestWindow.Show();if(guestWindow.WindowState==FormWindowState.Minimized)guestWindow.WindowState=FormWindowState.Normal;guestWindow.Activate();}
             catch(Exception e){OnError("临时传输未开启："+e.Message);}
         }
         private readonly Dictionary<string, ChatRecord> transferRecords = new Dictionary<string, ChatRecord>();
@@ -72,10 +72,19 @@ public sealed class MainForm : ModernWindow
             using(var confirm=new ConfirmDialog("取消发送？","将撤销这批尚未接收的文件邀请；本机原文件和对方已保存的文件保留。","取消发送",true))
                 if(confirm.ShowDialog(this)==DialogResult.OK)network.CancelOutgoing(record.PeerId,record.Packet,record.State,true);
         }
-        private void OpenTransfers()
+        internal void OpenTransfers()
         {
             if(transferWindow==null||transferWindow.IsDisposed)transferWindow=new TransferWindow(this);
+            if(transferWindow.WindowState==FormWindowState.Minimized)
+                transferWindow.WindowState=transferWindow.RestoreMaximized?FormWindowState.Maximized:FormWindowState.Normal;
             transferWindow.Show();transferWindow.Activate();
+        }
+        internal WindowPlacement TransferWindowPlacement { get { return network.Settings.TransferWindow; } }
+        internal void SaveTransferWindowPlacement(WindowPlacement placement)
+        {
+            network.Settings.TransferWindow = placement;
+            try { store.SaveSettings(network.Settings); }
+            catch (Exception error) { status.Text = "传输窗口状态保存失败：" + error.Message; }
         }
         private readonly List<ToolsGateway> gateways=new List<ToolsGateway>();
         private bool toolsRestored;
@@ -496,6 +505,7 @@ public sealed class MainForm : ModernWindow
             }
             if (restoreFront && !IsDisposed) Activate();
             next.Window = previous.Window;
+            next.TransferWindow = previous.TransferWindow;
             next.SidebarWidth = previous.SidebarWidth;
             next.KnownPeers = previous.KnownPeers;
             next.Conversations = previous.Conversations;

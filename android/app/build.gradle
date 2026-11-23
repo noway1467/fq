@@ -7,8 +7,8 @@ android {
         applicationId 'org.feiqlight.android'
         minSdk 26
         targetSdk 36
-        versionCode 75
-        versionName '0.8.0'
+        versionCode 76
+        versionName '0.8.1'
     }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
@@ -35,6 +35,8 @@ android {
     testOptions {
         unitTests.includeAndroidResources = true
         unitTests.all {
+            // Robolectric 注册的 Conscrypt 会影响后续纯 JVM TLS；按测试类隔离密码库状态。
+            forkEvery = 1
             systemProperty 'java.io.tmpdir', System.getProperty('java.io.tmpdir', file('../../build/tmp').absolutePath)
             systemProperty 'maven.repo.local', file('../../build/maven-repo').absolutePath
             systemProperty 'robolectric.dependency.repo.url', 'https://repo.maven.apache.org/maven2'

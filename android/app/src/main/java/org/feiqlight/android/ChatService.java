@@ -51,6 +51,7 @@ public final class ChatService extends Service {
     }
     private volatile LanNode node;
     private volatile LanNode startingNode;
+    private volatile LanNetwork lanNetwork;
     private final List<ToolsGateway> gateways=new ArrayList<>();
     static Intent toolIntent(Context context,Uri url,String peerId,String mode,boolean phone) {
         if("share".equals(mode)) {
@@ -59,13 +60,17 @@ public final class ChatService extends Service {
         return new Intent(context,RemoteActivity.class).setData(url).putExtra("phone",phone).putExtra("peer_id",peerId).putExtra("tool_mode",mode);
     }
     void openTool(LanNode.Peer peer,int port,String mode,boolean phone,Consumer<Intent> ready) {
-        LanNode current=node;long epoch=connectionEpoch;int transport=current==null?0:current.transportEpoch();
+        LanNode current=node;LanNetwork route=lanNetwork;long epoch=connectionEpoch;int transport=current==null?0:current.transportEpoch();
         queue(()->{try {
-            if(current==null)throw new IOException("请先连接局域网");current.verifyPeer(peer);
-            ToolsGateway gateway=new ToolsGateway(current.security(),peer,port,new LanNetwork(getSystemService(ConnectivityManager.class)),current);
+            if(current==null||route==null)throw new IOException("请先连接局域网");current.verifyPeer(peer);
+            ToolsGateway gateway=new ToolsGateway(current.security(),peer,port,route,current);
             main.post(()->{if(!currentConnection(epoch)||node!=current||transport!=current.transportEpoch()){gateway.close();return;}gateways.add(gateway);
                 ready.accept(toolIntent(this,Uri.parse(gateway.url()+"#"+mode),peer.id(),mode,phone));});
         }catch(Exception error){fail(error);}});
+    }
+    List<String> localAddresses()throws IOException {
+        LanNetwork route=lanNetwork;
+        return (route!=null?route:networkFactory.apply(getSystemService(ConnectivityManager.class))).addresses();
     }
     void forgetSecurity(LanNode.Peer peer){queue(()->{try{requireNode().forgetSecurity(peer);new ToolsPairings(this).forgetFingerprint(peer.fingerprint);main.post(()->{closeGateways();closeSharing();PhoneRemoteService.stopActive();});showError("已撤销设备信任，下次连接需重新核对");}catch(Exception e){fail(e);}});}
     private void closeGateways(){for(ToolsGateway gateway:gateways)gateway.close();gateways.clear();}
@@ -77,15 +82,15 @@ public final class ChatService extends Service {
     void stopGuest(){guestEpoch++;if(guestTransfer!=null){guestTransfer.close();if(!guestTransfer.cleanupError.isEmpty())showError(guestTransfer.cleanupError);guestTransfer=null;}}
     void startGuest(List<Uri> files,boolean upload,Consumer<Boolean> done) {
         if(!online()){showError("请先连接局域网");done.accept(false);return;}
-        stopGuest();long epoch=guestEpoch;
+        stopGuest();long epoch=guestEpoch;LanNetwork route=lanNetwork;
         queue(()->{try {
             List<LanNode.Source> sources=new ArrayList<>();for(Uri uri:files)sources.add(new DocumentSource(this,uri));
-            GuestTransfer created=new GuestTransfer(this,sources,upload,false);created.received=()->main.post(this::changed);
+            GuestTransfer created=new GuestTransfer(this,sources,upload,false,route);created.received=()->main.post(this::changed);
             main.post(()->{if(stopped||epoch!=guestEpoch||!online()){created.close();done.accept(false);return;}guestTransfer=created;done.accept(true);});
         }catch(Exception e){fail(e);main.post(()->done.accept(false));}});
     }
     interface SharedFactory { SharedFiles create(List<Uri> tree,int port)throws IOException; }
-    SharedFactory sharedFactory=(tree,port)->new SharedFiles(this,tree,port,false);
+    SharedFactory sharedFactory=(tree,port)->new SharedFiles(this,tree,port,false,lanNetwork);
     private long sharingEpoch;
     private int connectedPort;
     private volatile boolean stopped, connecting;
@@ -93,6 +98,7 @@ public final class ChatService extends Service {
     private volatile long connectionEpoch;
     // 工厂不接受外部 Intent 参数；回归测试可替换为真实回环节点，避免接触用户局域网。
     java.util.function.BiFunction<SharedPreferences,LanNode.Listener,LanNode> connectionFactory=(prefs,listener)->new LanNode(prefs.getInt("port",2425),false,prefs.getString("login",""),"Android",prefs.getString("name",Build.MODEL),prefs.getString("group","我的局域网"),listener);
+    java.util.function.Function<ConnectivityManager,LanNetwork> networkFactory=LanNetwork::new;
     private volatile String activePeer="";
     private volatile LanNode.Transfer transfer;
     private volatile ReceiveRequest activeReceive;
@@ -254,14 +260,15 @@ public final class ChatService extends Service {
                 Map<String,String> savedStates=new HashMap<>();for(ChatStore.TransferState state:store.transfers())savedStates.put(state.key,state.state);next.restoreOutgoingStates(savedStates);
                 next.rememberPeers(store.conversations().stream().map(c->c.peer).collect(java.util.stream.Collectors.toList()));
                 next.rememberEndpoints(store.conversations().stream().map(c->c.peer.endpoint).collect(java.util.stream.Collectors.toList()));
-                next.setSocketBinding(new LanNetwork(getSystemService(ConnectivityManager.class)));
+                final LanNetwork route=networkFactory.apply(getSystemService(ConnectivityManager.class));
+                next.setSocketBinding(route);
                 // 先登记再复核请求，断开/销毁才能释放 start() 尚未返回的监听。
                 startingNode=next;
                 if(!currentConnection(epoch)) { next.close(); return; }
                 next.start();
                 // 节点只在成功启动且仍属于本次请求时发布；销毁/断开不能漏掉尚未发布的节点。
                 synchronized(connectionLock) {
-                    if(currentConnection(epoch))node=next;
+                    if(currentConnection(epoch)){node=next;lanNetwork=route;}
                     if(startingNode==next)startingNode=null;
                 }
                 if(node!=next) { next.close(); return; }
@@ -274,12 +281,18 @@ public final class ChatService extends Service {
                         if (wifi!=null) { multicast=wifi.createMulticastLock("FeiqLight"); multicast.setReferenceCounted(false); multicast.acquire(); }
                         connectivity=getSystemService(ConnectivityManager.class);
                         callback=new ConnectivityManager.NetworkCallback() {
-                            private void update() {if(currentConnection(epoch)&&node==connected)connected.networkChanged();}
-                            @Override public void onAvailable(Network network) { diagnostics.record(Diagnostics.Event.NetworkChanged);update(); }
-                            @Override public void onLost(Network network) { update(); }
-                            @Override public void onLinkPropertiesChanged(Network network,LinkProperties properties) { update(); }
-                            @Override public void onCapabilitiesChanged(Network network,NetworkCapabilities capabilities) { update(); }
-                            @Override public void onBlockedStatusChanged(Network network,boolean blocked) { update(); }
+                            private void update(Network network,boolean lost) {
+                                synchronized(connectionLock) {
+                                    if(!currentConnection(epoch)||node!=connected)return;
+                                    if(lost)route.lost(network);else route.track(network);
+                                    connected.networkChanged();
+                                }
+                            }
+                            @Override public void onAvailable(Network network) { diagnostics.record(Diagnostics.Event.NetworkChanged);update(network,false); }
+                            @Override public void onLost(Network network) { update(network,true); }
+                            @Override public void onLinkPropertiesChanged(Network network,LinkProperties properties) { update(network,false); }
+                            @Override public void onCapabilitiesChanged(Network network,NetworkCapabilities capabilities) { update(network,false); }
+                            @Override public void onBlockedStatusChanged(Network network,boolean blocked) { update(network,false); }
                         };
                         connectivity.registerNetworkCallback(new NetworkRequest.Builder()
                             .addTransportType(NetworkCapabilities.TRANSPORT_WIFI).addTransportType(NetworkCapabilities.TRANSPORT_ETHERNET)
@@ -656,6 +669,7 @@ public final class ChatService extends Service {
         if (multicast!=null && multicast.isHeld()) multicast.release(); multicast=null;
         if (callback!=null && connectivity!=null) { try { connectivity.unregisterNetworkCallback(callback); } catch (RuntimeException ignored) { } } callback=null;
         if (tetherReceiver!=null) { try { unregisterReceiver(tetherReceiver); } catch (RuntimeException ignored) { } } tetherReceiver=null;
+        LanNetwork route=lanNetwork;lanNetwork=null;if(route!=null)route.clearTrackedNetworks();
     }
     void cancelTransfer() { LanNode.Transfer task=transfer; if (task!=null) task.close(); }
     private void transferJob(Throwing job) {

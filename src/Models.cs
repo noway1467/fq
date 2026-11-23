@@ -32,6 +32,7 @@ namespace FeiqLight
         public int SettingsRevision { get; set; }
         public string ReceiveFolder { get; set; }
         public WindowPlacement Window { get; set; }
+        public WindowPlacement TransferWindow { get; set; }
         public int SidebarWidth { get; set; }
         public string[] KnownPeers { get; set; }
         public SavedConversation[] Conversations { get; set; }

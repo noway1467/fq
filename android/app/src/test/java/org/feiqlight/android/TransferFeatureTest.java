@@ -94,6 +94,99 @@ public final class TransferFeatureTest {
             assertEquals(1,store.fileTasks().size());assertEquals(peer.id(),store.fileTasks().get(0).peer);store.deleteMessages(peer.id(),Collections.singletonList(message));assertTrue(store.fileTasks().isEmpty());
         }
     }
+    @Test public void chatToolbarOpensTasks()throws Exception {
+        Context context=RuntimeEnvironment.getApplication();disableConnection(context);
+        ServiceController<ChatService> serviceController=Robolectric.buildService(ChatService.class).create();ChatService service=serviceController.get();
+        Shadows.shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(context,ChatService.class),service.onBind(new Intent()));
+        try {
+            settle(service);ChatStore store=(ChatStore)field(service,"store");ExecutorService io=(ExecutorService)field(service,"io");
+            LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:31234"),"toolbar","host","中文 English 很长的聊天联系人名称","");
+            io.submit(()->{LanNode.Message message=new LanNode.Message();message.number=1;message.text="文件消息";message.state="已收到";message.files.add(new Protocol.Attachment(0,"资料.txt",20,1));store.message(peer,message,false,false);}).get(5,TimeUnit.SECONDS);
+            for(boolean dark:new boolean[]{false,true}) {
+                context.getSharedPreferences("settings",0).edit().putBoolean("dark_mode",dark).commit();
+                try(ActivityController<MainActivity> controller=Robolectric.buildActivity(MainActivity.class).setup()) {
+                    MainActivity activity=controller.get();settle(service);
+                    java.lang.reflect.Method open=MainActivity.class.getDeclaredMethod("open",String.class);open.setAccessible(true);open.invoke(activity,peer.id());settle(service);
+                    View root=(View)field(activity,"root");measure(root,786,1500);LinearLayout toolbar=(LinearLayout)field(activity,"toolbar");
+                    View transfer=findDescription(toolbar,"传输任务"),more=findDescription(toolbar,"会话菜单");assertNotNull(transfer);assertNotNull(more);
+                    assertEquals("transfer",field(transfer,"kind"));assertEquals(toolbar.indexOfChild(more)-1,toolbar.indexOfChild(transfer));
+                    int expected=Math.round(48*activity.getResources().getDisplayMetrics().density);assertEquals(expected,transfer.getWidth());assertEquals(expected,transfer.getHeight());assertTrue(transfer.getRight()<=more.getLeft());
+                    preview(toolbar,"chat-header-android-"+(dark?"dark":"light")+".png",(Integer)field(activity,"SURFACE"));assertTrue(transfer.performClick());settle(service);
+                    Dialog dialog=(Dialog)field(activity,"tasksDialog");assertNotNull(dialog);assertTrue(dialog.isShowing());assertEquals(ViewGroup.LayoutParams.MATCH_PARENT,dialog.getWindow().getAttributes().width);assertEquals(ViewGroup.LayoutParams.MATCH_PARENT,dialog.getWindow().getAttributes().height);
+                    BaseAdapter adapter=(BaseAdapter)field(activity,"taskAdapter");assertEquals(1,adapter.getCount());dialog.dismiss();settle(service);assertNull(field(activity,"taskAdapter"));
+                }
+            }
+        }finally{serviceController.destroy();}
+    }
+    @SuppressWarnings("unchecked")
+    @Test public void taskRefreshSkipsEqualContent()throws Exception {
+        Context context=RuntimeEnvironment.getApplication();disableConnection(context);
+        ServiceController<ChatService> serviceController=Robolectric.buildService(ChatService.class).create();ChatService service=serviceController.get();
+        Shadows.shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(context,ChatService.class),service.onBind(new Intent()));
+        try(ActivityController<MainActivity> controller=Robolectric.buildActivity(MainActivity.class).setup()) {
+            MainActivity activity=controller.get();settle(service);showTasks(activity);settle(service);Dialog dialog=(Dialog)field(activity,"tasksDialog");
+            try {
+                BaseAdapter adapter=(BaseAdapter)field(activity,"taskAdapter");List<ChatStore.FileTask> all=(List<ChatStore.FileTask>)field(adapter,"all");
+                ChatStore.FileTask first=task("test",1,"中文 English.bin",10485760),second=task("test",2,"waiting.txt",1024);all.clear();all.add(first);all.add(second);
+                Map<String,ChatService.FileProgress> progress=(Map<String,ChatService.FileProgress>)field(service,"fileProgress");String key=ChatService.fileKey(first.peer,first.message.number,first.file.id,false);
+                progress.put(key,new ChatService.FileProgress(20,"接收中",1048576,null));refresh(adapter);
+                Changes changes=new Changes();adapter.registerDataSetObserver(changes);TextView count=(TextView)field(adapter,"count");final int[] textChanges={0};
+                count.addTextChangedListener(new android.text.TextWatcher(){public void beforeTextChanged(CharSequence s,int start,int n,int after){}public void onTextChanged(CharSequence s,int start,int before,int n){textChanges[0]++;}public void afterTextChanged(android.text.Editable value){}});
+                for(int i=0;i<5;i++){refresh(adapter);activity.transfersChanged();}assertEquals(0,changes.count);assertEquals(0,textChanges[0]);
+                ChatStore.FileTask copy=task("test",1,"中文 English.bin",10485760);all.set(0,copy);refresh(adapter);assertEquals(0,changes.count);assertSame("等值刷新仍应保留新的操作数据",copy,adapter.getItem(0));
+                progress.put(key,new ChatService.FileProgress(35,"接收中",1048576,null));activity.transfersChanged();assertEquals(1,changes.count);assertTrue(count.getText().toString().contains("3.5 MB"));assertEquals(1,textChanges[0]);
+                ListView parent=find(dialog.getWindow().getDecorView(),ListView.class);LinearLayout view=(LinearLayout)adapter.getView(0,null,parent);assertEquals(35,((ProgressBar)view.getChildAt(3)).getProgress());assertTrue(((TextView)view.getChildAt(2)).getText().toString().contains("1.0 MB/s"));
+                progress.put(key,new ChatService.FileProgress(35,"接收中",1048577,null));activity.transfersChanged();assertEquals("显示速度与剩余时间相同应跳过刷新",1,changes.count);
+                progress.put(key,new ChatService.FileProgress(35,"已暂停",0,null));activity.transfersChanged();assertEquals(2,changes.count);assertEquals("已暂停",((TextView)((LinearLayout)adapter.getView(0,view,parent)).getChildAt(2)).getText().toString());
+                EditText input=(EditText)field(adapter,"input");input.setText("waiting");assertEquals(1,adapter.getCount());int notifications=changes.count,summaryChanges=textChanges[0];
+                progress.put(key,new ChatService.FileProgress(60,"接收中",2097152,null));activity.transfersChanged();assertEquals("筛选外任务变化不应重绑当前列表",notifications,changes.count);assertEquals(summaryChanges,textChanges[0]);
+                input.setText(" WAITING ");assertEquals("相同搜索结果不应重复刷新",notifications,changes.count);
+                all.clear();refresh(adapter);assertEquals(0,adapter.getCount());notifications=changes.count;refresh(adapter);activity.transfersChanged();assertEquals("空列表不应反复刷新",notifications,changes.count);
+            }finally{dialog.dismiss();}
+        }finally{serviceController.destroy();}
+    }
+    @SuppressWarnings("unchecked")
+    @Test public void taskQueueSummaryDoesNotRebindRows()throws Exception {
+        Context context=RuntimeEnvironment.getApplication();disableConnection(context);
+        ServiceController<ChatService> serviceController=Robolectric.buildService(ChatService.class).create();ChatService service=serviceController.get();
+        Shadows.shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(context,ChatService.class),service.onBind(new Intent()));
+        try(ActivityController<MainActivity> controller=Robolectric.buildActivity(MainActivity.class).setup()) {
+            MainActivity activity=controller.get();settle(service);showTasks(activity);settle(service);Dialog dialog=(Dialog)field(activity,"tasksDialog");
+            try {
+                BaseAdapter adapter=(BaseAdapter)field(activity,"taskAdapter");Changes changes=new Changes();adapter.registerDataSetObserver(changes);TextView count=(TextView)field(adapter,"count");
+                ArrayDeque<Object> queue=(ArrayDeque<Object>)field(service,"queuedTransfers");Class<?> type=Class.forName(ChatService.class.getName()+"$QueuedTransfer");java.lang.reflect.Constructor<?> constructor=type.getDeclaredConstructor(Runnable.class,Runnable.class);constructor.setAccessible(true);
+                queue.add(constructor.newInstance((Runnable)()->{},(Runnable)()->{}));activity.transfersChanged();assertTrue(count.getText().toString().contains("另有 1 项"));assertEquals(0,changes.count);
+                CharSequence summary=count.getText();activity.transfersChanged();assertSame("等值摘要不应重复设置文本",summary,count.getText());assertEquals(0,changes.count);
+                queue.clear();activity.transfersChanged();assertFalse(count.getText().toString().contains("排队中"));assertEquals(0,changes.count);
+            }finally{dialog.dismiss();}
+        }finally{serviceController.destroy();}
+    }
+    @Test public void concurrentTaskReloadCoalescesAndKeepsLatestRows()throws Exception {
+        Context context=RuntimeEnvironment.getApplication();disableConnection(context);
+        ServiceController<ChatService> serviceController=Robolectric.buildService(ChatService.class).create();ChatService service=serviceController.get();
+        Shadows.shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(context,ChatService.class),service.onBind(new Intent()));
+        try(ActivityController<MainActivity> controller=Robolectric.buildActivity(MainActivity.class).setup()) {
+            MainActivity activity=controller.get();settle(service);
+            ChatStore store=(ChatStore)field(service,"store");ExecutorService io=(ExecutorService)field(service,"io");
+            LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:31234"),"reload","host","测试设备","");
+            ChatStore.FileTask first=task(peer.id(),1,"旧任务.txt",20),latest=task(peer.id(),2,"最新任务.txt",30);
+            first.message.text="旧附件";first.message.time=1;latest.message.text="最新附件";latest.message.time=2;
+            io.submit(()->store.message(peer,first.message,false,false)).get(5,TimeUnit.SECONDS);
+            showTasks(activity);settle(service);BaseAdapter adapter=(BaseAdapter)field(activity,"taskAdapter");assertEquals(1,adapter.getCount());
+            java.lang.reflect.Method load=MainActivity.class.getDeclaredMethod("loadTaskRows");load.setAccessible(true);load.invoke(activity);
+            // 第一份旧快照已读完，主线程回调尚未运行；此时产生新任务并再次请求刷新。
+            io.submit(()->{}).get(5,TimeUnit.SECONDS);assertEquals(true,field(activity,"loadingTasks"));
+            io.submit(()->store.message(peer,latest.message,false,false)).get(5,TimeUnit.SECONDS);
+            for(int index=0;index<5;index++)load.invoke(activity);
+            assertEquals(true,field(activity,"reloadTasksPending"));settle(service);
+            assertEquals("并发刷新丢失最新任务",2,adapter.getCount());assertEquals(2,((ChatStore.FileTask)adapter.getItem(0)).message.number);
+            assertEquals(false,field(activity,"loadingTasks"));assertEquals(false,field(activity,"reloadTasksPending"));
+            load.invoke(activity);io.submit(()->{}).get(5,TimeUnit.SECONDS);load.invoke(activity);
+            ((Dialog)field(activity,"tasksDialog")).dismiss();settle(service);
+            assertNull(field(activity,"tasksDialog"));assertNull(field(activity,"taskAdapter"));assertEquals(false,field(activity,"reloadTasksPending"));
+            showTasks(activity);settle(service);assertEquals(2,((BaseAdapter)field(activity,"taskAdapter")).getCount());((Dialog)field(activity,"tasksDialog")).dismiss();
+        }finally{serviceController.destroy();}
+    }
     @Test public void tasksRenderWithNativeMainWindowStyle()throws Exception {
         Context context=RuntimeEnvironment.getApplication();ServiceController<ChatService> serviceController=Robolectric.buildService(ChatService.class).create();ChatService service=serviceController.get();
         Shadows.shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(context,ChatService.class),service.onBind(new Intent()));
@@ -112,5 +205,21 @@ public final class TransferFeatureTest {
             }
         }finally{serviceController.destroy();}
     }
+    private static final class Changes extends android.database.DataSetObserver {int count;@Override public void onChanged(){count++;}}
+    private static void disableConnection(Context context){context.getSharedPreferences("settings",0).edit().putBoolean("auto_connect",false).putBoolean("connection_enabled",false).commit();}
+    private static Object field(Object target,String name)throws Exception {java.lang.reflect.Field field=target.getClass().getDeclaredField(name);field.setAccessible(true);return field.get(target);}
+    private static void refresh(Object adapter)throws Exception {java.lang.reflect.Method refresh=adapter.getClass().getDeclaredMethod("refresh");refresh.setAccessible(true);refresh.invoke(adapter);}
+    private static void showTasks(MainActivity activity)throws Exception {java.lang.reflect.Method show=MainActivity.class.getDeclaredMethod("showTasks");show.setAccessible(true);show.invoke(activity);}
+    private static ChatStore.FileTask task(String peer,long packet,String name,long size){LanNode.Message message=new LanNode.Message();message.number=packet;message.state="已收到";Protocol.Attachment file=new Protocol.Attachment(0,name,size,1);message.files.add(file);return new ChatStore.FileTask(peer,message,file);}
+    private static void settle(ChatService service)throws Exception {
+        ExecutorService io=(ExecutorService)field(service,"io");
+        for(int i=0;i<3;i++){io.submit(()->{}).get(5,TimeUnit.SECONDS);Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(100));}
+    }
+    private static void measure(View view,int width,int height){view.measure(View.MeasureSpec.makeMeasureSpec(width,View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(height,View.MeasureSpec.EXACTLY));view.layout(0,0,width,height);}
+    private static void preview(View view,String name,int background)throws Exception {
+        File output=new File(System.getProperty("feiq.previewDir"));assertTrue(output.isDirectory()||output.mkdirs());Bitmap bitmap=Bitmap.createBitmap(view.getWidth(),view.getHeight(),Bitmap.Config.ARGB_8888);
+        try{Canvas canvas=new Canvas(bitmap);canvas.drawColor(background);view.draw(canvas);try(OutputStream stream=new FileOutputStream(new File(output,name))){assertTrue(bitmap.compress(Bitmap.CompressFormat.PNG,100,stream));}}finally{bitmap.recycle();}
+    }
+    private static View findDescription(View view,String description){if(description.contentEquals(view.getContentDescription()==null?"":view.getContentDescription()))return view;if(view instanceof ViewGroup)for(int i=0;i<((ViewGroup)view).getChildCount();i++){View result=findDescription(((ViewGroup)view).getChildAt(i),description);if(result!=null)return result;}return null;}
     private static <T> T find(View view,Class<T> type){if(type.isInstance(view))return type.cast(view);if(view instanceof ViewGroup)for(int i=0;i<((ViewGroup)view).getChildCount();i++){T result=find(((ViewGroup)view).getChildAt(i),type);if(result!=null)return result;}return null;}
 }

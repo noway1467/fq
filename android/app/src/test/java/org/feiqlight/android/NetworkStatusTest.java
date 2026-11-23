@@ -4,7 +4,7 @@ import android.app.Notification;
 import android.app.NotificationManager;
 import android.content.*;
 import android.graphics.*;
-import android.net.ConnectivityManager;
+import android.net.*;
 import android.os.Looper;
 import android.view.View;
 import android.widget.*;
@@ -15,6 +15,7 @@ import org.robolectric.*;
 import org.robolectric.android.controller.*;
 import org.robolectric.annotation.*;
 import org.robolectric.shadows.ShadowNetwork;
+import org.robolectric.shadows.ShadowNetworkCapabilities;
 import java.io.*;
 import java.lang.reflect.*;
 import java.net.*;
@@ -97,6 +98,41 @@ public final class NetworkStatusTest {
             assertNull(field(service,"tetherReceiver"));
             receiver.onReceive(service,new Intent("android.net.conn.TETHER_STATE_CHANGED"));settle(service);
             assertFalse(service.online());assertFalse(service.canDisconnect());assertEquals("已断开",service.status());
+        } finally {sc.destroy();}
+    }
+    @Test @Config(shadows=LanNetworkTest.SnapshotConnectivity.class)
+    public void coldVpnStartTracksCallbackWifiUpdatesStatusAndSharesRouteWithGuest()throws Exception {
+        ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();
+        ConnectivityManager cm=service.getSystemService(ConnectivityManager.class);shadowOf(cm).clearAllNetworks();
+        LanNetworkTest.SnapshotConnectivity manager=org.robolectric.shadow.api.Shadow.extract(cm);
+        Network vpn=ShadowNetwork.newInstance(9931),wifi=ShadowNetwork.newInstance(9932);
+        NetworkCapabilities vpnCaps=ShadowNetworkCapabilities.newInstance(),wifiCaps=ShadowNetworkCapabilities.newInstance();
+        shadowOf(vpnCaps).addTransportType(NetworkCapabilities.TRANSPORT_VPN);shadowOf(vpnCaps).removeCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN);
+        shadowOf(wifiCaps).addTransportType(NetworkCapabilities.TRANSPORT_WIFI);shadowOf(wifiCaps).addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN);
+        shadowOf(cm).addNetwork(vpn,null);shadowOf(cm).setNetworkCapabilities(vpn,vpnCaps);
+        shadowOf(cm).addNetwork(wifi,null);shadowOf(cm).setNetworkCapabilities(wifi,wifiCaps);
+        Constructor<LinkAddress> constructor=LinkAddress.class.getDeclaredConstructor(InetAddress.class,int.class);constructor.setAccessible(true);
+        LinkProperties links=new LinkProperties();LinkProperties.class.getDeclaredMethod("addLinkAddress",LinkAddress.class).invoke(links,constructor.newInstance(InetAddress.getLoopbackAddress(),32));shadowOf(cm).setLinkProperties(wifi,links);
+        manager.snapshot=new Network[]{vpn};
+        try(ServerSocket free=new ServerSocket(0,1,InetAddress.getLoopbackAddress())) {
+            int port=free.getLocalPort();free.close();settle(service);
+            service.networkFactory=connectivity->new LanNetwork(connectivity,java.util.Collections::emptyList);
+            service.connectionFactory=(prefs,listener)->new LanNode(port,false,"callback-wifi","host","测试","",listener);
+            service.onStartCommand(new Intent(),0,1);settle(service);assertFalse(service.online());assertTrue(service.status(),service.status().contains("VPN"));
+            LanNode node=(LanNode)field(service,"node");LanNetwork route=(LanNetwork)field(service,"lanNetwork");assertSame(route,field(node,"socketBinding"));
+            ConnectivityManager.NetworkCallback callback=(ConnectivityManager.NetworkCallback)field(service,"callback");
+            callback.onAvailable(wifi);callback.onCapabilitiesChanged(wifi,wifiCaps);callback.onLinkPropertiesChanged(wifi,links);
+            long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(4);
+            while(!service.online()&&System.nanoTime()<deadline){settle(service);Thread.sleep(10);}
+            settle(service);assertTrue(service.status(),service.online());assertEquals(wifi,route.select());assertFalse(service.status(),service.status().contains("VPN"));
+            Notification notification=shadowOf(service.getSystemService(NotificationManager.class)).getNotification(1);assertFalse(notification.extras.getString(Notification.EXTRA_TEXT).contains("VPN"));
+            final boolean[] started={false};service.startGuest(java.util.Collections.emptyList(),true,success->started[0]=success);settle(service);
+            assertTrue(started[0]);GuestTransfer guest=service.guestTransfer();assertSame("访客服务必须复用回调网络视图",route,field(field(guest,"http"),"binding"));
+            manager.snapshot=new Network[0];route.changed();assertEquals(wifi,route.select());
+            shadowOf(cm).removeNetwork(wifi);callback.onLost(wifi);settle(service);
+            deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(4);while(service.online()&&System.nanoTime()<deadline){settle(service);Thread.sleep(10);}
+            assertFalse(service.online());service.disconnect();settle(service);callback.onAvailable(wifi);settle(service);
+            assertNull(field(service,"lanNetwork"));assertTrue(((java.util.Set<?>)field(route,"trackedNetworks")).isEmpty());assertNull(cm.getBoundNetworkForProcess());
         } finally {sc.destroy();}
     }
     @Test public void profileSavedWhileConnectingIsPublishedWithoutChangingBoundPort()throws Exception {

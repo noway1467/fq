@@ -35,11 +35,15 @@ final class GuestTransfer implements AutoCloseable {
     volatile String cleanupError="";
     Runnable received=()->{};
     GuestTransfer(Context context,List<LanNode.Source> sources,boolean allowUpload,boolean loopback)throws IOException {
+        this(context,sources,allowUpload,loopback,loopback?null:new LanNetwork(context.getSystemService(android.net.ConnectivityManager.class)));
+    }
+    GuestTransfer(Context context,List<LanNode.Source> sources,boolean allowUpload,boolean loopback,LanNode.SocketBinding binding)throws IOException {
+        if(!loopback&&binding==null)throw new IOException("请先连接局域网");
         this.context=context.getApplicationContext();this.allowUpload=allowUpload;directory=new File(context.getFilesDir(),"received");Files.createDirectories(directory.toPath());
         if(sources.size()>1000)throw new IOException("单次最多 1000 个文件");
         for(LanNode.Source source:sources){if(!Protocol.safeName(source.name())||source.size()<0)throw new IOException("文件名或大小无效");Download file=new Download(source);downloads.put(file.id,file);}
         if(downloads.isEmpty()&&!allowUpload)throw new IOException("请先选择文件或开启接收");
-        http=new ToolsHttp(0,loopback,this::handle,null,loopback?null:new LanNetwork(context.getSystemService(android.net.ConnectivityManager.class)),1048576);
+        http=new ToolsHttp(0,loopback,this::handle,null,loopback?null:binding,1048576);
         expiry.schedule(this::close,15,TimeUnit.MINUTES);
     }
     int port(){return http.port();}

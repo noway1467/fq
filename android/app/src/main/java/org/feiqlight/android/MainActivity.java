@@ -116,7 +116,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
     private Dialog historyDialog;
     private Dialog tasksDialog;
     private TaskAdapter taskAdapter;
-    private boolean loadingTasks;
+    private boolean loadingTasks,reloadTasksPending;
     private final List<Uri> guestFiles=new ArrayList<>();
     private boolean guestUpload;
     private android.window.OnBackInvokedCallback backCallback;
@@ -235,6 +235,10 @@ public final class MainActivity extends Activity implements ChatService.Observer
         LinearLayout headings=column(); title=text("飞Q",20,INK); title.setTypeface(null,Typeface.BOLD); subtitle=text("",12,MUTED);
         title.setSingleLine(); title.setEllipsize(TextUtils.TruncateAt.END); subtitle.setSingleLine(); subtitle.setEllipsize(TextUtils.TruncateAt.END);
         headings.addView(title); headings.addView(subtitle); toolbar.addView(headings,weight());
+        if(!selected.isEmpty()) {
+            IconButton transfers=new IconButton("transfer","传输任务",MUTED);
+            toolbar.addView(transfers,new LinearLayout.LayoutParams(dp(48),dp(48)));transfers.setOnClickListener(v->showTasks());
+        }
         IconButton action=new IconButton(selected.isEmpty()?"add":"more",selected.isEmpty()?"手动添加联系人":"会话菜单",MUTED);
         toolbar.addView(action,new LinearLayout.LayoutParams(dp(48),dp(48))); action.setOnClickListener(v->{ if(selected.isEmpty()) addPeer(); else {ChatStore.Conversation c=conversation(selected);if(c!=null)conversationMenu(c);} });
         View line=new View(this); line.setBackgroundColor(LINE); root.addView(line,new LinearLayout.LayoutParams(-1,dp(1)));
@@ -553,7 +557,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
     }
     private static boolean continues(LanNode.Message previous,LanNode.Message next) { long gap=next.time-previous.time; return previous.outgoing==next.outgoing&&gap>-60000&&gap<300000; }
     @Override public void transfersChanged() {
-        if(taskAdapter!=null&&tasksDialog!=null)taskAdapter.refresh();
+        if(taskAdapter!=null&&tasksDialog!=null&&tasksDialog.isShowing())taskAdapter.refresh();
         // 进度只更新当前卡片，不重新查询历史/创建全部气泡，也不改变用户的阅读位置。
         if(!visible||service==null||!selected.equals(progressPeer))return;
         for(Runnable update:new ArrayList<>(fileProgressViews))update.run();
@@ -737,14 +741,15 @@ public final class MainActivity extends Activity implements ChatService.Observer
         }
     }
     private void showAbout() {
-        LinearLayout content=column(),brand=row();brand.setPadding(0,dp(12),0,dp(12));
-        ImageView logo=new ImageView(this);logo.setImageDrawable(getApplicationInfo().loadIcon(getPackageManager()));logo.setContentDescription("飞Q图标");brand.addView(logo,new LinearLayout.LayoutParams(dp(52),dp(52)));
-        LinearLayout identity=column();identity.setPadding(dp(16),0,0,0);TextView name=text("飞Q",22,INK);name.setTypeface(null,Typeface.BOLD);identity.addView(name);identity.addView(text("Android  "+BuildConfig.VERSION_NAME,13,MUTED));brand.addView(identity,weight());content.addView(brand);
-        TextView intro=text("局域网聊天与文件传输",15,INK);intro.setPadding(0,dp(8),0,dp(18));content.addView(intro);
-        LinearLayout repository=row();repository.setPadding(dp(12),dp(10),dp(12),dp(10));repository.setBackground(new android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(BUBBLE),shape(PALE,CONTROL_RADIUS),null));repository.setFocusable(true);repository.setContentDescription("GitHub 仓库：github.com/noway1467/fq");
-        IconButton source=new IconButton("code","源码",BLUE);source.setClickable(false);source.setFocusable(false);source.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);repository.addView(source,new LinearLayout.LayoutParams(dp(40),dp(44)));
-        LinearLayout labels=column();labels.setPadding(dp(8),0,0,0);labels.addView(text("GitHub 仓库",15,BLUE));labels.addView(text("github.com/noway1467/fq",13,MUTED));repository.addView(labels,weight());repository.setOnClickListener(v->{try{startActivity(new Intent(Intent.ACTION_VIEW,Uri.parse(GITHUB_REPOSITORY)).addCategory(Intent.CATEGORY_BROWSABLE));}catch(ActivityNotFoundException e){error("没有可用的浏览器");}});content.addView(repository,new LinearLayout.LayoutParams(-1,-2));
-        TextView note=text("新版设备默认 TLS 加密 · 首次核对配对码\n内置头像：Twemoji · CC BY 4.0\n© Twitter, Inc. 及贡献者；许可随 APK 内置。",12,MUTED);note.setPadding(0,dp(18),0,dp(4));note.setLineSpacing(dp(4),1);content.addView(note);
+        LinearLayout content=column(),brand=row();brand.setPadding(0,dp(4),0,dp(10));
+        ImageView logo=new ImageView(this);logo.setImageDrawable(getApplicationInfo().loadIcon(getPackageManager()));logo.setContentDescription("飞Q图标");brand.addView(logo,new LinearLayout.LayoutParams(dp(48),dp(48)));
+        LinearLayout identity=column();identity.setPadding(dp(14),0,0,0);TextView name=text("飞Q",20,INK);name.setTypeface(null,Typeface.BOLD);identity.addView(name);identity.addView(text("Android  "+BuildConfig.VERSION_NAME+" · 局域网聊天与文件传输",12,MUTED));brand.addView(identity,weight());content.addView(brand);
+        LinearLayout repository=row();repository.setPadding(dp(12),dp(10),dp(12),dp(10));
+        GradientDrawable repoBg=shape(PALE,CONTROL_RADIUS);repoBg.setStroke(dp(1),LINE);
+        repository.setBackground(new android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(BUBBLE),repoBg,null));repository.setFocusable(true);repository.setContentDescription("GitHub 仓库：github.com/noway1467/fq");
+        IconButton source=new IconButton("code","源码",BLUE);source.setClickable(false);source.setFocusable(false);source.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);repository.addView(source,new LinearLayout.LayoutParams(dp(38),dp(40)));
+        LinearLayout labels=column();labels.setPadding(dp(8),0,0,0);labels.addView(text("GitHub 仓库",14,BLUE));labels.addView(text("github.com/noway1467/fq",12,MUTED));repository.addView(labels,weight());repository.setOnClickListener(v->{try{startActivity(new Intent(Intent.ACTION_VIEW,Uri.parse(GITHUB_REPOSITORY)).addCategory(Intent.CATEGORY_BROWSABLE));}catch(ActivityNotFoundException e){error("没有可用的浏览器");}});content.addView(repository,new LinearLayout.LayoutParams(-1,-2));
+        TextView note=text("默认 TLS 加密 · 首次核对配对码\n内置头像：Twemoji · CC BY 4.0（© Twitter, Inc. 及贡献者）",12,MUTED);note.setPadding(dp(2),dp(12),dp(2),0);note.setLineSpacing(dp(3),1);content.addView(note);
         sheet("关于飞Q",content,"确定",Dialog::dismiss);
     }
     private void hiddenConversations() {
@@ -756,13 +761,14 @@ public final class MainActivity extends Activity implements ChatService.Observer
     private void showContactProfile(ChatStore.Conversation c) {
         String peer=selected;int generation=editorGeneration;ChatService source=service;
         LinearLayout content=column();TextView avatar=text("",18,INK);bindAvatar(avatar,c.peer.id(),c.displayName(),c.peer.online,c.peer.avatar);avatar.setContentDescription("联系人资料头像，点击查看大图");
-        LinearLayout.LayoutParams portrait=new LinearLayout.LayoutParams(dp(80),dp(80));portrait.gravity=Gravity.CENTER_HORIZONTAL;portrait.bottomMargin=dp(8);content.addView(avatar,portrait);avatar.setOnClickListener(v->showAvatarPreview(c.peer));
-        EditText nickname=formField(content,"昵称",c.note==null||c.note.isEmpty()?c.peer.name:c.note);nickname.setContentDescription("联系人资料昵称");nickname.setFilters(new InputFilter[]{new InputFilter.LengthFilter(64)});
-        TextView hint=text("修改仅在本机显示；留空恢复对方昵称。",12,MUTED);hint.setPadding(0,dp(8),0,dp(4));content.addView(hint);
-        if(c.peer.group!=null&&!c.peer.group.trim().isEmpty())profileField(content,"部门",c.peer.group,"联系人资料部门");
-        profileField(content,"IP 地址",c.peer.endpoint.getAddress().getHostAddress()+":"+c.peer.endpoint.getPort(),"联系人资料地址");
-        profileField(content,"传输安全",c.peer.fingerprint==null?(ChatService.allowLegacy(getSharedPreferences("settings",MODE_PRIVATE))?"旧版设备 · 明文兼容已开启":"旧版设备 · 明文兼容已关闭"):"TLS 加密 · 首次连接需两端核对","联系人安全状态");
-        if(c.peer.fingerprint!=null){Button forget=button("撤销设备信任",false);content.addView(forget);forget.setOnClickListener(v->confirm("撤销设备信任","下次连接将重新核对两端配对码。","撤销",()->{if(service!=null)service.forgetSecurity(c.peer);}));}
+        LinearLayout.LayoutParams portrait=new LinearLayout.LayoutParams(dp(76),dp(76));portrait.gravity=Gravity.CENTER_HORIZONTAL;portrait.bottomMargin=dp(6);content.addView(avatar,portrait);avatar.setOnClickListener(v->showAvatarPreview(c.peer));
+        EditText nickname=formField(content,"昵称",c.note==null||c.note.isEmpty()?c.peer.name:c.note);nickname.setContentDescription("联系人资料昵称");nickname.setHint("留空恢复对方昵称");nickname.setHintTextColor(MUTED);nickname.setFilters(new InputFilter[]{new InputFilter.LengthFilter(64)});
+        LinearLayout infoCard=column();GradientDrawable cardBg=shape(PALE,CONTROL_RADIUS);cardBg.setStroke(dp(1),LINE);infoCard.setBackground(cardBg);infoCard.setPadding(dp(14),dp(4),dp(14),dp(10));
+        if(c.peer.group!=null&&!c.peer.group.trim().isEmpty())profileField(infoCard,"部门",c.peer.group,"联系人资料部门");
+        profileField(infoCard,"IP 地址",c.peer.endpoint.getAddress().getHostAddress()+":"+c.peer.endpoint.getPort(),"联系人资料地址");
+        profileField(infoCard,"传输安全",c.peer.fingerprint==null?(ChatService.allowLegacy(getSharedPreferences("settings",MODE_PRIVATE))?"旧版设备 · 明文兼容":"旧版设备 · 明文已关"):"TLS 加密","联系人安全状态");
+        LinearLayout.LayoutParams cardParams=new LinearLayout.LayoutParams(-1,-2);cardParams.topMargin=dp(12);content.addView(infoCard,cardParams);
+        if(c.peer.fingerprint!=null){Button forget=button("撤销设备信任",false);LinearLayout.LayoutParams fp=new LinearLayout.LayoutParams(-1,-2);fp.topMargin=dp(10);content.addView(forget,fp);forget.setOnClickListener(v->confirm("撤销设备信任","下次连接将重新核对两端配对码。","撤销",()->{if(service!=null)service.forgetSecurity(c.peer);}));}
         Dialog dialog=sheet("联系人资料",content,"保存",d->{
             if(service!=source||source==null||!selected.equals(peer)||editorGeneration!=generation){d.dismiss();return;}
             String value=nickname.getText().toString().trim();source.editConversation(c.peer.id(),value.equals(c.peer.name)?"":value,c.pinned);d.dismiss();
@@ -770,7 +776,8 @@ public final class MainActivity extends Activity implements ChatService.Observer
         dialog.getWindow().setGravity(Gravity.CENTER);dialog.getWindow().setLayout(Math.min(getResources().getDisplayMetrics().widthPixels-dp(24),dp(420)),ViewGroup.LayoutParams.WRAP_CONTENT);
     }
     private void profileField(LinearLayout content,String name,String value,String description) {
-        TextView label=text(name,12,MUTED);label.setPadding(0,dp(12),0,dp(4));content.addView(label);
+        if(content.getChildCount()>0){View divider=new View(this);divider.setBackgroundColor(LINE);LinearLayout.LayoutParams dpLine=new LinearLayout.LayoutParams(-1,dp(1));dpLine.topMargin=dp(8);content.addView(divider,dpLine);}
+        TextView label=text(name,11,MUTED);label.setPadding(0,dp(8),0,dp(2));content.addView(label);
         TextView field=text(value,14,INK);field.setContentDescription(description);selectable(field);content.addView(field);
     }
     private void showAvatarPreview(LanNode.Peer peer) {
@@ -848,14 +855,21 @@ public final class MainActivity extends Activity implements ChatService.Observer
         TextView emptyTasks=text("暂无传输任务\n收到或发送的文件会显示在这里",15,MUTED);emptyTasks.setGravity(Gravity.CENTER);emptyTasks.setLineSpacing(dp(8),1);area.addView(emptyTasks,new FrameLayout.LayoutParams(-1,-1));rows.setEmptyView(emptyTasks);page.addView(area,new LinearLayout.LayoutParams(-1,0,1));
         rows.setOnItemClickListener((parent,view,position,id)->taskActions(tasks.items.get(position)));
         input.addTextChangedListener(new TextWatcher(){public void beforeTextChanged(CharSequence s,int start,int n,int after){}public void onTextChanged(CharSequence s,int start,int before,int n){tasks.refresh();}public void afterTextChanged(Editable e){}});
-        dialog.setContentView(page);dialog.setOnDismissListener(d->{if(tasksDialog==dialog){tasksDialog=null;taskAdapter=null;loadingTasks=false;}});dialog.show();
+        dialog.setContentView(page);dialog.setOnDismissListener(d->{if(tasksDialog==dialog){tasksDialog=null;taskAdapter=null;loadingTasks=false;reloadTasksPending=false;}});dialog.show();
         Window window=dialog.getWindow();window.setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(SURFACE));window.setLayout(-1,-1);window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);SystemBars.apply(window,SURFACE,DARK);
         page.setOnApplyWindowInsetsListener((v,insets)->{if(Build.VERSION.SDK_INT>=30){Insets pad=insets.getInsets(WindowInsets.Type.systemBars()|WindowInsets.Type.displayCutout()|WindowInsets.Type.ime());v.setPadding(pad.left,pad.top,pad.right,pad.bottom);}else v.setPadding(insets.getSystemWindowInsetLeft(),insets.getSystemWindowInsetTop(),insets.getSystemWindowInsetRight(),insets.getSystemWindowInsetBottom());return insets;});page.requestApplyInsets();loadTaskRows();
     }
     private void loadTaskRows() {
-        if(tasksDialog==null||taskAdapter==null||service==null||loadingTasks)return;
+        if(tasksDialog==null||taskAdapter==null||service==null)return;
+        if(loadingTasks){reloadTasksPending=true;return;}
         TaskAdapter expected=taskAdapter;ChatService source=service;loadingTasks=true;
-        source.fileTasks(rows->{loadingTasks=false;if(isDestroyed()||taskAdapter!=expected||source!=service)return;expected.all=rows;expected.refresh();});
+        source.fileTasks(rows->{
+            if(taskAdapter!=expected)return;
+            loadingTasks=false;
+            if(isDestroyed())return;
+            if(source==service){expected.all=rows;expected.refresh();}
+            if(reloadTasksPending&&tasksDialog!=null&&tasksDialog.isShowing()){reloadTasksPending=false;loadTaskRows();}
+        });
     }
     private String taskState(ChatStore.FileTask item) {
         if(item.guestFile!=null)return item.guestFile.isFile()||receivedStorage.saved(item.guestFile)!=null?"已保存":"本机文件已删除";
@@ -868,16 +882,37 @@ public final class MainActivity extends Activity implements ChatService.Observer
     private static boolean taskComplete(String state) { return state.equals("已保存")||state.equals("对方已校验保存"); }
     private static boolean taskEnded(String state) { return taskComplete(state)||state.contains("已拒绝")||state.contains("已取消发送")||state.equals("本机文件已删除"); }
     private static boolean taskActive(String state) { return state.contains("中")&&!state.contains("中断")&&!taskEnded(state); }
+    private String taskLabel(ChatStore.FileTask item,String state,ChatService.FileProgress progress) {
+        String label=state;
+        if(progress!=null&&progress.bytesPerSecond>0&&taskActive(state)) {
+            double seconds=item.file.size*(1-progress.percent/100.0)/progress.bytesPerSecond;
+            label+=" · "+size((long)progress.bytesPerSecond)+"/s · 剩余约 "+(seconds>=60?(long)Math.ceil(seconds/60)+" 分钟":Math.max(1,(long)Math.ceil(seconds))+" 秒");
+        }
+        return label;
+    }
     private final class TaskAdapter extends BaseAdapter {
         List<ChatStore.FileTask> all=new ArrayList<>(),items=new ArrayList<>();final TextView count;final EditText input;int filter;
+        private String contentSignature,summaryText;
         TaskAdapter(TextView count,EditText input){this.count=count;this.input=input;}
         void refresh() {
             String query=input.getText().toString().trim().toLowerCase(Locale.ROOT);List<ChatStore.FileTask> next=new ArrayList<>();int completed=0;double total=0,done=0;
+            StringBuilder content=new StringBuilder();
             for(ChatStore.FileTask item:all){String state=taskState(item);ChatStore.Conversation contact=conversation(item.peer);String name=item.guestFile!=null?"浏览器访客":contact==null?"已移除的设备":contact.displayName();
                 if(!(item.file.name+" "+name).toLowerCase(Locale.ROOT).contains(query)||filter==1&&!taskActive(state)||filter==2&&(taskActive(state)||taskComplete(state))||filter==3&&!taskComplete(state))continue;
                 next.add(item);if(taskComplete(state))completed++;ChatService.FileProgress p=service==null?null:service.progress(item.peer,item.message.number,item.file.id,item.message.outgoing);total+=item.file.size;done+=item.file.size*(taskComplete(state)?1:p==null?0:p.percent/100.0);
+                int percent=taskComplete(state)?100:p==null?0:p.percent;
+                content.append(item.peer).append('\0').append(item.message.number).append('\0').append(item.message.outgoing).append('\0').append(item.file.id).append('\0')
+                    .append(item.file.name).append('\0').append(item.file.size).append('\0').append(name).append('\0').append(state).append('\0').append(percent).append('\0')
+                    .append(taskLabel(item,state,p)).append('\0').append(item.guestFile==null?"":item.guestFile.getAbsolutePath()).append('\0');
             }
-            items=next;count.setText(items.size()+" 个文件 · "+completed+" 个已完成"+(total>0?" · "+size((long)done)+" / "+size((long)total):"")+(service!=null&&service.queuedTransfers()>0?"\n另有 "+service.queuedTransfers()+" 项文件操作排队中":""));notifyDataSetChanged();
+            String signature=content.toString();int queued=service==null?0:service.queuedTransfers();
+            String summary=next.size()+" 个文件 · "+completed+" 个已完成"+(total>0?" · "+size((long)done)+" / "+size((long)total):"")+(queued>0?"\n另有 "+queued+" 项文件操作排队中":"");
+            boolean rowsChanged=!signature.equals(contentSignature),summaryChanged=!summary.equals(summaryText);
+            items=next;
+            if(!rowsChanged&&!summaryChanged)return;
+            contentSignature=signature;summaryText=summary;
+            if(summaryChanged&&!summary.contentEquals(count.getText()))count.setText(summary);
+            if(rowsChanged)notifyDataSetChanged();
         }
         public int getCount(){return items.size();}public Object getItem(int position){return items.get(position);}public long getItemId(int position){return position;}
         public View getView(int position,View old,ViewGroup parent) {
@@ -885,7 +920,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
             if(old==null){box=column();box.setPadding(dp(20),dp(12),dp(20),dp(12));TextView name=text("",15,INK);name.setTypeface(null,Typeface.BOLD);name.setSingleLine();name.setEllipsize(TextUtils.TruncateAt.END);box.addView(name);TextView meta=text("",12,MUTED);meta.setSingleLine();meta.setEllipsize(TextUtils.TruncateAt.END);meta.setPadding(0,dp(5),0,dp(4));box.addView(meta);TextView status=text("",12,MUTED);status.setMaxLines(2);box.addView(status);ProgressBar bar=new ProgressBar(MainActivity.this,null,android.R.attr.progressBarStyleHorizontal);bar.setMax(100);bar.setProgressTintList(android.content.res.ColorStateList.valueOf(BLUE));bar.setProgressBackgroundTintList(android.content.res.ColorStateList.valueOf(LINE));LinearLayout.LayoutParams bp=new LinearLayout.LayoutParams(-1,dp(3));bp.topMargin=dp(8);box.addView(bar,bp);}else box=(LinearLayout)old;
             ChatStore.Conversation contact=conversation(item.peer);String state=taskState(item);ChatService.FileProgress p=service==null?null:service.progress(item.peer,item.message.number,item.file.id,item.message.outgoing);
             ((TextView)box.getChildAt(0)).setText(item.file.name);((TextView)box.getChildAt(1)).setText((item.message.outgoing?"发送给 ":"来自 ")+(item.guestFile!=null?"浏览器访客":contact==null?"已移除的设备":contact.displayName())+" · "+size(item.file.size));
-            String label=state;if(p!=null&&p.bytesPerSecond>0&&taskActive(state)){double seconds=item.file.size*(1-p.percent/100.0)/p.bytesPerSecond;label+=" · "+size((long)p.bytesPerSecond)+"/s · 剩余约 "+(seconds>=60?(long)Math.ceil(seconds/60)+" 分钟":Math.max(1,(long)Math.ceil(seconds))+" 秒");}
+            String label=taskLabel(item,state,p);
             TextView status=(TextView)box.getChildAt(2);status.setText(label);status.setTextColor(taskComplete(state)?ONLINE:taskActive(state)?BLUE:MUTED);ProgressBar bar=(ProgressBar)box.getChildAt(3);bar.setProgress(taskComplete(state)?100:p==null?0:p.percent);bar.setVisibility(taskEnded(state)?View.GONE:View.VISIBLE);box.setContentDescription(item.file.name+"，"+label);return box;
         }
     }
@@ -917,26 +952,96 @@ public final class MainActivity extends Activity implements ChatService.Observer
         }
         fileAction(content,actions,"查看所在会话",()->{if(tasksDialog!=null)tasksDialog.dismiss();locateHistoryMessage(item.peer,item.message);});
     }
+    private String guestFileName(Uri uri) {
+        try(android.database.Cursor cursor=getContentResolver().query(uri,new String[]{android.provider.OpenableColumns.DISPLAY_NAME},null,null,null)) {
+            if(cursor!=null&&cursor.moveToFirst()){String name=cursor.getString(0);if(name!=null&&!name.isEmpty())return name;}
+        }catch(RuntimeException ignored){}
+        String segment=uri==null?null:uri.getLastPathSegment();
+        return segment==null||segment.isEmpty()?"已选文件":segment;
+    }
     private void showGuest() {
         if(service==null||!service.online()){error("请先连接局域网");return;}
         ChatService source=service;GuestTransfer active=source.guestTransfer();boolean running=active!=null&&active.active();
-        LinearLayout box=column();TextView note=text("对方无需安装飞Q，可用浏览器收发文件。链接15分钟后失效；HTTP明文，仅用于可信局域网中的非敏感文件。",13,MUTED);note.setLineSpacing(dp(4),1);note.setPadding(0,0,0,dp(12));box.addView(note);
+        LinearLayout box=column();
+        LinearLayout card=column();
+        GradientDrawable cardBg=shape(PALE,CONTROL_RADIUS);cardBg.setStroke(dp(1),LINE);
+        card.setBackground(cardBg);card.setPadding(dp(14),dp(12),dp(14),dp(12));
+        LinearLayout topRow=row();
+        int leftMinutes=running?Math.max(0,(int)Math.ceil((active.until-System.currentTimeMillis())/60000.0)):0;
+        TextView badge=text(running?"开放中 · 剩余约 "+leftMinutes+" 分钟":"未开启",12,running?ONLINE:MUTED);
+        badge.setTypeface(null,Typeface.BOLD);
+        badge.setPadding(dp(10),dp(4),dp(10),dp(4));
+        badge.setBackground(shape(blend(running?ONLINE:MUTED,SURFACE,DARK?.28f:.14f),99));
+        topRow.addView(badge);
+        TextView safeNote=text("HTTP 明文 · 15 分钟有效",11,MUTED);safeNote.setGravity(Gravity.END|Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams safeParams=weight();safeParams.leftMargin=dp(8);topRow.addView(safeNote,safeParams);
+        card.addView(topRow);
         if(running) {
-            TextView status=text("正在开放 · 剩余约 "+Math.max(0,(int)Math.ceil((active.until-System.currentTimeMillis())/60000.0))+" 分钟",14,BLUE);box.addView(status);
+            List<String> addresses=new ArrayList<>();
+            try{addresses.addAll(service!=null?service.localAddresses():new LanNetwork(getSystemService(android.net.ConnectivityManager.class)).addresses());}catch(java.io.IOException e){error(e.getMessage());}
+            for(String address:addresses) {
+                String link=active.url(address);
+                LinearLayout linkCard=column();
+                GradientDrawable linkBg=shape(SURFACE,CONTROL_RADIUS);linkBg.setStroke(dp(1),LINE);
+                linkCard.setBackground(linkBg);linkCard.setPadding(dp(12),dp(10),dp(12),dp(10));
+                LinearLayout.LayoutParams lcp=new LinearLayout.LayoutParams(-1,-2);lcp.topMargin=dp(10);
+                TextView ipLabel=text(address,12,BLUE);ipLabel.setTypeface(null,Typeface.BOLD);linkCard.addView(ipLabel);
+                TextView urlView=text(link,12,MUTED);urlView.setTypeface(Typeface.MONOSPACE);urlView.setSingleLine();urlView.setEllipsize(TextUtils.TruncateAt.MIDDLE);urlView.setPadding(0,dp(3),0,dp(8));linkCard.addView(urlView);
+                LinearLayout btnRow=row();
+                Button copyBtn=button("复制链接",false);
+                copyBtn.setTextColor(BLUE);copyBtn.setMinHeight(dp(38));copyBtn.setPadding(dp(10),dp(6),dp(10),dp(6));
+                copyBtn.setBackground(new android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(BUBBLE),shape(OUTGOING,CONTROL_RADIUS),null));
+                copyBtn.setOnClickListener(v->copyText("临时传输链接",link));
+                Button qrBtn=button("显示二维码",false);
+                qrBtn.setMinHeight(dp(38));qrBtn.setPadding(dp(10),dp(6),dp(10),dp(6));
+                GradientDrawable qrBg=shape(PALE,CONTROL_RADIUS);qrBg.setStroke(dp(1),LINE);
+                qrBtn.setBackground(new android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(BUBBLE),qrBg,null));
+                qrBtn.setOnClickListener(v->{try{startActivity(new Intent(Intent.ACTION_VIEW,Uri.parse(link+"&qr")));}catch(ActivityNotFoundException e){error("没有可用浏览器，请复制链接");}});
+                LinearLayout.LayoutParams leftBtn=weight();leftBtn.rightMargin=dp(8);btnRow.addView(copyBtn,leftBtn);btnRow.addView(qrBtn,weight());
+                linkCard.addView(btnRow);card.addView(linkCard,lcp);
+            }
+            LinearLayout.LayoutParams cp=new LinearLayout.LayoutParams(-1,-2);cp.bottomMargin=dp(8);box.addView(card,cp);
             Dialog dialog=sheet("临时浏览器传输",box,null,null);
-            try {for(String address:new LanNetwork(getSystemService(android.net.ConnectivityManager.class)).addresses()) {
-                String link=active.url(address);fileAction(box,dialog,"复制链接 · "+address,()->copyText("临时传输链接",link));
-                fileAction(box,dialog,"显示二维码 · "+address,()->{try{startActivity(new Intent(Intent.ACTION_VIEW,Uri.parse(link+"&qr")));}catch(ActivityNotFoundException e){error("没有可用浏览器，请复制链接");}});
-            }}catch(java.io.IOException e){error(e.getMessage());}
             fileAction(box,dialog,"查看已接收文件",this::showTasks);
-            fileAction(box,dialog,"结束临时传输",()->{source.stopGuest();error("临时传输已结束，完整文件保留");});return;
+            fileAction(box,dialog,"结束临时传输",()->{source.stopGuest();error("临时传输已结束，完整文件保留");});
+            return;
         }
-        box.addView(text("已选 "+guestFiles.size()+" 个文件",14,INK));
-        Switch receive=settingSwitch("允许对方向我发送文件",guestUpload);box.addView(receive);receive.setOnCheckedChangeListener((button,checked)->guestUpload=checked);
-        box.addView(text("本次最多100个文件、合计10 GiB，保存在应用接收区，可从传输任务另存。",12,MUTED));
+        String summaryText=guestFiles.isEmpty()?"未选择分享文件（可仅开启接收）":"已选 "+guestFiles.size()+" 个文件";
+        TextView fileSummary=text(summaryText,14,INK);fileSummary.setTypeface(null,Typeface.BOLD);fileSummary.setPadding(0,dp(10),0,dp(4));card.addView(fileSummary);
+        if(!guestFiles.isEmpty()) {
+            StringBuilder preview=new StringBuilder();
+            int show=Math.min(3,guestFiles.size());
+            for(int i=0;i<show;i++){if(i>0)preview.append('\n');preview.append("· ").append(guestFileName(guestFiles.get(i)));}
+            if(guestFiles.size()>show)preview.append("\n等共 ").append(guestFiles.size()).append(" 个文件");
+            TextView listPreview=text(preview.toString(),12,MUTED);listPreview.setLineSpacing(dp(2),1);listPreview.setPadding(0,0,0,dp(8));card.addView(listPreview);
+        }
+        LinearLayout pickRow=row();pickRow.setPadding(0,dp(4),0,0);
+        Button pickBtn=button(guestFiles.isEmpty()?"选择分享文件":"重新选择文件",false);
+        pickBtn.setTextColor(BLUE);pickBtn.setMinHeight(dp(40));pickBtn.setPadding(dp(12),dp(6),dp(12),dp(6));
+        pickBtn.setBackground(new android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(BUBBLE),shape(OUTGOING,CONTROL_RADIUS),null));
+        LinearLayout.LayoutParams pickParams=weight();
+        if(!guestFiles.isEmpty())pickParams.rightMargin=dp(8);
+        pickRow.addView(pickBtn,pickParams);
+        Button clearBtn=null;
+        if(!guestFiles.isEmpty()) {
+            clearBtn=button("清空",false);clearBtn.setMinHeight(dp(40));clearBtn.setPadding(dp(14),dp(6),dp(14),dp(6));
+            GradientDrawable clearBg=shape(SURFACE,CONTROL_RADIUS);clearBg.setStroke(dp(1),LINE);
+            clearBtn.setBackground(new android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(BUBBLE),clearBg,null));
+            pickRow.addView(clearBtn,new LinearLayout.LayoutParams(-2,-2));
+        }
+        card.addView(pickRow);
+        LinearLayout.LayoutParams cp=new LinearLayout.LayoutParams(-1,-2);cp.bottomMargin=dp(10);box.addView(card,cp);
+
+        LinearLayout uploadCard=column();
+        GradientDrawable uploadBg=shape(PALE,CONTROL_RADIUS);uploadBg.setStroke(dp(1),LINE);
+        uploadCard.setBackground(uploadBg);uploadCard.setPadding(dp(14),dp(4),dp(14),dp(10));
+        Switch receive=settingSwitch("允许对方向我发送文件",guestUpload);uploadCard.addView(receive);receive.setOnCheckedChangeListener((button,checked)->guestUpload=checked);
+        uploadCard.addView(text("保存至应用接收区 · 限 100 个文件 / 10 GiB",12,MUTED));
+        box.addView(uploadCard,new LinearLayout.LayoutParams(-1,-2));
+
         Dialog dialog=sheet("临时浏览器传输",box,"开启临时传输",d->{source.startGuest(new ArrayList<>(guestFiles),receive.isChecked(),success->{if(success&&!isDestroyed()&&service==source){d.dismiss();showGuest();}});});
-        fileAction(box,dialog,"选择分享文件",()->{try{startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*").addCategory(Intent.CATEGORY_OPENABLE).putExtra(Intent.EXTRA_ALLOW_MULTIPLE,true).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION),27);}catch(ActivityNotFoundException e){error("系统文件选择器不可用");}});
-        if(!guestFiles.isEmpty())fileAction(box,dialog,"清空待分享文件",()->{guestFiles.clear();showGuest();});
+        pickBtn.setOnClickListener(v->{dialog.dismiss();try{startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*").addCategory(Intent.CATEGORY_OPENABLE).putExtra(Intent.EXTRA_ALLOW_MULTIPLE,true).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION),27);}catch(ActivityNotFoundException e){error("系统文件选择器不可用");}});
+        if(clearBtn!=null)clearBtn.setOnClickListener(v->{dialog.dismiss();guestFiles.clear();showGuest();});
     }
     private void sharing() {
         if(service==null||!service.online()){error("请先连接局域网");return;}
@@ -1100,8 +1205,9 @@ public final class MainActivity extends Activity implements ChatService.Observer
         pages.load(1);
     }
     private void deleteConversation(ChatStore.Conversation c,boolean clearOnly) {
-        LinearLayout box=column();TextView hint=text("仅影响本机，不删除已接收的文件。删除列表不是屏蔽，新消息会恢复会话入口。",14,MUTED);box.addView(hint);
-        Switch clear=settingSwitch("同时删除聊天记录",clearOnly);clear.setEnabled(!clearOnly);box.addView(clear);
+        LinearLayout box=column();TextView hint=text(clearOnly?"仅清空本机聊天记录，已接收文件保留。":"仅从列表移除，已接收文件保留，新消息会自动恢复。",13,MUTED);hint.setPadding(dp(2),0,dp(2),dp(10));box.addView(hint);
+        LinearLayout toggleCard=column();GradientDrawable cardBg=shape(PALE,CONTROL_RADIUS);cardBg.setStroke(dp(1),LINE);toggleCard.setBackground(cardBg);toggleCard.setPadding(dp(14),dp(2),dp(14),dp(2));
+        Switch clear=settingSwitch("同时删除聊天记录",clearOnly);clear.setEnabled(!clearOnly);toggleCard.addView(clear);box.addView(toggleCard);
         sheet(clearOnly?"清空聊天记录":"删除联系人",box,"确认删除",dialog->{
             if(service==null)return;String id=c.peer.id();
             service.removeConversation(id,clear.isChecked(),!clearOnly,success->{if(!success||isDestroyed())return;dialog.dismiss();if(selected.equals(id)){if(clearOnly){historySignature="";changed();}else open("");}});
@@ -1109,27 +1215,29 @@ public final class MainActivity extends Activity implements ChatService.Observer
     }
     private void addPeer() {
         if(service==null||!service.online()) { error("请先连接"); return; }
-        LinearLayout content=column(); EditText input=formField(content,"IP 地址",""); input.setHint("192.168.1.100:2425"); input.setInputType(android.text.InputType.TYPE_CLASS_TEXT|android.text.InputType.TYPE_TEXT_VARIATION_URI);
+        LinearLayout content=column(); EditText input=formField(content,"IP 地址",""); input.setHint("192.168.1.100:2425"); input.setHintTextColor(MUTED); input.setInputType(android.text.InputType.TYPE_CLASS_TEXT|android.text.InputType.TYPE_TEXT_VARIATION_URI);
         sheet("添加联系人",content,"添加",dialog->{ try { LanNode.endpoint(input.getText().toString()); service.probe(input.getText().toString()); dialog.dismiss(); } catch(Exception e) { input.setError(e.getMessage()); } });
     }
     private void settings() {
         SharedPreferences prefs=getSharedPreferences("settings",MODE_PRIVATE); LinearLayout box=column();
         settingHeading(box,"个人资料与连接");
         String normalizedAvatar=Protocol.normalizeAvatar(prefs.getString("avatar","default"));final String[] avatarValue={normalizedAvatar==null?"default":normalizedAvatar};
-        String self="device:"+prefs.getString("device_id","");LinearLayout avatarRow=row();TextView portrait=text("",18,INK);portrait.setContentDescription("个人头像");bindAvatar(portrait,self,"个人头像",false,avatarValue[0]);avatarRow.addView(portrait,new LinearLayout.LayoutParams(dp(72),dp(72)));
-        Button changeAvatar=button("更换头像",false);LinearLayout.LayoutParams avatarButton=weight();avatarButton.leftMargin=dp(12);avatarRow.addView(changeAvatar,avatarButton);box.addView(avatarRow,settingSpacing(0,12));
+        String self="device:"+prefs.getString("device_id","");LinearLayout avatarRow=row();TextView portrait=text("",18,INK);portrait.setContentDescription("个人头像");bindAvatar(portrait,self,"个人头像",false,avatarValue[0]);avatarRow.addView(portrait,new LinearLayout.LayoutParams(dp(64),dp(64)));
+        Button changeAvatar=button("更换头像",false);LinearLayout.LayoutParams avatarButton=weight();avatarButton.leftMargin=dp(12);avatarRow.addView(changeAvatar,avatarButton);box.addView(avatarRow,settingSpacing(0,10));
         changeAvatar.setOnClickListener(v->showAvatarPicker(avatarValue[0],value->{avatarValue[0]=value;bindAvatar(portrait,self,"个人头像",false,value);}));
         EditText name=formField(box,"昵称",prefs.getString("name",Build.MODEL)), group=formField(box,"部门",prefs.getString("group","我的局域网")), port=formField(box,"端口",String.format(Locale.ROOT,"%d",prefs.getInt("port",2425)));
         port.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
-        Switch autoConnect=settingSwitch("打开应用时恢复连接",prefs.getBoolean("auto_connect",true)); box.addView(autoConnect,new LinearLayout.LayoutParams(-1,-2));
-        TextView reconnectHint=text("曾连接后，下次打开自动连接并查找历史联系人。主动断开后保持离线，需手动连接；不会开机自启。",12,MUTED); box.addView(reconnectHint);
-        Switch legacy=settingSwitch("允许旧版明文协议",ChatService.allowLegacy(prefs));box.addView(legacy,new LinearLayout.LayoutParams(-1,-2));box.addView(text("默认开启，兼容旧版聊天和附件。旧设备使用明文；已配对设备不降级，共享和远控始终加密。",12,MUTED));
+        Switch autoConnect=settingSwitch("打开应用时自动恢复连接",prefs.getBoolean("auto_connect",true)); box.addView(autoConnect,settingSpacing(6,0));
+        Switch legacy=settingSwitch("允许旧版明文协议",ChatService.allowLegacy(prefs));box.addView(legacy,new LinearLayout.LayoutParams(-1,-2));box.addView(text("兼容旧设备明文；已配对设备与共享远控始终加密",12,MUTED));
         settingHeading(box,"文件接收");
         Switch automatic=settingSwitch("自动接收文件",receivedStorage.automatic()); automatic.setContentDescription("自动接收文件"); box.addView(automatic,new LinearLayout.LayoutParams(-1,-2));
-        TextView hint=text("开启后无需逐次确认，不会自动打开文件。仅用于可信局域网。\n目录选择立即生效，其他选项点击保存。",12,MUTED);hint.setLineSpacing(dp(3),1); box.addView(hint);
-        folderLabel=text(receivedStorage.folderLabel(),13,MUTED); folderLabel.setPadding(0,dp(12),0,dp(12)); folderLabel.setContentDescription("文件保存目录"); box.addView(folderLabel);
-        Button choose=button("选择保存文件夹",false); box.addView(choose,new LinearLayout.LayoutParams(-1,-2)); choose.setOnClickListener(v->chooseFolder());
-        Button reset=button("恢复应用内保存",false); LinearLayout.LayoutParams rp=new LinearLayout.LayoutParams(-1,-2); rp.topMargin=dp(12); box.addView(reset,rp); reset.setOnClickListener(v->{ receivedStorage.useInternal(); folderLabel.setText(receivedStorage.folderLabel()); if(service!=null) service.receiveSettingsChanged(); });
+        TextView hint=text("仅用于可信局域网，不自动打开文件",12,MUTED); box.addView(hint);
+        folderLabel=text(receivedStorage.folderLabel(),13,MUTED); folderLabel.setPadding(0,dp(10),0,dp(10)); folderLabel.setContentDescription("文件保存目录"); box.addView(folderLabel);
+        LinearLayout folderBtns=row();
+        Button choose=button("选择保存文件夹",false); Button reset=button("恢复应用内",false);
+        LinearLayout.LayoutParams chp=weight();chp.rightMargin=dp(8);folderBtns.addView(choose,chp);folderBtns.addView(reset,weight());box.addView(folderBtns);
+        choose.setOnClickListener(v->chooseFolder());
+        reset.setOnClickListener(v->{ receivedStorage.useInternal(); folderLabel.setText(receivedStorage.folderLabel()); if(service!=null) service.receiveSettingsChanged(); });
         settingHeading(box,"外观");
         Switch follow=settingSwitch("跟随系统切换",prefs.getBoolean("follow_system_theme",false));box.addView(follow,settingSpacing(0,8));
         Switch dark=settingSwitch("夜间模式",follow.isChecked()?systemDark():prefs.getBoolean("dark_mode",false));dark.setEnabled(!follow.isChecked());box.addView(dark,new LinearLayout.LayoutParams(-1,-2));
@@ -1163,26 +1271,27 @@ public final class MainActivity extends Activity implements ChatService.Observer
         boolean[] presetDark={false,false,false,false,true,true,true,true};
         for(int lineIndex=0;lineIndex<4;lineIndex++){LinearLayout presetRow=row();presetRow.setBaselineAligned(false);presetRow.setGravity(Gravity.TOP);box.addView(presetRow,box.indexOfChild(preview)+1+lineIndex,new LinearLayout.LayoutParams(-1,-2));for(int columnIndex=0;columnIndex<2;columnIndex++){int preset=lineIndex*2+columnIndex;Button pick=button(presetNames[preset],false);LinearLayout.LayoutParams pp=weight();pp.setMargins(columnIndex==0?0:dp(6),0,columnIndex==0?dp(6):0,dp(12));presetRow.addView(pick,pp);pick.setOnClickListener(v->{follow.setChecked(false);dark.setChecked(presetDark[preset]);accent.check(accent.getChildAt(presetAccentIndex[preset]).getId());backgrounds.check(backgrounds.getChildAt(presetBgIndex[preset]).getId());updatePreview.run();});}}
         Button chooseBackground=button("选择背景图片…",false);box.addView(chooseBackground,settingSpacing(0,4));chooseBackground.setOnClickListener(v->{try{startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("image/*").addCategory(Intent.CATEGORY_OPENABLE).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION),23);}catch(ActivityNotFoundException e){error("系统没有可用的图片选择器");}});
-        TextView backgroundHint=text("图片授权立即保存；其他外观选项点击保存后生效。支持最长边抽样至 1920 像素，不影响原图。",12,MUTED);backgroundHint.setPadding(0,dp(8),0,0);box.addView(backgroundHint);
         settingHeading(box,"存储管理");
-        Button clear=button("清理已接收文件",false); LinearLayout.LayoutParams cp=new LinearLayout.LayoutParams(-1,-2); cp.topMargin=dp(16); box.addView(clear,cp); clear.setOnClickListener(v->clearReceivedFiles());
-        Button clearOffers=button("清理发送缓存",false); LinearLayout.LayoutParams op=new LinearLayout.LayoutParams(-1,-2); op.topMargin=dp(10); box.addView(clearOffers,op);
-        Switch cleanupSaved=settingSwitch("另存成功后清理应用内副本",prefs.getBoolean(ReceivedStorage.CLEAN_EXPORTED,false));box.addView(cleanupSaved,settingSpacing(12,0));
-        box.addView(text("默认关闭。开启后会重新核验另存文件，完整且可读才清理内部副本；保存目录中的文件保留。",12,MUTED));
-        clear.setGravity(Gravity.START|Gravity.CENTER_VERTICAL);clearOffers.setGravity(Gravity.START|Gravity.CENTER_VERTICAL);
-        TextView limits=text("文件不设固定大小上限，受设备可用空间限制并保留 16 MiB 余量。网络失败后重新接收可续传；主动取消会清理断点。另存到目录仍需内部暂存空间。",12,MUTED); limits.setPadding(0,dp(12),0,0); box.addView(limits);
+        LinearLayout clearRow=row();
+        Button clear=button("清理已接收文件",false); Button clearOffers=button("清理发送缓存",false);
+        LinearLayout.LayoutParams clrP=weight();clrP.rightMargin=dp(8);clearRow.addView(clear,clrP);clearRow.addView(clearOffers,weight());box.addView(clearRow,settingSpacing(6,8));
+        clear.setOnClickListener(v->clearReceivedFiles());
+        Switch cleanupSaved=settingSwitch("另存后清理应用内副本",prefs.getBoolean(ReceivedStorage.CLEAN_EXPORTED,false));box.addView(cleanupSaved,settingSpacing(4,0));
+        box.addView(text("核验另存文件完整后才清理内部副本，不影响已导出文件",12,MUTED));
         clearOffers.setOnClickListener(v->confirm("清理发送缓存","撤销尚未接收的文件邀请并删除暂存副本？原文件不受影响。","清理",()->{
             if(service==null) { error("连接服务尚未就绪，请稍后重试"); return; }
             service.clearOffers(result->error(result.files==0?"没有可清理的发送缓存":"已撤销未接收的文件邀请，删除 "+result.files+" 个暂存副本，释放 "+size(result.bytes)));
         }));
         settingHeading(box,"故障诊断");
-        TextView connectionDetails=text(service==null?"尚未连接局域网":service.connectionDetails(),12,MUTED);selectable(connectionDetails);box.addView(connectionDetails,settingSpacing(0,12));
+        TextView connectionDetails=text(service==null?"尚未连接局域网":service.connectionDetails(),12,MUTED);selectable(connectionDetails);box.addView(connectionDetails,settingSpacing(0,10));
         Switch diagnosticSwitch=settingSwitch("记录故障诊断",prefs.getBoolean("diagnostics",false));box.addView(diagnosticSwitch,new LinearLayout.LayoutParams(-1,-2));
-        box.addView(text("默认关闭，保存后生效。仅记 UTC 时间和事件码，不记聊天、身份、IP、URI 和路径；最多 128 KiB。关闭后保留，可手动清除。",12,MUTED));
+        box.addView(text("仅记时间与事件码（限 128 KiB），不含聊天与路径",12,MUTED));
         Diagnostics journal=new Diagnostics(this);
-        Button viewLog=button("查看诊断记录",false);box.addView(viewLog,settingSpacing(16,12));
-        viewLog.setOnClickListener(v->{try{TextView log=text(journal.read(),12,INK);selectable(log);sheet("诊断记录（可选择复制）",log,"确定",Dialog::dismiss);}catch(Exception e){error("诊断读取失败："+e.getMessage());}});
-        Button clearLog=button("清除诊断记录",false);box.addView(clearLog,settingSpacing(0,4));clearLog.setOnClickListener(v->{try{journal.clear();error("诊断记录已清除");}catch(Exception e){error("诊断清除失败："+e.getMessage());}});
+        LinearLayout logRow=row();
+        Button viewLog=button("查看诊断记录",false); Button clearLog=button("清除诊断记录",false);
+        LinearLayout.LayoutParams vlP=weight();vlP.rightMargin=dp(8);logRow.addView(viewLog,vlP);logRow.addView(clearLog,weight());box.addView(logRow,settingSpacing(12,4));
+        viewLog.setOnClickListener(v->{try{TextView log=text(journal.read(),12,INK);selectable(log);sheet("诊断记录",log,"确定",Dialog::dismiss);}catch(Exception e){error("诊断读取失败："+e.getMessage());}});
+        clearLog.setOnClickListener(v->{try{journal.clear();error("诊断记录已清除");}catch(Exception e){error("诊断清除失败："+e.getMessage());}});
         sheet("设置",box,"保存",dialog->{
             String n=name.getText().toString().trim(), g=group.getText().toString().trim(); int p;
             if(n.isEmpty()||n.length()>64) { settingsError(dialog,name,"昵称须为 1–64 个字符"); return; } if(g.length()>64) { settingsError(dialog,group,"分组最多 64 个字符"); return; }
@@ -1206,14 +1315,21 @@ public final class MainActivity extends Activity implements ChatService.Observer
     private void showAvatarPicker(String value,java.util.function.Consumer<String> use) {
         AvatarSelection state=new AvatarSelection();state.value=Protocol.normalizeAvatar(value);if(state.value==null)state.value="default";avatarSelection=state;
         LinearLayout box=column();String identity="device:"+getSharedPreferences("settings",MODE_PRIVATE).getString("device_id","");
-        state.preview=text("",18,INK);state.preview.setContentDescription("所选头像预览");box.addView(state.preview,new LinearLayout.LayoutParams(-1,dp(80)));
+        LinearLayout topCard=row();GradientDrawable topBg=shape(PALE,CONTROL_RADIUS);topBg.setStroke(dp(1),LINE);topCard.setBackground(topBg);topCard.setPadding(dp(12),dp(10),dp(12),dp(10));
+        state.preview=text("",18,INK);state.preview.setContentDescription("所选头像预览");topCard.addView(state.preview,new LinearLayout.LayoutParams(dp(56),dp(56)));
+        Button local=button("本地图片",false),reset=button("默认头像",false);
+        GradientDrawable btnBg1=shape(SURFACE,CONTROL_RADIUS);btnBg1.setStroke(dp(1),LINE);local.setBackground(new android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(BUBBLE),btnBg1,null));
+        GradientDrawable btnBg2=shape(SURFACE,CONTROL_RADIUS);btnBg2.setStroke(dp(1),LINE);reset.setBackground(new android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(BUBBLE),btnBg2,null));
+        local.setMinHeight(dp(42));reset.setMinHeight(dp(42));local.setPadding(dp(8),dp(6),dp(8),dp(6));reset.setPadding(dp(8),dp(6),dp(8),dp(6));
+        LinearLayout.LayoutParams lp=weight();lp.leftMargin=dp(12);topCard.addView(local,lp);
+        LinearLayout.LayoutParams rp=weight();rp.leftMargin=dp(8);topCard.addView(reset,rp);
+        box.addView(topCard,settingSpacing(0,10));
         GridLayout grid=new GridLayout(this);grid.setColumnCount(6);grid.setContentDescription("内置头像列表");box.addView(grid,new LinearLayout.LayoutParams(-1,-2));EmojiAvatars avatars=EmojiAvatars.get(this);
         for(int i=0;i<avatars.count();i++) {
             String selected="builtin:"+i;ImageButton choice=new ImageButton(this);choice.setTag(selected);choice.setContentDescription("内置头像："+avatars.description(i));choice.setPadding(dp(4),dp(4),dp(4),dp(4));choice.setImageDrawable(new AvatarDrawable(this,"",false,dp(3),SURFACE,ONLINE,selected));
-            GridLayout.LayoutParams spacing=new GridLayout.LayoutParams(GridLayout.spec(i/6),GridLayout.spec(i%6,1f));spacing.width=0;spacing.height=dp(56);spacing.setMargins(dp(2),dp(2),dp(2),dp(2));grid.addView(choice,spacing);state.choices.add(choice);
+            GridLayout.LayoutParams spacing=new GridLayout.LayoutParams(GridLayout.spec(i/6),GridLayout.spec(i%6,1f));spacing.width=0;spacing.height=dp(52);spacing.setMargins(dp(2),dp(2),dp(2),dp(2));grid.addView(choice,spacing);state.choices.add(choice);
             choice.setOnClickListener(v->{state.revision++;state.loading=false;state.value=selected;updateAvatarPicker(state,identity);});
         }
-        LinearLayout actions=row();Button local=button("本地图片",false),reset=button("默认头像",false);actions.addView(local,weight());LinearLayout.LayoutParams resetSpacing=weight();resetSpacing.leftMargin=dp(12);actions.addView(reset,resetSpacing);box.addView(actions,settingSpacing(12,8));
         state.local=local;
         reset.setOnClickListener(v->{state.revision++;state.loading=false;state.value="default";updateAvatarPicker(state,identity);});
         local.setOnClickListener(v->{
@@ -1221,7 +1337,6 @@ public final class MainActivity extends Activity implements ChatService.Observer
             try{startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("image/*").addCategory(Intent.CATEGORY_OPENABLE).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),25);}
             catch(ActivityNotFoundException e){avatarImageRequest=null;error("系统没有可用的图片选择器");}
         });
-        box.addView(text("选择后回到设置页点击保存。原图移动不影响头像。",12,MUTED));
         state.dialog=sheet("更换头像",box,"使用此头像",dialog->{if(!state.loading){use.accept(state.value);dialog.dismiss();}});
         state.confirm=(Button)state.dialog.getWindow().getDecorView().findViewWithTag("sheet-primary");
         state.dialog.setOnDismissListener(d->{if(avatarSelection==state)avatarSelection=null;});updateAvatarPicker(state,identity);
@@ -1327,7 +1442,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
             tab.setText(names[i]);tab.setTextSize(15);tab.setAllCaps(false);tab.setGravity(Gravity.CENTER);tab.setMinHeight(dp(48));tab.setMinimumWidth(0);tab.setPadding(dp(2),dp(10),dp(2),dp(10));tab.setStateListAnimator(null);tab.setBackground(new android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(BUBBLE),shape(SURFACE,0),null));tab.setTag("settings-tab:"+i);tabs[i]=tab;navigation.addView(tab,new LinearLayout.LayoutParams(0,-2,1));tab.setOnClickListener(v->select.accept(index));
         }
         frame.addView(navigation);frame.addView(scroller,new LinearLayout.LayoutParams(-1,0,1));
-        LinearLayout footer=row();footer.setPadding(dp(22),dp(10),dp(22),dp(14));TextView note=text("切换分类会保留未保存的修改",12,MUTED);footer.addView(note,weight());Button done=button("保存",true);footer.addView(done,new LinearLayout.LayoutParams(-2,-2));done.setOnClickListener(v->handler.accept(dialog));frame.addView(footer);
+        LinearLayout footer=row();footer.setPadding(dp(20),dp(10),dp(20),dp(14));footer.setGravity(Gravity.END|Gravity.CENTER_VERTICAL);Button done=button("保存",true);done.setMinimumWidth(dp(112));footer.addView(done,new LinearLayout.LayoutParams(-2,-2));done.setOnClickListener(v->handler.accept(dialog));frame.addView(footer);
         dialog.setContentView(frame);Window window=dialog.getWindow();if(window!=null){window.setBackgroundDrawableResource(android.R.color.transparent);window.setGravity(Gravity.BOTTOM);window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);window.setDimAmount(.32f);window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);SystemBars.applyOverlay(window,DARK);}
         select.accept(0);dialog.show();if(window!=null){window.setLayout(-1,-2);SystemBars.applyOverlay(window,DARK);}return dialog;
     }
@@ -1338,16 +1453,16 @@ public final class MainActivity extends Activity implements ChatService.Observer
             @Override public boolean dispatchTouchEvent(MotionEvent event) { dismissSelectionOutside(event); return super.dispatchTouchEvent(event); }
         }; dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
         dialog.setOnDismissListener(d->{ if(selectionOwner!=null&&selectionOwner.getRootView()==dialog.getWindow().getDecorView()) finishSelection(); });
-        LinearLayout box=column(); box.setPadding(dp(20),dp(10),dp(20),dp(22)); box.setBackground(shape(SURFACE,20));
+        LinearLayout box=column(); box.setPadding(dp(18),dp(8),dp(18),dp(18)); box.setBackground(shape(SURFACE,20));
         View handle=new View(this); handle.setBackground(shape(blend(INK,SURFACE,DARK?.22f:.14f),99));
-        LinearLayout.LayoutParams handleParams=new LinearLayout.LayoutParams(dp(36),dp(4)); handleParams.gravity=Gravity.CENTER_HORIZONTAL; handleParams.bottomMargin=dp(8); box.addView(handle,handleParams);
-        LinearLayout heading=row(); heading.setPadding(dp(4),0,0,dp(10)); TextView caption=text(name,18,INK); caption.setTypeface(null,Typeface.BOLD); caption.setMaxLines(2); caption.setEllipsize(TextUtils.TruncateAt.END); caption.setContentDescription(name); heading.addView(caption,weight()); IconButton close=new IconButton("close","关闭",MUTED); heading.addView(close,new LinearLayout.LayoutParams(dp(44),dp(44))); close.setOnClickListener(v->dialog.dismiss()); box.addView(heading);
+        LinearLayout.LayoutParams handleParams=new LinearLayout.LayoutParams(dp(36),dp(4)); handleParams.gravity=Gravity.CENTER_HORIZONTAL; handleParams.bottomMargin=dp(6); box.addView(handle,handleParams);
+        LinearLayout heading=row(); heading.setPadding(dp(2),0,0,dp(8)); TextView caption=text(name,18,INK); caption.setTypeface(null,Typeface.BOLD); caption.setMaxLines(2); caption.setEllipsize(TextUtils.TruncateAt.END); caption.setContentDescription(name); heading.addView(caption,weight()); IconButton close=new IconButton("close","关闭",MUTED); heading.addView(close,new LinearLayout.LayoutParams(dp(42),dp(42))); close.setOnClickListener(v->dialog.dismiss()); box.addView(heading);
         box.addView(content,new LinearLayout.LayoutParams(-1,-2));
         if(action!=null) {
-            boolean danger=action.contains("删除")||action.contains("清空")||action.contains("取消发送")||action.contains("清除")||action.contains("撤销")||action.contains("拒绝");
+            boolean danger=action.contains("删除")||action.contains("清空")||action.contains("取消发送")||action.contains("清除")||action.contains("撤销")||action.contains("拒绝")||action.contains("结束");
             Button done=button(action,true); done.setTag("sheet-primary");
             if(danger){int tone=DARK?0xffe06066:0xffd24e54;done.setBackground(new android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(0x33ffffff),shape(tone,CONTROL_RADIUS),null));done.setTextColor(Color.WHITE);}
-            LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(-1,-2); p.topMargin=dp(20); box.addView(done,p); done.setOnClickListener(v->{ if(handler!=null) handler.accept(dialog); });
+            LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(-1,-2); p.topMargin=dp(14); box.addView(done,p); done.setOnClickListener(v->{ if(handler!=null) handler.accept(dialog); });
         }
         // 整张操作面板可滚动；遵守父窗口实际给出的高度，避免键盘、横屏或长标题把底部按钮挤到屏外。
         ScrollView scroller=new ScrollView(this) { @Override protected void onMeasure(int width,int height) {
@@ -1361,7 +1476,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
     }
     private void confirm(String title,String body,String action,Runnable confirm) {
         LinearLayout panel=column();
-        TextView content=text(body,15,MUTED); content.setLineSpacing(dp(3),1f); content.setPadding(dp(4),dp(6),dp(4),dp(20)); panel.addView(content);
+        TextView content=text(body,14,MUTED); content.setLineSpacing(dp(4),1f); content.setPadding(dp(2),dp(2),dp(2),dp(16)); panel.addView(content);
         LinearLayout actions=row();
         Button cancel=button("取消",false);
         GradientDrawable cancelBg=shape(PALE,CONTROL_RADIUS); cancelBg.setStroke(dp(1),LINE);
@@ -1378,11 +1493,11 @@ public final class MainActivity extends Activity implements ChatService.Observer
     }
     private void copyText(String label,String value) { getSystemService(ClipboardManager.class).setPrimaryClip(ClipData.newPlainText(label,value)); error("已复制"+label); }
     private void fileAction(LinearLayout options,Dialog dialog,String label,Runnable action) {
-        boolean danger=label.equals("断开")||label.equals("取消发送")||label.startsWith("拒绝")||label.startsWith("删除")||label.startsWith("清空");
-        if(danger&&options.getChildCount()>0) { View line=new View(this);line.setBackgroundColor(blend(INK,SURFACE,.09f));LinearLayout.LayoutParams separator=new LinearLayout.LayoutParams(-1,dp(1));separator.setMargins(dp(12),dp(8),dp(12),dp(8));options.addView(line,separator); }
+        boolean danger=label.equals("断开")||label.equals("取消发送")||label.startsWith("拒绝")||label.startsWith("删除")||label.startsWith("清空")||label.startsWith("结束");
+        if(danger&&options.getChildCount()>0) { View line=new View(this);line.setBackgroundColor(blend(INK,SURFACE,.09f));LinearLayout.LayoutParams separator=new LinearLayout.LayoutParams(-1,dp(1));separator.setMargins(dp(10),dp(6),dp(10),dp(6));options.addView(line,separator); }
         int color=danger?0xffd24e54:INK;
-        Button item=button(label,false); item.setTextColor(color); item.setGravity(Gravity.START|Gravity.CENTER_VERTICAL); item.setMinHeight(dp(52)); item.setPadding(dp(12),dp(12),dp(14),dp(12));
-        item.setCompoundDrawablesWithIntrinsicBounds(new MenuIcon(label,danger?color:MUTED),null,null,null); item.setCompoundDrawablePadding(dp(16));
+        Button item=button(label,false); item.setTextColor(color); item.setGravity(Gravity.START|Gravity.CENTER_VERTICAL); item.setMinHeight(dp(52)); item.setPadding(dp(12),dp(10),dp(12),dp(10));
+        item.setCompoundDrawablesWithIntrinsicBounds(new MenuIcon(label,danger?color:MUTED),null,null,null); item.setCompoundDrawablePadding(dp(14));
         item.setBackground(new android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(BUBBLE),shape(SURFACE,CONTROL_RADIUS),shape(Color.WHITE,CONTROL_RADIUS)));
         LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(-1,-2); p.topMargin=dp(2); options.addView(item,p); item.setOnClickListener(v->{ dialog.dismiss(); action.run(); });
     }
@@ -1396,7 +1511,9 @@ public final class MainActivity extends Activity implements ChatService.Observer
         @Override public int getOpacity() { return PixelFormat.TRANSLUCENT; }
         @Override public void draw(Canvas c) {
             c.save();Rect b=getBounds();c.translate(b.left,b.top);c.scale(b.width()/24f,b.height()/24f);Path p=new Path();
-            if(label.startsWith("复制")) { c.drawRoundRect(8,8,20,21,2,2,paint);p.moveTo(5,16);p.lineTo(3,16);p.lineTo(3,3);p.lineTo(15,3);p.lineTo(15,5);c.drawPath(p,paint); }
+            if(label.contains("传输任务")) { c.drawLine(4,7,20,7,paint);p.moveTo(16,3);p.lineTo(20,7);p.lineTo(16,11);c.drawLine(20,17,4,17,paint);p.moveTo(8,13);p.lineTo(4,17);p.lineTo(8,21);c.drawPath(p,paint); }
+            else if(label.contains("临时浏览器")) { c.drawCircle(12,12,9,paint);c.drawLine(3,12,21,12,paint);c.drawOval(7.5f,3,16.5f,21,paint); }
+            else if(label.startsWith("复制")) { c.drawRoundRect(8,8,20,21,2,2,paint);p.moveTo(5,16);p.lineTo(3,16);p.lineTo(3,3);p.lineTo(15,3);p.lineTo(15,5);c.drawPath(p,paint); }
             else if(label.contains("转发")||label.contains("分享")) { p.moveTo(3,4);p.lineTo(21,12);p.lineTo(3,20);p.lineTo(6,12);p.close();c.drawPath(p,paint);c.drawLine(6,12,21,12,paint); }
             else if(label.contains("目录")||label.contains("位置")||label.contains("共享")||label.contains("文件夹")) { p.moveTo(3,6);p.lineTo(9,6);p.lineTo(11,9);p.lineTo(21,9);p.lineTo(21,20);p.lineTo(3,20);p.close();c.drawPath(p,paint); }
             else if(label.contains("Windows")){c.drawRoundRect(3,4,21,17,2,2,paint);c.drawLine(12,17,12,21,paint);c.drawLine(8,21,16,21,paint);}
@@ -1635,6 +1752,10 @@ public final class MainActivity extends Activity implements ChatService.Observer
             else if(kind.equals("close")) { canvas.drawLine(5,5,19,19,p); canvas.drawLine(19,5,5,19,p); }
             else if(kind.equals("add")) { canvas.drawLine(12,3,12,21,p); canvas.drawLine(3,12,21,12,p); }
             else if(kind.equals("back")) { path.moveTo(12,4); path.lineTo(4,12); path.lineTo(12,20); canvas.drawPath(path,p); canvas.drawLine(4,12,21,12,p); }
+            else if(kind.equals("transfer")) {
+                canvas.drawLine(4,7,20,7,p);path.moveTo(16,3);path.lineTo(20,7);path.lineTo(16,11);
+                canvas.drawLine(20,17,4,17,p);path.moveTo(8,13);path.lineTo(4,17);path.lineTo(8,21);canvas.drawPath(path,p);
+            }
             else if(kind.equals("send")) { path.moveTo(3,3); path.lineTo(22,12); path.lineTo(3,21); path.lineTo(6,12); path.close(); canvas.drawPath(path,p); canvas.drawLine(6,12,21,12,p); }
             else if(kind.equals("smile")) {canvas.drawCircle(12,12,9,p);canvas.drawPoint(9,9,p);canvas.drawPoint(15,9,p);canvas.drawArc(7,9,17,17,15,150,false,p);}
             else if(kind.equals("code")) {path.moveTo(7,6);path.lineTo(2,12);path.lineTo(7,18);path.moveTo(17,6);path.lineTo(22,12);path.lineTo(17,18);canvas.drawPath(path,p);canvas.drawLine(14,4,10,20,p);}

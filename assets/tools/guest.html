@@ -1,14 +1,88 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>飞Q · 临时传输</title><link rel="stylesheet" href="/guest.css"><script src="/qrcodegen.js" defer></script><script src="/guest.js" defer></script></head>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>飞Q · 临时传输</title>
+  <link rel="stylesheet" href="/guest.css">
+  <script src="/qrcodegen.js" defer></script>
+  <script src="/guest.js" defer></script>
+</head>
 <body>
-<main>
-  <header><span class="logo" aria-hidden="true">↗</span><div><h1>临时传输</h1><p>飞Q · 同一局域网直接传送</p></div><button id="qr-toggle" class="quiet" type="button">二维码</button></header>
-  <div class="notice"><span class="dot"></span><span id="session">正在连接…</span></div>
-  <p class="security">访客连接使用 HTTP 明文，请仅在可信局域网传送非敏感文件。</p>
-  <section id="qr-panel" hidden><canvas id="qr" aria-label="临时传输链接二维码"></canvas><p>用另一台设备扫码打开</p><button id="copy" class="quiet" type="button">复制链接</button></section>
-  <section aria-labelledby="files-title"><div class="section-title"><h2 id="files-title">对方分享的文件</h2><span id="count"></span></div><div id="downloads" class="files"><p class="empty">正在读取文件…</p></div></section>
-  <section id="upload" hidden aria-labelledby="upload-title"><div class="section-title"><h2 id="upload-title">发送给对方</h2><span>本次最多 100 个文件 · 10 GiB</span></div><label id="drop" tabindex="0"><span class="upload-icon" aria-hidden="true">↑</span><strong>选择文件，或拖到这里</strong><span>按顺序上传，失败可继续</span><input id="picker" type="file" multiple hidden></label><div id="uploads" class="files"></div></section>
-  <p id="message" role="status" aria-live="polite"></p>
-</main>
-</body></html>
+  <main>
+    <header class="topbar">
+      <div class="brand-wrap">
+        <span class="logo" aria-hidden="true">FQ</span>
+        <div class="brand-text">
+          <div class="title-row">
+            <h1>临时传输</h1>
+            <span class="mode-badge">局域网直传</span>
+          </div>
+          <p>飞Q · 免安装扫码直传</p>
+        </div>
+      </div>
+      <button id="qr-toggle" class="tool-btn" type="button" aria-expanded="false">
+        <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.2"/><rect x="14" y="3" width="7" height="7" rx="1.2"/><rect x="3" y="14" width="7" height="7" rx="1.2"/><path d="M14 14h3v3h-3zM19 14h2v2M14 19h2v2M18 19h3v2"/></svg>
+        <span>二维码</span>
+      </button>
+    </header>
+
+    <div class="status-card">
+      <div class="notice">
+        <span class="dot" aria-hidden="true"></span>
+        <span id="session">正在连接…</span>
+      </div>
+      <p class="security">
+        <svg class="inline-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/></svg>
+        <span>HTTP 局域网明文 · 仅传非敏感文件</span>
+      </p>
+    </div>
+
+    <section id="qr-panel" class="qr-card" hidden>
+      <div class="qr-frame">
+        <canvas id="qr" aria-label="临时传输链接二维码"></canvas>
+      </div>
+      <p class="qr-tip">扫码打开临时传输页</p>
+      <div class="qr-actions">
+        <code id="qr-link" class="qr-link"></code>
+        <button id="copy" class="primary" type="button">复制链接</button>
+      </div>
+    </section>
+
+    <section class="panel-card" aria-labelledby="files-title">
+      <div class="section-title">
+        <div class="section-heading">
+          <h2 id="files-title">对方分享的文件</h2>
+        </div>
+        <span id="count" class="count-pill">读取中…</span>
+      </div>
+      <div id="downloads" class="files">
+        <p class="empty">正在读取文件…</p>
+      </div>
+    </section>
+
+    <section id="upload" class="panel-card" hidden aria-labelledby="upload-title">
+      <div class="section-title">
+        <div class="section-heading">
+          <h2 id="upload-title">发送给对方</h2>
+        </div>
+        <span class="quota-pill">限 100 个 · 10 GiB</span>
+      </div>
+      <div class="upload-body">
+        <label id="drop" tabindex="0">
+          <span class="upload-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+          </span>
+          <strong>选择文件或拖放到这里</strong>
+          <span>分块上传 · 中断可续传</span>
+          <input id="picker" type="file" multiple hidden>
+        </label>
+        <div id="uploads" class="files upload-list"></div>
+      </div>
+    </section>
+
+    <p id="message" role="status" aria-live="polite"></p>
+  </main>
+</body>
+</html>

@@ -31,9 +31,114 @@ public final class NetworkRecoveryTest {
     }
     private static final class Events implements LanNode.Listener {
         final List<String> errors=new CopyOnWriteArrayList<>(),updates=new CopyOnWriteArrayList<>();
+        final List<LanNode.Message> incoming=new CopyOnWriteArrayList<>();
         public void peersChanged() { }
-        public void message(LanNode.Peer peer,LanNode.Message message,boolean update){if(update)updates.add(message.state);}
+        public void message(LanNode.Peer peer,LanNode.Message message,boolean update){if(update)updates.add(message.state);if(!message.outgoing)incoming.add(message);}
         public void error(String text){errors.add(text);}
+    }
+    private static final class SourceBoundRoute implements LanNode.SocketBinding {
+        final InetAddress target=InetAddress.getByName("127.0.0.1"),source=InetAddress.getByName("::1");
+        final boolean retry;
+        final List<Socket> bound=new CopyOnWriteArrayList<>();
+        final java.util.concurrent.atomic.AtomicInteger retryChecks=new java.util.concurrent.atomic.AtomicInteger();
+        Runnable beforeRetry=()->{};
+        SourceBoundRoute(boolean retry)throws UnknownHostException{this.retry=retry;}
+        public void bind(DatagramSocket socket){ }
+        public void bind(Socket socket){fail("出站 TCP 必须提供目标地址");}
+        public void bind(Socket socket,InetAddress destination)throws IOException {
+            if(!allows(destination))throw new IOException("目标不在受控回环子网内");
+            // 两个地址都是回环：IPv6 源绑定后连接 IPv4 会在 connect 阶段失败，隔离宿主网卡和 VPN。
+            socket.bind(new InetSocketAddress(source,0));bound.add(socket);
+        }
+        public boolean allows(InetAddress destination){return destination.equals(target);}
+        public boolean shouldRetryWithoutSourceBind(InetAddress destination){retryChecks.incrementAndGet();beforeRetry.run();return retry&&allows(destination);}
+        public Collection<InetAddress> broadcasts(){return Collections.emptyList();}
+        public void send(DatagramSocket socket,byte[] bytes,InetSocketAddress destination){assertEquals(target,destination.getAddress());}
+    }
+    private static void discoverTcp(LanNode node,InetSocketAddress endpoint)throws Exception {
+        Method method=LanNode.class.getDeclaredMethod("probeTcp",InetSocketAddress.class);method.setAccessible(true);method.invoke(node,endpoint);
+    }
+    @Test public void newTcpPeerImmediatelySyncsAfterSourceBoundConnectRetryWithoutWaitingForTimer()throws Exception {
+        Path directory=Files.createTempDirectory("source-sync-");Events localEvents=new Events(),remoteEvents=new Events();SourceBoundRoute route=new SourceBoundRoute(true);
+        String localId="11111111111111111111111111111111",remoteId="22222222222222222222222222222222";
+        try(LanNode local=new LanNode(port(),false,"local","phone","手机","",localEvents);
+            LanNode remote=new LanNode(port(),true,"remote","pc","电脑","",remoteEvents)) {
+            local.setSocketBinding(route);local.setDeviceId(localId);remote.setDeviceId(remoteId);
+            local.configureSecurity(directory.resolve("local").toFile(),(name,code)->true);remote.configureSecurity(directory.resolve("remote").toFile(),(name,code)->true);
+            assertTrue(local.security().ensureTrusted(remoteId,remote.security().fingerprint,"电脑"));assertTrue(remote.security().ensureTrusted(localId,local.security().fingerprint,"手机"));
+            local.start();remote.start();((ScheduledExecutorService)field(local,"timer")).shutdownNow();
+            // 手机入站关闭，电脑的消息只保留在待同步队列；没有定时器或 UDP 能替新联系人触发同步。
+            ((DatagramSocket)field(local,"udp")).close();((ServerSocket)field(local,"tcp")).close();
+            LanNode.Peer localPeer=new LanNode.Peer(new InetSocketAddress(route.target,local.port()),"local","phone","手机","");localPeer.deviceId=localId;localPeer.fingerprint=local.security().fingerprint;
+            LanNode.Message queued=remote.sendMessage(localPeer,"新联系人立即同步",Collections.emptyList());
+            assertTrue(local.peers().isEmpty());discoverTcp(local,new InetSocketAddress(route.target,remote.port()));
+            await(()->localEvents.incoming.stream().anyMatch(message->message.number==queued.number&&message.text.equals("新联系人立即同步")));
+            assertEquals(1,local.peers().size());assertEquals("电脑",local.peers().get(0).name);assertTrue(local.peers().get(0).online);
+            assertTrue("FQD 与 S 同步没有分别执行连接回退",route.retryChecks.get()>=2);
+            for(Socket first:route.bound)assertTrue("源绑定失败的 socket 未关闭",first.isClosed());
+            Set<?> probes=(Set<?>)field(local,"probeSockets");await(probes::isEmpty);assertTrue(localEvents.errors.toString(),localEvents.errors.isEmpty());
+        }
+    }
+    @Test public void sourceBoundRetryCompletesTlsVerificationSendingAndSecureFileReceive()throws Exception {
+        Path directory=Files.createTempDirectory("source-tls-");Events localEvents=new Events(),remoteEvents=new Events();SourceBoundRoute route=new SourceBoundRoute(true);
+        String localId="33333333333333333333333333333333",remoteId="44444444444444444444444444444444";
+        byte[] payload=new byte[1024*1024+7];new Random(37).nextBytes(payload);File source=directory.resolve("中文-source.bin").toFile();Files.write(source.toPath(),payload);
+        try(LanNode local=new LanNode(port(),false,"local","phone","手机","",localEvents);
+            LanNode remote=new LanNode(port(),true,"remote","pc","电脑","",remoteEvents)) {
+            local.setSocketBinding(route);local.setDeviceId(localId);remote.setDeviceId(remoteId);
+            local.configureSecurity(directory.resolve("local").toFile(),(name,code)->true);remote.configureSecurity(directory.resolve("remote").toFile(),(name,code)->true);
+            assertTrue(local.security().ensureTrusted(remoteId,remote.security().fingerprint,"电脑"));assertTrue(remote.security().ensureTrusted(localId,local.security().fingerprint,"手机"));
+            local.heartbeatRetry=TimeUnit.MILLISECONDS.toNanos(200);local.start();remote.start();discoverTcp(local,new InetSocketAddress(route.target,remote.port()));
+            assertEquals(1,local.peers().size());LanNode.Peer remotePeer=local.peers().get(0);local.verifyPeer(remotePeer);
+            int before=route.retryChecks.get();LanNode.Message sent=local.sendMessage(remotePeer,"TCP 回退发送文件",Collections.singletonList(source));
+            await(()->remoteEvents.incoming.stream().anyMatch(message->message.number==sent.number));assertTrue("安全发送未采用第二次无源地址连接",route.retryChecks.get()>before);
+            await(()->!remote.peers().isEmpty());LanNode.Peer localPeer=remote.peers().get(0);
+            LanNode.Message offered=remote.sendMessage(localPeer,"下载回退",Collections.singletonList(source));
+            await(()->localEvents.incoming.stream().anyMatch(message->message.number==offered.number));
+            File destination=directory.resolve("secure-received.bin").toFile();before=route.retryChecks.get();
+            try(LanNode.Transfer transfer=new LanNode.Transfer()) {
+                local.receiveFile(remotePeer,offered.number,offered.files.get(0),destination,transfer,null);
+                assertTrue("安全文件接收未执行受限连接回退",route.retryChecks.get()>before);
+                Socket attached=(Socket)field(transfer,"socket");assertNotNull(attached);assertFalse("取消句柄仍指向第一次源绑定 socket",route.bound.contains(attached));assertTrue(attached.isClosed());
+            }
+            assertArrayEquals(payload,Files.readAllBytes(destination.toPath()));assertEquals(offered.files.get(0).sha256,SecureIdentity.hashFile(destination));
+            assertTrue(localEvents.errors.toString(),localEvents.errors.isEmpty());assertTrue(remoteEvents.errors.toString(),remoteEvents.errors.isEmpty());
+        }
+    }
+    @Test public void legacyReceiveRetriesOnceReattachesCancellationAndRejectsDisabledOrOutsideRetry()throws Exception {
+        Path directory=Files.createTempDirectory("source-file-");byte[] payload={1,2,3,4,5};ExecutorService worker=Executors.newSingleThreadExecutor();
+        try {
+            for(boolean enabled:new boolean[]{true,false}) {
+                SourceBoundRoute route=new SourceBoundRoute(enabled);
+                try(ServerSocket server=new ServerSocket(0,1,route.target);LanNode local=new LanNode(port(),false,"local","phone","手机","",new Events());LanNode.Transfer transfer=new LanNode.Transfer()) {
+                    local.setSocketBinding(route);LanNode.Peer peer=new LanNode.Peer(new InetSocketAddress(route.target,server.getLocalPort()),"remote","pc","电脑","");
+                    Protocol.Attachment file=new Protocol.Attachment(0,"file.bin",payload.length,1);File destination=directory.resolve("received-"+enabled+".bin").toFile();
+                    if(enabled) {
+                        Future<?> response=worker.submit(()->{try(Socket client=server.accept()){client.setSoTimeout(2000);int value;while((value=client.getInputStream().read())!=0)if(value<0)throw new EOFException("文件请求提前结束");client.getOutputStream().write(payload);}return null;});
+                        local.receiveFile(peer,1,file,destination,transfer,null);response.get(3,TimeUnit.SECONDS);
+                        assertArrayEquals(payload,Files.readAllBytes(destination.toPath()));Socket attached=(Socket)field(transfer,"socket");assertFalse(route.bound.contains(attached));assertTrue(attached.isClosed());
+                    } else {
+                        assertThrows(IOException.class,()->local.receiveFile(peer,1,file,destination,transfer,null));server.setSoTimeout(120);assertThrows(SocketTimeoutException.class,server::accept);assertFalse(destination.exists());
+                    }
+                    assertEquals(1,route.bound.size());assertEquals(1,route.retryChecks.get());assertTrue(route.bound.get(0).isClosed());assertTrue(((Set<?>)field(local,"connections")).isEmpty());
+                    LanNode.Peer outside=new LanNode.Peer(new InetSocketAddress("192.168.99.42",server.getLocalPort()),"outside","host","子网外","");
+                    try(LanNode.Transfer denied=new LanNode.Transfer()) {assertThrows(IOException.class,()->local.receiveFile(outside,2,file,directory.resolve("outside-"+enabled+".bin").toFile(),denied,null));}
+                    assertEquals("子网外目标不应进入 connect 或默认路由重试",1,route.retryChecks.get());assertEquals(1,route.bound.size());
+                }
+            }
+        } finally {worker.shutdownNow();assertTrue(worker.awaitTermination(3,TimeUnit.SECONDS));}
+    }
+    @Test public void cancelledOrStoppedSourceBoundTransferNeverCreatesRetryConnection()throws Exception {
+        Path directory=Files.createTempDirectory("source-cancel-");
+        for(boolean stop:new boolean[]{false,true}) {
+            SourceBoundRoute route=new SourceBoundRoute(true);
+            try(ServerSocket server=new ServerSocket(0,1,route.target);LanNode local=new LanNode(port(),false,"local","phone","手机","",new Events());LanNode.Transfer transfer=new LanNode.Transfer()) {
+                local.setSocketBinding(route);route.beforeRetry=stop?local::stopListening:transfer::close;
+                LanNode.Peer peer=new LanNode.Peer(new InetSocketAddress(route.target,server.getLocalPort()),"remote","pc","电脑","");Protocol.Attachment file=new Protocol.Attachment(0,"cancel.bin",3,1);
+                assertThrows(IOException.class,()->local.receiveFile(peer,1,file,directory.resolve("cancel-"+stop+".bin").toFile(),transfer,null));
+                server.setSoTimeout(120);assertThrows(SocketTimeoutException.class,server::accept);assertEquals(1,route.bound.size());assertTrue(route.bound.get(0).isClosed());assertTrue(((Set<?>)field(local,"connections")).isEmpty());
+            }
+        }
     }
     private static void announce(DatagramSocket raw,int port)throws Exception {
         byte[] bytes=Protocol.encode(1,"peer","host",Protocol.ANSWER|Protocol.UTF8,"设备","组");
@@ -46,8 +151,11 @@ public final class NetworkRecoveryTest {
                 DatagramSocket udp=blockTcp?null:new DatagramSocket(port,InetAddress.getLoopbackAddress());
                 LanNode node=new LanNode(port,true,"startup","host","启动恢复","组",events);
                 DatagramSocket remote=new DatagramSocket(0,InetAddress.getLoopbackAddress())) {
-                node.start();assertFalse(node.networkAvailable());assertTrue(node.networkStatus().contains("正在重试"));
-                assertTrue("端口错误应标明失败协议："+node.networkStatus(),node.networkStatus().contains(blockTcp?"TCP":"UDP"));
+                node.start();assertFalse(node.networkAvailable());
+                java.util.concurrent.atomic.AtomicReference<String> waiting=new java.util.concurrent.atomic.AtomicReference<>();
+                // 自动重试会短暂经过断网状态；协议与重试文案必须来自同一份状态快照。
+                await(()->{String state=node.networkStatus();if(state.contains("正在重试"))waiting.compareAndSet(null,state);return waiting.get()!=null;});
+                assertTrue("端口错误应标明失败协议："+waiting.get(),waiting.get().contains(blockTcp?"TCP":"UDP"));
                 if(tcp!=null)tcp.close();if(udp!=null)udp.close();
                 await(node::networkAvailable);
                 announce(remote,port);await(()->!node.peers().isEmpty());assertTrue(node.peers().get(0).online);

@@ -55,6 +55,7 @@ public final class LanNode implements AutoCloseable {
         void bind(DatagramSocket socket) throws IOException;
         void bind(Socket socket) throws IOException;
         default void bind(Socket socket,InetAddress destination) throws IOException { bind(socket); }
+        default boolean shouldRetryWithoutSourceBind(InetAddress destination) throws IOException { return false; }
         default void bindAccepted(Socket socket) throws IOException { }
         default boolean allows(InetAddress address) throws IOException { return true; }
         default Collection<InetAddress> broadcasts() throws IOException { return null; }
@@ -157,6 +158,33 @@ public final class LanNode implements AutoCloseable {
     interface PeerConnector {void connect(Socket socket,InetSocketAddress target)throws IOException;}
     private PeerConnector peerConnector=(socket,target)->socket.connect(target,8000);
     private static void closeSocket(Socket socket){try{socket.close();}catch(IOException ignored){}}
+    private Socket connectSocket(Socket socket,InetSocketAddress target,Set<Socket> registered,java.util.function.Consumer<Socket> beforeConnect,PeerConnector connector)throws IOException {
+        if(loopback&&!target.getAddress().isLoopbackAddress())throw new IOException("测试模式不能访问局域网");
+        int epoch; synchronized(gate){epoch=transportEpoch;}
+        if(beforeConnect!=null)beforeConnect.accept(socket);
+        SocketBinding binding=socketBinding;
+        if(!loopback&&binding!=null)binding.bind(socket,target.getAddress());
+        try {connector.connect(socket,target);return socket;}
+        catch(IOException failure) {
+            // 只重试建连，握手和业务请求不重放；取消、关停及切网不能借重试复活旧任务。
+            if(closed||socket.isClosed()||loopback||binding==null||!binding.shouldRetryWithoutSourceBind(target.getAddress())||!binding.allows(target.getAddress()))throw failure;
+            Socket retry=new Socket(Proxy.NO_PROXY);
+            synchronized(gate) {
+                if(closed||socket.isClosed()||epoch!=transportEpoch){closeSocket(retry);throw failure;}
+                closeSocket(socket);registered.remove(socket);registered.add(retry);
+                if(registered==connections&&connections.size()>8){registered.remove(retry);closeSocket(retry);throw new IOException("服务已关闭或连接任务过多",failure);}
+            }
+            try {
+                // 重新登记传输/待发送/回连的 socket，取消操作必须能关闭第二次连接。
+                if(beforeConnect!=null)beforeConnect.accept(retry);
+                if(closed||retry.isClosed())throw new IOException("连接已取消");
+                connector.connect(retry,target);return retry;
+            } catch(IOException|RuntimeException retryFailure) {
+                closeSocket(retry);synchronized(gate){registered.remove(retry);}
+                retryFailure.addSuppressed(failure);throw retryFailure;
+            }
+        }
+    }
     private static boolean isCompletedState(String state){return "已发送（非保存确认）".equals(state)||"对方已校验保存".equals(state);}
     private static boolean isOfferCompleted(Offer offer){return offer!=null&&isCompletedState(offer.state);}
     public static boolean isUnconfirmedState(String state){String value=state==null?"":state;return "等待确认".equals(value)||value.contains("未确认")||value.contains("失败");}
@@ -758,9 +786,9 @@ public final class LanNode implements AutoCloseable {
             probeSockets.add(socket);
             if(closed){probeSockets.remove(socket);closeSocket(socket);return;}
         }
-        try(Socket active=socket) {
-            if(!loopback&&socketBinding!=null)socketBinding.bind(active,target.getAddress());
-            active.connect(target,1200);connected=true;active.setSoTimeout(1500);
+        try {
+            socket=connectSocket(socket,target,probeSockets,null,(active,endpoint)->active.connect(endpoint,1200));
+            Socket active=socket;connected=true;active.setSoTimeout(1500);
             OutputStream out=active.getOutputStream();
             out.write(new byte[]{'F','Q','D','\n'});
             SecureIdentity.writeFrame(out,withPort(encode(Protocol.ENTRY|Protocol.CAP_UTF8|Protocol.FILE,Protocol.field(nickname),Protocol.field(group))));
@@ -768,10 +796,10 @@ public final class LanNode implements AutoCloseable {
             Protocol.Packet packet=Protocol.parse(SecureIdentity.readFrame(input,60000));
             if(packet!=null&&(packet.mode()==Protocol.ANSWER||packet.mode()==Protocol.ENTRY||packet.mode()==Protocol.ABSENCE)) {
                 InetSocketAddress from=new InetSocketAddress(active.getInetAddress(),packet.replyPort>0?packet.replyPort:target.getPort());
-                if(!isSelf(packet,from)){upsertPeer(packet,from);discovered=true;}
+                if(!isSelf(packet,from)){Peer latest=upsertPeer(packet,from);if(latest!=null){known=latest;discovered=true;}}
             }
         } catch(IOException|RuntimeException ignored) { }
-        finally {synchronized(gate){probeSockets.remove(socket);}}
+        finally {closeSocket(socket);synchronized(gate){probeSockets.remove(socket);}}
         if(connected&&known!=null&&security!=null&&known.fingerprint!=null&&security.isTrusted(known.deviceId,known.fingerprint)) {
             if(!discovered)try {verifyPeer(known);}catch(IOException|RuntimeException ignored){ }
             scheduleSync(known);
@@ -809,9 +837,9 @@ public final class LanNode implements AutoCloseable {
             probeSockets.add(raw);
             if(closed){probeSockets.remove(raw);closeSocket(raw);return;}
         }
-        try(Socket active=raw) {
-            if(!loopback&&socketBinding!=null)socketBinding.bind(active,target.getAddress());
-            active.connect(target,2500);active.setSoTimeout(5000);
+        try {
+            raw=connectSocket(raw,target,probeSockets,null,(active,endpoint)->active.connect(endpoint,2500));
+            Socket active=raw;active.setSoTimeout(5000);
             active.getOutputStream().write(new byte[]{'F','Q','2','\n'});
             try(SSLSocket socket=security.client(active,peer.fingerprint)) {
                 socket.setSoTimeout(15000);
@@ -843,7 +871,7 @@ public final class LanNode implements AutoCloseable {
                 }
             }
         } catch(IOException|RuntimeException ignored) { }
-        finally {synchronized(gate){probeSockets.remove(raw);}}
+        finally {closeSocket(raw);synchronized(gate){probeSockets.remove(raw);}}
     }
     private void pushSecureFile(Peer peer,long number,long id,long offset) {
         Offer offer;
@@ -946,10 +974,15 @@ public final class LanNode implements AutoCloseable {
             if(security.isTrusted(peer.deviceId,peer.fingerprint)){request=new ReverseRequest();request.deviceId=peer.deviceId;request.fingerprint=peer.fingerprint;request.port=targetPort;request.direct=direct;reverseRequests.put(ticket,request);}}
         ScheduledFuture<?> nudge=null;
         try {
-            if(loopback&&!peer.endpoint.getAddress().isLoopbackAddress())throw new IOException("测试模式不能访问局域网");
-            if(!loopback&&socketBinding!=null)socketBinding.bind(direct,peer.endpoint.getAddress());
             if(request!=null)nudge=timer.schedule(()->{synchronized(gate){if(!reverseRequests.containsKey(ticket))return;}try{probe(peer.endpoint);}catch(IOException ignored){}},150,TimeUnit.MILLISECONDS);
-            IOException failure=null;try{peerConnector.connect(direct,new InetSocketAddress(peer.endpoint.getAddress(),targetPort));}catch(IOException e){failure=e;}
+            ReverseRequest activeRequest=request;
+            boolean[] attempted={false};
+            IOException failure=null;
+            try {
+                direct=connectSocket(direct,new InetSocketAddress(peer.endpoint.getAddress(),targetPort),connections,s->{
+                    if(activeRequest!=null)synchronized(gate){activeRequest.direct=s;if(activeRequest.client!=null)closeSocket(s);}
+                },(active,target)->{attempted[0]=true;peerConnector.connect(active,target);});
+            }catch(IOException e){if(!attempted[0])throw e;failure=e;}
             if(failure==null){synchronized(gate){reverseRequests.remove(ticket);if(request==null||request.client==null){direct.setSoTimeout(45000);return direct;}}}
             direct.close();releaseConnection(direct);
             if(request==null)throw new IOException("无法连接对方",failure);
@@ -970,7 +1003,8 @@ public final class LanNode implements AutoCloseable {
             if(closed||epoch!=transportEpoch||connections.size()>8||!security.isTrusted(id,fingerprint)){connections.remove(socket);closeSocket(socket);return;}
         }
         try {
-            if(!loopback&&socketBinding!=null)socketBinding.bind(socket,endpoint.getAddress());socket.connect(endpoint,8000);socket.setSoTimeout(5000);
+            socket=connectSocket(socket,endpoint,connections,s->{synchronized(gate){if(epoch!=transportEpoch||!security.isTrusted(id,fingerprint)){closeSocket(s);throw new UncheckedIOException(new IOException("连接已取消或设备信任已撤销"));}}},(active,target)->active.connect(target,8000));
+            socket.setSoTimeout(5000);
             socket.getOutputStream().write(("FQR\n"+ticket).getBytes(java.nio.charset.StandardCharsets.US_ASCII));
             if(servicePort==port)dispatchConnection(socket);else security.acceptReverse(servicePort,socket);
         }catch(IOException|RuntimeException ignored){}
@@ -999,9 +1033,8 @@ public final class LanNode implements AutoCloseable {
             if(closed||connections.size()>8){connections.remove(socket);socket.close();throw new IOException("服务已关闭或连接任务过多");}
         }
         try {
-            if(beforeConnect!=null)beforeConnect.accept(socket);
-            if(!loopback&&socketBinding!=null)socketBinding.bind(socket,endpoint.getAddress());
-            socket.connect(endpoint,8000);socket.setSoTimeout(5000);socket.getOutputStream().write(new byte[]{'F','Q','2','\n'});return socket;
+            socket=connectSocket(socket,endpoint,connections,beforeConnect,(active,target)->active.connect(target,8000));
+            socket.setSoTimeout(5000);socket.getOutputStream().write(new byte[]{'F','Q','2','\n'});return socket;
         } catch(IOException|RuntimeException e){socket.close();synchronized(gate){connections.remove(socket);}throw e;}
     }
     private void sendSecurePending(Pending item) {
@@ -1322,16 +1355,14 @@ public final class LanNode implements AutoCloseable {
             if(closed||connections.size()>8){connections.remove(socket);socket.close();throw new IOException("服务已关闭或传输任务过多");}
         }
         boolean owned=false,complete=false;
-        try (Socket active=socket;
-             java.nio.channels.FileChannel output=java.nio.channels.FileChannel.open(part.toPath(),java.nio.file.StandardOpenOption.CREATE,java.nio.file.StandardOpenOption.WRITE,java.nio.file.LinkOption.NOFOLLOW_LINKS);
+        try (java.nio.channels.FileChannel output=java.nio.channels.FileChannel.open(part.toPath(),java.nio.file.StandardOpenOption.CREATE,java.nio.file.StandardOpenOption.WRITE,java.nio.file.LinkOption.NOFOLLOW_LINKS);
              java.nio.channels.FileLock lock=output.tryLock()) {
             if(lock==null) throw new IOException("同一文件正在接收");
             owned=true; long offset=output.size();
             if(offset>file.size) { output.truncate(0); offset=0; }
             output.position(offset); requireSpace(destination.getAbsoluteFile().getParentFile(),file.size-offset);
-            transfer.attach(active);
-            if(!loopback && socketBinding!=null) socketBinding.bind(active,peer.endpoint.getAddress());
-            active.connect(peer.endpoint,8000); active.setSoTimeout(15000);
+            socket=connectSocket(socket,peer.endpoint,connections,s->{try{transfer.attach(s);}catch(IOException error){throw new UncheckedIOException(error);}},(active,target)->active.connect(target,8000));
+            Socket active=socket;active.setSoTimeout(15000);
             byte[] request=encode(Protocol.GET_FILE,Long.toHexString(packet)+":"+Integer.toHexString(file.id)+":"+Long.toHexString(offset)+":",null);
             active.getOutputStream().write(request);
             OutputStream out=new BufferedOutputStream(java.nio.channels.Channels.newOutputStream(output),65536);
@@ -1351,7 +1382,9 @@ public final class LanNode implements AutoCloseable {
             } finally { out.flush(); }
             if (transfer.isCancelled()) throw new IOException("已取消传输");
             output.force(false); complete=true;
-        } finally {
+        } catch(UncheckedIOException error) {throw error.getCause();}
+        finally {
+            closeSocket(socket);
             synchronized (gate) { connections.remove(socket); }
             if(owned && (transfer.isCancelled()&&!transfer.isPaused()||(!complete&&part.length()==0))) Files.deleteIfExists(part.toPath());
         }

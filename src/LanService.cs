@@ -764,7 +764,7 @@ namespace FeiqLight
                         && (packet.Mode == Protocol.AnswerEntry || packet.Mode == Protocol.Entry || packet.Mode == Protocol.Absence))
                     {
                         IPEndPoint from = new IPEndPoint(target.Address, packet.ReplyPort > 0 ? packet.ReplyPort : target.Port);
-                        if (!IsSelf(packet, from)) { Upsert(packet, from); discovered = true; }
+                        if (!IsSelf(packet, from)) { Peer latest = Upsert(packet, from); if (latest != null) { known = latest; discovered = true; } }
                     }
                 }
             }

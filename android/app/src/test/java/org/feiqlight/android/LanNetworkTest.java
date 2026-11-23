@@ -29,6 +29,32 @@ public final class LanNetworkTest {
         int binds;
         @org.robolectric.annotation.Implementation protected void bindSocket(DatagramSocket socket) {binds++;super.bindSocket(socket);}
     }
+    @org.robolectric.annotation.Implements(ConnectivityManager.class)
+    public static class SnapshotConnectivity extends ShadowConnectivityManager {
+        Network[] snapshot;
+        @org.robolectric.annotation.Implementation protected Network[] getAllNetworks() {return snapshot==null?super.getAllNetworks():snapshot;}
+    }
+    @Test @Config(shadows=SnapshotConnectivity.class)
+    public void trackedWifiSurvivesVpnOnlyOrEmptySnapshotAndPrunesLostNetworks()throws Exception {
+        ConnectivityManager cm=RuntimeEnvironment.getApplication().getSystemService(ConnectivityManager.class);shadowOf(cm).clearAllNetworks();
+        Network vpn=add(cm,990,NetworkCapabilities.TRANSPORT_VPN,"198.18.0.1",16);
+        Network wifi=add(cm,991,NetworkCapabilities.TRANSPORT_WIFI,"192.168.10.25",24);
+        SnapshotConnectivity manager=org.robolectric.shadow.api.Shadow.extract(cm);manager.snapshot=new Network[]{vpn};
+        LanNetwork route=new LanNetwork(cm,NO_LOCAL);
+        assertThrows(IOException.class,route::select);
+        route.track(wifi);route.track(vpn);assertEquals(wifi,route.select());
+        assertEquals(Collections.singletonList("192.168.10.25"),route.addresses());
+        manager.snapshot=new Network[0];route.changed();assertEquals(wifi,route.select());
+        try(DatagramSocket socket=new DatagramSocket(null)){route.bind(socket);assertTrue(shadowOf(wifi).isSocketBound(socket));}
+        route.lost(wifi);assertThrows(IOException.class,route::select);
+        route.track(wifi);assertEquals(wifi,route.select());
+        NetworkCapabilities valid=cm.getNetworkCapabilities(wifi);shadowOf(cm).setNetworkCapabilities(wifi,null);route.changed();
+        assertThrows(IOException.class,route::select);
+        shadowOf(cm).setNetworkCapabilities(wifi,valid);route.changed();
+        assertThrows("失效网络应从回调集合移除，不能在能力恢复后自动复活",IOException.class,route::select);
+        route.clearTrackedNetworks();assertNull(route.networkKey());assertTrue(route.broadcasts().isEmpty());
+        assertNull("回调跟踪不应改变默认路由",cm.getBoundNetworkForProcess());
+    }
     @Test @Config(shadows={CountingConnectivity.class,CountingNetwork.class})
     public void discoveryBurstDoesNotQueryAndRebindTheSameSocketForEveryPacket() throws Exception {
         ConnectivityManager cm=(ConnectivityManager)RuntimeEnvironment.getApplication().getSystemService(Context.CONNECTIVITY_SERVICE);shadowOf(cm).clearAllNetworks();
@@ -215,6 +241,19 @@ public final class LanNetworkTest {
         assertNull("无 IPv4 的托管 Wi-Fi 接口不应漏进热点回退",route.networkKey());
         assertTrue(route.broadcasts().isEmpty());
     }
+    @Test public void vpnReportedUnderlyingInterfaceDoesNotExcludePhysicalPrivateFallback()throws Exception {
+        ConnectivityManager cm=RuntimeEnvironment.getApplication().getSystemService(ConnectivityManager.class);shadowOf(cm).clearAllNetworks();
+        Network vpn=add(cm,992,NetworkCapabilities.TRANSPORT_VPN,"198.18.0.1",16);
+        NetworkCapabilities caps=cm.getNetworkCapabilities(vpn);shadowOf(caps).addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR);shadowOf(cm).setNetworkCapabilities(vpn,caps);
+        for(String name:new String[]{"wlan0","eth0"}) {
+            LinkProperties links=cm.getLinkProperties(vpn);LinkProperties.class.getDeclaredMethod("setInterfaceName",String.class).invoke(links,name);shadowOf(cm).setLinkProperties(vpn,links);
+            LanNetwork route=new LanNetwork(cm,()->Collections.singletonList(iface(name,true,false,false,false,"192.168.10.25",24)));
+            assertNotNull("VPN 报告底层接口不能把物理私网排除："+name,route.networkKey());
+            assertTrue(route.allows(InetAddress.getByName("192.168.10.42")));
+            assertTrue(route.shouldRetryWithoutSourceBind(InetAddress.getByName("192.168.10.42")));
+            assertFalse(route.shouldRetryWithoutSourceBind(InetAddress.getByName("192.168.99.42")));
+        }
+    }
     @Test public void hotspotTrafficCannotUseHistoricalAddressesOutsideCurrentSubnets() throws Exception {
         ConnectivityManager cm=(ConnectivityManager)RuntimeEnvironment.getApplication().getSystemService(Context.CONNECTIVITY_SERVICE);shadowOf(cm).clearAllNetworks();
         Network cell=add(cm,950,NetworkCapabilities.TRANSPORT_CELLULAR,"10.88.0.2",24);
@@ -286,9 +325,10 @@ public final class LanNetworkTest {
     }
     @org.robolectric.annotation.Implements(Network.class)
     public static class BlockingBindNetwork extends ShadowNetwork {
+        boolean blocked=true;
         @SuppressWarnings("unchecked") private static <T extends Throwable> void raise(Throwable e) throws T {throw (T)e;}
-        @org.robolectric.annotation.Implementation protected void bindSocket(DatagramSocket socket) {raise(new IOException("Operation not permitted"));}
-        @org.robolectric.annotation.Implementation protected void bindSocket(Socket socket) {raise(new IOException("Operation not permitted"));}
+        @org.robolectric.annotation.Implementation protected void bindSocket(DatagramSocket socket) {if(blocked)raise(new IOException("Operation not permitted"));else super.bindSocket(socket);}
+        @org.robolectric.annotation.Implementation protected void bindSocket(Socket socket) {if(blocked)raise(new IOException("Operation not permitted"));else super.bindSocket(socket);}
     }
     @Test @Config(shadows=BlockingBindNetwork.class)
     public void vpnBindSocketBlockedFallsBackToLocalInterfaceSourceAddress() throws Exception {
@@ -304,6 +344,63 @@ public final class LanNetworkTest {
         try(RecordingSocket outside=new RecordingSocket()) {
             try {route.bind(outside,InetAddress.getByName("192.168.99.42"));fail("不应允许访问当前物理子网外地址");}
             catch(IOException expected){assertTrue(expected.getMessage().contains("子网")||expected.getMessage().contains("局域网"));}
+        }
+    }
+    @Test @Config(shadows=BlockingBindNetwork.class)
+    public void unboundTcpRetryRequiresVpnBlockedBindAndCurrentPrivateUnicastSubnet()throws Exception {
+        ConnectivityManager cm=RuntimeEnvironment.getApplication().getSystemService(ConnectivityManager.class);shadowOf(cm).clearAllNetworks();
+        Network vpn=add(cm,993,NetworkCapabilities.TRANSPORT_VPN,"198.18.0.1",16);
+        Network wifi=add(cm,994,NetworkCapabilities.TRANSPORT_WIFI,"192.168.10.25",24);
+        LanNetwork route=new LanNetwork(cm,NO_LOCAL);InetAddress target=InetAddress.getByName("192.168.10.42");
+        assertFalse("绑定尚未被拒绝时不应允许默认路由重试",route.shouldRetryWithoutSourceBind(target));
+        try(RecordingSocket socket=new RecordingSocket()){route.bind(socket,target);assertEquals(new InetSocketAddress("192.168.10.25",0),socket.source);}
+        assertTrue(route.shouldRetryWithoutSourceBind(target));route.changed();assertTrue("同一网络的缓存刷新不能丢失绑定受限状态",route.shouldRetryWithoutSourceBind(target));
+        for(String address:new String[]{"192.168.10.255","192.168.99.42","10.8.0.2","8.8.8.8","255.255.255.255","127.0.0.1","::1"})
+            assertFalse("不安全 TCP 重试目标："+address,route.shouldRetryWithoutSourceBind(InetAddress.getByName(address)));
+        shadowOf(cm).removeNetwork(vpn);route.changed();assertFalse("无 VPN 时不得使用默认路由回退",route.shouldRetryWithoutSourceBind(target));
+        add(cm,993,NetworkCapabilities.TRANSPORT_VPN,"198.18.0.1",16);shadowOf(cm).removeNetwork(wifi);add(cm,995,NetworkCapabilities.TRANSPORT_WIFI,"192.168.10.25",24);route.changed();
+        assertFalse("新物理网络不能继承旧网络的绑定失败标记",route.shouldRetryWithoutSourceBind(target));
+        LanNetwork hotspot=new LanNetwork(null,()->Collections.singletonList(iface("ap0",true,false,false,false,"192.168.10.1",24)));
+        try(RecordingSocket socket=new RecordingSocket()){hotspot.bind(socket,target);}
+        assertFalse("没有 VPN 的热点不能使用默认路由回退",hotspot.shouldRetryWithoutSourceBind(target));
+    }
+    @Test public void successfulPhysicalBindUnderVpnNeverEnablesUnboundTcpRetry()throws Exception {
+        ConnectivityManager cm=RuntimeEnvironment.getApplication().getSystemService(ConnectivityManager.class);shadowOf(cm).clearAllNetworks();
+        add(cm,996,NetworkCapabilities.TRANSPORT_VPN,"198.18.0.1",16);add(cm,997,NetworkCapabilities.TRANSPORT_WIFI,"192.168.10.25",24);
+        LanNetwork route=new LanNetwork(cm,NO_LOCAL);InetAddress target=InetAddress.getByName("192.168.10.42");
+        try(Socket socket=new Socket(java.net.Proxy.NO_PROXY)){route.bind(socket,target);}
+        assertFalse(route.shouldRetryWithoutSourceBind(target));
+    }
+    @Test @Config(shadows=BlockingBindNetwork.class)
+    public void recoveredBindOnSamePhysicalNetworkClearsUnboundRetryPermission()throws Exception {
+        ConnectivityManager cm=RuntimeEnvironment.getApplication().getSystemService(ConnectivityManager.class);shadowOf(cm).clearAllNetworks();
+        add(cm,9990,NetworkCapabilities.TRANSPORT_VPN,"198.18.0.1",16);Network wifi=add(cm,9991,NetworkCapabilities.TRANSPORT_WIFI,"192.168.10.25",24);
+        LanNetwork route=new LanNetwork(cm,NO_LOCAL);InetAddress target=InetAddress.getByName("192.168.10.42");
+        try(RecordingSocket socket=new RecordingSocket()){route.bind(socket,target);}assertTrue(route.shouldRetryWithoutSourceBind(target));
+        BlockingBindNetwork network=org.robolectric.shadow.api.Shadow.extract(wifi);network.blocked=false;
+        try(Socket socket=new Socket(java.net.Proxy.NO_PROXY)){route.bind(socket,target);}assertFalse("物理绑定恢复成功后不得继承旧的受限回退标记",route.shouldRetryWithoutSourceBind(target));
+    }
+    @Test @Config(shadows=BlockingBindNetwork.class)
+    public void vpnUdpUnicastRetriesUnboundOnlyAfterPrivateSourceFailsAndNeverForBroadcastOrOutside()throws Exception {
+        ConnectivityManager cm=RuntimeEnvironment.getApplication().getSystemService(ConnectivityManager.class);shadowOf(cm).clearAllNetworks();
+        Network vpn=add(cm,998,NetworkCapabilities.TRANSPORT_VPN,"198.18.0.1",16);add(cm,999,NetworkCapabilities.TRANSPORT_WIFI,"192.168.10.25",24);
+        List<InetSocketAddress> sources=new ArrayList<>();List<SocketAddress> delivered=new ArrayList<>();List<DatagramSocket> created=new ArrayList<>();
+        LanNetwork route=new LanNetwork(cm,NO_LOCAL,source->{
+            sources.add(source);
+            DatagramSocket sender=new DatagramSocket((SocketAddress)null){@Override public void send(DatagramPacket packet)throws IOException{if(source!=null)throw new SocketException("模拟 TUN 拒绝物理源 IP");delivered.add(packet.getSocketAddress());}};
+            created.add(sender);return sender;
+        });
+        try(DatagramSocket receiver=new DatagramSocket((SocketAddress)null){@Override public void send(DatagramPacket packet){fail("未绑定的监听 socket 不得走默认路由");}}) {
+            route.bind(receiver);InetSocketAddress target=new InetSocketAddress("192.168.10.42",2425);route.send(receiver,new byte[]{1},target);
+            assertEquals(Arrays.asList(new InetSocketAddress("192.168.10.25",0),null),sources);assertEquals(Collections.singletonList(target),delivered);
+            sources.clear();assertThrows(IOException.class,()->route.send(receiver,new byte[]{2},new InetSocketAddress("192.168.10.255",2425)));
+            assertEquals("广播不得尝试无源 IP socket",Collections.singletonList(new InetSocketAddress("192.168.10.25",0)),sources);
+            for(String address:new String[]{"192.168.99.42","10.8.0.2","8.8.8.8","255.255.255.255"}) {
+                sources.clear();assertThrows(IOException.class,()->route.send(receiver,new byte[]{3},new InetSocketAddress(address,2425)));assertTrue(address,sources.isEmpty());
+            }
+            sources.clear();shadowOf(cm).removeNetwork(vpn);route.changed();assertThrows(IOException.class,()->route.send(receiver,new byte[]{4},target));
+            assertEquals("没有 VPN 时不能无源 IP 重试",Collections.singletonList(new InetSocketAddress("192.168.10.25",0)),sources);
+            assertEquals(1,delivered.size());for(DatagramSocket sender:created)assertTrue("临时 UDP socket 未关闭",sender.isClosed());
         }
     }
     @Test @Config(shadows=BlockingBindNetwork.class)

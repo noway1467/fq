@@ -27,7 +27,7 @@ namespace FeiqLight
         }
         internal static Panel Body(ModernWindow window)
         {
-            Panel body = new Panel { Dock = DockStyle.Fill, Padding = new Padding(24, 8, 24, 16) };
+            Panel body = new Panel { Dock = DockStyle.Fill, Padding = new Padding(22, 6, 22, 12) };
             window.Surface.Controls.Add(body); return body;
         }
         internal static void StyleSecondary(Button button)
@@ -39,13 +39,13 @@ namespace FeiqLight
         }
         internal static void Actions(ModernWindow window, Button primary, Button secondary = null)
         {
-            Panel footer = new Panel { Dock = DockStyle.Bottom, Height = 68, Padding = new Padding(24, 16, 24, 16), BackColor = Theme.Surface };
+            Panel footer = new Panel { Dock = DockStyle.Bottom, Height = 60, Padding = new Padding(22, 12, 22, 12), BackColor = Theme.Surface };
             footer.Paint += delegate(object sender, PaintEventArgs e) { using (Pen line = new Pen(Theme.Line)) e.Graphics.DrawLine(line, 0, 0, footer.Width, 0); };
             FlowLayoutPanel row = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, WrapContents = false, Margin = Padding.Empty };
             if (secondary != null) StyleSecondary(secondary);
             foreach (Button button in new[] { primary, secondary }.Where(b => b != null))
             {
-                button.Size = new Size(Math.Max(88, TextRenderer.MeasureText(button.Text, button.Font).Width + 36), 36);
+                button.Size = new Size(Math.Max(84, TextRenderer.MeasureText(button.Text, button.Font).Width + 34), 36);
                 button.Margin = new Padding(10, 0, 0, 0); row.Controls.Add(button);
             }
             footer.Controls.Add(row); window.Surface.Controls.Add(footer); window.AcceptButton = primary; window.CancelButton = secondary ?? primary;
@@ -56,14 +56,14 @@ namespace FeiqLight
         }
         internal static Control Badge(string glyph, Color tone)
         {
-            Panel host = new Panel { Dock = DockStyle.Left, Width = 50, Margin = Padding.Empty, BackColor = Theme.Surface };
+            Panel host = new Panel { Dock = DockStyle.Left, Width = 48, Margin = Padding.Empty, BackColor = Theme.Surface };
             host.Paint += delegate(object sender, PaintEventArgs e)
             {
                 e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
                 float scale = e.Graphics.DpiX / 96F;
                 float box = 36F * scale;
                 RectangleF chip = new RectangleF(0, 2F * scale, box, box);
-                Color fill = Theme.Blend(tone, Theme.Surface, Theme.Dark ? .24F : .12F);
+                Color fill = Theme.Blend(tone, Theme.Surface, Theme.Dark ? .26F : .13F);
                 using (GraphicsPath path = Theme.RoundedF(chip, 10F * scale)) using (SolidBrush brush = new SolidBrush(fill)) e.Graphics.FillPath(brush, path);
                 float inset = 8F * scale;
                 Theme.Glyph(e.Graphics, glyph, new RectangleF(chip.Left + inset, chip.Top + inset, chip.Width - inset * 2F, chip.Height - inset * 2F), tone);
@@ -76,23 +76,23 @@ namespace FeiqLight
             ReadOnlyDetailsBox details = new ReadOnlyDetailsBox
             {
                 Dock = DockStyle.Fill, Text = text ?? "", Font = Theme.Body, BackColor = surface,
-                ForeColor = framed ? Theme.Ink : Theme.Blend(Theme.Ink, Theme.Muted, .78F),
+                ForeColor = framed ? Theme.Ink : Theme.Blend(Theme.Ink, Theme.Muted, .82F),
                 ScrollBars = framed ? RichTextBoxScrollBars.Vertical : RichTextBoxScrollBars.None,
                 AccessibleName = accessible
             };
             Theme.AttachEditMenu(details); Theme.ThemeScrollbars(details);
             if (!framed)
             {
-                Panel wrap = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Surface, Padding = new Padding(0, 4, 0, 2) };
+                Panel wrap = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Surface, Padding = new Padding(0, 2, 0, 2) };
                 wrap.Controls.Add(details); return wrap;
             }
-            RoundedPanel card = new RoundedPanel { Dock = DockStyle.Fill, Fill = Theme.Ice, Border = Theme.Line, Radius = Theme.ControlRadius, Padding = new Padding(14, 12, 10, 12) };
+            RoundedPanel card = new RoundedPanel { Dock = DockStyle.Fill, Fill = Theme.Ice, Border = Theme.Line, Radius = Theme.ControlRadius, Padding = new Padding(12, 10, 10, 10) };
             card.Controls.Add(details); return card;
         }
         internal static RoundedPanel OptionCard(ToggleSwitch toggle)
         {
             toggle.Dock = DockStyle.Fill; toggle.BackColor = Theme.Ice;
-            RoundedPanel card = new RoundedPanel { Dock = DockStyle.Bottom, Height = 50, Fill = Theme.Ice, Border = Theme.Line, Radius = Theme.ControlRadius, Padding = new Padding(14, 4, 12, 4), Margin = new Padding(0, 10, 0, 0) };
+            RoundedPanel card = new RoundedPanel { Dock = DockStyle.Bottom, Height = 46, Fill = Theme.Ice, Border = Theme.Line, Radius = Theme.ControlRadius, Padding = new Padding(14, 2, 12, 2), Margin = new Padding(0, 8, 0, 0) };
             card.Controls.Add(toggle); return card;
         }
         internal static string SemanticGlyph(string title, bool danger)
@@ -113,12 +113,12 @@ namespace FeiqLight
         {
             int measured = DialogLayout.MeasureBodyHeight(text, 344);
             bool framed = measured > 128 || (text ?? "").Length > 220;
-            int width = framed ? 520 : 456;
-            int contentHeight = Math.Max(48, Math.Min(240, measured + (framed ? 34 : 18)));
-            int optionHeight = optionText == null ? 0 : 62;
+            int width = framed ? 512 : 440;
+            int contentHeight = Math.Max(44, Math.Min(240, measured + (framed ? 28 : 14)));
+            int optionHeight = optionText == null ? 0 : 56;
             Text = title; ResizeWindow = false;
-            ClientSize = new Size(width, Math.Max(198, Math.Min(480, 144 + contentHeight + optionHeight)));
-            MinimumSize = new Size(380, 190); StartPosition = FormStartPosition.CenterParent;
+            ClientSize = new Size(width, Math.Max(176, Math.Min(468, 126 + contentHeight + optionHeight)));
+            MinimumSize = new Size(368, 172); StartPosition = FormStartPosition.CenterParent;
             Panel body = DialogLayout.Body(this);
             Panel content = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Surface };
             content.Controls.Add(DialogLayout.ReadOnlyText(text, "确认详情", framed));
@@ -126,7 +126,7 @@ namespace FeiqLight
             body.Controls.Add(content);
             if (optionText != null)
             {
-                Panel gap = new Panel { Dock = DockStyle.Bottom, Height = 12, BackColor = Theme.Surface };
+                Panel gap = new Panel { Dock = DockStyle.Bottom, Height = 10, BackColor = Theme.Surface };
                 option = new ToggleSwitch { Text = optionText, AccessibleName = optionText };
                 RoundedPanel optionCard = DialogLayout.OptionCard(option);
                 body.Controls.Add(gap); body.Controls.Add(optionCard);
@@ -142,21 +142,21 @@ namespace FeiqLight
         private readonly Bitmap logo=Theme.AppLogo(160);
         public AboutDialog()
         {
-            Text="关于飞Q";ResizeWindow=false;ClientSize=new Size(460,430);MinimumSize=new Size(400,400);StartPosition=FormStartPosition.CenterParent;
-            Panel footer=new Panel {Dock=DockStyle.Bottom,Height=62,Padding=new Padding(24,8,24,16)};
-            Button done=Theme.Button("确定",delegate {DialogResult=DialogResult.OK;},true);done.Dock=DockStyle.Right;footer.Controls.Add(done);AcceptButton=done;CancelButton=done;
-            TableLayoutPanel body=new TableLayoutPanel {Dock=DockStyle.Fill,ColumnCount=1,RowCount=4,Padding=new Padding(24,10,24,8)};
-            body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));foreach(int height in new[]{96,34,78,80})body.RowStyles.Add(new RowStyle(SizeType.Absolute,height));
-            TableLayoutPanel brand=new TableLayoutPanel {Dock=DockStyle.Fill,ColumnCount=2,RowCount=2,Margin=Padding.Empty};brand.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute,86));brand.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));brand.RowStyles.Add(new RowStyle(SizeType.Percent,56));brand.RowStyles.Add(new RowStyle(SizeType.Percent,44));
-            Panel icon=new Panel {Dock=DockStyle.Fill,Margin=new Padding(0,4,16,12),AccessibleName="飞Q图标"};icon.Paint+=delegate(object sender,PaintEventArgs e){e.Graphics.InterpolationMode=InterpolationMode.HighQualityBicubic;e.Graphics.SmoothingMode=SmoothingMode.AntiAlias;int size=Math.Min(icon.Width,icon.Height);e.Graphics.DrawImage(logo,new Rectangle(0,0,size,size));};brand.Controls.Add(icon,0,0);brand.SetRowSpan(icon,2);
-            Label title=Theme.Label("飞Q",Theme.Title,Theme.Ink);title.Font=new Font(Theme.Body.FontFamily,17F,FontStyle.Bold);title.Dock=DockStyle.Fill;brand.Controls.Add(title,1,0);
+            Text="关于飞Q";ResizeWindow=false;ClientSize=new Size(432,374);MinimumSize=new Size(380,340);StartPosition=FormStartPosition.CenterParent;
+            TableLayoutPanel body=new TableLayoutPanel {Dock=DockStyle.Fill,ColumnCount=1,RowCount=4,Padding=new Padding(22,8,22,12)};
+            body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));foreach(int height in new[]{78,28,72,68})body.RowStyles.Add(new RowStyle(SizeType.Absolute,height));
+            TableLayoutPanel brand=new TableLayoutPanel {Dock=DockStyle.Fill,ColumnCount=2,RowCount=2,Margin=Padding.Empty};brand.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute,76));brand.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));brand.RowStyles.Add(new RowStyle(SizeType.Percent,56));brand.RowStyles.Add(new RowStyle(SizeType.Percent,44));
+            Panel icon=new Panel {Dock=DockStyle.Fill,Margin=new Padding(0,4,14,8),AccessibleName="飞Q图标"};icon.Paint+=delegate(object sender,PaintEventArgs e){e.Graphics.InterpolationMode=InterpolationMode.HighQualityBicubic;e.Graphics.SmoothingMode=SmoothingMode.AntiAlias;int size=Math.Min(icon.Width,icon.Height);e.Graphics.DrawImage(logo,new Rectangle(0,0,size,size));};brand.Controls.Add(icon,0,0);brand.SetRowSpan(icon,2);
+            Label title=Theme.Label("飞Q",Theme.Title,Theme.Ink);title.Font=new Font(Theme.Body.FontFamily,16F,FontStyle.Bold);title.Dock=DockStyle.Fill;brand.Controls.Add(title,1,0);
             Label version=Theme.Label("Windows  "+typeof(AboutDialog).Assembly.GetName().Version.ToString(3),Theme.Small,Theme.Muted);version.Dock=DockStyle.Fill;brand.Controls.Add(version,1,1);body.Controls.Add(brand,0,0);
             Label intro=Theme.Label("局域网聊天与文件传输 · 无需服务器",Theme.Body,Theme.Muted);intro.Dock=DockStyle.Fill;intro.Margin=Padding.Empty;body.Controls.Add(intro,0,1);
-            RoundedPanel card=new RoundedPanel {Dock=DockStyle.Fill,Fill=Theme.Ice,Radius=Theme.ControlRadius,Padding=new Padding(14,8,14,8),Margin=new Padding(0,0,0,10)};
-            Panel sourceIcon=new Panel {Dock=DockStyle.Left,Width=38,BackColor=Theme.Ice};sourceIcon.Paint+=delegate(object sender,PaintEventArgs e){Theme.Glyph(e.Graphics,"code",new Rectangle(0,(sourceIcon.Height-26)/2,26,26),Theme.Blue);};
+            RoundedPanel card=new RoundedPanel {Dock=DockStyle.Fill,Fill=Theme.Ice,Border=Theme.Line,Radius=Theme.ControlRadius,Padding=new Padding(14,8,14,8),Margin=new Padding(0,4,0,8)};
+            Panel sourceIcon=new Panel {Dock=DockStyle.Left,Width=36,BackColor=Theme.Ice};sourceIcon.Paint+=delegate(object sender,PaintEventArgs e){Theme.Glyph(e.Graphics,"code",new Rectangle(0,(sourceIcon.Height-24)/2,24,24),Theme.Blue);};
             LinkLabel repository=new LinkLabel {Dock=DockStyle.Fill,Text="GitHub 仓库\ngithub.com/noway1467/fq",Font=Theme.Body,BackColor=Theme.Ice,LinkColor=Theme.Blue,ActiveLinkColor=Theme.Blue,VisitedLinkColor=Theme.Blue,TextAlign=ContentAlignment.MiddleLeft,LinkBehavior=LinkBehavior.HoverUnderline,AccessibleName="GitHub 仓库：github.com/noway1467/fq"};repository.Links.Add(0,repository.Text.Length,RepositoryUrl);repository.LinkClicked+=delegate {MessageLinks.Open(repository,RepositoryUrl);};card.Controls.Add(repository);card.Controls.Add(sourceIcon);body.Controls.Add(card,0,2);
             Label note=Theme.Label("新版设备默认 TLS 加密 · 首次核对配对码\n内置表情与头像：Twemoji · CC BY 4.0\n© Twitter, Inc. 及贡献者；许可随程序内置。",Theme.Small,Theme.Muted);note.Dock=DockStyle.Fill;note.Margin=Padding.Empty;body.Controls.Add(note,0,3);
-            Surface.Controls.Add(body);Surface.Controls.Add(footer);
+            Surface.Controls.Add(body);
+            Button done=Theme.Button("确定",delegate {DialogResult=DialogResult.OK;},true);
+            DialogLayout.Actions(this,done);
         }
         protected override void Dispose(bool disposing) {if(disposing)logo.Dispose();base.Dispose(disposing);}
     }
@@ -166,13 +166,13 @@ namespace FeiqLight
         public NoticeDialog(string title, string text, string linkText, string linkUrl)
         {
             bool hasLink = !String.IsNullOrWhiteSpace(linkText) && !String.IsNullOrWhiteSpace(linkUrl);
-            int measured = DialogLayout.MeasureBodyHeight(text, 348);
+            int measured = DialogLayout.MeasureBodyHeight(text, 344);
             bool framed = measured > 128 || (text ?? "").Length > 240;
-            int width = framed ? 540 : 456;
-            int contentHeight = Math.Max(48, Math.Min(290, measured + (framed ? 36 : 18)));
+            int width = framed ? 528 : 440;
+            int contentHeight = Math.Max(44, Math.Min(290, measured + (framed ? 30 : 14)));
             Text = title; ResizeWindow = false;
-            ClientSize = new Size(width, Math.Max(198, Math.Min(480, 144 + contentHeight + (hasLink ? 38 : 0))));
-            MinimumSize = new Size(380, 190); StartPosition = FormStartPosition.CenterParent;
+            ClientSize = new Size(width, Math.Max(176, Math.Min(468, 126 + contentHeight + (hasLink ? 34 : 0))));
+            MinimumSize = new Size(368, 172); StartPosition = FormStartPosition.CenterParent;
             Panel body = DialogLayout.Body(this);
             Panel content = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Surface };
             content.Controls.Add(DialogLayout.ReadOnlyText(text, "提示详情", framed));
@@ -184,7 +184,7 @@ namespace FeiqLight
             body.Controls.Add(content);
             if (hasLink)
             {
-                Panel linkPanel = new Panel { Dock = DockStyle.Bottom, Height = 38, Padding = new Padding(framed ? 0 : 50, 8, 0, 0) };
+                Panel linkPanel = new Panel { Dock = DockStyle.Bottom, Height = 34, Padding = new Padding(framed ? 0 : 48, 6, 0, 0) };
                 LinkLabel link = new LinkLabel { Dock = DockStyle.Fill, Text = linkText, Font = Theme.Body, BackColor = Color.Transparent, LinkColor = Theme.Blue, ActiveLinkColor = Theme.Blue, VisitedLinkColor = Theme.Blue, TextAlign = ContentAlignment.MiddleLeft, AccessibleName = linkText };
                 link.Links.Add(0, link.Text.Length, linkUrl);
                 link.LinkClicked += delegate(object sender, LinkLabelLinkClickedEventArgs e) { MessageLinks.Open(link, e.Link.LinkData as string); };
@@ -198,19 +198,19 @@ namespace FeiqLight
     {
         public MessageTextDialog(string text)
         {
-            Text = "消息全文"; ClientSize = new Size(640, 560); MinimumSize = new Size(380, 280); StartPosition = FormStartPosition.CenterParent;
-            Panel footer = new Panel { Dock = DockStyle.Bottom, Height = 64, Padding = new Padding(20, 12, 20, 10) };
-            Button close = Theme.Button("关闭", delegate { DialogResult = DialogResult.OK; }, false); close.Dock = DockStyle.Right; footer.Controls.Add(close);
-            Label hint = Theme.Label("拖动选择文字 · Ctrl+C 复制 · Ctrl+A 全选", Theme.Small, Theme.Muted); hint.Dock = DockStyle.Fill; hint.AutoEllipsis = true; footer.Controls.Add(hint); hint.BringToFront();
+            Text = "消息全文"; ClientSize = new Size(640, 540); MinimumSize = new Size(380, 280); StartPosition = FormStartPosition.CenterParent;
             RichTextBox content = new RichTextBox { Dock = DockStyle.Fill, ReadOnly = true, BorderStyle = BorderStyle.None, Font = Theme.Body,
-                BackColor = Theme.Surface, ForeColor = Theme.Ink, DetectUrls = false, HideSelection = false, ScrollBars = RichTextBoxScrollBars.Vertical,
+                BackColor = Theme.Ice, ForeColor = Theme.Ink, DetectUrls = false, HideSelection = false, ScrollBars = RichTextBoxScrollBars.Vertical,
                 Text = MessageText.NormalizeLineBreaks(text), AccessibleName = "消息全文（可选择复制）" };
             Theme.AttachEditMenu(content); Theme.ThemeScrollbars(content);
-            RoundedPanel card = new RoundedPanel { Dock = DockStyle.Fill, Fill = Theme.Ice, Radius = Theme.ControlRadius, Padding = new Padding(14, 12, 10, 10), Margin = new Padding(20, 6, 20, 0) };
-            content.BackColor = Theme.Ice; card.Controls.Add(content);
-            Panel frame = new Panel { Dock = DockStyle.Fill, Padding = new Padding(24, 12, 24, 8) }; frame.Controls.Add(card);
-            Surface.Controls.Add(frame); Surface.Controls.Add(footer);
-            CancelButton = close; Shown += delegate { content.Focus(); content.Select(0, 0); };
+            RoundedPanel card = new RoundedPanel { Dock = DockStyle.Fill, Fill = Theme.Ice, Border = Theme.Line, Radius = Theme.ControlRadius, Padding = new Padding(14, 12, 10, 10) };
+            card.Controls.Add(content);
+            Panel frame = new Panel { Dock = DockStyle.Fill, Padding = new Padding(22, 8, 22, 12) }; frame.Controls.Add(card);
+            Surface.Controls.Add(frame);
+            Button close = Theme.Button("关闭", delegate { DialogResult = DialogResult.OK; }, false);
+            DialogLayout.StyleSecondary(close);
+            DialogLayout.Actions(this, close);
+            Shown += delegate { content.Focus(); content.Select(0, 0); };
         }
     }
     internal sealed class ContactProfileDialog : ModernWindow
@@ -219,25 +219,24 @@ namespace FeiqLight
         internal ContactProfileDialog(Peer peer, Func<string, bool> save)
         {
             bool department = !String.IsNullOrWhiteSpace(peer.Group);
-            Text = "联系人资料"; ResizeWindow = false; ClientSize = new Size(420, department ? 526 : 462); MinimumSize = new Size(360, 384); StartPosition = FormStartPosition.CenterParent;
+            Text = "联系人资料"; ResizeWindow = false; ClientSize = new Size(408, department ? 458 : 398); MinimumSize = new Size(356, 360); StartPosition = FormStartPosition.CenterParent;
             Panel body = DialogLayout.Body(this); body.AutoScroll = true;
             // 内容独立滚动，较小工作区也能查看 IP，底部保存区始终可见。
-            TableLayoutPanel fields = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 1, RowCount = department ? 8 : 6, Margin = Padding.Empty };
+            TableLayoutPanel fields = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 1, RowCount = department ? 7 : 5, Margin = Padding.Empty };
             fields.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            foreach (int height in department ? new[] { 128, 28, 44, 36, 24, 40, 24, 40 } : new[] { 128, 28, 44, 36, 24, 40 }) fields.RowStyles.Add(new RowStyle(SizeType.Absolute, height));
+            foreach (int height in department ? new[] { 124, 24, 48, 24, 34, 24, 34 } : new[] { 124, 24, 48, 24, 34 }) fields.RowStyles.Add(new RowStyle(SizeType.Absolute, height));
             avatar = new PictureBox { Image = Theme.ContactAvatar(96, peer.Id, peer.Online, peer.Avatar), SizeMode = PictureBoxSizeMode.Zoom, Size = new Size(116, 116), Anchor = AnchorStyles.None, Margin = Padding.Empty, Cursor = Cursors.Hand, AccessibleName = "联系人资料头像", AccessibleDescription = "点击查看大图" }; fields.Controls.Add(avatar, 0, 0);
             avatar.Click += delegate {
                 try { using(AvatarPreviewDialog preview = new AvatarPreviewDialog(peer.Id, peer.Avatar)) preview.ShowDialog(this); }
                 catch(Exception error) { using(NoticeDialog notice = new NoticeDialog("无法查看头像", error.Message)) notice.ShowDialog(this); }
             };
             Label name = Theme.Label("昵称", Theme.Small, Theme.Muted); name.Dock = DockStyle.Fill; fields.Controls.Add(name, 0, 1);
-            RoundedInput input = new RoundedInput { Dock = DockStyle.Fill, Margin = Padding.Empty }; input.Input.MaxLength = 64; input.Input.Text = String.IsNullOrEmpty(peer.Note) ? peer.Nickname : peer.Note; input.Input.AccessibleName = "联系人资料昵称"; fields.Controls.Add(input, 0, 2);
-            Label hint = Theme.Label("修改仅在本机显示；留空恢复对方昵称。", Theme.Small, Theme.Muted); hint.Dock = DockStyle.Fill; fields.Controls.Add(hint, 0, 3);
+            RoundedInput input = new RoundedInput { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 6) }; input.Input.MaxLength = 64; input.Input.Text = String.IsNullOrEmpty(peer.Note) ? peer.Nickname : peer.Note; input.Input.AccessibleName = "联系人资料昵称"; input.Placeholder = "留空恢复对方昵称"; fields.Controls.Add(input, 0, 2);
             if (department) {
-                Label title = Theme.Label("部门", Theme.Small, Theme.Muted); title.Dock = DockStyle.Fill; fields.Controls.Add(title, 0, 4);
-                Label group = Theme.Label(peer.Group, Theme.Body, Theme.Ink); group.Dock = DockStyle.Fill; group.AutoEllipsis = true; group.AccessibleName = "联系人资料部门"; fields.Controls.Add(group, 0, 5);
+                Label title = Theme.Label("部门", Theme.Small, Theme.Muted); title.Dock = DockStyle.Fill; fields.Controls.Add(title, 0, 3);
+                Label group = Theme.Label(peer.Group, Theme.Body, Theme.Ink); group.Dock = DockStyle.Fill; group.AutoEllipsis = true; group.AccessibleName = "联系人资料部门"; fields.Controls.Add(group, 0, 4);
             }
-            int addressRow = department ? 6 : 4;
+            int addressRow = department ? 5 : 3;
             Label addressTitle = Theme.Label("IP 地址", Theme.Small, Theme.Muted); addressTitle.Dock = DockStyle.Fill; fields.Controls.Add(addressTitle, 0, addressRow);
             Label address = Theme.Label(peer.Endpoint.ToString(), Theme.Body, Theme.Ink); address.Dock = DockStyle.Fill; address.AccessibleName = "联系人资料地址"; fields.Controls.Add(address, 0, addressRow + 1);
             body.Controls.Add(fields);
@@ -251,7 +250,7 @@ namespace FeiqLight
         private readonly PictureBox picture;
         internal AvatarPreviewDialog(string identity, string avatar)
         {
-            Text = "头像"; ClientSize = new Size(480, 540); MinimumSize = new Size(280, 320); StartPosition = FormStartPosition.CenterParent;
+            Text = "头像"; ClientSize = new Size(460, 500); MinimumSize = new Size(280, 320); StartPosition = FormStartPosition.CenterParent;
             Bitmap image;
             string value = Protocol.NormalizeAvatar(avatar);
             if(value != null && value.StartsWith("image:", StringComparison.Ordinal)) {
@@ -259,7 +258,9 @@ namespace FeiqLight
             } else image = Theme.ContactAvatar(320, identity, false, value);
             picture = new PictureBox { Dock = DockStyle.Fill, Image = image, SizeMode = PictureBoxSizeMode.Zoom, AccessibleName = "头像大图" };
             Panel body = DialogLayout.Body(this); body.Controls.Add(picture);
-            DialogLayout.Actions(this, Theme.Button("关闭", delegate { DialogResult = DialogResult.OK; }, false));
+            Button close = Theme.Button("关闭", delegate { DialogResult = DialogResult.OK; }, false);
+            DialogLayout.StyleSecondary(close);
+            DialogLayout.Actions(this, close);
         }
         protected override void Dispose(bool disposing) { if(disposing && picture.Image != null) { picture.Image.Dispose(); picture.Image = null; } base.Dispose(disposing); }
     }
@@ -271,19 +272,23 @@ namespace FeiqLight
         private readonly ToggleSwitch history;
         public ConversationDialog(Peer peer, bool deleting, bool clearOnly = false)
         {
-            Text=clearOnly?"清空聊天记录":deleting?"删除联系人":"设置备注"; ResizeWindow=false; ClientSize=new Size(460,deleting?276:248); MinimumSize=new Size(380,220); StartPosition=FormStartPosition.CenterParent;
+            Text=clearOnly?"清空聊天记录":deleting?"删除联系人":"设置备注"; ResizeWindow=false; ClientSize=new Size(436,deleting?248:208); MinimumSize=new Size(368,196); StartPosition=FormStartPosition.CenterParent;
             Panel body=DialogLayout.Body(this);
-            string message=clearOnly?"仅清空本机聊天记录，不删除已接收的文件。":deleting?"仅从本机列表移除，不删除已接收的文件。\n新消息仍会恢复此会话。":"仅在本机显示；留空恢复对方昵称。";
-            Panel intro=new Panel {Dock=DockStyle.Top,Height=deleting?56:36,BackColor=Theme.Surface,Margin=Padding.Empty};
-            Label hint=Theme.Label(message,Theme.Body,Theme.Muted);hint.Dock=DockStyle.Fill;hint.TextAlign=ContentAlignment.TopLeft;hint.Padding=new Padding(0,2,0,0);intro.Controls.Add(hint);
-            if(deleting)intro.Controls.Add(DialogLayout.Badge(clearOnly?"eraser":"trash",Theme.Danger));
-            body.Controls.Add(intro);
-            RoundedInput input=new RoundedInput {Dock=DockStyle.Top,Height=44};note=input.Input;note.MaxLength=64;note.Text=peer.Note??"";note.AccessibleName="联系人备注";input.Visible=!deleting;
-            Panel inputGap=new Panel {Dock=DockStyle.Top,Height=10,BackColor=Theme.Surface,Visible=!deleting};
+            if(deleting) {
+                string message=clearOnly?"仅清空本机聊天记录，已接收文件保留。":"仅从本机列表移除，已接收文件保留；收到新消息会自动恢复。";
+                Panel intro=new Panel {Dock=DockStyle.Top,Height=48,BackColor=Theme.Surface,Margin=Padding.Empty};
+                Label hint=Theme.Label(message,Theme.Body,Theme.Muted);hint.Dock=DockStyle.Fill;hint.TextAlign=ContentAlignment.TopLeft;hint.Padding=new Padding(0,2,0,0);intro.Controls.Add(hint);
+                intro.Controls.Add(DialogLayout.Badge(clearOnly?"eraser":"trash",Theme.Danger));
+                body.Controls.Add(intro);
+            } else {
+                Label caption=Theme.Label("备注名称",Theme.Section,Theme.Ink);caption.Dock=DockStyle.Top;caption.Height=26;body.Controls.Add(caption);
+            }
+            RoundedInput input=new RoundedInput {Dock=DockStyle.Top,Height=44};note=input.Input;note.MaxLength=64;note.Text=peer.Note??"";note.AccessibleName="联系人备注";input.Placeholder="留空恢复对方昵称";input.Visible=!deleting;
+            Panel inputGap=new Panel {Dock=DockStyle.Top,Height=6,BackColor=Theme.Surface,Visible=!deleting};
             body.Controls.Add(inputGap);inputGap.BringToFront();body.Controls.Add(input);input.BringToFront();
             history=new ToggleSwitch {Text="同时删除聊天记录",Checked=clearOnly,Enabled=!clearOnly,AccessibleName="同时删除聊天记录"};
             RoundedPanel optionCard=DialogLayout.OptionCard(history);optionCard.Dock=DockStyle.Top;optionCard.Visible=deleting;
-            Panel optionGap=new Panel {Dock=DockStyle.Top,Height=12,BackColor=Theme.Surface,Visible=deleting};
+            Panel optionGap=new Panel {Dock=DockStyle.Top,Height=10,BackColor=Theme.Surface,Visible=deleting};
             body.Controls.Add(optionGap);optionGap.BringToFront();body.Controls.Add(optionCard);optionCard.BringToFront();
             Button cancel=Theme.Button("取消",delegate{DialogResult=DialogResult.Cancel;},false);
             Button done=Theme.Button(deleting?"确认删除":"保存",delegate{DialogResult=DialogResult.OK;},true);DialogLayout.Actions(this,done,cancel);
@@ -297,12 +302,12 @@ namespace FeiqLight
         public IPEndPoint Endpoint { get; private set; }
         public AddressDialog(int port)
         {
-            Text = "添加联系人"; ResizeWindow = false; ClientSize = new Size(460, 260); MinimumSize = new Size(380, 232); StartPosition = FormStartPosition.CenterParent;
+            Text = "添加联系人"; ResizeWindow = false; ClientSize = new Size(436, 224); MinimumSize = new Size(368, 210); StartPosition = FormStartPosition.CenterParent;
             Panel body = DialogLayout.Body(this);
-            Label label = Theme.Label("对方的 IPv4 地址", Theme.Section, Theme.Ink); label.Dock=DockStyle.Top;label.Height=28;body.Controls.Add(label);
-            RoundedInput input = new RoundedInput {Dock=DockStyle.Top,Height=44}; address = input.Input; address.AccessibleName = "好友 IP 地址"; input.Placeholder = "192.168.1.100:" + port; body.Controls.Add(input);input.BringToFront();
-            Label error = Theme.Label("端口可省略，默认 " + port + "。", Theme.Small, Theme.Muted); error.Dock=DockStyle.Top;error.Height=40;error.Padding=new Padding(2,6,0,0);error.TextAlign=ContentAlignment.TopLeft;body.Controls.Add(error);error.BringToFront();
-            Button add = Theme.Button("添加", delegate { try { Endpoint = Parse(address.Text); DialogResult = DialogResult.OK; } catch (ArgumentException e) { error.Text = e.Message; error.ForeColor=Theme.Danger; address.Focus(); } }, true);
+            Label label = Theme.Label("对方 IPv4 地址", Theme.Section, Theme.Ink); label.Dock=DockStyle.Top;label.Height=26;body.Controls.Add(label);
+            RoundedInput input = new RoundedInput {Dock=DockStyle.Top,Height=44}; address = input.Input; address.AccessibleName = "好友 IP 地址"; input.Placeholder = "例如 192.168.1.100（默认端口 " + port + "）"; body.Controls.Add(input);input.BringToFront();
+            Label error = Theme.Label("", Theme.Small, Theme.Danger); error.Dock=DockStyle.Top;error.Height=28;error.Padding=new Padding(2,6,0,0);error.TextAlign=ContentAlignment.TopLeft;body.Controls.Add(error);error.BringToFront();
+            Button add = Theme.Button("添加", delegate { try { Endpoint = Parse(address.Text); DialogResult = DialogResult.OK; } catch (ArgumentException e) { error.Text = e.Message; address.Focus(); } }, true);
             Button cancel=Theme.Button("取消",delegate {DialogResult=DialogResult.Cancel;},false);DialogLayout.Actions(this,add,cancel);Shown+=delegate {address.Focus();};
         }
         public static IPEndPoint Parse(string text)
@@ -317,10 +322,10 @@ namespace FeiqLight
         public Peer Target { get; private set; }
         public ForwardDialog(Peer[] peers, int attachments = 0)
         {
-            Text = attachments<0?"恢复已移除的联系人":"转发到"; ClientSize = new Size(440, 476); MinimumSize = new Size(380, 320); ResizeWindow = false; StartPosition = FormStartPosition.CenterParent;
+            Text = attachments<0?"恢复已移除的联系人":attachments>0?"转发 "+attachments+" 个附件":"转发到"; ClientSize = new Size(432, 456); MinimumSize = new Size(368, 320); ResizeWindow = false; StartPosition = FormStartPosition.CenterParent;
             ListBox list = new ListBox { Dock = DockStyle.Fill, BorderStyle = BorderStyle.None, Font = Theme.Body, BackColor = Theme.Surface, ForeColor = Theme.Ink, IntegralHeight = false };
             foreach (Peer peer in peers) list.Items.Add(peer.DisplayName + "  ·  " + peer.Endpoint);
-            list.DrawMode = DrawMode.OwnerDrawFixed; list.ItemHeight = 64;
+            list.DrawMode = DrawMode.OwnerDrawFixed; list.ItemHeight = 62;
             list.DrawItem += delegate(object sender, DrawItemEventArgs e) {
                 if (e.Index < 0) return; Peer peer = peers[e.Index]; bool selected = (e.State & DrawItemState.Selected) != 0; float scale = e.Graphics.DpiX / 96F;
                 e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
@@ -329,21 +334,27 @@ namespace FeiqLight
                 using (GraphicsPath path = Theme.RoundedF(card, 9F * scale))
                 {
                     using (SolidBrush brush = new SolidBrush(selected ? Theme.Sky : Theme.Ice)) e.Graphics.FillPath(brush, path);
-                    if (selected) using (Pen border = new Pen(Theme.Blend(Theme.Blue, Theme.Surface, .5F))) e.Graphics.DrawPath(border, path);
+                    using (Pen border = new Pen(selected ? Theme.Blend(Theme.Blue, Theme.Surface, .5F) : Theme.Line)) e.Graphics.DrawPath(border, path);
                 }
                 Bitmap avatar = Theme.CachedAvatar(40, peer.Id, false, peer.Avatar); e.Graphics.DrawImageUnscaled(avatar, (int)(card.Left + 10F * scale) - Theme.AvatarHalo(40), (int)(card.Top + (card.Height - 40) / 2F) - Theme.AvatarHalo(40));
                 int textLeft = (int)(card.Left + 60F * scale), textWidth = Math.Max(1, (int)(card.Right - textLeft - 12F * scale));
-                TextRenderer.DrawText(e.Graphics, peer.DisplayName, Theme.Section, new Rectangle(textLeft, (int)(card.Top + 9F * scale), textWidth, (int)(22 * scale)), Theme.Ink, TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
-                TextRenderer.DrawText(e.Graphics, (peer.DuplicateName?"#"+peer.ConversationNumber+" · ":"")+peer.Endpoint, Theme.Small, new Rectangle(textLeft, (int)(card.Top + 32F * scale), textWidth, (int)(20 * scale)), Theme.Muted, TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+                TextRenderer.DrawText(e.Graphics, peer.DisplayName, Theme.Section, new Rectangle(textLeft, (int)(card.Top + 8F * scale), textWidth, (int)(22 * scale)), Theme.Ink, TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+                TextRenderer.DrawText(e.Graphics, (peer.DuplicateName?"#"+peer.ConversationNumber+" · ":"")+peer.Endpoint, Theme.Small, new Rectangle(textLeft, (int)(card.Top + 31F * scale), textWidth, (int)(20 * scale)), Theme.Muted, TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
                 if ((e.State & DrawItemState.Focus) != 0) e.DrawFocusRectangle();
             };
             Theme.ThemeScrollbars(list);
             Button send = Theme.Button(attachments<0?"恢复会话":"确认转发", delegate { if (list.SelectedIndex >= 0) { Target = peers[list.SelectedIndex]; DialogResult = DialogResult.OK; } }, true);
             Button cancel = Theme.Button("取消", delegate { DialogResult = DialogResult.Cancel; }, false);
             send.Enabled = false; list.SelectedIndexChanged += delegate { send.Enabled = list.SelectedIndex >= 0; };
-            Label hint = Theme.Label(attachments<0?(peers.Length==0?"没有已移除的联系人。":"选择联系人并恢复；保留的历史和草稿仍可查看。"):peers.Length == 0 ? "没有在线联系人，请先连接或添加联系人。" : attachments == 0 ? "转发文本 · 选择联系人后确认发送" : "转发 " + attachments + " 个附件及正文 · 选择联系人", Theme.Small, Theme.Muted); hint.Dock = DockStyle.Top; hint.Height = 36; hint.Padding = new Padding(24, 4, 24, 0);
-            Panel frame = new Panel { Dock = DockStyle.Fill, Padding = new Padding(20, 4, 20, 8) }; frame.Controls.Add(list);
-            Surface.Controls.Add(frame); Surface.Controls.Add(hint); DialogLayout.Actions(this, send, cancel);
+            Panel frame = new Panel { Dock = DockStyle.Fill, Padding = new Padding(20, 6, 20, 12) };
+            RoundedPanel listShell = new RoundedPanel { Dock = DockStyle.Fill, Fill = Theme.Surface, Border = Theme.Line, Radius = 12, Padding = new Padding(6) };
+            if (peers.Length == 0) {
+                Label empty = Theme.Label(attachments<0?"没有已移除的联系人":"当前没有在线联系人", Theme.Body, Theme.Muted); empty.Dock = DockStyle.Fill; empty.TextAlign = ContentAlignment.MiddleCenter; listShell.Controls.Add(empty);
+            }
+            listShell.Controls.Add(list);
+            if (peers.Length == 0) list.Visible = false;
+            frame.Controls.Add(listShell);
+            Surface.Controls.Add(frame); DialogLayout.Actions(this, send, cancel);
         }
     }
     internal sealed class AvatarPickerDialog : ModernWindow
@@ -377,28 +388,35 @@ namespace FeiqLight
         public string SelectedValue { get; private set; }
         internal AvatarPickerDialog(string value, string identity)
         {
-            this.identity = identity; Text = "更换头像"; ResizeWindow = false; ClientSize = new Size(520, 560); MinimumSize = new Size(480, 560); StartPosition = FormStartPosition.CenterParent;
-            TableLayoutPanel content = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, Margin = Padding.Empty };
-            content.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); foreach(int height in new[] { 76, 248, 44, 28 }) content.RowStyles.Add(new RowStyle(SizeType.Absolute, height));
-            TableLayoutPanel top = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty };
-            top.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 76)); top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); top.Controls.Add(preview, 0, 0);
-            Label title = Theme.Label("选一个喜欢的头像\n也可以使用自己的图片", Theme.Body, Theme.Ink); title.Dock = DockStyle.Fill; title.Padding = new Padding(12, 0, 0, 0); top.Controls.Add(title, 1, 0); content.Controls.Add(top, 0, 0);
-            TableLayoutPanel grid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 6, RowCount = 4, Margin = new Padding(0, 4, 0, 8), AccessibleName = "内置头像列表" };
-            for(int i = 0; i < 6; i++) grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F / 6));
-            for(int i = 0; i < 4; i++) grid.RowStyles.Add(new RowStyle(SizeType.Percent, 25));
-            for(int i = 0; i < choices.Length; i++) { int index = i; AvatarChoice choice = new AvatarChoice(i) { Dock = DockStyle.Fill, Margin = new Padding(4) }; choice.Click += delegate { SetAvatar("builtin:" + index); }; choices[i] = choice; grid.Controls.Add(choice, i % 6, i / 6); }
-            content.Controls.Add(grid, 0, 1);
-            TableLayoutPanel actions = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty };
-            actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50)); actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            this.identity = identity; Text = "更换头像"; ResizeWindow = false; ClientSize = new Size(496, 476); MinimumSize = new Size(460, 460); StartPosition = FormStartPosition.CenterParent;
+            TableLayoutPanel content = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Margin = Padding.Empty };
+            content.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            content.RowStyles.Add(new RowStyle(SizeType.Absolute, 84));
+            content.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+
+            RoundedPanel topCard = new RoundedPanel { Dock = DockStyle.Fill, Fill = Theme.Ice, Border = Theme.Line, Radius = 12, Padding = new Padding(12, 8, 12, 8), Margin = new Padding(0, 0, 0, 10) };
+            TableLayoutPanel top = new TableLayoutPanel { Dock = DockStyle.Fill, BackColor = Theme.Ice, ColumnCount = 3, RowCount = 1, Margin = Padding.Empty };
+            top.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 68)); top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50)); top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            top.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            preview.BackColor = Theme.Ice;
+            top.Controls.Add(preview, 0, 0);
             localImage = Theme.Button("选择本地图片…", async delegate {
                 using(OpenFileDialog picker = new OpenFileDialog { Title = "选择头像图片", Filter = "图片|*.jpg;*.jpeg;*.png;*.bmp;*.gif", CheckFileExists = true }) if(picker.ShowDialog(this) == DialogResult.OK) {
                     Activate();
                     string chosen = picker.FileName;
                     await ImportImageAsync(System.Threading.Tasks.Task.Run(() => EmojiAvatars.FromLocalImage(chosen)));
                 } else Activate();
-            }, false); localImage.Dock = DockStyle.Fill; localImage.Margin = new Padding(0, 0, 6, 4); actions.Controls.Add(localImage, 0, 0);
-            Button reset = Theme.Button("使用默认头像", delegate { SetAvatar("default"); }, false); reset.Dock = DockStyle.Fill; reset.Margin = new Padding(6, 0, 0, 4); actions.Controls.Add(reset, 1, 0); content.Controls.Add(actions, 0, 2);
-            Label hint = Theme.Label("回到设置页点击保存后生效。", Theme.Small, Theme.Muted); hint.Dock = DockStyle.Fill; content.Controls.Add(hint, 0, 3);
+            }, false); localImage.Dock = DockStyle.Fill; localImage.Margin = new Padding(12, 10, 6, 10); DialogLayout.StyleSecondary(localImage); top.Controls.Add(localImage, 1, 0);
+            Button reset = Theme.Button("使用默认头像", delegate { SetAvatar("default"); }, false); reset.Dock = DockStyle.Fill; reset.Margin = new Padding(6, 10, 0, 10); DialogLayout.StyleSecondary(reset); top.Controls.Add(reset, 2, 0);
+            topCard.Controls.Add(top);
+            content.Controls.Add(topCard, 0, 0);
+
+            TableLayoutPanel grid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 6, RowCount = 4, Margin = Padding.Empty, AccessibleName = "内置头像列表" };
+            for(int i = 0; i < 6; i++) grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F / 6));
+            for(int i = 0; i < 4; i++) grid.RowStyles.Add(new RowStyle(SizeType.Percent, 25));
+            for(int i = 0; i < choices.Length; i++) { int index = i; AvatarChoice choice = new AvatarChoice(i) { Dock = DockStyle.Fill, Margin = new Padding(4) }; choice.Click += delegate { SetAvatar("builtin:" + index); }; choices[i] = choice; grid.Controls.Add(choice, i % 6, i / 6); }
+            content.Controls.Add(grid, 0, 1);
+
             Panel body = DialogLayout.Body(this); body.Controls.Add(content);
             useAvatar = Theme.Button("使用此头像", delegate { DialogResult = DialogResult.OK; }, true);
             DialogLayout.Actions(this, useAvatar, Theme.Button("取消", delegate { DialogResult = DialogResult.Cancel; }, false));
@@ -494,35 +512,32 @@ namespace FeiqLight
                 using(AvatarPickerDialog picker = new AvatarPickerDialog(avatarValue, avatarIdentity)) if(picker.ShowDialog(this) == DialogResult.OK) {
                     avatarValue = picker.SelectedValue; Image old = avatarPreview.Image; avatarPreview.Image = Theme.ContactAvatar(64, avatarIdentity, false, avatarValue); old.Dispose();
                 }
-            }, false); avatarButton.Width = 128; avatarButton.Anchor = AnchorStyles.Left; avatarRow.Controls.Add(avatarButton, 1, 0); body.Controls.Add(avatarRow);
+            }, false); avatarButton.Width = 118; avatarButton.Anchor = AnchorStyles.Left; DialogLayout.StyleSecondary(avatarButton); avatarRow.Controls.Add(avatarButton, 1, 0); body.Controls.Add(avatarRow);
             TextBox name = Input("昵称", current.Nickname, 8, 32), group = Input("部门", current.Group, 80, 32), signature = Input("个性签名", current.Signature, 152, 80);
-            ToggleSwitch close = new ToggleSwitch { Text = "关闭时收起到托盘", Description = "关闭窗口后仍在后台接收消息，可从托盘图标恢复。", Checked = current.CloseToTray, BackColor = Theme.Surface }; close.SetBounds(26, 232, 458, 54); body.Controls.Add(close);
-            ToggleSwitch notifications = new ToggleSwitch { Text = "消息通知", Description = "窗口不在前台时用系统气泡提示新消息。", Checked = current.Notifications, BackColor = Theme.Surface }; notifications.SetBounds(26, 274, 458, 54); body.Controls.Add(notifications);
-            ToggleSwitch startup = new ToggleSwitch { Text = "开机自启动", AccessibleName = "开机自启动", Description = "登录 Windows 后自动连接并收起到托盘。", Checked = startupAvailable ? startupEnabled : current.StartWithWindows, Enabled = startupAvailable, BackColor = Theme.Surface }; startup.SetBounds(26, 275, 458, 54); body.Controls.Add(startup);
-            ToggleSwitch auto = new ToggleSwitch { Text = "自动接收文件", AccessibleName = "自动接收文件", Description = "收到文件邀请时直接保存到接收文件夹；关闭后需手动点击接收。", Checked = current.AutoReceiveFiles, BackColor = Theme.Surface }; auto.SetBounds(26, 316, 458, 54); body.Controls.Add(auto);
-            Label hint = Theme.Label("仅用于可信局域网；不会自动运行文件。", Theme.Small, Theme.Muted); hint.SetBounds(26, 360, 458, 24); body.Controls.Add(hint);
-            ToggleSwitch autoDrop=new ToggleSwitch {Text="拖入文件自动发送",AccessibleName="拖入文件自动发送",Description="默认关闭：拖入后先加入待发送列表。开启后仅发送本次拖入的文件，不夹带草稿或已排队附件。",Checked=current.AutoSendDroppedFiles,BackColor=Theme.Surface};autoDrop.SetBounds(26,520,458,68);body.Controls.Add(autoDrop);
-            ToggleSwitch legacy=new ToggleSwitch {Text="允许旧版明文协议",AccessibleName="允许旧版明文协议",Description="默认开启，兼容旧版聊天和附件。旧设备使用明文；已配对设备不降级，共享和远控始终加密。",Checked=current.AllowLegacyProtocol,BackColor=Theme.Surface};legacy.SetBounds(26,280,458,68);body.Controls.Add(legacy);
-            Label dropHint=Theme.Label("文件只在点击发送或开启自动发送后传输。",Theme.Small,Theme.Muted);dropHint.SetBounds(26,521,458,24);body.Controls.Add(dropHint);
+            ToggleSwitch close = new ToggleSwitch { Text = "关闭时收起到托盘", Checked = current.CloseToTray, BackColor = Theme.Surface }; close.SetBounds(26, 232, 458, 42); body.Controls.Add(close);
+            ToggleSwitch notifications = new ToggleSwitch { Text = "新消息气泡通知", Checked = current.Notifications, BackColor = Theme.Surface }; notifications.SetBounds(26, 274, 458, 42); body.Controls.Add(notifications);
+            ToggleSwitch startup = new ToggleSwitch { Text = "开机自启动", AccessibleName = "开机自启动", Checked = startupAvailable ? startupEnabled : current.StartWithWindows, Enabled = startupAvailable, BackColor = Theme.Surface }; startup.SetBounds(26, 275, 458, 42); body.Controls.Add(startup);
+            ToggleSwitch auto = new ToggleSwitch { Text = "自动接收文件", AccessibleName = "自动接收文件", Description = "仅用于可信局域网，不自动运行文件", Checked = current.AutoReceiveFiles, BackColor = Theme.Surface }; auto.SetBounds(26, 316, 458, 52); body.Controls.Add(auto);
+            ToggleSwitch autoDrop=new ToggleSwitch {Text="拖入文件自动发送",AccessibleName="拖入文件自动发送",Description="仅发本次拖入文件，不夹带草稿或已排队附件",Checked=current.AutoSendDroppedFiles,BackColor=Theme.Surface};autoDrop.SetBounds(26,520,458,52);body.Controls.Add(autoDrop);
+            ToggleSwitch legacy=new ToggleSwitch {Text="允许旧版明文协议",AccessibleName="允许旧版明文协议",Description="兼容旧设备明文；已配对设备与共享远控始终加密",Checked=current.AllowLegacyProtocol,BackColor=Theme.Surface};legacy.SetBounds(26,280,458,52);body.Controls.Add(legacy);
             TextBox folder = Input("文件保存文件夹", current.ReceiveFolder ?? AppSettings.DefaultReceiveFolder, 404, 240); folder.Parent.Width = 350;
             Button browse = Theme.Button("选择文件夹", delegate
             {
                 using (FolderBrowserDialog dialog = new FolderBrowserDialog { Description = "选择飞Q接收文件的保存文件夹", SelectedPath = folder.Text, ShowNewFolderButton = true })
                     if (dialog.ShowDialog(this) == DialogResult.OK) folder.Text = dialog.SelectedPath;
-            }, false); browse.SetBounds(386, 434, 96, 44); body.Controls.Add(browse);
-            Button reset = Theme.Button("恢复默认目录", delegate { folder.Text = AppSettings.DefaultReceiveFolder; }, false); reset.SetBounds(26, 486, 146, 36); body.Controls.Add(reset);
-            Label info = Theme.Label("端口 " + port + " · 启动后自动连接并查找历史联系人\n资料目录  " + dataPath, Theme.Small, Theme.Muted); info.SetBounds(26, 532, 458, 46); info.AutoEllipsis = true; body.Controls.Add(info);
-            ToggleSwitch dark=new ToggleSwitch { Text="夜间模式",AccessibleName="夜间模式",Description="界面与聊天背景切换为深色，阅读更省眼。",Checked=current.DarkMode,BackColor=Theme.Surface }; dark.SetBounds(26,590,458,54);body.Controls.Add(dark);
-            ToggleSwitch follow=new ToggleSwitch { Text="跟随系统切换",AccessibleName="跟随系统切换",Description="自动跟随 Windows 的日间和夜间设置；关闭后可手动选择。",Checked=current.FollowSystemTheme,BackColor=Theme.Surface };follow.Top=290;body.Controls.Add(follow);
+            }, false); browse.SetBounds(386, 434, 96, 40); DialogLayout.StyleSecondary(browse); body.Controls.Add(browse);
+            Button reset = Theme.Button("恢复默认目录", delegate { folder.Text = AppSettings.DefaultReceiveFolder; }, false); reset.SetBounds(26, 486, 146, 36); DialogLayout.StyleSecondary(reset); body.Controls.Add(reset);
+            Label info = Theme.Label("端口 " + port + " · 资料目录 " + dataPath, Theme.Small, Theme.Muted); info.SetBounds(26, 532, 458, 40); info.AutoEllipsis = true; body.Controls.Add(info);
+            ToggleSwitch dark=new ToggleSwitch { Text="夜间模式",AccessibleName="夜间模式",Checked=current.DarkMode,BackColor=Theme.Surface }; dark.SetBounds(26,590,458,42);body.Controls.Add(dark);
+            ToggleSwitch follow=new ToggleSwitch { Text="跟随系统主题",AccessibleName="跟随系统切换",Checked=current.FollowSystemTheme,BackColor=Theme.Surface };follow.Top=290;body.Controls.Add(follow);
             Action followTheme=delegate {dark.Enabled=!follow.Checked;if(follow.Checked)dark.Checked=Theme.SystemDark;};follow.CheckedChanged+=delegate {followTheme();};followTheme();
             string[] accentKeys = { "blue", "green", "purple", "amber", "rose", "slate" };
             string[] accentNames = { "经典蓝", "青绿色", "紫罗兰", "琥珀金", "绯樱粉", "墨韵灰" };
             int accentIndex = Math.Max(0, Array.IndexOf(accentKeys, Theme.NormalizeAccent(current.Accent)));
-            ToggleSwitch diagnostics=new ToggleSwitch {Text="记录故障诊断",AccessibleName="记录故障诊断",Description="保存后生效；仅记录时间与事件码，不含聊天内容、身份、IP 或路径。",Checked=current.DiagnosticsEnabled,BackColor=Theme.Surface};diagnostics.SetBounds(26,700,458,64);body.Controls.Add(diagnostics);
-            Label privacy=Theme.Label("最多 128 KiB，自动轮转；关闭后保留，可随时清除。",Theme.Small,Theme.Muted);privacy.SetBounds(26,742,458,28);body.Controls.Add(privacy);
+            ToggleSwitch diagnostics=new ToggleSwitch {Text="记录故障诊断",AccessibleName="记录故障诊断",Description="仅记时间与事件码（限 128 KiB），不含聊天与路径",Checked=current.DiagnosticsEnabled,BackColor=Theme.Surface};diagnostics.SetBounds(26,700,458,52);body.Controls.Add(diagnostics);
             Diagnostics journal=new Diagnostics(dataPath,()=>current.DiagnosticsEnabled);
-            Button viewLog=Theme.Button("查看诊断记录",delegate {try {using(NoticeDialog dialog=new NoticeDialog("诊断记录（可选择复制）",journal.Read()))dialog.ShowDialog(this);}catch(Exception e){using(NoticeDialog dialog=new NoticeDialog("读取失败",e.Message))dialog.ShowDialog(this);}},false);viewLog.SetBounds(26,798,168,36);body.Controls.Add(viewLog);
-            Button clearLog=Theme.Button("清除诊断记录",delegate {try {journal.Clear();}catch(Exception e){using(NoticeDialog dialog=new NoticeDialog("清除失败",e.Message))dialog.ShowDialog(this);}},false);clearLog.SetBounds(204,798,168,36);body.Controls.Add(clearLog);
+            Button viewLog=Theme.Button("查看诊断记录",delegate {try {using(NoticeDialog dialog=new NoticeDialog("诊断记录（可选择复制）",journal.Read()))dialog.ShowDialog(this);}catch(Exception e){using(NoticeDialog dialog=new NoticeDialog("读取失败",e.Message))dialog.ShowDialog(this);}},false);viewLog.SetBounds(26,798,168,36);DialogLayout.StyleSecondary(viewLog);body.Controls.Add(viewLog);
+            Button clearLog=Theme.Button("清除诊断记录",delegate {try {journal.Clear();}catch(Exception e){using(NoticeDialog dialog=new NoticeDialog("清除失败",e.Message))dialog.ShowDialog(this);}},false);clearLog.SetBounds(204,798,168,36);DialogLayout.StyleSecondary(clearLog);body.Controls.Add(clearLog);
             TableLayoutPanel accent = new TableLayoutPanel { ColumnCount = 3, RowCount = 2, Height = 104, AccessibleName = "主题颜色", Margin = new Padding(0, 4, 0, 10) };
             for (int r = 0; r < 2; r++) accent.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
             Button[] choices = new Button[accentKeys.Length];
@@ -587,7 +602,7 @@ namespace FeiqLight
                 int detail = TextRenderer.MeasureText(error.Text, error.Font, new Size(Math.Max(1, footer.Width - footer.Padding.Horizontal), 0), TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix).Height;
                 footer.Height = actionRow.Height + footer.Padding.Vertical + (error.Visible ? Math.Max((int)(32 * scale), detail + (int)(8 * scale)) : (int)(4 * scale));
             };
-            Button cancel = Theme.Button("取消", delegate { DialogResult = DialogResult.Cancel; }, false); cancel.Size = new Size(92, 40); CancelButton = cancel;
+            Button cancel = Theme.Button("取消", delegate { DialogResult = DialogResult.Cancel; }, false); cancel.Size = new Size(90, 38); DialogLayout.StyleSecondary(cancel); CancelButton = cancel;
             save = Theme.Button("保存", delegate
             {
                 if (String.IsNullOrWhiteSpace(name.Text)) { error.Text = "昵称不能为空"; SelectTab(0); name.Focus(); return; }
@@ -598,13 +613,13 @@ namespace FeiqLight
                     DialogResult = DialogResult.OK;
                 }
                 catch (Exception e) { error.Text = "保存目录不可用：" + e.Message; SelectTab(2); folder.Focus(); }
-            }, true); save.Size = new Size(96, 40); save.Margin = Padding.Empty; cancel.Margin = new Padding(0, 0, 12, 0); actionRow.Controls.Add(save); actionRow.Controls.Add(cancel); AcceptButton = save;
+            }, true); save.Size = new Size(92, 38); save.Margin = Padding.Empty; cancel.Margin = new Padding(0, 0, 10, 0); actionRow.Controls.Add(save); actionRow.Controls.Add(cancel); AcceptButton = save;
             // 页面只创建一次，切换仅改变可见性，尚未保存的控件状态不会丢失。
             dark.Top = 290; accent.Top = 291; info.Top = 900;
             Control[] fields = body.Controls.Cast<Control>().OrderBy(c => c.Top).ToArray();
             body.Controls.Clear();
             for(int i=0;i<pages.Length;i++) {
-                pages[i]=new FlowLayoutPanel {FlowDirection=FlowDirection.TopDown,WrapContents=false,AutoSize=true,AutoSizeMode=AutoSizeMode.GrowAndShrink,Padding=new Padding(28,10,28,26),Visible=false,AccessibleName="设置内容："+tabNames[i],BackColor=Theme.Surface};
+                pages[i]=new FlowLayoutPanel {FlowDirection=FlowDirection.TopDown,WrapContents=false,AutoSize=true,AutoSizeMode=AutoSizeMode.GrowAndShrink,Padding=new Padding(24,8,24,20),Visible=false,AccessibleName="设置内容："+tabNames[i],BackColor=Theme.Surface};
                 body.Controls.Add(pages[i]);
             }
             int page=0;
@@ -612,22 +627,29 @@ namespace FeiqLight
             {
                 if(field==dark)page=1;else if(field==auto)page=2;else if(field==diagnostics||field==info)page=3;
                 FlowLayoutPanel layout=pages[page];
-                if (field == reset) continue;
+                if (field == reset || field == clearLog) continue;
                 if (field == browse)
                 {
-                    TableLayoutPanel actions = new TableLayoutPanel { ColumnCount = 2, RowCount = 1, Height = 44, Margin = new Padding(0, 0, 0, 12) };
+                    TableLayoutPanel actions = new TableLayoutPanel { ColumnCount = 2, RowCount = 1, Height = 40, Margin = new Padding(0, 2, 0, 10) };
                     actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50)); actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
                     browse.Dock = reset.Dock = DockStyle.Fill;
                     browse.Margin = new Padding(0, 0, 6, 0); reset.Margin = new Padding(6, 0, 0, 0); actions.Controls.Add(browse, 0, 0); actions.Controls.Add(reset, 1, 0); layout.Controls.Add(actions); continue;
                 }
+                if (field == viewLog)
+                {
+                    TableLayoutPanel logActions = new TableLayoutPanel { ColumnCount = 2, RowCount = 1, Height = 40, Margin = new Padding(0, 4, 0, 8) };
+                    logActions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50)); logActions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+                    viewLog.Dock = clearLog.Dock = DockStyle.Fill;
+                    viewLog.Margin = new Padding(0, 0, 6, 0); clearLog.Margin = new Padding(6, 0, 0, 0); logActions.Controls.Add(viewLog, 0, 0); logActions.Controls.Add(clearLog, 1, 0); layout.Controls.Add(logActions); continue;
+                }
                 string section = field == fields[0] ? "个人资料" : field == close ? "消息与窗口" : field == auto ? "文件接收" : field == autoDrop ? "文件发送" : field == dark ? "聊天外观" : field == diagnostics ? "故障诊断" : field == info ? "本机信息" : null;
                 if (section != null) {
-                    if(layout.Controls.Count>0) { Panel divider=new Panel { Height=1, BackColor=Theme.Line, Margin=new Padding(0,12,0,12) };layout.Controls.Add(divider); }
-                    Label heading = Theme.Label(section, Theme.Section, Theme.Ink); heading.Height = 26; heading.Margin = new Padding(0, 0, 0, 6); layout.Controls.Add(heading);
+                    if(layout.Controls.Count>0) { Panel divider=new Panel { Height=1, BackColor=Theme.Line, Margin=new Padding(0,10,0,10) };layout.Controls.Add(divider); }
+                    Label heading = Theme.Label(section, Theme.Section, Theme.Ink); heading.Height = 24; heading.Margin = new Padding(0, 0, 0, 4); layout.Controls.Add(heading);
                 }
-                if(field is Label && field != hint && field != info && field != privacy && field != dropHint) field.Height=22;
+                if(field is Label && field != info) field.Height=20;
                 if(field is ToggleSwitch) field.Height=((ToggleSwitch)field).PreferredHeightFor(458);
-                field.Margin = new Padding(0, 0, 0, field is Label ? 4 : 8); layout.Controls.Add(field);
+                field.Margin = new Padding(0, 0, 0, field is Label ? 4 : 6); layout.Controls.Add(field);
             }
             // 侧栏：4 个分类自上而下排列，与内容区之间用细线分隔。
             for(int i=0;i<tabs.Length;i++) {
@@ -640,14 +662,14 @@ namespace FeiqLight
             }
             Label navFooter=Theme.Label("飞Q 设置",Theme.Small,Theme.Muted); navFooter.SetBounds(20, nav.Height-34, nav.Width-30, 22); navFooter.Anchor=AnchorStyles.Left|AnchorStyles.Bottom; nav.Controls.Add(navFooter);
             Action fit = delegate {
-                int width = Math.Max(160, body.Width - (int)(56 * DeviceDpi / 96F) - SystemInformation.VerticalScrollBarWidth);
+                int width = Math.Max(160, body.Width - (int)(48 * DeviceDpi / 96F) - SystemInformation.VerticalScrollBarWidth);
                 foreach(FlowLayoutPanel layout in pages) {
                     layout.SuspendLayout();
                     foreach (Control field in layout.Controls) {
                         field.Width = width;
                         ToggleSwitch toggle = field as ToggleSwitch;
                         if(toggle != null) field.Height = toggle.PreferredHeightFor(width);
-                        else if(field == hint || field == dropHint || field == privacy || field == info)
+                        else if(field == info)
                             field.Height = TextRenderer.MeasureText(field.Text, field.Font, new Size(width, Int32.MaxValue), TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl | TextFormatFlags.NoPrefix).Height + 4;
                     }
                     layout.ResumeLayout(true);

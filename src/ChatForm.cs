@@ -53,6 +53,7 @@ namespace FeiqLight
         private ReceivedFile activeFile;
         private bool pauseRequested;
         private readonly System.Windows.Forms.Timer draftTimer = new System.Windows.Forms.Timer { Interval = 500 };
+        private readonly ToolTip headTips = new ToolTip();
         private bool drawerOpen;
         private ContextMenuStrip chatMenu, fileMenu;
         private EmojiPicker emojiPicker;
@@ -63,8 +64,8 @@ namespace FeiqLight
             Theme.Apply(this); DoubleBuffered = true; Text = peer.Nickname; FormBorderStyle = FormBorderStyle.None; ClientSize = new Size(760, 720); MinimumSize = Size.Empty;
             root = new BufferedLayoutTable { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, Margin = Padding.Empty, BackColor = Theme.Surface };
             root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); root.RowStyles.Add(new RowStyle(SizeType.Absolute, 74)); root.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); root.RowStyles.Add(new RowStyle(SizeType.Absolute, 0)); root.RowStyles.Add(new RowStyle(SizeType.Absolute, 82)); Controls.Add(root);
-            head = new BufferedLayoutTable { Dock = DockStyle.Fill, ColumnCount = 5, RowCount = 1, Padding = new Padding(16, 8, 12, 8), Margin = Padding.Empty, BackColor = Theme.Surface };
-            head.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 58)); head.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); for (int i = 0; i < 3; i++) head.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 44)); head.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            head = new BufferedLayoutTable { Dock = DockStyle.Fill, ColumnCount = 6, RowCount = 1, Padding = new Padding(16, 8, 12, 8), Margin = Padding.Empty, BackColor = Theme.Surface };
+            head.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 58)); head.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); for (int i = 0; i < 4; i++) head.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 44)); head.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             avatar = new PictureBox { Image = Theme.ContactAvatar(46, peer.Id, peer.Online, peer.Avatar), AccessibleName = "聊天联系人头像", Size = new Size(56, 56), Margin = Padding.Empty, SizeMode = PictureBoxSizeMode.Zoom, Anchor = AnchorStyles.Left }; head.Controls.Add(avatar, 0, 0);
             TableLayoutPanel identity = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 2, ColumnCount = 1, Margin = Padding.Empty }; identity.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); identity.RowStyles.Add(new RowStyle(SizeType.Percent, 56)); identity.RowStyles.Add(new RowStyle(SizeType.Percent, 44));
             peerName.Dock = DockStyle.Fill; peerName.AutoEllipsis = true; peerName.AccessibleName = "聊天联系人昵称"; identity.Controls.Add(peerName, 0, 0);
@@ -72,9 +73,11 @@ namespace FeiqLight
             avatarIdentity = peer.Id; avatarValue = peer.Avatar; avatarOnline = peer.Online; RefreshPeer();
             avatar.Cursor = Cursors.Hand;
             avatar.Click += delegate { main.ShowContactProfile(peer); };
-            Button search = Theme.IconButton("search", "聊天记录", ShowHistory, false); search.Dock = DockStyle.Fill; search.Margin = Padding.Empty; head.Controls.Add(search, 2, 0);
-            fileButton = Theme.IconButton("inbox", "收到的文件", delegate { SetDrawer(!drawerOpen); }, false); fileButton.Dock = DockStyle.Fill; fileButton.Margin = Padding.Empty; head.Controls.Add(fileButton, 3, 0);
-            Button menu = Theme.IconButton("more", "会话菜单", ShowMenu, false); menu.Dock = DockStyle.Fill; menu.Margin = Padding.Empty; head.Controls.Add(menu, 4, 0);
+            Button transferButton = Theme.IconButton("transfer", "传输任务", delegate { main.OpenTransfers(); }, false); transferButton.Dock = DockStyle.Fill; transferButton.Margin = Padding.Empty; head.Controls.Add(transferButton, 2, 0);
+            Button search = Theme.IconButton("search", "聊天记录", ShowHistory, false); search.Dock = DockStyle.Fill; search.Margin = Padding.Empty; head.Controls.Add(search, 3, 0);
+            fileButton = Theme.IconButton("inbox", "收到的文件", delegate { SetDrawer(!drawerOpen); }, false); fileButton.Dock = DockStyle.Fill; fileButton.Margin = Padding.Empty; head.Controls.Add(fileButton, 4, 0);
+            Button menu = Theme.IconButton("more", "会话菜单", ShowMenu, false); menu.Dock = DockStyle.Fill; menu.Margin = Padding.Empty; head.Controls.Add(menu, 5, 0);
+            foreach (Button button in new[] { transferButton, search, fileButton, menu }) headTips.SetToolTip(button, button.AccessibleName);
             root.Controls.Add(head, 0, 0);
             head.Paint += delegate(object sender, PaintEventArgs e) { using (Pen line = new Pen(Theme.Line)) e.Graphics.DrawLine(line, 0, head.Height - 1, head.Width, head.Height - 1); };
             middle = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty, BackColor = Theme.Wallpaper };
@@ -624,6 +627,6 @@ namespace FeiqLight
             main.TrackTransfer(item.Record);
             history.Delivery(item.Record);
         }
-        protected override void Dispose(bool disposing) { if (disposing && !IsDisposed) { ClearPastedImages(); SaveDraft(); draftTimer.Dispose(); if (emojiPicker != null) emojiPicker.Dispose(); if (chatMenu != null) chatMenu.Dispose(); if (fileMenu != null) fileMenu.Dispose(); if (receiving != null) receiving.Cancel(); if (avatar != null && avatar.Image != null) avatar.Image.Dispose(); } base.Dispose(disposing); if(disposing&&chatFont!=null){chatFont.Dispose();chatFont=null;} }
+        protected override void Dispose(bool disposing) { if (disposing && !IsDisposed) { ClearPastedImages(); SaveDraft(); draftTimer.Dispose(); headTips.Dispose(); if (emojiPicker != null) emojiPicker.Dispose(); if (chatMenu != null) chatMenu.Dispose(); if (fileMenu != null) fileMenu.Dispose(); if (receiving != null) receiving.Cancel(); if (avatar != null && avatar.Image != null) avatar.Image.Dispose(); } base.Dispose(disposing); if(disposing&&chatFont!=null){chatFont.Dispose();chatFont=null;} }
     }
 }

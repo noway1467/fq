@@ -5,6 +5,7 @@ import android.database.Cursor;
 import android.net.Uri;
 import android.os.*;
 import android.provider.DocumentsContract;
+import org.feiqlight.android.core.LanNode;
 import org.feiqlight.android.core.ToolsHttp;
 import org.json.*;
 import java.io.*;
@@ -32,6 +33,10 @@ final class SharedFiles implements AutoCloseable {
         this(context,Collections.singletonList(tree),port,loopback);
     }
     SharedFiles(Context context,List<Uri> folders,int port,boolean loopback) throws IOException {
+        this(context,folders,port,loopback,loopback?null:new LanNetwork(context.getSystemService(android.net.ConnectivityManager.class)));
+    }
+    SharedFiles(Context context,List<Uri> folders,int port,boolean loopback,LanNode.SocketBinding binding) throws IOException {
+        if(!loopback&&binding==null)throw new IOException("请先连接局域网");
         this.context=context.getApplicationContext();List<Uri> trees=new ArrayList<>(new LinkedHashSet<>(folders));
         if(trees.isEmpty()||trees.size()>20)throw new IOException("请选择 1–20 个共享文件夹");
         for(Uri tree:trees) {
@@ -44,7 +49,7 @@ final class SharedFiles implements AutoCloseable {
         }
         // 单目录保留旧配对范围；多目录配对绑定完整集合，增减目录后原凭据不可复用。
         scope="share:"+String.join("\n",trees.stream().map(Uri::toString).sorted().collect(java.util.stream.Collectors.toList()));
-        pairings=new ToolsPairings(this.context);http=new ToolsHttp(port,loopback,this::handle,loopback?null:AppIdentity.get(context),loopback?null:new LanNetwork(context.getSystemService(android.net.ConnectivityManager.class)));
+        pairings=new ToolsPairings(this.context);http=new ToolsHttp(port,loopback,this::handle,loopback?null:AppIdentity.get(context),loopback?null:binding);
     }
     String code(){return SystemClock.elapsedRealtime()<codeUntil?code:"已过期，请停止后重新开启";}
     int port(){return http.port();}
