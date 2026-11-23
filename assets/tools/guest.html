@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>飞Q · 临时传输</title><link rel="stylesheet" href="/guest.css"><script src="/qrcodegen.js" defer></script><script src="/guest.js" defer></script></head>
+<body>
+<main>
+  <header><span class="logo" aria-hidden="true">↗</span><div><h1>临时传输</h1><p>飞Q · 同一局域网直接传送</p></div><button id="qr-toggle" class="quiet" type="button">二维码</button></header>
+  <div class="notice"><span class="dot"></span><span id="session">正在连接…</span></div>
+  <p class="security">访客连接使用 HTTP 明文，请仅在可信局域网传送非敏感文件。</p>
+  <section id="qr-panel" hidden><canvas id="qr" aria-label="临时传输链接二维码"></canvas><p>用另一台设备扫码打开</p><button id="copy" class="quiet" type="button">复制链接</button></section>
+  <section aria-labelledby="files-title"><div class="section-title"><h2 id="files-title">对方分享的文件</h2><span id="count"></span></div><div id="downloads" class="files"><p class="empty">正在读取文件…</p></div></section>
+  <section id="upload" hidden aria-labelledby="upload-title"><div class="section-title"><h2 id="upload-title">发送给对方</h2><span>本次最多 100 个文件 · 10 GiB</span></div><label id="drop" tabindex="0"><span class="upload-icon" aria-hidden="true">↑</span><strong>选择文件，或拖到这里</strong><span>按顺序上传，失败可继续</span><input id="picker" type="file" multiple hidden></label><div id="uploads" class="files"></div></section>
+  <p id="message" role="status" aria-live="polite"></p>
+</main>
+</body></html>

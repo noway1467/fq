@@ -146,7 +146,15 @@ public final class FileFeaturesTest {
     private static void set(Object o,String name,Object value)throws Exception { Field f=o.getClass().getDeclaredField(name); f.setAccessible(true); f.set(o,value); }
     private static void settle(ChatService s)throws Exception { for(int i=0;i<3;i++) { ((ExecutorService)field(s,"io")).submit(()->{}).get(5,TimeUnit.SECONDS); shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(100)); } }
     private static void waitFor(ChatService s,BooleanSupplier done)throws Exception { long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(8); do { settle(s); if(done.getAsBoolean()) return; Thread.sleep(15); } while(System.nanoTime()<end); assertTrue("异步接收超时",done.getAsBoolean()); }
-    private static int port()throws Exception { try(ServerSocket tcp=new ServerSocket(0,1,InetAddress.getLoopbackAddress()); DatagramSocket udp=new DatagramSocket(tcp.getLocalPort(),InetAddress.getLoopbackAddress())) { return tcp.getLocalPort(); } }
+    private static int port()throws Exception {
+        for(int attempt=0;attempt<20;attempt++) {
+            try(DatagramSocket udp=new DatagramSocket(0,InetAddress.getLoopbackAddress())) {
+                try(ServerSocket tcp=new ServerSocket(udp.getLocalPort(),1,InetAddress.getLoopbackAddress())) {return udp.getLocalPort();}
+                catch(BindException occupied){/* TCP和UDP的动态端口池独立，需要同时空闲。 */}
+            }
+        }
+        throw new IOException("未找到同时空闲的TCP/UDP测试端口");
+    }
     private static File source(Context c,String text)throws Exception { File f=File.createTempFile("received-",".txt",c.getCacheDir()); Files.write(f.toPath(),text.getBytes(StandardCharsets.UTF_8)); return f; }
     private static void fails(Throwing action)throws Exception { try { action.run(); fail("操作应当被拒绝"); } catch(IOException|SecurityException expected) { } }
     private interface Throwing { void run()throws Exception; }
@@ -230,6 +238,15 @@ public final class FileFeaturesTest {
         LanNode.Transfer cancelled=new LanNode.Transfer(); cancelled.close(); fails(()->storage.save(file,"文件.txt",cancelled)); assertTrue(docs.files.isEmpty());
         String old=docs.createDocument("root","text/plain","旧文件.txt"); Files.write(docs.files.get(old).toPath(),"不可覆盖".getBytes(StandardCharsets.UTF_8)); docs.reuse=true;
         fails(()->storage.save(file,"新名字.txt",new LanNode.Transfer())); assertEquals(1,docs.files.size()); assertEquals("不可覆盖",new String(Files.readAllBytes(docs.files.get(old).toPath()),StandardCharsets.UTF_8));
+    }
+    @Test public void exportedCleanupRequiresOptInAndMatchingBytes()throws Exception {
+        Context c=RuntimeEnvironment.getApplication();Docs docs=provider(c);ReceivedStorage storage=new ReceivedStorage(c);storage.choose(TREE,FLAGS);
+        File directory=new File(c.getFilesDir(),"received");assertTrue(directory.isDirectory()||directory.mkdirs());File file=new File(directory,"c".repeat(64));Files.write(file.toPath(),"保留完整副本 😀".getBytes(StandardCharsets.UTF_8));LanNode.Transfer task=new LanNode.Transfer();Uri saved=storage.save(file,"报告.txt",task);
+        storage.cleanExported(file,task);assertTrue("默认不能清理内部副本",file.isFile());
+        storage.settings().edit().putBoolean(ReceivedStorage.CLEAN_EXPORTED,true).commit();
+        File exported=docs.files.get(DocumentsContract.getDocumentId(saved));byte[] original=Files.readAllBytes(file.toPath());Files.write(exported.toPath(),new byte[]{1});
+        fails(()->storage.cleanExported(file,task));assertTrue("损坏的另存副本不能导致原文件被删",file.isFile());
+        Files.write(exported.toPath(),original);storage.cleanExported(file,task);assertFalse(file.exists());assertArrayEquals(original,Files.readAllBytes(exported.toPath()));assertEquals(saved,storage.saved(file));
     }
     @Test public void incompleteExternalDocumentIsExplicitWhenProviderRefusesCleanup()throws Exception {
         Context c=RuntimeEnvironment.getApplication(); Docs docs=provider(c); ReceivedStorage storage=new ReceivedStorage(c); storage.choose(TREE,FLAGS); docs.failOpen=docs.refuseDelete=true; File file=source(c,"完整内容");

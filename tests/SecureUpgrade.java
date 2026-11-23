@@ -312,6 +312,19 @@ public final class SecureUpgrade {
         try{method.invoke(sender.node,peer,body);}catch(java.lang.reflect.InvocationTargetException e){if(e.getCause() instanceof Exception)throw (Exception)e.getCause();throw e;}
     }
     private static void partialTests(Path root)throws Exception {
+        run("TLS 接收暂停保留断点，继续同一邀请并校验原文件",()->{
+            ExecutorService worker=Executors.newSingleThreadExecutor();PausedSource source=new PausedSource();
+            try(Node sender=new Node(root.resolve("pause-a").toFile(),port(),"41414141414141414141414141414141");Node receiver=new Node(root.resolve("pause-b").toFile(),port(),"42424242424242424242424242424242")) {
+                LanNode.Peer target=find(sender,receiver),back=find(receiver,sender);sender.node.verifyPeer(target);
+                sender.node.sendSources(target,Collections.singletonList(source));LanNode.Message message=receiver.incoming.poll(5,TimeUnit.SECONDS);check(message!=null,"暂停测试邀请未到达");
+                File destination=root.resolve("user-paused.bin").toFile(),part=LanNode.partialFile(back,message.number,message.files.get(0),destination);LanNode.Transfer task=new LanNode.Transfer();source.pause.set(true);
+                Future<?> download=worker.submit(()->{try{receiver.node.receiveFile(back,message.number,message.files.get(0),destination,task,null);throw new AssertionError("暂停后仍提交文件");}catch(IOException expected){}});
+                check(source.entered.await(5,TimeUnit.SECONDS),"未进入文件发送流");waitFor(()->part.length()>0,"暂停前没有非空断点");task.pause();source.release.countDown();download.get(8,TimeUnit.SECONDS);
+                long offset=part.length();check(task.isPaused()&&offset>0&&offset<source.bytes.length&&!destination.exists(),"暂停清除了断点或提交不完整文件");source.pause.set(false);
+                receiver.node.receiveFile(back,message.number,message.files.get(0),destination,new LanNode.Transfer(),null);
+                check(source.openedOffset.get()==offset&&SecureIdentity.hashFile(destination).equals(message.files.get(0).sha256),"暂停后续传偏移或SHA-256错误");
+            }finally{source.release.countDown();worker.shutdownNow();check(worker.awaitTermination(5,TimeUnit.SECONDS),"暂停测试线程未退出");}
+        });
         run("TLS 活跃下载取消通过安全 M 通道通知并删除非空断点，保留同批正式文件",()->{
             ExecutorService worker=Executors.newSingleThreadExecutor();PausedSource source=new PausedSource();
             try(Node sender=new Node(root.resolve("live-a").toFile(),port(),"11111111111111111111111111111111");Node receiver=new Node(root.resolve("live-b").toFile(),port(),"22222222222222222222222222222222")) {

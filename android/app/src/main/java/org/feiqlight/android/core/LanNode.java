@@ -88,15 +88,18 @@ public final class LanNode implements AutoCloseable {
         }
         if(networkDirty.compareAndSet(false,true))try {timer.execute(this::tick);}catch(RejectedExecutionException ignored) { }
     }
-    public interface Progress { void update(int percent); default void update(int percent,double bytesPerSecond) { update(percent); } }
+    public interface Progress { void update(int percent); default void update(int percent,double bytesPerSecond) { update(percent); } default void stage(String value) { } }
     public static final class OfferRevokedException extends IOException {
         private static final long serialVersionUID=1L;
         public OfferRevokedException() { super("对方已取消发送"); }
     }
     public static final class Transfer implements AutoCloseable {
         private volatile boolean cancelled;
+        private volatile boolean paused;
         private volatile Socket socket;
         public boolean isCancelled() { return cancelled; }
+        public boolean isPaused() { return paused; }
+        public synchronized void pause() { paused=true;close(); }
         private synchronized void attach(Socket value) throws IOException {
             if (cancelled) { value.close(); throw new IOException("已取消传输"); } socket=value;
         }
@@ -1231,7 +1234,7 @@ public final class LanNode implements AutoCloseable {
                 if(response.length!=3||!response[0].equals("OK")||!response[1].equals(Long.toString(file.size))||!response[2].equals(file.sha256))throw new IOException("发送方文件信息已变化");
                 byte[] buffer=new byte[65536];long received=offset;TransferRate rate=new TransferRate(offset);long startedAt=System.nanoTime();
                 while(received<file.size){if(transfer.isCancelled())throw new IOException("已取消传输");int count=socket.getInputStream().read(buffer,0,(int)Math.min(buffer.length,file.size-received));if(count<0)throw new IOException("传输中断，已保留断点");java.nio.ByteBuffer bytes=java.nio.ByteBuffer.wrap(buffer,0,count);while(bytes.hasRemaining())output.write(bytes);received+=count;if(rate.update(received,(System.nanoTime()-startedAt)/1000000.0)&&progress!=null)progress.update((int)(received*100.0/Math.max(1,file.size)),rate.bytesPerSecond());}
-                output.force(true);output.position(0);
+                output.force(true);output.position(0);if(progress!=null)progress.stage("正在校验");
                 java.security.MessageDigest sha;try{sha=java.security.MessageDigest.getInstance("SHA-256");}catch(java.security.NoSuchAlgorithmException e){throw new IllegalStateException(e);}
                 java.nio.ByteBuffer bufferView=java.nio.ByteBuffer.wrap(buffer);int count;
                 while((count=output.read(bufferView))>0){if(transfer.isCancelled())throw new IOException("已取消传输");sha.update(buffer,0,count);bufferView.clear();}
@@ -1247,7 +1250,7 @@ public final class LanNode implements AutoCloseable {
             if(pd!=null){synchronized(gate){pendingDownloads.remove(pd);}pd.done.countDown();}
             if(directTls!=null)try{directTls.close();}catch(IOException ignored){}
             if(raw!=null){try{raw.close();}catch(IOException ignored){}synchronized(gate){connections.remove(raw);}}
-            if(owned&&(revoked||transfer.isCancelled()||part.length()==0))Files.deleteIfExists(part.toPath());
+            if(owned&&(revoked||transfer.isCancelled()&&!transfer.isPaused()||part.length()==0))Files.deleteIfExists(part.toPath());
         }
     }
     private InputStream openOffer(Offer offer,long offset)throws IOException {if(offer.source!=null)return offer.source.open(offset);FileInputStream input=new FileInputStream(offer.file);try{input.getChannel().position(offset);return input;}catch(IOException e){input.close();throw e;}}
@@ -1350,9 +1353,9 @@ public final class LanNode implements AutoCloseable {
             output.force(false); complete=true;
         } finally {
             synchronized (gate) { connections.remove(socket); }
-            if(owned && (transfer.isCancelled()||(!complete&&part.length()==0))) Files.deleteIfExists(part.toPath());
+            if(owned && (transfer.isCancelled()&&!transfer.isPaused()||(!complete&&part.length()==0))) Files.deleteIfExists(part.toPath());
         }
-        if(transfer.isCancelled()) { Files.deleteIfExists(part.toPath()); throw new IOException("已取消传输"); }
+        if(transfer.isCancelled()) { if(!transfer.isPaused())Files.deleteIfExists(part.toPath()); throw new IOException("已取消传输"); }
         Files.move(part.toPath(),destination.toPath()); if (progress!=null) progress.update(100);
     }
     public static File partialFile(Peer peer,long packet,Protocol.Attachment file,File destination) {

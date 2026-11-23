@@ -232,4 +232,26 @@ public final class SharedFilesTest {
             assertEquals(204,get(server,"/native/unavailable","").code);
         }
     }
+    @Test public void multipleRootsKeepTheirOwnTreeAndRevokeOldScope()throws Exception {
+        Uri second=DocumentsContract.buildTreeDocumentUri("feiq.shared.test","folder");String pair;
+        try(SharedFiles server=new SharedFiles(context,Arrays.asList(TREE,second),0,true)) {
+            Reply reply=request(server.port(),"/api/login","",new JSONObject().put("mode","share").put("code",server.code()).toString(),"","POST");
+            pair=Arrays.stream(reply.headers.split("\r\n")).filter(s->s.startsWith("Set-Cookie: fq_pair_")).findFirst().get().substring(12).split(";")[0];
+            String cookie="fq_share="+reply.json().getString("token");JSONArray roots=get(server,"/api/list",cookie).json().getJSONArray("items");assertEquals(2,roots.length());
+            assertEquals(2,get(server,"/api/list?id="+roots.getJSONObject(0).getString("id"),cookie).json().getJSONArray("items").length());
+            assertEquals(0,get(server,"/api/list?id="+roots.getJSONObject(1).getString("id"),cookie).json().getJSONArray("items").length());
+        }
+        try(SharedFiles server=new SharedFiles(context,TREE,0,true)) {
+            assertEquals(401,request(server.port(),"/api/reconnect",pair,"{\"mode\":\"share\"}","X-FQ-Reconnect: 1\r\n","POST").code);
+        }
+    }
+    @Test public void legacyFolderMigratesWithoutLosingGrants()throws Exception {
+        Uri second=DocumentsContract.buildTreeDocumentUri("feiq.shared.test","folder");SharedFolderSettings settings=new SharedFolderSettings(context);
+        int flags=Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION;
+        settings.acquire(TREE,flags);settings.acquire(second,flags);
+        context.getSharedPreferences("shared_folder",0).edit().clear().putString("tree",TREE.toString()).putBoolean("enabled",true).commit();
+        assertEquals(Collections.singletonList(TREE),settings.trees());settings.save(Arrays.asList(TREE,second,TREE),true);
+        assertEquals(Arrays.asList(TREE,second),new SharedFolderSettings(context).trees());settings.stop();assertFalse(settings.enabled());assertEquals(2,settings.trees().size());
+        settings.save(Collections.singletonList(second),false);assertEquals(Collections.singletonList(second),settings.trees());assertEquals(2,context.getContentResolver().getPersistedUriPermissions().size());
+    }
 }

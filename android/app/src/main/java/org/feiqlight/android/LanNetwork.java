@@ -270,4 +270,9 @@ final class LanNetwork implements LanNode.SocketBinding {
         for(LocalLink link:cachedLocalLinks)addresses.add(link.address.getHostAddress()+"/"+link.prefix);
         return addresses.isEmpty()?DISCONNECTED_STATUS:"热点 / USB 共享 · "+String.join("、",addresses);
     }
+    synchronized List<String> addresses()throws IOException {
+        Network network=select();List<String> addresses=new ArrayList<>();
+        if(network!=null&&cachedLinks!=null){for(LinkAddress link:cachedLinks.getLinkAddresses())if(link.getAddress() instanceof Inet4Address)addresses.add(link.getAddress().getHostAddress());}
+        else for(LocalLink link:cachedLocalLinks)addresses.add(link.address.getHostAddress());return addresses;
+    }
 }

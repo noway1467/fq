@@ -548,4 +548,16 @@ public final class ReliabilityTest {
             s.clearOffers(result->fail("有文件连接时不应回报清理结果")); transferDone(s); assertTrue(existing.isFile()); assertTrue(errors.toString(),errors.stream().anyMatch(e->e.contains("文件连接")));
         } finally { sc.destroy(); }
     }
+    @Test public void fileJobsQueueAndRunAfterActiveCopy()throws Exception {
+        ServiceController<ChatService> controller=Robolectric.buildService(ChatService.class).create();ChatService service=controller.get();CountDownLatch release=new CountDownLatch(1);
+        try(DatagramSocket destination=new DatagramSocket(0,InetAddress.getLoopbackAddress());LanNode node=node()) {
+            settle(service);set(service,"node",node);TestProvider provider=provider(service,8L,8);provider.openedGate=new CountDownLatch(1);provider.releaseGate=release;
+            LanNode.Peer peer=peer(destination.getLocalPort());Uri uri=Uri.parse("content://feiq.test/file");service.sendFile(peer,uri);assertTrue(provider.openedGate.await(3,TimeUnit.SECONDS));
+            service.sendFile(peer,uri);assertEquals(1,service.queuedTransfers());release.countDown();
+            long until=System.nanoTime()+TimeUnit.SECONDS.toNanos(8);
+            while((service.busy()||service.queuedTransfers()>0)&&System.nanoTime()<until){shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(100));Thread.sleep(10);}
+            settle(service);assertFalse(service.busy());assertEquals(0,service.queuedTransfers());assertEquals(2,provider.opened);assertEquals(2,((Map<?,?>)field(node,"offers")).size());
+            ((java.util.concurrent.atomic.AtomicBoolean)field(service,"busy")).set(true);service.sendFile(peer,uri);assertEquals(1,service.queuedTransfers());service.cancelQueuedTransfers();assertEquals(0,service.queuedTransfers());((java.util.concurrent.atomic.AtomicBoolean)field(service,"busy")).set(false);assertEquals(2,provider.opened);
+        }finally{release.countDown();controller.destroy();}
+    }
 }

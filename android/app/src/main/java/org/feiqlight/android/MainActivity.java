@@ -114,6 +114,11 @@ public final class MainActivity extends Activity implements ChatService.Observer
     private Button connect;
     private IconButton sendButton;
     private Dialog historyDialog;
+    private Dialog tasksDialog;
+    private TaskAdapter taskAdapter;
+    private boolean loadingTasks;
+    private final List<Uri> guestFiles=new ArrayList<>();
+    private boolean guestUpload;
     private android.window.OnBackInvokedCallback backCallback;
     private ConversationAdapter adapter;
     private final java.util.concurrent.ExecutorService avatarLoader=java.util.concurrent.Executors.newSingleThreadExecutor();
@@ -376,6 +381,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
     }
     @Override public void changed() {
         acceptSystemShare();
+        loadTaskRows();
         if(root==null || rendering) return; rendering=true;
         try {
             if(selected.isEmpty()) {
@@ -547,6 +553,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
     }
     private static boolean continues(LanNode.Message previous,LanNode.Message next) { long gap=next.time-previous.time; return previous.outgoing==next.outgoing&&gap>-60000&&gap<300000; }
     @Override public void transfersChanged() {
+        if(taskAdapter!=null&&tasksDialog!=null)taskAdapter.refresh();
         // 进度只更新当前卡片，不重新查询历史/创建全部气泡，也不改变用户的阅读位置。
         if(!visible||service==null||!selected.equals(progressPeer))return;
         for(Runnable update:new ArrayList<>(fileProgressViews))update.run();
@@ -724,9 +731,9 @@ public final class MainActivity extends Activity implements ChatService.Observer
             if(remembered==null){error("请从联系人重新打开一次远控，以核对设备身份");return;}
             if(lastRemote.getBooleanExtra("phone",false))openPhone(remembered);else openTools(remembered,true);
         });
-        String[] labels={"刷新","添加联系人","共享本机文件夹","允许控制本机","已移除的联系人","设置","关于",service!=null&&service.canDisconnect()?"断开":"连接"};
+        String[] labels={"传输任务","临时浏览器传输","刷新","添加联系人","共享本机文件夹","允许控制本机","已移除的联系人","设置","关于",service!=null&&service.canDisconnect()?"断开":"连接"};
         for(String label:labels) {
-            fileAction(options,dialog,label,()->{ if(label.equals("允许控制本机"))startActivity(new Intent(this,PhoneRemoteActivity.class));else if(label.equals("共享本机文件夹")) sharing(); else if(label.equals("已移除的联系人")) hiddenConversations(); else if(label.equals("设置")) settings(); else if(label.equals("添加联系人")) addPeer(); else if(label.equals("刷新")) { if(service!=null) service.refresh(); } else if(label.equals("断开")) { if(service!=null) service.disconnect(); } else if(label.equals("关于")) showAbout(); else connect(); });
+            fileAction(options,dialog,label,()->{ if(label.equals("临时浏览器传输"))showGuest();else if(label.equals("传输任务"))showTasks();else if(label.equals("允许控制本机"))startActivity(new Intent(this,PhoneRemoteActivity.class));else if(label.equals("共享本机文件夹")) sharing(); else if(label.equals("已移除的联系人")) hiddenConversations(); else if(label.equals("设置")) settings(); else if(label.equals("添加联系人")) addPeer(); else if(label.equals("刷新")) { if(service!=null) service.refresh(); } else if(label.equals("断开")) { if(service!=null) service.disconnect(); } else if(label.equals("关于")) showAbout(); else connect(); });
         }
     }
     private void showAbout() {
@@ -754,7 +761,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         TextView hint=text("修改仅在本机显示；留空恢复对方昵称。",12,MUTED);hint.setPadding(0,dp(8),0,dp(4));content.addView(hint);
         if(c.peer.group!=null&&!c.peer.group.trim().isEmpty())profileField(content,"部门",c.peer.group,"联系人资料部门");
         profileField(content,"IP 地址",c.peer.endpoint.getAddress().getHostAddress()+":"+c.peer.endpoint.getPort(),"联系人资料地址");
-        profileField(content,"传输安全",c.peer.fingerprint==null?"旧版设备 · 明文兼容需手动开启":"TLS 加密 · 首次连接需两端核对","联系人安全状态");
+        profileField(content,"传输安全",c.peer.fingerprint==null?(ChatService.allowLegacy(getSharedPreferences("settings",MODE_PRIVATE))?"旧版设备 · 明文兼容已开启":"旧版设备 · 明文兼容已关闭"):"TLS 加密 · 首次连接需两端核对","联系人安全状态");
         if(c.peer.fingerprint!=null){Button forget=button("撤销设备信任",false);content.addView(forget);forget.setOnClickListener(v->confirm("撤销设备信任","下次连接将重新核对两端配对码。","撤销",()->{if(service!=null)service.forgetSecurity(c.peer);}));}
         Dialog dialog=sheet("联系人资料",content,"保存",d->{
             if(service!=source||source==null||!selected.equals(peer)||editorGeneration!=generation){d.dismiss();return;}
@@ -822,9 +829,119 @@ public final class MainActivity extends Activity implements ChatService.Observer
             return slash>=0&&slash+1<path.length()?path.substring(slash+1):path;
         } catch(RuntimeException ignored) { return "已授权文件夹"; }
     }
+    private void showTasks() {
+        if(tasksDialog!=null){tasksDialog.dismiss();return;}
+        Dialog dialog=new Dialog(this);dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);tasksDialog=dialog;
+        LinearLayout page=column();page.setBackgroundColor(SURFACE);
+        LinearLayout header=row();header.setPadding(dp(8),dp(6),dp(12),dp(6));
+        IconButton back=new IconButton("back","返回",MUTED);header.addView(back,new LinearLayout.LayoutParams(dp(48),dp(48)));back.setOnClickListener(v->dialog.dismiss());
+        TextView caption=text("传输任务",20,INK);caption.setTypeface(null,Typeface.BOLD);header.addView(caption,weight());page.addView(header);
+        IconButton queueMenu=new IconButton("more","排队任务操作",MUTED);header.addView(queueMenu,new LinearLayout.LayoutParams(dp(48),dp(48)));queueMenu.setOnClickListener(v->{if(service==null)return;if(service.queuedTransfers()==0){error("当前没有排队的文件操作");return;}confirm("取消排队任务","取消尚未开始的 "+service.queuedTransfers()+" 项文件操作？正在传输和已保存的文件不受影响。","取消排队",()->service.cancelQueuedTransfers());});
+        EditText input=new EditText(this);configureInput(input);input.setSingleLine();input.setTextSize(15);input.setTextColor(INK);input.setHintTextColor(MUTED);input.setHint("搜索文件或设备");input.setPadding(dp(14),dp(8),dp(14),dp(8));input.setBackground(shape(PALE,CONTROL_RADIUS));
+        LinearLayout.LayoutParams ip=new LinearLayout.LayoutParams(-1,dp(46));ip.setMargins(dp(16),dp(4),dp(16),dp(8));page.addView(input,ip);
+        TextView count=text("正在读取传输记录…",12,MUTED);count.setPadding(dp(20),dp(8),dp(20),dp(10));
+        TaskAdapter tasks=new TaskAdapter(count,input);taskAdapter=tasks;
+        LinearLayout filters=row();filters.setPadding(dp(12),0,dp(12),0);String[] names={"全部","进行中","待处理","已完成"};List<Button> picks=new ArrayList<>();
+        for(int i=0;i<names.length;i++){final int index=i;Button pick=button(names[i],false);pick.setMinWidth(0);pick.setMinimumWidth(0);pick.setPadding(0,dp(8),0,dp(8));filters.addView(pick,new LinearLayout.LayoutParams(0,dp(44),1));picks.add(pick);pick.setOnClickListener(v->{tasks.filter=index;for(int j=0;j<picks.size();j++){picks.get(j).setTextColor(j==index?BLUE:MUTED);picks.get(j).setBackground(shape(j==index?BUBBLE:SURFACE,CONTROL_RADIUS));}tasks.refresh();});}
+        page.addView(filters);page.addView(count);picks.get(0).performClick();
+        FrameLayout area=new FrameLayout(this);ListView rows=new ListView(this);rows.setDivider(null);rows.setAdapter(tasks);rows.setContentDescription("传输任务列表");area.addView(rows,new FrameLayout.LayoutParams(-1,-1));
+        TextView emptyTasks=text("暂无传输任务\n收到或发送的文件会显示在这里",15,MUTED);emptyTasks.setGravity(Gravity.CENTER);emptyTasks.setLineSpacing(dp(8),1);area.addView(emptyTasks,new FrameLayout.LayoutParams(-1,-1));rows.setEmptyView(emptyTasks);page.addView(area,new LinearLayout.LayoutParams(-1,0,1));
+        rows.setOnItemClickListener((parent,view,position,id)->taskActions(tasks.items.get(position)));
+        input.addTextChangedListener(new TextWatcher(){public void beforeTextChanged(CharSequence s,int start,int n,int after){}public void onTextChanged(CharSequence s,int start,int before,int n){tasks.refresh();}public void afterTextChanged(Editable e){}});
+        dialog.setContentView(page);dialog.setOnDismissListener(d->{if(tasksDialog==dialog){tasksDialog=null;taskAdapter=null;loadingTasks=false;}});dialog.show();
+        Window window=dialog.getWindow();window.setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(SURFACE));window.setLayout(-1,-1);window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);SystemBars.apply(window,SURFACE,DARK);
+        page.setOnApplyWindowInsetsListener((v,insets)->{if(Build.VERSION.SDK_INT>=30){Insets pad=insets.getInsets(WindowInsets.Type.systemBars()|WindowInsets.Type.displayCutout()|WindowInsets.Type.ime());v.setPadding(pad.left,pad.top,pad.right,pad.bottom);}else v.setPadding(insets.getSystemWindowInsetLeft(),insets.getSystemWindowInsetTop(),insets.getSystemWindowInsetRight(),insets.getSystemWindowInsetBottom());return insets;});page.requestApplyInsets();loadTaskRows();
+    }
+    private void loadTaskRows() {
+        if(tasksDialog==null||taskAdapter==null||service==null||loadingTasks)return;
+        TaskAdapter expected=taskAdapter;ChatService source=service;loadingTasks=true;
+        source.fileTasks(rows->{loadingTasks=false;if(isDestroyed()||taskAdapter!=expected||source!=service)return;expected.all=rows;expected.refresh();});
+    }
+    private String taskState(ChatStore.FileTask item) {
+        if(item.guestFile!=null)return item.guestFile.isFile()||receivedStorage.saved(item.guestFile)!=null?"已保存":"本机文件已删除";
+        ChatService.FileProgress progress=service==null?null:service.progress(item.peer,item.message.number,item.file.id,item.message.outgoing);
+        if(progress!=null)return progress.state;
+        if(item.stored)return "已保存";
+        if(item.message.state!=null&&(item.message.state.equals("对方已取消发送")||item.message.state.equals("已拒绝")||item.message.state.equals("已取消发送")))return item.message.state;
+        return item.message.outgoing?"等待对方接收":"待接收";
+    }
+    private static boolean taskComplete(String state) { return state.equals("已保存")||state.equals("对方已校验保存"); }
+    private static boolean taskEnded(String state) { return taskComplete(state)||state.contains("已拒绝")||state.contains("已取消发送")||state.equals("本机文件已删除"); }
+    private static boolean taskActive(String state) { return state.contains("中")&&!state.contains("中断")&&!taskEnded(state); }
+    private final class TaskAdapter extends BaseAdapter {
+        List<ChatStore.FileTask> all=new ArrayList<>(),items=new ArrayList<>();final TextView count;final EditText input;int filter;
+        TaskAdapter(TextView count,EditText input){this.count=count;this.input=input;}
+        void refresh() {
+            String query=input.getText().toString().trim().toLowerCase(Locale.ROOT);List<ChatStore.FileTask> next=new ArrayList<>();int completed=0;double total=0,done=0;
+            for(ChatStore.FileTask item:all){String state=taskState(item);ChatStore.Conversation contact=conversation(item.peer);String name=item.guestFile!=null?"浏览器访客":contact==null?"已移除的设备":contact.displayName();
+                if(!(item.file.name+" "+name).toLowerCase(Locale.ROOT).contains(query)||filter==1&&!taskActive(state)||filter==2&&(taskActive(state)||taskComplete(state))||filter==3&&!taskComplete(state))continue;
+                next.add(item);if(taskComplete(state))completed++;ChatService.FileProgress p=service==null?null:service.progress(item.peer,item.message.number,item.file.id,item.message.outgoing);total+=item.file.size;done+=item.file.size*(taskComplete(state)?1:p==null?0:p.percent/100.0);
+            }
+            items=next;count.setText(items.size()+" 个文件 · "+completed+" 个已完成"+(total>0?" · "+size((long)done)+" / "+size((long)total):"")+(service!=null&&service.queuedTransfers()>0?"\n另有 "+service.queuedTransfers()+" 项文件操作排队中":""));notifyDataSetChanged();
+        }
+        public int getCount(){return items.size();}public Object getItem(int position){return items.get(position);}public long getItemId(int position){return position;}
+        public View getView(int position,View old,ViewGroup parent) {
+            ChatStore.FileTask item=items.get(position);LinearLayout box;
+            if(old==null){box=column();box.setPadding(dp(20),dp(12),dp(20),dp(12));TextView name=text("",15,INK);name.setTypeface(null,Typeface.BOLD);name.setSingleLine();name.setEllipsize(TextUtils.TruncateAt.END);box.addView(name);TextView meta=text("",12,MUTED);meta.setSingleLine();meta.setEllipsize(TextUtils.TruncateAt.END);meta.setPadding(0,dp(5),0,dp(4));box.addView(meta);TextView status=text("",12,MUTED);status.setMaxLines(2);box.addView(status);ProgressBar bar=new ProgressBar(MainActivity.this,null,android.R.attr.progressBarStyleHorizontal);bar.setMax(100);bar.setProgressTintList(android.content.res.ColorStateList.valueOf(BLUE));bar.setProgressBackgroundTintList(android.content.res.ColorStateList.valueOf(LINE));LinearLayout.LayoutParams bp=new LinearLayout.LayoutParams(-1,dp(3));bp.topMargin=dp(8);box.addView(bar,bp);}else box=(LinearLayout)old;
+            ChatStore.Conversation contact=conversation(item.peer);String state=taskState(item);ChatService.FileProgress p=service==null?null:service.progress(item.peer,item.message.number,item.file.id,item.message.outgoing);
+            ((TextView)box.getChildAt(0)).setText(item.file.name);((TextView)box.getChildAt(1)).setText((item.message.outgoing?"发送给 ":"来自 ")+(item.guestFile!=null?"浏览器访客":contact==null?"已移除的设备":contact.displayName())+" · "+size(item.file.size));
+            String label=state;if(p!=null&&p.bytesPerSecond>0&&taskActive(state)){double seconds=item.file.size*(1-p.percent/100.0)/p.bytesPerSecond;label+=" · "+size((long)p.bytesPerSecond)+"/s · 剩余约 "+(seconds>=60?(long)Math.ceil(seconds/60)+" 分钟":Math.max(1,(long)Math.ceil(seconds))+" 秒");}
+            TextView status=(TextView)box.getChildAt(2);status.setText(label);status.setTextColor(taskComplete(state)?ONLINE:taskActive(state)?BLUE:MUTED);ProgressBar bar=(ProgressBar)box.getChildAt(3);bar.setProgress(taskComplete(state)?100:p==null?0:p.percent);bar.setVisibility(taskEnded(state)?View.GONE:View.VISIBLE);box.setContentDescription(item.file.name+"，"+label);return box;
+        }
+    }
+    private void taskActions(ChatStore.FileTask item) {
+        if(item.guestFile!=null) {
+            LinearLayout box=column();box.addView(text("浏览器访客 · "+taskState(item),13,MUTED));Dialog dialog=sheet(item.file.name,box,null,null);
+            Uri uri=item.guestFile.isFile()?ReceivedFileProvider.uri(this,item.guestFile,item.file.name):receivedStorage.saved(item.guestFile);
+            if(uri!=null){fileAction(box,dialog,"打开文件",()->openFile(uri,item.file.name,false));fileAction(box,dialog,"分享文件",()->openFile(uri,item.file.name,true));}
+            if(item.guestFile.isFile()){fileAction(box,dialog,"另存为…",()->export(item.guestFile,item.file.name));if(receivedStorage.tree()!=null)fileAction(box,dialog,"保存到设置目录",()->service.saveToFolder(item.guestFile,item.file.name));}
+            fileAction(box,dialog,"查看保存位置",()->showFileLocation(item.guestFile));return;
+        }
+        if(service==null)return;ChatStore.Conversation contact=conversation(item.peer);if(contact==null){error("联系人已移除，请重新添加后操作");return;}
+        LinearLayout content=column();content.addView(text(taskState(item)+" · "+size(item.file.size),13,MUTED));Dialog actions=sheet(item.file.name,content,null,null);String state=taskState(item);
+        if(!item.message.outgoing&&!taskEnded(state)) {
+            ChatService.FileProgress progress=service.progress(item.peer,item.message.number,item.file.id,false);
+            if(progress!=null&&progress.task!=null) {
+                fileAction(content,actions,"暂停并保留断点",()->service.pauseFile(item.peer,item.message.number,item.file.id));
+                fileAction(content,actions,"取消接收并清理断点",()->confirm("取消接收","已下载但尚未完成的数据将被清理，之后需要重新接收。","取消接收",()->service.cancelFile(item.peer,item.message.number,item.file.id)));
+            } else {
+                fileAction(content,actions,"继续接收",()->service.receive(contact.peer,item.message.number,item.file));
+                if(!state.equals("已暂停"))fileAction(content,actions,"暂停排队",()->service.pauseFile(item.peer,item.message.number,item.file.id));
+            }
+            fileAction(content,actions,"继续所有未完成接收",()->{for(ChatStore.FileTask task:new ArrayList<>(taskAdapter.all)){ChatStore.Conversation peer=conversation(task.peer);String status=taskState(task);if(peer!=null&&!task.message.outgoing&&!taskEnded(status)&&!taskActive(status))service.receive(peer.peer,task.message.number,task.file);}});
+        }
+        if(!item.message.outgoing)fileAction(content,actions,"文件与保存位置",()->fileActions(contact.peer,item.message.number,item.file));
+        if(item.message.outgoing&&service.canCancelOutgoing(item.peer,item.message.number)) {
+            ChatService source=service;
+            fileAction(content,actions,"取消这批发送",()->confirm("取消发送？","撤销这批未完成的文件邀请；原文件和对方已保存的文件保留。","取消发送",()->{if(service==source)source.cancelOutgoing(item.peer,item.message,success->{if(success)loadTaskRows();});}));
+        }
+        fileAction(content,actions,"查看所在会话",()->{if(tasksDialog!=null)tasksDialog.dismiss();locateHistoryMessage(item.peer,item.message);});
+    }
+    private void showGuest() {
+        if(service==null||!service.online()){error("请先连接局域网");return;}
+        ChatService source=service;GuestTransfer active=source.guestTransfer();boolean running=active!=null&&active.active();
+        LinearLayout box=column();TextView note=text("对方无需安装飞Q，可用浏览器收发文件。链接15分钟后失效；HTTP明文，仅用于可信局域网中的非敏感文件。",13,MUTED);note.setLineSpacing(dp(4),1);note.setPadding(0,0,0,dp(12));box.addView(note);
+        if(running) {
+            TextView status=text("正在开放 · 剩余约 "+Math.max(0,(int)Math.ceil((active.until-System.currentTimeMillis())/60000.0))+" 分钟",14,BLUE);box.addView(status);
+            Dialog dialog=sheet("临时浏览器传输",box,null,null);
+            try {for(String address:new LanNetwork(getSystemService(android.net.ConnectivityManager.class)).addresses()) {
+                String link=active.url(address);fileAction(box,dialog,"复制链接 · "+address,()->copyText("临时传输链接",link));
+                fileAction(box,dialog,"显示二维码 · "+address,()->{try{startActivity(new Intent(Intent.ACTION_VIEW,Uri.parse(link+"&qr")));}catch(ActivityNotFoundException e){error("没有可用浏览器，请复制链接");}});
+            }}catch(java.io.IOException e){error(e.getMessage());}
+            fileAction(box,dialog,"查看已接收文件",this::showTasks);
+            fileAction(box,dialog,"结束临时传输",()->{source.stopGuest();error("临时传输已结束，完整文件保留");});return;
+        }
+        box.addView(text("已选 "+guestFiles.size()+" 个文件",14,INK));
+        Switch receive=settingSwitch("允许对方向我发送文件",guestUpload);box.addView(receive);receive.setOnCheckedChangeListener((button,checked)->guestUpload=checked);
+        box.addView(text("本次最多100个文件、合计10 GiB，保存在应用接收区，可从传输任务另存。",12,MUTED));
+        Dialog dialog=sheet("临时浏览器传输",box,"开启临时传输",d->{source.startGuest(new ArrayList<>(guestFiles),receive.isChecked(),success->{if(success&&!isDestroyed()&&service==source){d.dismiss();showGuest();}});});
+        fileAction(box,dialog,"选择分享文件",()->{try{startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*").addCategory(Intent.CATEGORY_OPENABLE).putExtra(Intent.EXTRA_ALLOW_MULTIPLE,true).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION),27);}catch(ActivityNotFoundException e){error("系统文件选择器不可用");}});
+        if(!guestFiles.isEmpty())fileAction(box,dialog,"清空待分享文件",()->{guestFiles.clear();showGuest();});
+    }
     private void sharing() {
         if(service==null||!service.online()){error("请先连接局域网");return;}
-        SharedFiles current=service.sharedFiles();Uri savedTree=new SharedFolderSettings(this).tree();
+        SharedFiles current=service.sharedFiles();List<Uri> savedTrees;
+        try{savedTrees=new SharedFolderSettings(this).trees();}catch(java.io.IOException e){error(e.getMessage());return;}
         LinearLayout box=column();
         LinearLayout card=column();
         GradientDrawable cardBg=shape(PALE,CONTROL_RADIUS);cardBg.setStroke(dp(1),LINE);
@@ -839,7 +956,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         TextView safeNote=text("仅允许只读浏览与下载",12,MUTED);safeNote.setGravity(Gravity.END|Gravity.CENTER_VERTICAL);
         LinearLayout.LayoutParams safeParams=weight();safeParams.leftMargin=dp(8);topRow.addView(safeNote,safeParams);
         card.addView(topRow);
-        String folderText=active?"共享目录："+folderDisplayName(savedTree):savedTree!=null?"上次目录："+folderDisplayName(savedTree)+"（未开启）":"尚未选择共享文件夹，仅授予所选目录只读权限";
+        String folderText=savedTrees.isEmpty()?"添加需要共享的文件夹":"已选择 "+savedTrees.size()+" / 20 个文件夹";
         TextView folderTextView=text(folderText,14,INK);folderTextView.setPadding(0,dp(10),0,active?dp(12):0);folderTextView.setMaxLines(2);folderTextView.setEllipsize(TextUtils.TruncateAt.MIDDLE);
         card.addView(folderTextView);
         if(active) {
@@ -867,9 +984,15 @@ public final class MainActivity extends Activity implements ChatService.Observer
         LinearLayout.LayoutParams cardParams=new LinearLayout.LayoutParams(-1,-2);cardParams.bottomMargin=dp(10);
         box.addView(card,cardParams);
         Dialog dialog=sheet("共享本机文件夹",box,null,null);
-        if(current==null&&savedTree!=null)fileAction(box,dialog,"开启上次的共享文件夹",()->{ChatService expected=service;if(expected!=null)expected.shareFolder(savedTree,success->{if(success&&!isFinishing()&&!isDestroyed()&&service==expected)sharing();});});
-        fileAction(box,dialog,current==null?"选择文件夹并开启":"更换文件夹 / 更新连接码",()->{
-            try {Intent pick=new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION|Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);if(savedTree!=null)pick.putExtra(android.provider.DocumentsContract.EXTRA_INITIAL_URI,savedTree);startActivityForResult(pick,24);}
+        for(Uri folder:savedTrees) {
+            LinearLayout item=row();item.setPadding(dp(10),dp(6),0,dp(6));
+            TextView title=text(folderDisplayName(folder),14,INK);title.setMaxLines(2);title.setEllipsize(TextUtils.TruncateAt.MIDDLE);item.addView(title,weight());
+            IconButton remove=new IconButton("close","移除共享文件夹",MUTED);item.addView(remove,new LinearLayout.LayoutParams(dp(48),dp(48)));
+            remove.setOnClickListener(v->confirm("移除共享文件夹","仅取消这个目录的共享，不删除文件；当前共享连接将结束。","移除",()->{ChatService expected=service;if(expected!=null)expected.removeSharedFolder(folder,success->{if(success&&!isDestroyed()){dialog.dismiss();sharing();}});}));box.addView(item);
+        }
+        if(current==null&&!savedTrees.isEmpty())fileAction(box,dialog,"开启已选文件夹",()->{ChatService expected=service;if(expected!=null)expected.shareFolders(savedTrees,success->{if(success&&!isFinishing()&&!isDestroyed()&&service==expected)sharing();});});
+        fileAction(box,dialog,"添加文件夹并开启",()->{
+            try {Intent pick=new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION|Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);if(!savedTrees.isEmpty())pick.putExtra(android.provider.DocumentsContract.EXTRA_INITIAL_URI,savedTrees.get(0));startActivityForResult(pick,24);}
             catch(ActivityNotFoundException e){error("系统没有可用的文件夹选择器");}
         });
         if(current!=null)fileAction(box,dialog,"停止共享",()->{if(service!=null)service.stopSharing();});
@@ -1044,6 +1167,8 @@ public final class MainActivity extends Activity implements ChatService.Observer
         settingHeading(box,"存储管理");
         Button clear=button("清理已接收文件",false); LinearLayout.LayoutParams cp=new LinearLayout.LayoutParams(-1,-2); cp.topMargin=dp(16); box.addView(clear,cp); clear.setOnClickListener(v->clearReceivedFiles());
         Button clearOffers=button("清理发送缓存",false); LinearLayout.LayoutParams op=new LinearLayout.LayoutParams(-1,-2); op.topMargin=dp(10); box.addView(clearOffers,op);
+        Switch cleanupSaved=settingSwitch("另存成功后清理应用内副本",prefs.getBoolean(ReceivedStorage.CLEAN_EXPORTED,false));box.addView(cleanupSaved,settingSpacing(12,0));
+        box.addView(text("默认关闭。开启后会重新核验另存文件，完整且可读才清理内部副本；保存目录中的文件保留。",12,MUTED));
         clear.setGravity(Gravity.START|Gravity.CENTER_VERTICAL);clearOffers.setGravity(Gravity.START|Gravity.CENTER_VERTICAL);
         TextView limits=text("文件不设固定大小上限，受设备可用空间限制并保留 16 MiB 余量。网络失败后重新接收可续传；主动取消会清理断点。另存到目录仍需内部暂存空间。",12,MUTED); limits.setPadding(0,dp(12),0,0); box.addView(limits);
         clearOffers.setOnClickListener(v->confirm("清理发送缓存","撤销尚未接收的文件邀请并删除暂存副本？原文件不受影响。","清理",()->{
@@ -1066,7 +1191,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
             View backdrop=backgrounds.findViewById(backgrounds.getCheckedRadioButtonId());String backdropKey=backdrop==null?"orbits":backdrop.getTag().toString();
             if(backdropKey.equals("image")&&prefs.getString("background_image","").isEmpty()){dialog.getWindow().getDecorView().findViewWithTag("settings-tab:1").performClick();error("请先选择背景图片");return;}
             int nextSize=fontSize.getProgress()+14;boolean nextDark=follow.isChecked()?systemDark():dark.isChecked();String nextBgImage=prefs.getString("background_image","");
-            boolean saved=prefs.edit().putBoolean("allow_legacy_protocol",legacy.isChecked()).putInt("legacy_protocol_policy",ChatService.LEGACY_POLICY_VERSION).putString("avatar",avatarValue[0]).putString("name",n).putString("group",g).putInt("port",p).putBoolean("auto_connect",autoConnect.isChecked()).putBoolean("diagnostics",diagnosticSwitch.isChecked()).putBoolean(ReceivedStorage.AUTO,automatic.isChecked()).putBoolean("follow_system_theme",follow.isChecked()).putBoolean("dark_mode",dark.isChecked()).putString("accent",accentKey).putInt("chat_font_size",nextSize).putString("chat_background",backdropKey).commit();
+            boolean saved=prefs.edit().putBoolean(ReceivedStorage.CLEAN_EXPORTED,cleanupSaved.isChecked()).putBoolean("allow_legacy_protocol",legacy.isChecked()).putInt("legacy_protocol_policy",ChatService.LEGACY_POLICY_VERSION).putString("avatar",avatarValue[0]).putString("name",n).putString("group",g).putInt("port",p).putBoolean("auto_connect",autoConnect.isChecked()).putBoolean("diagnostics",diagnosticSwitch.isChecked()).putBoolean(ReceivedStorage.AUTO,automatic.isChecked()).putBoolean("follow_system_theme",follow.isChecked()).putBoolean("dark_mode",dark.isChecked()).putString("accent",accentKey).putInt("chat_font_size",nextSize).putString("chat_background",backdropKey).commit();
             if(!saved){error("设置未保存，请检查设备存储空间");return;}if(service!=null){service.receiveSettingsChanged();service.profileSettingsChanged();}dialog.dismiss();
             boolean visualChanged=nextDark!=DARK||!accentKey.equals(initialAccent)||nextSize!=initialFontSize||!backdropKey.equals(initialBackground)||!nextBgImage.equals(initialBackgroundImage);
             if(visualChanged) {
@@ -1328,6 +1453,8 @@ public final class MainActivity extends Activity implements ChatService.Observer
             fileAction(options,dialog,"删除本机文件",()->confirm("删除这个文件？",file.name+"\n将删除应用内副本"+(exported==null?"":"和保存目录中的对应文件")+"，聊天记录与对方文件保留。此操作无法撤销。","删除文件",()->{if(service==source)source.deleteReceivedFile(peer,packet,file);}));
             if(cached.isFile()) {
                 fileAction(options,dialog,"另存为…",()->export(cached,file.name));
+                String mime=ReceivedStorage.mime(file.name);
+                if(Build.VERSION.SDK_INT>=29&&(mime.startsWith("image/")||mime.startsWith("video/")))fileAction(options,dialog,"保存到相册",()->{if(service!=null)service.saveToGallery(cached,file.name);});
                 if(receivedStorage.tree()!=null) fileAction(options,dialog,"保存到设置目录 / 重试",()->{ if(service!=null) service.saveToFolder(cached,file.name); });
             }
         } else {
@@ -1393,7 +1520,11 @@ public final class MainActivity extends Activity implements ChatService.Observer
         super.onActivityResult(request,result,data);
         if(request==25&&(result!=RESULT_OK||data==null||data.getData()==null)){avatarImageRequest=null;return;}
         if(result!=RESULT_OK||data==null) return;
-        if(request!=20&&data.getData()==null) return;
+        if(request!=20&&request!=27&&data.getData()==null) return;
+        if(request==27) {
+            try {List<Uri> chosen=selectedFiles(data);for(Uri uri:chosen)getContentResolver().takePersistableUriPermission(uri,Intent.FLAG_GRANT_READ_URI_PERMISSION);guestFiles.clear();guestFiles.addAll(chosen);showGuest();}
+            catch(RuntimeException e){error("文件授权失败："+e.getMessage());}return;
+        }
         if(request==25) {
             AvatarSelection expected=avatarImageRequest;int revision=avatarImageRevision;avatarImageRequest=null;if(expected==null||avatarSelection!=expected||expected.revision!=revision||!expected.dialog.isShowing())return;
             Uri uri=data.getData();String identity="device:"+getSharedPreferences("settings",MODE_PRIVATE).getString("device_id","");

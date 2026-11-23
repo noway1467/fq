@@ -31,6 +31,52 @@ public sealed class MainForm : ModernWindow
         private ToolStripMenuItem nightItem;
         private ProfileMenuItem profileItem;
         private ToolsWindow toolsWindow;
+        private TransferWindow transferWindow;
+        private GuestWindow guestWindow;
+        private long guestPacket=DateTime.UtcNow.Ticks;
+        internal void GuestReceived(string path,string name)
+        {
+            var file=new FileTransferState { Id=0,Name=name,Size=new FileInfo(path).Length,Percent=100,Status="已保存",LocalPath=path };
+            TrySave(new ChatRecord { Packet=++guestPacket,PeerId="browser-guests",Sender="浏览器访客",Time=DateTime.Now,Text="[文件] "+name,State="已保存",HasAttachments=true,AttachmentNames=new[]{name},LocalFiles=new[]{path},Transfers=new[]{file} });
+        }
+        private void OpenGuest()
+        {
+            try{if(guestWindow==null||guestWindow.IsDisposed)guestWindow=new GuestWindow(this,network);guestWindow.Show();guestWindow.Activate();}
+            catch(Exception e){OnError("临时传输未开启："+e.Message);}
+        }
+        private readonly Dictionary<string, ChatRecord> transferRecords = new Dictionary<string, ChatRecord>();
+        private int transferArchiveRevision;
+        private static string TransferKey(ChatRecord record) { return record.PeerId + "/" + record.Packet + "/" + record.Outgoing; }
+        internal void TrackTransfer(ChatRecord record) { if(record.Transfers!=null&&record.Transfers.Length>0)transferRecords[TransferKey(record)]=record; }
+        internal ChatRecord[] TransferRecords { get { return transferRecords.Values.ToArray(); } }
+        internal Peer TransferPeer(string id) { return network.Peers.FirstOrDefault(p=>p.Id==id); }
+        internal async System.Threading.Tasks.Task LoadTransfers()
+        {
+            int revision=transferArchiveRevision;
+            string[] peers = network.Peers.Select(p=>p.Id).Concat(new[]{"browser-guests"}).ToArray();
+            var records = await System.Threading.Tasks.Task.Run(()=>peers.SelectMany(p=>store.AttachmentHistory(p)).ToArray());
+            if(IsDisposed)return;
+            if(revision!=transferArchiveRevision){await LoadTransfers();return;}
+            foreach(ChatRecord record in records)if(!transferRecords.ContainsKey(TransferKey(record)))TrackTransfer(record.Outgoing?network.OutgoingRecord(record.PeerId,record.Packet)??record:record);
+        }
+        internal bool ReceivingTask(ChatRecord record,int fileId) { ChatForm chat;return chats.TryGetValue(record.PeerId,out chat)&&!chat.IsDisposed&&chat.TaskReceiving(record.Packet,fileId); }
+        internal void TransferAction(ChatRecord record,int fileId,bool pause)
+        {
+            Peer peer=TransferPeer(record.PeerId);if(peer==null)throw new IOException("联系人已移除，请重新添加后继续。");
+            ChatForm chat=GetOrCreateChat(peer);
+            if(pause)chat.PauseTask(record,fileId);else chat.QueueTask(record,fileId);
+        }
+        internal bool CanCancelTransfer(ChatRecord record){return record.Outgoing&&network.CanCancelOutgoing(record.PeerId,record.Packet);}
+        internal void CancelTransfer(ChatRecord record)
+        {
+            using(var confirm=new ConfirmDialog("取消发送？","将撤销这批尚未接收的文件邀请；本机原文件和对方已保存的文件保留。","取消发送",true))
+                if(confirm.ShowDialog(this)==DialogResult.OK)network.CancelOutgoing(record.PeerId,record.Packet,record.State,true);
+        }
+        private void OpenTransfers()
+        {
+            if(transferWindow==null||transferWindow.IsDisposed)transferWindow=new TransferWindow(this);
+            transferWindow.Show();transferWindow.Activate();
+        }
         private readonly List<ToolsGateway> gateways=new List<ToolsGateway>();
         private bool toolsRestored;
         private readonly List<RoundedButton> filters = new List<RoundedButton>();
@@ -145,7 +191,7 @@ public sealed class MainForm : ModernWindow
             }
         }
         internal void PrepareNetworkCallbacks() { if(!IsHandleCreated)CreateHandle();network.NetworkReset+=OnNetworkReset; }
-        private void OnNetworkReset(){Ui(()=>{foreach(ToolsGateway gateway in gateways)gateway.Dispose();gateways.Clear();if(toolsWindow!=null&&!toolsWindow.IsDisposed)toolsWindow.NetworkReset();});}
+        private void OnNetworkReset(){Ui(()=>{foreach(ToolsGateway gateway in gateways)gateway.Dispose();gateways.Clear();if(guestWindow!=null&&!guestWindow.IsDisposed)guestWindow.Stop();if(toolsWindow!=null&&!toolsWindow.IsDisposed)toolsWindow.NetworkReset();});}
         private bool RememberPeerAddresses()
         {
             List<Peer> peers=network.Peers;Peer.UpdateConversationNames(peers);
@@ -191,7 +237,7 @@ public sealed class MainForm : ModernWindow
                 // ACK 已由网络层返回；重复邀请不能回退本机状态、增加未读或再次触发自动接收。
                 try { if (!store.AppendIncoming(message.Record)) return; }
                 catch (Exception e) { status.Text = "记录保存失败：" + e.Message; }
-                message.Peer.Hidden=false; Remember(message.Peer, message.Record);
+                TrackTransfer(message.Record);message.Peer.Hidden=false; Remember(message.Peer, message.Record);
                 ChatForm chat; chats.TryGetValue(message.Peer.Id, out chat); bool visible = chat != null && chat == ActiveChat && ContainsFocus;
                 if (!visible) { if (!unread.ContainsKey(message.Peer.Id)) unread[message.Peer.Id] = 0; unread[message.Peer.Id]++; }
                 bool loaded = false;
@@ -250,11 +296,13 @@ public sealed class MainForm : ModernWindow
             Ui(() => {
                 FileTransferState file = record.Transfers == null ? null : record.Transfers.FirstOrDefault(f => f.Id == id);
                 if (file == null) return; file.Percent = percent; file.Status = status; file.BytesPerSecond = bytesPerSecond;
+                file.MarkCurrent();
+                TrackTransfer(record);
                 if (status != "发送中"||percent%10==0) TrySave(record);
                 ChatForm chat; if (chats.TryGetValue(record.PeerId, out chat) && !chat.IsDisposed) chat.Delivery(record);
             });
         }
-        internal void TrySave(ChatRecord record) { try { store.Append(record); } catch (Exception e) { status.Text = "记录保存失败：" + e.Message; } }
+        internal void TrySave(ChatRecord record) { TrackTransfer(record);try { store.Append(record); } catch (Exception e) { status.Text = "记录保存失败：" + e.Message; } }
         internal void SaveDraft(string peerId, string text) { try { store.SaveDraft(peerId, text); } catch (Exception e) { status.Text = "草稿保存失败：" + e.Message; } }
         internal void Sent(Peer peer, ChatRecord record) { TrySave(record); Remember(peer, record); RefreshPeers(); }
         internal bool DeleteMessages(Peer peer, ChatRecord[] records)
@@ -278,6 +326,8 @@ public sealed class MainForm : ModernWindow
                     foreach (ChatRecord record in store.IncomingAttachments(peer.Id).Where(record => incomingPackets.Contains(record.Packet))) DeleteIncomingPartials(peer, record);
                 // 持久化成功后再更新界面，写入失败时仍保留原选区和消息。
                 store.DeleteRecords(peer.Id, records);
+                foreach(ChatRecord record in records)transferRecords.Remove(TransferKey(record));
+                transferArchiveRevision++;
                 if(chat != null) chat.RemoveMessages(records);
                 ChatRecord last = store.History(peer.Id, 1).LastOrDefault();
                 if(last == null) { previews.Remove(peer.Id); times.Remove(peer.Id); recent.Remove(peer.Id); }
@@ -330,16 +380,17 @@ public sealed class MainForm : ModernWindow
         internal void FileReceiveStatus(string text) { diagnostics.Record(DiagnosticEvent.FileStatus); if (!IsDisposed) status.Text = text; }
         internal async void ReceiveAutomatically()
         {
-            if (automaticReceiving || exiting || !network.Settings.AutoReceiveFiles) return;
+            if (automaticReceiving || exiting || !network.Settings.AutoReceiveFiles && !chats.Values.Any(c=>c.HasQueuedFile)) return;
             automaticReceiving = true;
             try
             {
                 // 全局按序接收，未打开的会话也参与；不为每个邀请启动一个并发下载。
-                while (!exiting && network.Settings.AutoReceiveFiles)
+                while (!exiting)
                 {
-                    ChatForm next = chats.Values.FirstOrDefault(c => !c.IsDisposed && c.HasAutomaticFile);
+                    bool automatic=network.Settings.AutoReceiveFiles;
+                    ChatForm next = chats.Values.FirstOrDefault(c => !c.IsDisposed && (automatic?c.HasAutomaticFile:c.HasQueuedFile));
                     if (next == null) break;
-                    await next.ReceiveNextAutomaticAsync();
+                    if(automatic)await next.ReceiveNextAutomaticAsync();else await next.ReceiveNextQueuedAsync();
                 }
             }
             catch (Exception e) { FileReceiveStatus("自动接收失败：" + e.GetBaseException().Message); }
@@ -397,7 +448,7 @@ public sealed class MainForm : ModernWindow
                 ChatForm chat;chats.TryGetValue(peer.Id,out chat);
                 if(dialog.DeleteHistory&&((chat!=null&&chat.PendingFileCount>0)||network.HasActiveOutgoingTransfer(peer.Id))){using(NoticeDialog notice=new NoticeDialog("请先处理文件","此会话还有待接收或传输中的文件。请完成、拒绝或取消发送后再清空记录。"))notice.ShowDialog(this);return;}
                 try {
-                    if(dialog.DeleteHistory){network.CancelUndeliveredOutgoingForPeer(peer.Id);foreach(ChatRecord record in store.IncomingAttachments(peer.Id))DeleteIncomingPartials(peer,record);store.ClearHistory(peer.Id);if(chat!=null)chat.ClearHistory();previews.Remove(peer.Id);times.Remove(peer.Id);recent.Remove(peer.Id);}
+                    if(dialog.DeleteHistory){network.CancelUndeliveredOutgoingForPeer(peer.Id);foreach(ChatRecord record in store.IncomingAttachments(peer.Id))DeleteIncomingPartials(peer,record);store.ClearHistory(peer.Id);foreach(string key in transferRecords.Where(item=>item.Value.PeerId==peer.Id).Select(item=>item.Key).ToArray())transferRecords.Remove(key);transferArchiveRevision++;if(chat!=null)chat.ClearHistory();previews.Remove(peer.Id);times.Remove(peer.Id);recent.Remove(peer.Id);}
                     bool hidden=peer.Hidden;peer.Hidden=!clearOnly;unread.Remove(peer.Id);
                     if(!RememberPeerAddresses()){peer.Hidden=hidden;fingerprint=null;RefreshPeers();return;}
                     if(!clearOnly&&chat!=null)CloseChat(chat);
@@ -511,6 +562,8 @@ public sealed class MainForm : ModernWindow
                 mainMenu.Items.Add(nightItem);
                 mainMenu.Items.Add("设置", null, delegate { OpenSettings(); });
                 mainMenu.Items.Add("共享与远控…", null, delegate { OpenTools(); });
+                mainMenu.Items.Add("传输任务…", null, delegate { OpenTransfers(); });
+                mainMenu.Items.Add("临时浏览器传输…",null,delegate {OpenGuest();});
                 mainMenu.Items.Add("添加到 Windows 发送到菜单…",null,delegate {try{WindowsShare.Install(Environment.GetFolderPath(Environment.SpecialFolder.SendTo),Application.ExecutablePath,store.Root,network.Port);using(NoticeDialog notice=new NoticeDialog("已添加","资源管理器右键文件 → 发送到 → 飞Q。选择联系人后再确认发送。"))notice.ShowDialog(this);}catch(Exception e){OnError(e.Message);}});
                 mainMenu.Items.Add("连接诊断…",null,delegate {using(NoticeDialog notice=new NoticeDialog("连接诊断",network.NetworkStatus+"\n\n聊天 UDP/TCP 监听已启动；共享与远控需主动开启。\n未发现设备时：核对同一网段、防火墙、路由器客户端隔离和 VPN 允许局域网设置。可使用添加联系人输入 IPv4:端口。"))notice.ShowDialog(this);});
                 mainMenu.Items.Add("已移除的联系人…", null,delegate {using(ForwardDialog dialog=new ForwardDialog(network.Peers.Where(p=>p.Hidden).ToArray(),-1))if(dialog.ShowDialog(this)==DialogResult.OK)OpenChat(dialog.Target);});
@@ -599,7 +652,7 @@ public sealed class MainForm : ModernWindow
             try { store.SaveSettings(network.Settings); }
             catch (Exception e) { status.Text = "窗口状态保存失败：" + e.Message; }
         }
-        private void Restore() { Show(); if (WindowState == FormWindowState.Minimized) WindowState = network.Settings.Window != null && network.Settings.Window.Maximized ? FormWindowState.Maximized : FormWindowState.Normal; Activate(); }
+        internal void Restore() { Show(); if (WindowState == FormWindowState.Minimized) WindowState = network.Settings.Window != null && network.Settings.Window.Maximized ? FormWindowState.Maximized : FormWindowState.Normal; Activate(); }
         public void ExitApplication() { exiting = true; Close(); }
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
@@ -614,6 +667,8 @@ public sealed class MainForm : ModernWindow
                 network.NetworkReset-=OnNetworkReset;foreach(ToolsGateway gateway in gateways)gateway.Dispose();gateways.Clear();
                 shareTimer.Stop();shareTimer.Dispose();
                 if (toolsWindow != null) toolsWindow.Dispose();
+                if (transferWindow != null) transferWindow.Dispose();
+                if (guestWindow != null) guestWindow.Dispose();
                 windowSaveTimer.Stop(); SaveWindowPlacement(); windowSaveTimer.Dispose();
                 diagnostics.Record(DiagnosticEvent.Stopped);network.Dispose();
                 try { store.CompletePending(); } catch (IOException e) { status.Text = "记录保存失败：" + e.Message; }

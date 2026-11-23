@@ -1281,9 +1281,9 @@ namespace FeiqLight
             }
             else SendReleaseFiles(peer, body);
         }
-        public Task<string> ReceiveFileAsync(Peer peer, long packet, Attachment file, string destination, IProgress<int> progress, CancellationToken cancel, bool renameOnCollision = false, IProgress<TransferProgress> details = null)
+        public Task<string> ReceiveFileAsync(Peer peer, long packet, Attachment file, string destination, IProgress<int> progress, CancellationToken cancel, bool renameOnCollision = false, IProgress<TransferProgress> details = null, Func<bool> keepPartial = null)
         {
-            if(Security!=null&&peer.Fingerprint!=null)return Task.Run(()=>ReceiveSecureFile(peer,packet,file,destination,progress,cancel,renameOnCollision,details),cancel);
+            if(Security!=null&&peer.Fingerprint!=null)return Task.Run(()=>ReceiveSecureFile(peer,packet,file,destination,progress,cancel,renameOnCollision,details,keepPartial),cancel);
             if(Security!=null&&(!Settings.AllowLegacyProtocol||Security.TrustedFingerprint(peer.DeviceId)!=null))throw new IOException("未允许旧版明文文件传输。");
             if (!Protocol.SafeFileName(file.Name) || file.Size < 0) throw new IOException("不安全的文件名或长度。");
             if (LoopbackOnly && !IPAddress.IsLoopback(peer.Endpoint.Address)) throw new InvalidOperationException("回环测试模式不能连接局域网。");
@@ -1365,7 +1365,7 @@ namespace FeiqLight
                     {
                         client.Close(); lock (gate) connections.Remove(client);
                         // 网络失败保留已写入数据；只有明确取消才丢弃断点。
-                        if (owned && File.Exists(temporary) && (cancel.IsCancellationRequested || new FileInfo(temporary).Length == 0)) File.Delete(temporary);
+                        if (owned && File.Exists(temporary) && (cancel.IsCancellationRequested && !(keepPartial != null && keepPartial()) || new FileInfo(temporary).Length == 0)) File.Delete(temporary);
                     }
                 }
                 finally { receiveLock.Release(); }
@@ -1378,7 +1378,7 @@ namespace FeiqLight
             using (SHA256 sha = SHA256.Create())
                 return Path.Combine(Path.GetDirectoryName(path), ".feiq-" + BitConverter.ToString(sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(identity))).Replace("-", "") + ".part");
         }
-        private string ReceiveSecureFile(Peer peer,long packet,Attachment file,string destination,IProgress<int> progress,CancellationToken cancel,bool rename,IProgress<TransferProgress> details)
+        private string ReceiveSecureFile(Peer peer,long packet,Attachment file,string destination,IProgress<int> progress,CancellationToken cancel,bool rename,IProgress<TransferProgress> details,Func<bool> keepPartial)
         {
             if(!Protocol.SafeFileName(file.Name)||file.Size<0||!SecureIdentity.ValidFingerprint(file.Sha256))throw new IOException("文件元数据或校验值无效。");
             string path=Path.GetFullPath(destination),part=PartialPath(peer,packet,file,path);bool owned=false,revoked=false;TcpClient connection=null;SslStream directStream=null;PendingDownload pd=null;
@@ -1436,7 +1436,11 @@ namespace FeiqLight
                         if(response.Length!=3||response[0]!="OK"||response[1]!=file.Size.ToString(CultureInfo.InvariantCulture)||response[2]!=file.Sha256)throw new IOException("发送方文件信息已变化。");
                         byte[] buffer=new byte[65536];long received=offset;TransferRate rate=new TransferRate(offset);var timer=System.Diagnostics.Stopwatch.StartNew();
                         while(received<file.Size){cancel.ThrowIfCancellationRequested();int count=stream.Read(buffer,0,(int)Math.Min(buffer.Length,file.Size-received));if(count==0)throw new IOException("传输中断，已保留断点。");output.Write(buffer,0,count);received+=count;bool sampled=rate.Update(received,timer.Elapsed.TotalMilliseconds);if(sampled){int percent=(int)(received*100.0/Math.Max(1,file.Size));if(progress!=null)progress.Report(percent);if(details!=null)details.Report(new TransferProgress(percent,rate.BytesPerSecond));}}
-                        output.Flush(true);output.Position=0;string hash;using(SHA256 sha=SHA256.Create())hash=BitConverter.ToString(sha.ComputeHash(output)).Replace("-","").ToLowerInvariant();
+                        output.Flush(true);output.Position=0;if(details!=null)details.Report(new TransferProgress(100,0,"正在校验"));
+                        string hash;using(SHA256 sha=SHA256.Create()) {
+                            int count;while((count=output.Read(buffer,0,buffer.Length))>0){cancel.ThrowIfCancellationRequested();sha.TransformBlock(buffer,0,count,buffer,0);}
+                            sha.TransformFinalBlock(buffer,0,0);hash=BitConverter.ToString(sha.Hash).Replace("-","").ToLowerInvariant();
+                        }
                         if(hash!=file.Sha256){output.SetLength(0);throw new IOException("文件校验失败，已清除错误断点，请重新接收。");}
                     }
                 }
@@ -1450,7 +1454,7 @@ namespace FeiqLight
                 if(pd!=null){lock(gate)pendingDownloads.Remove(pd);pd.Done.Set();}
                 if(directStream!=null)try{directStream.Dispose();}catch{}
                 if(connection!=null){try{connection.Close();}catch{}lock(gate)connections.Remove(connection);}
-                try{if(owned&&File.Exists(part)&&(revoked||cancel.IsCancellationRequested||new FileInfo(part).Length==0))File.Delete(part);}finally{targetLock.Release();}
+                try{if(owned&&File.Exists(part)&&(revoked||cancel.IsCancellationRequested&&!(keepPartial!=null&&keepPartial())||new FileInfo(part).Length==0))File.Delete(part);}finally{targetLock.Release();}
             }
         }
         public void Dispose()

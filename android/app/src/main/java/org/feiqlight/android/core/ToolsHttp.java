@@ -51,6 +51,7 @@ public final class ToolsHttp implements AutoCloseable {
     private boolean closed;
     private final SecureIdentity security;
     private final LanNode.SocketBinding binding;
+    private final int bodyLimit;
     private final java.util.function.Consumer<String> revoked=fingerprint->disconnectClients();
     public ToolsHttp(int port,boolean loopback,Handler handler) throws IOException {
         this(port,loopback,handler,null);
@@ -59,6 +60,10 @@ public final class ToolsHttp implements AutoCloseable {
         this(port,loopback,handler,security,null);
     }
     public ToolsHttp(int port,boolean loopback,Handler handler,SecureIdentity security,LanNode.SocketBinding binding) throws IOException {
+        this(port,loopback,handler,security,binding,16384);
+    }
+    public ToolsHttp(int port,boolean loopback,Handler handler,SecureIdentity security,LanNode.SocketBinding binding,int bodyLimit) throws IOException {
+        if(bodyLimit<0||bodyLimit>1048576)throw new IllegalArgumentException("请求体上限无效");this.bodyLimit=bodyLimit;
         this.security=security;
         this.binding=binding;
         this.handler=handler;server=new ServerSocket();
@@ -89,7 +94,7 @@ public final class ToolsHttp implements AutoCloseable {
             RequestInput deadline=new RequestInput(transport);InputStream input=new BufferedInputStream(deadline,8192);
             for(int index=0;index<16;index++){
             deadline.begin(index==0?5000:3000);
-            Request request=read(input);boolean reuse=index<15&&request.path.equals("/file")&&(request.method.equals("GET")||request.method.equals("HEAD"))&&request.header("Connection").equalsIgnoreCase("keep-alive");
+            Request request=read(input,bodyLimit);boolean reuse=index<15&&request.path.equals("/file")&&(request.method.equals("GET")||request.method.equals("HEAD"))&&request.header("Connection").equalsIgnoreCase("keep-alive");
             request.fingerprint=fingerprint;if(security!=null&&!security.isTrustedFingerprint(fingerprint))throw new IOException("设备信任已撤销");
             response=new Response(transport.getOutputStream(),request.method.equals("HEAD"),progress,reuse);
             request.address=socket.getInetAddress().getHostAddress();String expected=socket.getLocalAddress().getHostAddress()+":"+port();
@@ -105,7 +110,7 @@ public final class ToolsHttp implements AutoCloseable {
             }catch(IOException ignored){/* 对端已经关闭，不能再发送错误响应。 */}
         } finally {if(timeout!=null)timeout.cancel(false);try{socket.close();}catch(IOException ignored){}synchronized(clients){clients.remove(socket);}}
     }
-    private static Request read(InputStream input) throws IOException {
+    private static Request read(InputStream input,int bodyLimit) throws IOException {
         ByteArrayOutputStream header=new ByteArrayOutputStream();int last=0;
         while(header.size()<16384){int value=input.read();if(value<0)throw new EOFException();header.write(value);last=(last<<8)|value;if(last==0x0d0a0d0a)break;}
         if(last!=0x0d0a0d0a)throw new IOException("请求头过长");
@@ -114,8 +119,8 @@ public final class ToolsHttp implements AutoCloseable {
         String[] target=first[1].split("\\?",2);Request request=new Request();request.method=first[0];request.path=target[0];request.query=target.length==2?target[1]:"";
         for(int i=1;i<lines.length;i++){int colon=lines[i].indexOf(':');if(colon<=0)throw new IOException("无效请求头");String key=lines[i].substring(0,colon);if(request.headers.containsKey(key))throw new IOException("重复请求头");request.headers.put(key,lines[i].substring(colon+1).trim());}
         int length=0;String value=request.header("Content-Length");
-        if(!value.isEmpty()){if(!value.matches("[0-9]{1,5}"))throw new IOException("无效长度");length=Integer.parseInt(value);}
-        if(length>16384||!request.header("Transfer-Encoding").isEmpty())throw new IOException("无效请求体");
+        if(!value.isEmpty()){if(!value.matches("[0-9]{1,7}"))throw new IOException("无效长度");length=Integer.parseInt(value);}
+        if(length>bodyLimit||!request.header("Transfer-Encoding").isEmpty())throw new IOException("无效请求体");
         request.body=new byte[length];int offset=0;while(offset<length){int count=input.read(request.body,offset,length-offset);if(count<0)throw new EOFException();offset+=count;}return request;
     }
     public static long[] range(String header,long size) {

@@ -51,6 +51,7 @@ namespace FeiqLight
         private readonly HashSet<string> pastedImages = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private CancellationTokenSource receiving;
         private ReceivedFile activeFile;
+        private bool pauseRequested;
         private readonly System.Windows.Forms.Timer draftTimer = new System.Windows.Forms.Timer { Interval = 500 };
         private bool drawerOpen;
         private ContextMenuStrip chatMenu, fileMenu;
@@ -155,8 +156,8 @@ namespace FeiqLight
                 foreach(ChatRecord record in records.Where(r=>!r.Outgoing))foreach(FileTransferState file in record.Transfers??new FileTransferState[0]) {
                     if(files.Items.Count>=1000)break;
                     if(file.Status=="已拒绝"||file.Status=="对方已取消发送"||file.Status=="本机文件已删除"||!String.IsNullOrEmpty(file.LocalPath)||!SecureIdentity.ValidFingerprint(file.Sha256))continue;
-                    file.Status="已恢复 · 点击续传";
-                    files.Items.Add(new ReceivedFile{Packet=record.Packet,Record=record,File=new Attachment{Id=file.Id,Name=file.Name,Size=file.Size,Modified=file.Modified,Sha256=file.Sha256,RelativePath=file.RelativePath},AutomaticPending=false,Status="已恢复 · 点击续传"});
+                    file.Status=file.Status=="已暂停"?"已暂停":"已恢复 · 点击续传";
+                    files.Items.Add(new ReceivedFile{Packet=record.Packet,Record=record,File=new Attachment{Id=file.Id,Name=file.Name,Size=file.Size,Modified=file.Modified,Sha256=file.Sha256,RelativePath=file.RelativePath},AutomaticPending=false,Status=file.Status});
                 }
                 if(files.Items.Count>0){files.SelectedIndex=0;SetDrawer(true);}
             } catch (Exception e) { Error("本地记录", e.Message); }
@@ -237,6 +238,30 @@ namespace FeiqLight
                 (r.Transfers ?? new FileTransferState[0]).Any(f => ((f.DisplayStatus() ?? "").Contains("中") && !(f.DisplayStatus() ?? "").Contains("中断") && f.Percent < 100)));
         }
         public void Delivery(ChatRecord record) { history.Delivery(record); }
+        internal bool TaskReceiving(long packet, int fileId) { return receiving != null && activeFile != null && activeFile.Packet == packet && activeFile.File.Id == fileId; }
+        internal void PauseTask(ChatRecord record, int fileId)
+        {
+            FileTransferState state=(record.Transfers??new FileTransferState[0]).FirstOrDefault(f=>f.Id==fileId);
+            if(state==null||record.Outgoing||!String.IsNullOrEmpty(state.LocalPath)||new[]{"已拒绝","对方已取消发送","本机文件已删除"}.Contains(state.Status))return;
+            ReceivedFile item = files.Items.Cast<ReceivedFile>().FirstOrDefault(f => f.Packet == record.Packet && f.File.Id == fileId);
+            if(item==null){item=new ReceivedFile{Packet=record.Packet,Record=record,File=new Attachment{Id=state.Id,Name=state.Name,Size=state.Size,Modified=state.Modified,Sha256=state.Sha256,RelativePath=state.RelativePath}};files.Items.Add(item);}
+            item.AutomaticPending = false;
+            if (TaskReceiving(record.Packet, fileId)) { pauseRequested = true; receiving.Cancel(); }
+            else { item.Status = "已暂停"; FileState(item, null, "已暂停"); main.TrySave(item.Record); }
+        }
+        internal void QueueTask(ChatRecord record, int fileId)
+        {
+            FileTransferState state = (record.Transfers ?? new FileTransferState[0]).FirstOrDefault(f => f.Id == fileId);
+            if (state == null || record.Outgoing || !String.IsNullOrEmpty(state.LocalPath) || new[] { "已拒绝", "对方已取消发送", "本机文件已删除" }.Contains(state.Status)) return;
+            ReceivedFile item = files.Items.Cast<ReceivedFile>().FirstOrDefault(f => f.Packet == record.Packet && f.File.Id == fileId);
+            if (item == null) {
+                item = new ReceivedFile { Packet = record.Packet, Record = record, File = new Attachment { Id = state.Id, Name = state.Name, Size = state.Size, Modified = state.Modified, Sha256 = state.Sha256, RelativePath = state.RelativePath } };
+                files.Items.Add(item);
+            }
+            if(TaskReceiving(record.Packet,fileId))return;
+            item.AutomaticPending = true; item.Status = "排队中"; FileState(item, null, "排队中"); main.TrySave(item.Record);
+            main.ReceiveAutomatically();
+        }
         public void AddAttachments(IncomingMessage message)
         {
             foreach (Attachment file in message.Files) {ReceivedFile restored=files.Items.Cast<ReceivedFile>().FirstOrDefault(f=>f.Packet==message.Record.Packet&&f.File.Id==file.Id);if(restored!=null){restored.AutomaticPending=true;continue;}if (files.Items.Count >= 1000) { fileStatus.Text = "待接收文件已达上限"; break; } files.Items.Add(new ReceivedFile { Packet = message.Record.Packet, File = file, Record = message.Record }); }
@@ -445,6 +470,8 @@ namespace FeiqLight
         private void Error(string title, string text) { using (NoticeDialog dialog = new NoticeDialog(title, text)) dialog.ShowDialog(main); }
         public int PendingFileCount { get { return files.Items.Count; } }
         public bool HasAutomaticFile { get { return receiving == null && files.Items.Cast<ReceivedFile>().Any(f => f.AutomaticPending); } }
+        internal bool HasQueuedFile { get { return receiving == null && files.Items.Cast<ReceivedFile>().Any(f => f.AutomaticPending && f.Status == "排队中"); } }
+        internal Task ReceiveNextQueuedAsync() { return ReceiveAsync(files.Items.Cast<ReceivedFile>().First(f => f.AutomaticPending && f.Status == "排队中"), true); }
         public Task ReceiveNextAutomaticAsync()
         {
             return ReceiveAsync(files.Items.Cast<ReceivedFile>().First(f => f.AutomaticPending), true);
@@ -476,7 +503,7 @@ namespace FeiqLight
         {
             if (receiving != null || IsDisposed) return;
             if (!main.InvokeRequired && SynchronizationContext.Current == null) SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
-            selected.AutomaticPending = false; selected.Status = "接收中"; files.SelectedItem = selected;
+            selected.AutomaticPending = false; selected.Status = "接收中"; files.SelectedItem = selected; pauseRequested = false;
             CancellationTokenSource cancel = new CancellationTokenSource(); receiving = cancel; activeFile = selected;
             FileState(selected, 0, "连接中 · 点击取消");
             receive.Text = "取消"; receive.Enabled = true; reject.Enabled = false; files.Enabled = false; files.Invalidate();
@@ -488,12 +515,12 @@ namespace FeiqLight
                 selected.PartialPaths.Add(part); selected.PartialRoots[part] = receiveRoot;
                 fileStatus.Text = "连接中";
                 string saved = await network.ReceiveFileAsync(peer, selected.Packet, selected.File, destination, null, cancel.Token, true, new UiProgress(main, p => {
-                    if (!IsDisposed && receiving == cancel && activeFile == selected && !selected.OfferCanceled && selected.Status != "已保存") {
-                        FileState(selected, p.Percent, "接收中 · 点击取消", null, p.BytesPerSecond);
+                    if (!IsDisposed && receiving == cancel && !cancel.IsCancellationRequested && activeFile == selected && !selected.OfferCanceled && selected.Status != "已保存") {
+                        FileState(selected, p.Percent, p.Stage ?? "接收中 · 点击取消", null, p.BytesPerSecond);
                         selected.Status = p.Percent + "% · " + Theme.SizeText((long)p.BytesPerSecond) + "/s";
                         fileStatus.Text = selected.Status; files.Invalidate();
                     }
-                }));
+                }), () => pauseRequested && !selected.OfferCanceled);
                 if (IsDisposed) return;
                 selected.Status = "已保存";
                 selected.Record.LocalFiles = selected.Record.GetLocalFiles().Concat(new[] { saved }).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
@@ -506,12 +533,13 @@ namespace FeiqLight
                 SetDrawer(files.Items.Count > 0); fileStatus.Text = "已保存"; main.FileReceiveStatus("文件已保存：" + Path.GetFileName(saved));
             }
             catch (OfferRevokedException) { if (!IsDisposed) OfferCanceled(selected.Packet); }
-            catch (OperationCanceledException) { if (!IsDisposed && !selected.OfferCanceled) { selected.Status = "已取消，可重试"; fileStatus.Text = "已取消，可重新接收"; FileState(selected, 0, "已取消 · 点击重试"); main.TrySave(selected.Record); } }
+            catch (OperationCanceledException) { if (!IsDisposed && !selected.OfferCanceled) { selected.Status = pauseRequested ? "已暂停" : "已取消，可重试"; fileStatus.Text = pauseRequested ? "已暂停，保留断点" : "已取消，可重新接收"; FileState(selected, pauseRequested ? (int?)null : 0, pauseRequested ? "已暂停" : "已取消 · 点击重试"); main.TrySave(selected.Record); } }
             catch (Exception error)
             {
                 if (!IsDisposed && !selected.OfferCanceled)
                 {
                     selected.Status = "失败，可续传"; fileStatus.Text = "重试时继续已有断点";
+                    FileTransferState failed=selected.Record.Transfers.FirstOrDefault(f=>f.Id==selected.File.Id);if(failed!=null)failed.Error=error.GetBaseException().Message;
                     FileState(selected, null, "接收失败 · 点击续传"); main.TrySave(selected.Record);
                     // 更新卡片期间可能派发取消回调，旧失败提示不能覆盖已生效的取消状态。
                     if (selected.OfferCanceled) return;
@@ -592,6 +620,8 @@ namespace FeiqLight
             // 传输失败/进度可能晚于取消通知派发；终态只能被真实保存完成推进。
             if ((state.Status == "对方已取消发送" || state.Status == "已拒绝") && status != state.Status && status != "已保存") return;
             if (percent.HasValue) state.Percent = percent.Value; state.Status = status; state.BytesPerSecond = bytesPerSecond; if (path != null) state.LocalPath = path;
+            state.MarkCurrent();if(status=="已保存"||status.StartsWith("连接中"))state.Error=null;
+            main.TrackTransfer(item.Record);
             history.Delivery(item.Record);
         }
         protected override void Dispose(bool disposing) { if (disposing && !IsDisposed) { ClearPastedImages(); SaveDraft(); draftTimer.Dispose(); if (emojiPicker != null) emojiPicker.Dispose(); if (chatMenu != null) chatMenu.Dispose(); if (fileMenu != null) fileMenu.Dispose(); if (receiving != null) receiving.Cancel(); if (avatar != null && avatar.Image != null) avatar.Image.Dispose(); } base.Dispose(disposing); if(disposing&&chatFont!=null){chatFont.Dispose();chatFont=null;} }

@@ -63,7 +63,7 @@ final class ChatStore extends SQLiteOpenHelper {
     }
     List<TransferState> transfers(){
         List<TransferState> result=new ArrayList<>();try(Cursor cursor=getReadableDatabase().rawQuery("SELECT task,percent,state FROM transfer_states ORDER BY time",null)){
-            while(cursor.moveToNext()){String state=cursor.getString(2);if(state.startsWith("发送中"))state="上次退出，等待对方续传";else if(state.startsWith("接收中")||state.startsWith("连接中"))state="上次退出 · 点击续传";result.add(new TransferState(cursor.getString(0),cursor.getInt(1),state));}
+            while(cursor.moveToNext()){String state=cursor.getString(2);if(state.startsWith("发送中"))state="上次退出，等待对方续传";else if(state.startsWith("接收中")||state.startsWith("连接中")||state.startsWith("保存中")||state.equals("排队中")||state.startsWith("正在校验")||state.startsWith("正在核验"))state="上次退出 · 点击续传";result.add(new TransferState(cursor.getString(0),cursor.getInt(1),state));}
         }return result;
     }
     void peer(LanNode.Peer p) {
@@ -189,6 +189,19 @@ final class ChatStore extends SQLiteOpenHelper {
             while(cursor.moveToNext())rows.add(messageAt(cursor));
         }
         java.util.Collections.reverse(rows);return rows;
+    }
+    static final class FileTask {
+        final String peer;final LanNode.Message message;final Protocol.Attachment file;
+        java.io.File guestFile;
+        boolean stored;
+        FileTask(String peer,LanNode.Message message,Protocol.Attachment file){this.peer=peer;this.message=message;this.file=file;}
+    }
+    List<FileTask> fileTasks() {
+        List<FileTask> rows=new ArrayList<>();
+        try(Cursor cursor=getReadableDatabase().rawQuery("SELECT "+MESSAGE_COLUMNS+",peer FROM messages WHERE files<>'' ORDER BY time DESC,id DESC",null)) {
+            while(cursor.moveToNext()){LanNode.Message message=messageAt(cursor);for(Protocol.Attachment file:message.files)rows.add(new FileTask(cursor.getString(8),message,file));}
+        }
+        return rows;
     }
     LanNode.Message findMessage(String peer,long packet,boolean outgoing) {
         try(Cursor cursor=getReadableDatabase().rawQuery("SELECT "+MESSAGE_COLUMNS+" FROM messages WHERE peer=? AND packet=? AND outgoing=?",new String[]{peer,Long.toString(packet),outgoing?"1":"0"})) {

@@ -26,6 +26,15 @@ import static org.robolectric.Shadows.shadowOf;
 @Config(sdk=35,qualifiers="w360dp-h800dp-xhdpi")
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 public final class SettingsMessageTest {
+    private static int freeChatPort()throws IOException {
+        for(int attempt=0;attempt<20;attempt++) {
+            try(java.net.DatagramSocket udp=new java.net.DatagramSocket(0,java.net.InetAddress.getLoopbackAddress())) {
+                try(java.net.ServerSocket tcp=new java.net.ServerSocket(udp.getLocalPort(),1,java.net.InetAddress.getLoopbackAddress())) {return udp.getLocalPort();}
+                catch(java.net.BindException occupied){/* TCP和UDP必须同时空闲。 */}
+            }
+        }
+        throw new IOException("未找到同时空闲的TCP/UDP测试端口");
+    }
     @Test public void archiveRetainsOlderRowsAcrossRestartAndPagesEqualTimesWithoutDuplicates() throws Exception {
         Context context=RuntimeEnvironment.getApplication();
         LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:2425"),"archive","host","历史","");
@@ -284,11 +293,13 @@ public final class SettingsMessageTest {
         ActivityController<MainActivity> ac=Robolectric.buildActivity(MainActivity.class).create().start().resume().visible();MainActivity activity=ac.get();
         Dialog settings=null;
         int remotePort,localPort;
-        try(java.net.ServerSocket a=new java.net.ServerSocket(0,1,java.net.InetAddress.getLoopbackAddress());java.net.ServerSocket b=new java.net.ServerSocket(0,1,java.net.InetAddress.getLoopbackAddress())){remotePort=a.getLocalPort();localPort=b.getLocalPort();}
+        // 节点同时绑定TCP和UDP，只检查TCP空闲可能随机撞上宿主的UDP端口。
+        remotePort=freeChatPort();do {localPort=freeChatPort();}while(localPort==remotePort);
+        final int selectedLocalPort=localPort;
         try(LanNode remote=new LanNode(remotePort,true,"remote","test","远端","",new LanNode.Listener(){public void peersChanged(){}public void message(LanNode.Peer p,LanNode.Message m,boolean u){}public void error(String t){}})) {
             remote.start();settle(service);
             service.getSharedPreferences("settings",0).edit().putInt("port",localPort).putString("name","旧手机昵称").commit();
-            service.connectionFactory=(prefs,listener)->new LanNode(localPort,true,"local-test","test",prefs.getString("name","Android"),prefs.getString("group","我的局域网"),listener);
+            service.connectionFactory=(prefs,listener)->new LanNode(selectedLocalPort,true,"local-test","test",prefs.getString("name","Android"),prefs.getString("group","我的局域网"),listener);
             service.onStartCommand(new Intent(),0,1);settle(service);
             LanNode local=(LanNode)field(service,"node");assertNotNull(local);
             local.probe(LanNode.endpoint("127.0.0.1:"+remotePort));

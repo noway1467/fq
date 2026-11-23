@@ -13,6 +13,7 @@ import java.util.*;
 /** SAF 保存与历史位置映射；只创建新文档，失败时保留应用内完整副本。 */
 final class ReceivedStorage {
     static final String TREE="receive_tree", AUTO="auto_receive";
+    static final String CLEAN_EXPORTED="clean_exported_copy";
     private final Context context;
     ReceivedStorage(Context context) { this.context=context; }
     SharedPreferences settings() { return context.getSharedPreferences("settings",Context.MODE_PRIVATE); }
@@ -92,12 +93,39 @@ final class ReceivedStorage {
                 if(output==null) throw new IOException("无法写入所选目录"); byte[] buffer=new byte[65536]; int count;
                 while((count=input.read(buffer))!=-1) { check(task); output.write(buffer,0,count); }
             }
-            check(task); locations().edit().putString(file.getName(),created.toString()).putString(file.getName()+".tree",tree.toString()).apply(); return created;
+            check(task); if(!locations().edit().putString(file.getName(),created.toString()).putString(file.getName()+".tree",tree.toString()).commit())throw new IOException("保存位置未能记录，应用内副本保留");return created;
         } catch(Exception e) {
             boolean cleaned=created==null;
             if(created!=null) try { cleaned=DocumentsContract.deleteDocument(resolver,created); } catch(Exception ignored) { }
             throw new IOException((task.isCancelled()?"保存已取消":"保存到所选目录失败，请检查授权或重新选择目录")+"；应用内完整文件保留，可重试或另存为。"+(cleaned?"":"目标目录可能留下不完整副本。"),e);
         }
+    }
+    void cleanExported(File file,LanNode.Transfer task)throws IOException {
+        if(!settings().getBoolean(CLEAN_EXPORTED,false)||!file.isFile())return;
+        Uri destination=saved(file);if(destination==null)return;
+        File received=new File(context.getFilesDir(),"received").getCanonicalFile();
+        if(!received.equals(file.getCanonicalFile().getParentFile()))throw new IOException("只能清理应用内接收副本");
+        try {
+            java.security.MessageDigest digest=java.security.MessageDigest.getInstance("SHA-256");long size=0;
+            try(InputStream input=context.getContentResolver().openInputStream(destination)) {
+                if(input==null)throw new IOException("另存文件不可读");byte[] buffer=new byte[65536];int count;
+                while((count=input.read(buffer))!=-1){check(task);size+=count;if(size>file.length())throw new IOException("另存文件长度不一致");digest.update(buffer,0,count);}
+            }
+            byte[] expected;try(InputStream input=new FileInputStream(file)) {java.security.MessageDigest original=java.security.MessageDigest.getInstance("SHA-256");byte[] buffer=new byte[65536];int count;while((count=input.read(buffer))!=-1){check(task);original.update(buffer,0,count);}expected=original.digest();}
+            if(size!=file.length()||!java.util.Arrays.equals(expected,digest.digest()))throw new IOException("另存文件校验不一致，已保留内部副本");
+            check(task);java.nio.file.Files.delete(file.toPath());
+        }catch(java.security.NoSuchAlgorithmException e){throw new IllegalStateException(e);}
+    }
+    @android.annotation.TargetApi(29)
+    Uri gallery(File file,String name,LanNode.Transfer task)throws IOException {
+        String type=mime(name);if(!type.startsWith("image/")&&!type.startsWith("video/"))throw new IOException("仅图片和视频可保存到相册");
+        ContentResolver resolver=context.getContentResolver();ContentValues values=new ContentValues();values.put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME,name);values.put(android.provider.MediaStore.MediaColumns.MIME_TYPE,type);values.put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH,type.startsWith("video/")?"Movies/飞Q":"Pictures/飞Q");values.put(android.provider.MediaStore.MediaColumns.IS_PENDING,1);
+        Uri entry=resolver.insert(type.startsWith("video/")?android.provider.MediaStore.Video.Media.EXTERNAL_CONTENT_URI:android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI,values);
+        if(entry==null)throw new IOException("无法在相册创建文件");
+        try {
+            try(InputStream input=new FileInputStream(file);OutputStream output=resolver.openOutputStream(entry,"w")){if(output==null)throw new IOException("相册不可写");byte[] buffer=new byte[65536];int count;while((count=input.read(buffer))!=-1){check(task);output.write(buffer,0,count);}}
+            check(task);ContentValues ready=new ContentValues();ready.put(android.provider.MediaStore.MediaColumns.IS_PENDING,0);if(resolver.update(entry,ready,null,null)!=1)throw new IOException("相册文件未发布");return entry;
+        }catch(IOException|RuntimeException e){try{resolver.delete(entry,null,null);}catch(RuntimeException cleanup){e.addSuppressed(cleanup);}throw e;}
     }
     private static String directory(ContentResolver resolver,Uri tree,String parent,String name,LanNode.Transfer task)throws IOException {
         check(task);String found=null;

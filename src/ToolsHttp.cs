@@ -64,9 +64,11 @@ namespace FeiqLight
         private bool closed;
         private readonly SecureIdentity security;
         private readonly bool loopback;
+        private readonly int bodyLimit;
         internal readonly int Port;
-        internal ToolsHttp(int port, bool loopback, Action<Request, Response> handler, SecureIdentity security = null)
+        internal ToolsHttp(int port, bool loopback, Action<Request, Response> handler, SecureIdentity security = null, int bodyLimit = 16384)
         {
+            if(bodyLimit<0||bodyLimit>1048576)throw new ArgumentOutOfRangeException("bodyLimit");this.bodyLimit=bodyLimit;
             this.security=security;this.loopback=loopback;this.handler = handler; listener = new TcpListener(loopback ? IPAddress.Loopback : IPAddress.Any, port); listener.Start(16);
             Port = ((IPEndPoint)listener.LocalEndpoint).Port; Task.Run((Action)Accept);
             if(security!=null){security.TrustRevoked+=OnTrustRevoked;security.RegisterReverseListener(Port,AcceptReverse);}
@@ -102,7 +104,7 @@ namespace FeiqLight
                 for (int index = 0; index < 16; index++)
                 {
                     deadline.Begin(index == 0 ? 5000 : 3000);
-                    Request request = Read(input);
+                    Request request = Read(input,bodyLimit);
                     request.Fingerprint=fingerprint;
                     if(security!=null&&!security.IsTrustedFingerprint(fingerprint))throw new IOException("设备信任已撤销。");
                     bool reuse = index < 15 && request.Path == "/file" && (request.Method == "GET" || request.Method == "HEAD") && request.Header("Connection").Equals("keep-alive", StringComparison.OrdinalIgnoreCase);
@@ -130,7 +132,7 @@ namespace FeiqLight
             }
             finally { try { if (transport != null) transport.Dispose(); } finally { client.Close(); lock (gate) clients.Remove(client); } }
         }
-        private static Request Read(Stream stream)
+        private static Request Read(Stream stream,int bodyLimit)
         {
             List<byte> bytes = new List<byte>(); int last = 0;
             while (bytes.Count < 16384)
@@ -151,7 +153,7 @@ namespace FeiqLight
                 request.Headers.Add(name, lines[i].Substring(colon + 1).Trim());
             }
             int length = 0;
-            if (request.Header("Transfer-Encoding").Length > 0 || (request.Headers.ContainsKey("Content-Length") && !Int32.TryParse(request.Header("Content-Length"), NumberStyles.None, CultureInfo.InvariantCulture, out length)) || length < 0 || length > 16384) throw new IOException("请求体过长或格式无效");
+            if (request.Header("Transfer-Encoding").Length > 0 || (request.Headers.ContainsKey("Content-Length") && !Int32.TryParse(request.Header("Content-Length"), NumberStyles.None, CultureInfo.InvariantCulture, out length)) || length < 0 || length > bodyLimit) throw new IOException("请求体过长或格式无效");
             request.Body = new byte[length]; int offset = 0;
             while (offset < length) { int count = stream.Read(request.Body, offset, length - offset); if (count == 0) throw new IOException("请求中断"); offset += count; }
             return request;

@@ -14,10 +14,11 @@ import java.util.*;
 
 /** 仅访问用户授权的只读 SAF 目录；授权持久化由共享设置入口管理。 */
 final class SharedFiles implements AutoCloseable {
-    private static final class Entry {final Uri uri;final String name;final long size;final boolean directory;Entry(Uri uri,String name,long size,boolean directory){this.uri=uri;this.name=name;this.size=size;this.directory=directory;}}
+    private static final class Entry {final Uri tree,uri;final String name;final long size;final boolean directory;Entry(Uri tree,Uri uri,String name,long size,boolean directory){this.tree=tree;this.uri=uri;this.name=name;this.size=size;this.directory=directory;}}
     private static final class Session {final String token,address,fingerprint;volatile long last;Session(String token,String address,String fingerprint){this.token=token;this.address=address;this.fingerprint=fingerprint;last=SystemClock.elapsedRealtime();}}
     private final Context context;
-    private final Uri tree,root;
+    private final List<Entry> roots=new ArrayList<>();
+    private final String scope;
     private final Map<String,Entry> entries=new LinkedHashMap<>();
     private final List<Session> sessions=new ArrayList<>();
     private final ToolsHttp http;
@@ -28,12 +29,21 @@ final class SharedFiles implements AutoCloseable {
     private int attempts;
     private volatile boolean closed;
     SharedFiles(Context context,Uri tree,int port,boolean loopback) throws IOException {
-        this.context=context.getApplicationContext();this.tree=tree;
-        if(tree==null||!"content".equals(tree.getScheme())||!DocumentsContract.isTreeUri(tree))throw new IOException("请选择系统授权的文件夹");
-        root=DocumentsContract.buildDocumentUriUsingTree(tree,DocumentsContract.getTreeDocumentId(tree));
-        try(Cursor cursor=context.getContentResolver().query(root,new String[]{DocumentsContract.Document.COLUMN_MIME_TYPE},null,null)) {
-            if(cursor==null||!cursor.moveToFirst()||!DocumentsContract.Document.MIME_TYPE_DIR.equals(cursor.getString(0)))throw new IOException("无法读取所选目录，请重新授权");
+        this(context,Collections.singletonList(tree),port,loopback);
+    }
+    SharedFiles(Context context,List<Uri> folders,int port,boolean loopback) throws IOException {
+        this.context=context.getApplicationContext();List<Uri> trees=new ArrayList<>(new LinkedHashSet<>(folders));
+        if(trees.isEmpty()||trees.size()>20)throw new IOException("请选择 1–20 个共享文件夹");
+        for(Uri tree:trees) {
+            if(tree==null||!"content".equals(tree.getScheme())||!DocumentsContract.isTreeUri(tree))throw new IOException("请选择系统授权的文件夹");
+            Uri root=DocumentsContract.buildDocumentUriUsingTree(tree,DocumentsContract.getTreeDocumentId(tree));
+            try(Cursor cursor=context.getContentResolver().query(root,new String[]{DocumentsContract.Document.COLUMN_MIME_TYPE,DocumentsContract.Document.COLUMN_DISPLAY_NAME},null,null)) {
+                if(cursor==null||!cursor.moveToFirst()||!DocumentsContract.Document.MIME_TYPE_DIR.equals(cursor.getString(0)))throw new IOException("无法读取所选目录，请重新授权");
+                roots.add(new Entry(tree,root,cursor.getString(1)==null?"共享文件夹":cursor.getString(1),0,true));
+            }
         }
+        // 单目录保留旧配对范围；多目录配对绑定完整集合，增减目录后原凭据不可复用。
+        scope="share:"+String.join("\n",trees.stream().map(Uri::toString).sorted().collect(java.util.stream.Collectors.toList()));
         pairings=new ToolsPairings(this.context);http=new ToolsHttp(port,loopback,this::handle,loopback?null:AppIdentity.get(context),loopback?null:new LanNetwork(context.getSystemService(android.net.ConnectivityManager.class)));
     }
     String code(){return SystemClock.elapsedRealtime()<codeUntil?code:"已过期，请停止后重新开启";}
@@ -62,7 +72,7 @@ final class SharedFiles implements AutoCloseable {
         if(!data.optString("mode").equals("share"))throw new ToolsHttp.Failure(403,"Android 仅提供文件共享，远控请连接 Windows");
         if(reconnect&&!request.header("X-FQ-Reconnect").equals("1"))throw new ToolsHttp.Failure(403,"请求校验失败");
         if(now-attemptsSince>=60000){attempts=0;attemptsSince=now;}if(++attempts>8)throw new ToolsHttp.Failure(429,"尝试过多，请一分钟后重试");
-        String remembered=cookie(request,pairCookie()),scope=request.pairScope("share:"+tree);
+        String remembered=cookie(request,pairCookie()),scope=request.pairScope(this.scope);
         if(closed)throw new ToolsHttp.Failure(403,"共享已关闭");
         if(reconnect){if(!pairings.contains(remembered,scope))throw new ToolsHttp.Failure(401,"没有可用的上次连接，请输入连接码");}
         else if(now>=codeUntil||!data.optString("code").trim().equals(code))throw new ToolsHttp.Failure(403,"连接码错误或已过期");
@@ -74,7 +84,7 @@ final class SharedFiles implements AutoCloseable {
     private void handle(ToolsHttp.Request request,ToolsHttp.Response response) throws Exception {
         if(!request.method.equals("GET")&&!request.method.equals("HEAD")&&!request.method.equals("POST"))throw new ToolsHttp.Failure(405,"不支持此操作");
         if(request.method.equals("GET")&&request.path.equals("/api/status")){
-            boolean paired;synchronized(this){paired=!closed&&pairings.contains(cookie(request,pairCookie()),request.pairScope("share:"+tree));}
+            boolean paired;synchronized(this){paired=!closed&&pairings.contains(cookie(request,pairCookie()),request.pairScope(scope));}
             response.json(new JSONObject().put("remote",false).put("share",!closed).put("paired",paired).put("platform","android").toString(),"");return;
         }
         if(request.method.equals("POST")) {
@@ -93,15 +103,21 @@ final class SharedFiles implements AutoCloseable {
         }
     }
     private synchronized Entry entry(String id) throws ToolsHttp.Failure {
-        if(id.isEmpty())return new Entry(root,"共享文件夹",0,true);
+        if(id.isEmpty())return roots.size()==1?roots.get(0):new Entry(null,null,"共享文件夹",0,true);
         Entry entry=entries.get(id);if(entry==null)throw new ToolsHttp.Failure(404,"文件索引已失效，请刷新目录");return entry;
     }
     private synchronized String remember(Entry entry) throws ToolsHttp.Failure {
-        for(Map.Entry<String,Entry> item:entries.entrySet())if(item.getValue().uri.equals(entry.uri)){item.setValue(entry);return item.getKey();}
+        for(Map.Entry<String,Entry> item:entries.entrySet())if(item.getValue().uri.equals(entry.uri)&&item.getValue().tree.equals(entry.tree)){item.setValue(entry);return item.getKey();}
         if(entries.size()>=10000)throw new ToolsHttp.Failure(409,"浏览项已达上限，请重新开启共享");String id=random(16);entries.put(id,entry);return id;
     }
     private void list(ToolsHttp.Request request,ToolsHttp.Response response,Session session) throws Exception {
         Entry parent=entry(request.parameter("id"));if(!parent.directory)throw new ToolsHttp.Failure(404,"目录不存在");JSONArray items=new JSONArray();
+        if(parent.uri==null) {
+            for(Entry root:roots)items.put(new JSONObject().put("id",remember(root)).put("name",root.name).put("dir",true).put("size",0).put("seek",true));
+            if(!valid(session))throw new ToolsHttp.Failure(401,"共享已关闭");
+            response.json(new JSONObject().put("name","共享文件夹").put("items",items).toString(),"");return;
+        }
+        Uri tree=parent.tree;
         Uri children=DocumentsContract.buildChildDocumentsUriUsingTree(tree,DocumentsContract.getDocumentId(parent.uri));
         try(Cursor cursor=context.getContentResolver().query(children,new String[]{DocumentsContract.Document.COLUMN_DOCUMENT_ID,DocumentsContract.Document.COLUMN_DISPLAY_NAME,DocumentsContract.Document.COLUMN_MIME_TYPE,DocumentsContract.Document.COLUMN_SIZE},null,null)) {
             if(cursor==null)throw new ToolsHttp.Failure(403,"无法读取目录，请在手机上重新授权");
@@ -109,7 +125,7 @@ final class SharedFiles implements AutoCloseable {
                 if(!valid(session))throw new ToolsHttp.Failure(401,"共享已关闭");if(items.length()>=1000)throw new ToolsHttp.Failure(409,"此目录超过 1000 项，请共享更小的文件夹");
                 String document=cursor.getString(0);if(document==null||document.equals(DocumentsContract.getDocumentId(parent.uri)))continue;
                 boolean dir=DocumentsContract.Document.MIME_TYPE_DIR.equals(cursor.getString(2));long size=cursor.isNull(3)?-1:cursor.getLong(3);
-                Entry entry=new Entry(DocumentsContract.buildDocumentUriUsingTree(tree,document),cursor.getString(1)==null?"未命名文件":cursor.getString(1),size,dir);
+                Entry entry=new Entry(tree,DocumentsContract.buildDocumentUriUsingTree(tree,document),cursor.getString(1)==null?"未命名文件":cursor.getString(1),size,dir);
                 items.put(new JSONObject().put("id",remember(entry)).put("name",entry.name).put("dir",dir).put("size",size).put("seek",true));
             }
         }

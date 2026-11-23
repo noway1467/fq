@@ -254,7 +254,8 @@ namespace FeiqLight
     {
         public readonly int Percent;
         public readonly double BytesPerSecond;
-        public TransferProgress(int percent, double bytesPerSecond) { Percent = percent; BytesPerSecond = bytesPerSecond; }
+        public readonly string Stage;
+        public TransferProgress(int percent, double bytesPerSecond, string stage = null) { Percent = percent; BytesPerSecond = bytesPerSecond; Stage = stage; }
     }
     internal sealed class TransferRate
     {
@@ -285,6 +286,8 @@ namespace FeiqLight
         public string Status { get; set; }
         public string LocalPath { get; set; }
         [ScriptIgnore] public double BytesPerSecond { get; set; }
+        public string Error { get; set; }
+        internal void MarkCurrent() { Session=currentSession; }
         public string DisplayStatus() {
             if (Session != currentSession && (Status == "等待对方接收" || (Status ?? "").Contains("中") || (Status ?? "").StartsWith("待接收"))) return "历史邀请 · 无活动传输";
             return Status;
@@ -588,10 +591,14 @@ namespace FeiqLight
         }
         internal List<ChatRecord> IncomingAttachments(string peerId, long? packet = null)
         {
+            return AttachmentHistory(peerId, packet, true);
+        }
+        internal List<ChatRecord> AttachmentHistory(string peerId, long? packet = null, bool incomingOnly = false)
+        {
             lock (gate)
             {
                 string path = HistoryPath(peerId);
-                var records = new Dictionary<long, ChatRecord>();
+                var records = new Dictionary<string, ChatRecord>();
                 if (!File.Exists(path)) return records.Values.ToList();
                 HashSet<string> deleted = DeletedKeys(peerId);
                 // 清空与后台取消必须覆盖全部历史，不能沿用聊天页的尾部读取上限。
@@ -600,9 +607,9 @@ namespace FeiqLight
                     try
                     {
                         ChatRecord record = json.Deserialize<ChatRecord>(line);
-                        if (record == null || record.PeerId != peerId || record.Outgoing || packet.HasValue && record.Packet != packet.Value) continue;
-                        if (record.Deleted || deleted.Contains(RecordKey(record))) { records.Remove(record.Packet); continue; }
-                        records[record.Packet] = record;
+                        if (record == null || record.PeerId != peerId || incomingOnly && record.Outgoing || packet.HasValue && record.Packet != packet.Value) continue;
+                        if (record.Deleted || deleted.Contains(RecordKey(record))) { records.Remove(RecordKey(record)); continue; }
+                        if(record.Transfers!=null&&record.Transfers.Length>0)records[RecordKey(record)] = record;
                     }
                     catch (ArgumentException) { }
                     catch (InvalidOperationException) { }
