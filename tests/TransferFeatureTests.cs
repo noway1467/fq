@@ -6,6 +6,7 @@ using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -18,6 +19,8 @@ namespace FeiqLight.Tests
     {
         private static string root,output;
         private static int passed,failed;
+        [DllImport("user32.dll")] private static extern bool PrintWindow(IntPtr window,IntPtr dc,uint flags);
+        private static void SaveSnapshot(Form form,string name){form.Refresh();Application.DoEvents();Thread.Sleep(80);using(var image=new Bitmap(form.Width,form.Height)){using(Graphics g=Graphics.FromImage(image)){IntPtr dc=g.GetHdc();try{Check(PrintWindow(form.Handle,dc,2),"窗口渲染失败："+name);}finally{g.ReleaseHdc(dc);}}image.Save(Path.Combine(output,name+".png"),System.Drawing.Imaging.ImageFormat.Png);}}
         private static void Check(bool value,string message){if(!value)throw new Exception(message);}
         private static void Run(string name,Action test){try{test();passed++;Console.WriteLine("PASS "+name);}catch(Exception e){failed++;Console.WriteLine("FAIL "+name+" "+e);}}
         private static int FreePort(){var probe=new TcpListener(IPAddress.Loopback,0);probe.Start();int port=((IPEndPoint)probe.LocalEndpoint).Port;probe.Stop();return port;}
@@ -359,6 +362,85 @@ namespace FeiqLight.Tests
                         TextBox input=Controls(window).OfType<TextBox>().Single();input.Text="不存在的文件";Application.DoEvents();Check(list.Items.Count==0,"搜索未过滤");Check(Controls(window).OfType<Label>().Any(l=>l.Visible&&l.Text.Contains("没有匹配")),"空状态未显示");window.Close();main.ExitApplication();
                     }
                 }
+            });
+            Run("访客窗口记忆：防抖、关闭落盘、最大化恢复与保留设置",()=>{
+                Theme.Configure(false,"blue");var store=new LocalStore(Path.Combine(root,"guest-placement"));Rectangle area=Screen.PrimaryScreen.WorkingArea;
+                Rectangle wanted=new Rectangle(area.Left+24,area.Top+24,Math.Min(920,area.Width-48),Math.Min(600,area.Height-48));
+                using(var network=new LanService(new AppSettings{CloseToTray=false,Notifications=false,ReceiveFolder=Path.Combine(store.Root,"received")},FreePort(),true,"guest-place"))
+                using(var main=new MainForm(network,store))using(var guest=new GuestWindow(main,network))
+                {
+                    main.Show();guest.Show();guest.Bounds=wanted;
+                    Pump(()=>store.LoadSettings().GuestWindow!=null&&store.LoadSettings().GuestWindow.X==wanted.X,"访客窗口防抖未自动落盘");CheckPlacement(store.LoadSettings().GuestWindow,wanted,false,"访客位置或大小未持久化");
+                    wanted.Offset(6,4);guest.Bounds=wanted;guest.Close();CheckPlacement(store.LoadSettings().GuestWindow,wanted,false,"关闭未立即保存访客位置");main.ExitApplication();
+                }
+                using(var network=new LanService(store.LoadSettings(),FreePort(),true,"guest-restore-place"))using(var main=new MainForm(network,store))
+                {
+                    main.Show();MethodInfo open=typeof(MainForm).GetMethod("OpenGuest",BindingFlags.Instance|BindingFlags.NonPublic);open.Invoke(main,null);Application.DoEvents();
+                    GuestWindow guest=Field<GuestWindow>(main,"guestWindow");Check(guest.StartPosition==FormStartPosition.Manual&&guest.Bounds==wanted,"重启未恢复访客窗口几何："+guest.Bounds);
+                    guest.WindowState=FormWindowState.Maximized;guest.WindowState=FormWindowState.Minimized;open.Invoke(main,null);Application.DoEvents();
+                    Check(guest.WindowState==FormWindowState.Maximized,"最小化重开丢失访客最大化状态");
+                    guest.WindowState=FormWindowState.Minimized;Application.DoEvents();guest.Close();
+                    CheckPlacement(store.LoadSettings().GuestWindow,wanted,true,"最小化关闭覆盖访客最大化状态");
+                    using(var save=new System.Windows.Forms.Timer{Interval=40})
+                    {
+                        save.Tick+=delegate{SettingsDialog dialog=Application.OpenForms.OfType<SettingsDialog>().FirstOrDefault();if(dialog==null)return;save.Stop();Controls(dialog).OfType<Button>().Single(button=>button.Text=="保存").PerformClick();};
+                        save.Start();main.OpenSettings();
+                    }
+                    CheckPlacement(store.LoadSettings().GuestWindow,wanted,true,"保存设置丢失访客窗口记忆");main.ExitApplication();
+                }
+            });
+            Run("访客窗口与文字弹窗：MD3分层、明暗适配、防裁切与无左图校验",()=>{
+                string docA=Path.Combine(root,"项目需求说明-20261124.pdf"),docB=Path.Combine(root,"设计稿_最终确定版.png"),docC=Path.Combine(root,"归档打包-VeryLongAssetName-Final.zip");
+                File.WriteAllBytes(docA,new byte[245760]);File.WriteAllBytes(docB,new byte[1048576]);File.WriteAllBytes(docC,new byte[4194304]);
+                foreach(bool dark in new[]{false,true})
+                {
+                    Theme.Configure(dark,"blue");string theme=dark?"dark":"light";
+                    var store=new LocalStore(Path.Combine(root,"guest-ui-"+theme));
+                    using(var network=new LanService(new AppSettings{CloseToTray=false,Notifications=false,DarkMode=dark,ReceiveFolder=Path.Combine(store.Root,"received")},FreePort(),true,"guest-ui-"+theme))
+                    using(var main=new MainForm(network,store))using(var guest=new GuestWindow(main,network))
+                    {
+                        main.Show();guest.Show();Application.DoEvents();
+                        Check(guest.ClientSize.Width>=880&&guest.ClientSize.Height>=580,"访客默认窗口过小："+guest.ClientSize);
+                        RoundedPanel filesPane=Field<RoundedPanel>(guest,"filesPane");Panel inspectorPane=Field<Panel>(guest,"inspectorPane"),emptyPanel=Field<Panel>(guest,"emptyPanel");
+                        Control picker=Controls(guest).Single(c=>c.AccessibleName=="临时传输网络地址");
+                        Check(picker.Text=="127.0.0.1"&&picker.Height>=30,"网络地址选择器文本或高度异常："+picker.Text+" "+picker.Height);
+                        Check(!filesPane.Bounds.IntersectsWith(inspectorPane.Bounds),"双栏模式下文件区与控制栏重叠");
+                        Check(inspectorPane.Left>filesPane.Right,"默认尺寸未启用左右双栏布局："+filesPane.Bounds+" / "+inspectorPane.Bounds);
+                        Color filesFill=filesPane.Fill;Check(filesFill.ToArgb()!=inspectorPane.BackColor.ToArgb(),"主文件区与外层底色无层次差异");
+                        Check(emptyPanel.Height>=140,"默认空状态高度不足："+emptyPanel.Height);
+                        foreach(Button b in Controls(guest).OfType<Button>().Where(b=>b.Visible))Check(b.Parent.ClientRectangle.Contains(b.Bounds),"访客按钮越界："+b.Text);
+                        SaveSnapshot(guest,"guest-empty-"+theme+"-default");
+
+                        guest.Size=guest.MinimumSize;Application.DoEvents();
+                        Check(!filesPane.Bounds.IntersectsWith(inspectorPane.Bounds),"窄窗堆叠模式下文件区与控制栏重叠");
+                        Check(emptyPanel.Height>=110,"窄窗空状态高度过小导致文字裁切："+emptyPanel.Height);
+                        Check(picker.Bounds.Right<=inspectorPane.Width&&picker.Height>=30,"窄窗地址栏异常："+picker.Bounds);
+                        foreach(Button b in Controls(guest).OfType<Button>().Where(b=>b.Visible))Check(b.Parent.ClientRectangle.Contains(b.Bounds),"窄窗按钮越界："+b.Text);
+                        if(!dark)SaveSnapshot(guest,"guest-empty-light-min");
+
+                        guest.ClientSize=new Size(920,620);Application.DoEvents();
+                        typeof(GuestWindow).GetMethod("AddFiles",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(guest,new object[]{new[]{docA,docB,docC}});
+                        Controls(guest).OfType<Button>().Single(b=>b.Text=="开启临时传输").PerformClick();Application.DoEvents();
+                        TextBox linkBox=Controls(guest).OfType<TextBox>().Single(t=>t.AccessibleName=="临时传输链接");
+                        Check(linkBox.Text.StartsWith("http://127.0.0.1:"),"激活后链接未生成："+linkBox.Text);
+                        SaveSnapshot(guest,"guest-active-"+theme+"-split");
+                        guest.Close();main.ExitApplication();
+                    }
+                    using(var confirm=new ConfirmDialog("删除这条消息？","仅删除这台电脑上的消息记录，对方的记录和已保存的附件文件会保留。","删除",true))
+                    {
+                        confirm.Show();Application.DoEvents();RichTextBox details=Controls(confirm).OfType<RichTextBox>().Single(r=>r.AccessibleName=="确认详情");
+                        Check(details.Width>=340,"确认弹窗文本仍被左侧多余图标挤压宽度："+details.Width);
+                        SaveSnapshot(confirm,"confirm-delete-"+theme);confirm.Close();
+                    }
+                    if(!dark)
+                    {
+                        using(var remote=new ConfirmDialog("是否允许远程控制？","127.0.0.1 请求查看屏幕并操作此电脑。\n可随时按 Ctrl+Alt+F12 停止。","允许本次控制",false,"始终允许此设备")){remote.Show();Application.DoEvents();SaveSnapshot(remote,"confirm-remote-light");remote.Close();}
+                        using(var fileDel=new ConfirmDialog("删除这个文件？",docA+"\n\n仅删除这个本机文件，聊天记录与对方文件保留。此操作无法撤销。","删除文件",true)){fileDel.Show();Application.DoEvents();SaveSnapshot(fileDel,"confirm-file-light");fileDel.Close();}
+                        using(var notice=new NoticeDialog("无法共享文件夹","文件夹可能已被移动，或当前账号没有读取权限。\n请选择仍可访问的目录后重试。")){notice.Show();Application.DoEvents();RichTextBox d=Controls(notice).OfType<RichTextBox>().Single(r=>r.AccessibleName=="提示详情");Check(d.Width>=340,"提示弹窗存在多余左栏挤压");SaveSnapshot(notice,"notice-light");notice.Close();}
+                        using(var fwd=new ForwardDialog(new[]{new Peer{Nickname="研发工作站",Endpoint=new IPEndPoint(IPAddress.Parse("192.168.1.24"),2425),Online=true},new Peer{Nickname="设计组电脑",Endpoint=new IPEndPoint(IPAddress.Parse("192.168.1.38"),2425),Online=true}})){fwd.Show();Application.DoEvents();SaveSnapshot(fwd,"forward-light");fwd.Close();}
+                    }
+                }
+                Theme.Configure(false,"blue");
             });
             Console.WriteLine("TOTAL "+passed+" passed, "+failed+" failed");return failed==0?0:1;
         }

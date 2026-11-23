@@ -33,6 +33,7 @@ namespace FeiqLight
         public string ReceiveFolder { get; set; }
         public WindowPlacement Window { get; set; }
         public WindowPlacement TransferWindow { get; set; }
+        public WindowPlacement GuestWindow { get; set; }
         public int SidebarWidth { get; set; }
         public string[] KnownPeers { get; set; }
         public SavedConversation[] Conversations { get; set; }

@@ -12,35 +12,180 @@ namespace FeiqLight
 {
     internal sealed class GuestWindow : ModernWindow
     {
-        private sealed class StatusPill : Control
+        private sealed class BufferedCanvas : Panel
+        {
+            internal BufferedCanvas() { DoubleBuffered = true; ResizeRedraw = true; }
+        }
+
+        private sealed class StatusChip : Control
         {
             private string caption = "";
-            private Color tone = Theme.Muted;
-            internal StatusPill() { DoubleBuffered = true; ResizeRedraw = true; Height = 26; BackColor = Theme.Ice; }
-            internal void Set(string text, Color accent)
+            private Color fill = Theme.Surface;
+            private Color fore = Theme.Muted;
+            private Color dotColor = Theme.Muted;
+
+            internal StatusChip()
             {
-                if (caption == text && tone.ToArgb() == accent.ToArgb()) return;
-                caption = text ?? ""; tone = accent;
+                DoubleBuffered = true;
+                ResizeRedraw = true;
+                Height = 24;
+                BackColor = Theme.Canvas;
+            }
+
+            internal void Set(string text, bool active)
+            {
+                string nextCaption = text ?? "";
+                Color nextFill = active ? Theme.Blend(Theme.Online, Theme.Surface, Theme.Dark ? .26F : .14F) : Theme.Surface;
+                Color nextFore = active ? (Theme.Dark ? Theme.Blend(Color.White, Theme.Online, .32F) : Theme.Blend(Theme.Ink, Theme.Online, .62F)) : Theme.Muted;
+                Color nextDot = active ? Theme.Online : Theme.Muted;
+                if (caption == nextCaption && fill.ToArgb() == nextFill.ToArgb() && fore.ToArgb() == nextFore.ToArgb() && dotColor.ToArgb() == nextDot.ToArgb()) return;
+                caption = nextCaption;
+                fill = nextFill;
+                fore = nextFore;
+                dotColor = nextDot;
+                UpdateExtent();
+                Invalidate();
+            }
+
+            internal void UpdateExtent()
+            {
                 using (Graphics g = CreateGraphics())
                 {
                     float scale = g.DpiX / 96F;
                     int textW = TextRenderer.MeasureText(g, caption, Theme.Small, Size.Empty, TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width;
-                    Width = Math.Max((int)(68 * scale), textW + (int)(28 * scale));
+                    Height = Math.Max(22, (int)Math.Round(24 * scale));
+                    Width = Math.Max((int)Math.Round(64 * scale), textW + (int)Math.Round(26 * scale));
                 }
-                Invalidate();
             }
+
             protected override void OnPaint(PaintEventArgs e)
             {
-                Graphics g = e.Graphics; g.Clear(Parent == null ? BackColor : Parent.BackColor); g.SmoothingMode = SmoothingMode.AntiAlias;
+                Graphics g = e.Graphics;
+                g.Clear(Parent == null ? Theme.Canvas : Parent.BackColor);
+                g.SmoothingMode = SmoothingMode.AntiAlias;
                 float scale = g.DpiX / 96F;
-                RectangleF pill = new RectangleF(.5F, (Height - 22F * scale) / 2F, Width - 1F, 22F * scale);
-                Color fill = Theme.Blend(tone, Theme.Surface, Theme.Dark ? .26F : .14F);
-                using (GraphicsPath path = Theme.RoundedF(pill, pill.Height / 2F)) using (SolidBrush brush = new SolidBrush(fill)) g.FillPath(brush, path);
+                RectangleF chip = new RectangleF(.5F, .5F, Width - 1F, Height - 1F);
+                using (GraphicsPath path = Theme.RoundedF(chip, 6F * scale))
+                using (SolidBrush brush = new SolidBrush(fill))
+                    g.FillPath(brush, path);
                 float dot = 6F * scale;
-                Color labelTone = Theme.Dark ? Theme.Blend(Color.White, tone, .18F) : tone;
-                using (SolidBrush brush = new SolidBrush(labelTone)) g.FillEllipse(brush, pill.Left + 8F * scale, pill.Top + (pill.Height - dot) / 2F, dot, dot);
-                Rectangle text = new Rectangle((int)(pill.Left + 18F * scale), (int)pill.Top, Math.Max(1, (int)(pill.Width - 24F * scale)), (int)pill.Height);
-                TextRenderer.DrawText(g, caption, Theme.Small, text, labelTone, TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
+                using (SolidBrush brush = new SolidBrush(dotColor))
+                    g.FillEllipse(brush, chip.Left + 8F * scale, chip.Top + (chip.Height - dot) / 2F, dot, dot);
+                Rectangle textRect = new Rectangle((int)(chip.Left + 18F * scale), (int)chip.Top, Math.Max(1, (int)(chip.Width - 24F * scale)), (int)chip.Height);
+                TextRenderer.DrawText(g, caption, Theme.Small, textRect, fore, TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
+            }
+        }
+
+        // 自绘局域网地址选择器：替代原生 ComboBox（避免固定行高裁切 IP 底边文字）。
+        private sealed class AddressPicker : Control
+        {
+            private readonly List<string> items = new List<string>();
+            private readonly ContextMenuStrip menu = Theme.Menu();
+            private readonly Font font;
+            private int selectedIndex = -1;
+            private bool hovered;
+
+            internal event EventHandler SelectedIndexChanged;
+            internal string SelectedItem { get { return selectedIndex >= 0 && selectedIndex < items.Count ? items[selectedIndex] : null; } }
+
+            internal AddressPicker(Font monoFont)
+            {
+                font = monoFont;
+                DoubleBuffered = true;
+                ResizeRedraw = true;
+                TabStop = true;
+                Cursor = Cursors.Hand;
+                AccessibleName = "临时传输网络地址";
+                AccessibleRole = AccessibleRole.ComboBox;
+            }
+
+            internal void SetItems(string[] next)
+            {
+                string previous = SelectedItem;
+                items.Clear();
+                if (next != null) items.AddRange(next);
+                if (previous != null) selectedIndex = items.IndexOf(previous);
+                else selectedIndex = -1;
+                if (selectedIndex < 0 && items.Count > 0) selectedIndex = 0;
+                Text = SelectedItem ?? "";
+                Invalidate();
+            }
+
+            private void SelectIndex(int index)
+            {
+                if (index < 0 || index >= items.Count || index == selectedIndex) return;
+                selectedIndex = index;
+                Text = SelectedItem ?? "";
+                Invalidate();
+                EventHandler handler = SelectedIndexChanged;
+                if (handler != null) handler(this, EventArgs.Empty);
+            }
+
+            internal void OpenMenu()
+            {
+                if (!Enabled || items.Count == 0) return;
+                foreach (ToolStripItem old in menu.Items.Cast<ToolStripItem>().ToArray()) old.Dispose();
+                menu.Items.Clear();
+                for (int i = 0; i < items.Count; i++)
+                {
+                    int index = i;
+                    var item = new ToolStripMenuItem(items[i]) { Checked = i == selectedIndex };
+                    item.Click += delegate { SelectIndex(index); };
+                    menu.Items.Add(item);
+                }
+                menu.MinimumSize = new Size(Math.Max(140, Width), 0);
+                menu.Show(this, new Point(0, Height + 2));
+            }
+
+            protected override void OnMouseEnter(EventArgs e) { hovered = true; Invalidate(); base.OnMouseEnter(e); }
+            protected override void OnMouseLeave(EventArgs e) { hovered = false; Invalidate(); base.OnMouseLeave(e); }
+            protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
+            protected override void OnLostFocus(EventArgs e) { Invalidate(); base.OnLostFocus(e); }
+            protected override void OnEnabledChanged(EventArgs e) { Cursor = Enabled ? Cursors.Hand : Cursors.Default; Invalidate(); base.OnEnabledChanged(e); }
+            protected override void OnClick(EventArgs e) { Focus(); OpenMenu(); base.OnClick(e); }
+            protected override void OnKeyDown(KeyEventArgs e)
+            {
+                if (e.KeyCode == Keys.Space || e.KeyCode == Keys.Enter || e.KeyCode == Keys.Down)
+                {
+                    e.Handled = true;
+                    OpenMenu();
+                }
+                base.OnKeyDown(e);
+            }
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                Graphics g = e.Graphics;
+                g.Clear(Parent == null ? Theme.Canvas : Parent.BackColor);
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                float scale = g.DpiX / 96F;
+                RectangleF box = new RectangleF(.5F, .5F, Math.Max(4F, Width - 1F), Math.Max(4F, Height - 1F));
+                Color fill = Enabled ? (hovered ? Theme.Blend(Theme.Ink, Theme.Surface, .03F) : Theme.Surface) : Theme.SurfaceContainerLow;
+                using (GraphicsPath path = Theme.RoundedF(box, 8F * scale))
+                {
+                    using (SolidBrush brush = new SolidBrush(fill)) g.FillPath(brush, path);
+                    if (Focused) using (Pen pen = new Pen(Theme.Blue, 1.5F)) g.DrawPath(pen, path);
+                }
+                int chevronW = (int)Math.Round(28 * scale);
+                int padLeft = (int)Math.Round(12 * scale);
+                string label = SelectedItem ?? "暂无可用局域网地址";
+                Color ink = SelectedItem == null || !Enabled ? Theme.Muted : Theme.Ink;
+                Rectangle textRect = new Rectangle(padLeft, 0, Math.Max(1, Width - padLeft - chevronW), Height);
+                TextRenderer.DrawText(g, label, font, textRect, ink, TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+                float cx = Width - 14F * scale;
+                float cy = Height / 2F;
+                using (Pen arrow = new Pen(Theme.Muted, 1.5F * scale) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round })
+                    g.DrawLines(arrow, new[] {
+                        new PointF(cx - 4F * scale, cy - 1.5F * scale),
+                        new PointF(cx, cy + 2.5F * scale),
+                        new PointF(cx + 4F * scale, cy - 1.5F * scale)
+                    });
+            }
+
+            protected override void Dispose(bool disposing)
+            {
+                if (disposing) menu.Dispose();
+                base.Dispose(disposing);
             }
         }
 
@@ -79,96 +224,73 @@ namespace FeiqLight
 
         private readonly MainForm main;
         private readonly LanService network;
-        private readonly StatusPill statusPill = new StatusPill();
+        private readonly Font monoFont = new Font("Consolas", 9.5F);
+        private readonly Panel headerStrip = new BufferedCanvas();
+        private readonly StatusChip statusChip = new StatusChip();
+        private readonly Label headerHint = Theme.Label("浏览器扫码或打开链接即可收发 · 15 分钟有效 · HTTP 明文仅限可信局域网", Theme.Small, Theme.Muted);
+        private readonly Panel workspace = new BufferedCanvas();
+        private readonly RoundedPanel filesPane = new RoundedPanel { Radius = 12, Border = Color.Empty };
+        private readonly Panel filesHeader = new BufferedCanvas();
+        private readonly Label listTitle = Theme.Label("待分享文件", Theme.Section, Theme.Ink);
         private readonly Label fileSummary = Theme.Label("0 个文件", Theme.Small, Theme.Muted);
-        private readonly Label state = Theme.Label("就绪", Theme.Small, Theme.Muted);
-        private readonly Label linkCaption = Theme.Label("访问链接 · HTTP 局域网直连", Theme.Small, Theme.Muted);
-        private readonly TextBox linkBox = new TextBox { ReadOnly = true, BorderStyle = BorderStyle.None };
+        private readonly Panel listHost = new BufferedCanvas();
         private readonly ListBox files = new ListBox();
-        private readonly Panel emptyPanel = new Panel();
-        private readonly RoundedPanel summaryCard, listCard, configCard, addressShell, linkCard;
-        private readonly ComboBox address = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, FlatStyle = FlatStyle.Flat, DrawMode = DrawMode.OwnerDrawFixed };
-        private readonly ToggleSwitch upload;
-        private readonly Button start, choose, removeBtn, clearBtn, refreshIp, copy, qr, openTasks;
+        private readonly Panel emptyPanel = new BufferedCanvas();
+        private readonly Panel inspectorPane = new BufferedCanvas();
+        private readonly RoundedPanel linkBlock = new RoundedPanel { Radius = 12, Border = Color.Empty };
+        private readonly Label linkCaption = Theme.Label("访问链接 · HTTP 局域网直连", Theme.Small, Theme.Muted);
+        private readonly RoundedPanel linkFieldWrap = new RoundedPanel { Radius = 8, Border = Color.Empty };
+        private readonly TextBox linkBox = new TextBox { ReadOnly = true, BorderStyle = BorderStyle.None };
+        private readonly ToggleSwitch upload = new ToggleSwitch { Text = "允许对方向我发送文件", AccessibleName = "允许浏览器上传", Description = "保存至接收目录 · 限 100 个文件 / 10 GiB", Checked = false };
+        private readonly Label netTitle = Theme.Label("局域网地址", Theme.Section, Theme.Ink);
+        private readonly AddressPicker addressPicker;
+        private readonly Panel footerBar = new BufferedCanvas();
+        private readonly Label state = Theme.Label("就绪", Theme.Small, Theme.Muted);
+        private readonly Button choose, removeBtn, clearBtn, refreshIp, copy, qr, openTasks, start;
         private readonly Timer timer = new Timer { Interval = 1000 };
         private readonly Timer copyReset = new Timer { Interval = 1800 };
+        private readonly Timer windowSaveTimer = new Timer { Interval = 500 };
         private readonly ToolTip tips = new ToolTip();
-        private readonly Font monoFont = new Font("Consolas", 9.5F);
         private GuestTransfer session;
         private bool stateError;
+        private bool windowLoaded, placementPending;
+        private WindowPlacement placement;
+
+        internal bool RestoreMaximized { get { return placement != null && placement.Maximized; } }
 
         internal GuestWindow(MainForm main, LanService network)
         {
             this.main = main;
             this.network = network;
             Text = "临时浏览器传输";
-            ClientSize = new Size(720, 588);
-            MinimumSize = new Size(620, 492);
+            ClientSize = new Size(920, 620);
+            MinimumSize = new Size(680, 580);
             UseSecondaryChrome();
 
-            var body = new BufferedLayoutTable { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5, Padding = new Padding(22, 12, 22, 14), Margin = Padding.Empty };
-            body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            foreach (int h in new[] { 70, -1, 112, 82, 50 }) body.RowStyles.Add(new RowStyle(h < 0 ? SizeType.Percent : SizeType.Absolute, h < 0 ? 100 : h));
-            Surface.Controls.Add(body);
+            addressPicker = new AddressPicker(monoFont);
+            addressPicker.SelectedIndexChanged += delegate { UpdateLinkPreview(); };
 
-            // 区块一：状态摘要卡片
-            summaryCard = new RoundedPanel { Dock = DockStyle.Fill, Fill = Theme.Ice, Border = Theme.Line, Radius = 12, Padding = new Padding(16, 8, 16, 8), Margin = new Padding(0, 0, 0, 10) };
-            var summaryLayout = new TableLayoutPanel { Dock = DockStyle.Fill, BackColor = Theme.Ice, ColumnCount = 1, RowCount = 2, Margin = Padding.Empty };
-            summaryLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            summaryLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 56));
-            summaryLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 44));
-            var titleRow = new FlowLayoutPanel { Dock = DockStyle.Fill, BackColor = Theme.Ice, WrapContents = false, Margin = Padding.Empty, Padding = Padding.Empty };
-            Label heading = Theme.Label("临时浏览器传输", Theme.Strong, Theme.Ink);
-            heading.AutoSize = true;
-            heading.Margin = new Padding(0, 3, 10, 0);
-            titleRow.Controls.Add(heading);
-            statusPill.Margin = new Padding(0, 1, 0, 0);
-            titleRow.Controls.Add(statusPill);
-            summaryLayout.Controls.Add(titleRow, 0, 0);
-            Label desc = Theme.Label("浏览器扫码或打开链接即可收发 · 15 分钟有效 · HTTP 明文仅限可信局域网", Theme.Small, Theme.Muted);
-            desc.Dock = DockStyle.Fill;
-            desc.AutoEllipsis = true;
-            desc.Margin = Padding.Empty;
-            summaryLayout.Controls.Add(desc, 0, 1);
-            summaryCard.Controls.Add(summaryLayout);
-            body.Controls.Add(summaryCard, 0, 0);
+            // 顶栏直接落在 Canvas 背景上，不用线条硬隔断。
+            headerHint.AutoEllipsis = true;
+            headerHint.TextAlign = ContentAlignment.MiddleLeft;
+            headerStrip.Controls.Add(statusChip);
+            headerStrip.Controls.Add(headerHint);
 
-            // 区块二：待分享文件列表卡片
-            listCard = new RoundedPanel { Dock = DockStyle.Fill, Fill = Theme.Surface, Border = Theme.Line, Radius = 12, Padding = new Padding(12, 10, 12, 10), Margin = new Padding(0, 0, 0, 10) };
-            var listLayout = new TableLayoutPanel { Dock = DockStyle.Fill, BackColor = Theme.Surface, ColumnCount = 1, RowCount = 2, Margin = Padding.Empty };
-            listLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            listLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
-            listLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-
-            var listHeader = new TableLayoutPanel { Dock = DockStyle.Fill, BackColor = Theme.Surface, ColumnCount = 2, RowCount = 1, Margin = new Padding(2, 0, 0, 6) };
-            listHeader.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            listHeader.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 256));
-            listHeader.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            var listMeta = new FlowLayoutPanel { Dock = DockStyle.Fill, BackColor = Theme.Surface, WrapContents = false, Margin = Padding.Empty, Padding = Padding.Empty };
-            Label listTitle = Theme.Label("待分享文件", Theme.Section, Theme.Ink);
+            // 主体工作区卡片：白底/深卡衬于 Canvas 之上，突出核心文件操作区。
             listTitle.AutoSize = true;
-            listTitle.Margin = new Padding(0, 6, 10, 0);
-            listMeta.Controls.Add(listTitle);
             fileSummary.AutoSize = true;
-            fileSummary.Margin = new Padding(0, 8, 0, 0);
-            listMeta.Controls.Add(fileSummary);
-            listHeader.Controls.Add(listMeta, 0, 0);
+            choose = Theme.IconButton("plus", "添加文件", delegate { PickFiles(); }, false);
+            removeBtn = Theme.IconButton("trash", "移除所选", delegate { RemoveSelectedFile(); }, false);
+            clearBtn = Theme.IconButton("eraser", "清空列表", delegate { ClearFiles(); }, false);
+            tips.SetToolTip(choose, "添加待分享文件");
+            tips.SetToolTip(removeBtn, "移除选中文件");
+            tips.SetToolTip(clearBtn, "清空待分享列表");
+            filesHeader.Controls.Add(listTitle);
+            filesHeader.Controls.Add(fileSummary);
+            filesHeader.Controls.Add(choose);
+            filesHeader.Controls.Add(removeBtn);
+            filesHeader.Controls.Add(clearBtn);
 
-            var listButtons = new FlowLayoutPanel { Dock = DockStyle.Fill, BackColor = Theme.Surface, FlowDirection = FlowDirection.RightToLeft, WrapContents = false, Margin = Padding.Empty, Padding = Padding.Empty };
-            clearBtn = Theme.Button("清空", delegate { ClearFiles(); }, false);
-            clearBtn.Size = new Size(64, 32); clearBtn.Margin = Padding.Empty; StyleCardButton(clearBtn, false);
-            removeBtn = Theme.Button("移除", delegate { RemoveSelectedFile(); }, false);
-            removeBtn.Size = new Size(64, 32); removeBtn.Margin = new Padding(0, 0, 6, 0); StyleCardButton(removeBtn, false);
-            choose = Theme.Button("添加文件", delegate { PickFiles(); }, false);
-            choose.Size = new Size(104, 32); choose.Margin = new Padding(0, 0, 6, 0); StyleCardButton(choose, true);
-            listButtons.Controls.Add(clearBtn);
-            listButtons.Controls.Add(removeBtn);
-            listButtons.Controls.Add(choose);
-            listHeader.Controls.Add(listButtons, 1, 0);
-            listLayout.Controls.Add(listHeader, 0, 0);
-
-            var listHost = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Surface, Margin = Padding.Empty };
-            files.Dock = DockStyle.Fill;
             files.BorderStyle = BorderStyle.None;
             files.DrawMode = DrawMode.OwnerDrawFixed;
             files.ItemHeight = 56;
@@ -178,196 +300,386 @@ namespace FeiqLight
             files.SelectedIndexChanged += delegate { UpdateActions(); };
             files.KeyDown += (sender, e) => { if (e.KeyCode == Keys.Delete && session == null) { e.Handled = true; RemoveSelectedFile(); } };
             Theme.ThemeScrollbars(files);
-            listHost.Controls.Add(files);
 
-            emptyPanel.Dock = DockStyle.Fill;
-            emptyPanel.BackColor = Theme.Surface;
             emptyPanel.Cursor = Cursors.Hand;
             emptyPanel.Click += delegate { if (session == null) PickFiles(); };
             emptyPanel.Paint += PaintEmptyFiles;
+
+            files.Dock = DockStyle.Fill;
+            emptyPanel.Dock = DockStyle.Fill;
+            listHost.Controls.Add(files);
             listHost.Controls.Add(emptyPanel);
             emptyPanel.BringToFront();
-            listLayout.Controls.Add(listHost, 0, 1);
-            listCard.Controls.Add(listLayout);
-            body.Controls.Add(listCard, 0, 1);
 
-            EnableFileDrop(listCard);
+            filesPane.Controls.Add(filesHeader);
+            filesPane.Controls.Add(listHost);
+
+            EnableFileDrop(filesPane);
             EnableFileDrop(listHost);
             EnableFileDrop(files);
             EnableFileDrop(emptyPanel);
 
-            // 区块三：接收开关与局域网地址卡片
-            configCard = new RoundedPanel { Dock = DockStyle.Fill, Fill = Theme.Ice, Border = Theme.Line, Radius = 12, Padding = new Padding(16, 6, 16, 8), Margin = new Padding(0, 0, 0, 10) };
-            var configLayout = new TableLayoutPanel { Dock = DockStyle.Fill, BackColor = Theme.Ice, ColumnCount = 1, RowCount = 3, Margin = Padding.Empty };
-            configLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            configLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));
-            configLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 8));
-            configLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-
-            upload = new ToggleSwitch { Dock = DockStyle.Fill, BackColor = Theme.Ice, Text = "允许对方向我发送文件", AccessibleName = "允许浏览器上传", Description = "保存至接收目录 · 限 100 个文件 / 10 GiB", Checked = false, Margin = Padding.Empty };
-            configLayout.Controls.Add(upload, 0, 0);
-
-            var divider = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Ice, Margin = Padding.Empty };
-            divider.Paint += delegate(object sender, PaintEventArgs e) { using (Pen pen = new Pen(Theme.Line)) e.Graphics.DrawLine(pen, 0, divider.Height / 2, divider.Width, divider.Height / 2); };
-            configLayout.Controls.Add(divider, 0, 1);
-
-            var networkRow = new TableLayoutPanel { Dock = DockStyle.Fill, BackColor = Theme.Ice, ColumnCount = 3, RowCount = 1, Margin = Padding.Empty };
-            networkRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            networkRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 210));
-            networkRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 38));
-            networkRow.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-
-            Label netTitle = Theme.Label("局域网地址", Theme.Section, Theme.Ink); netTitle.Dock = DockStyle.Fill; netTitle.Margin = new Padding(0, 0, 10, 0);
-            networkRow.Controls.Add(netTitle, 0, 0);
-
-            addressShell = new RoundedPanel { Dock = DockStyle.Fill, BackColor = Theme.Ice, Fill = Theme.Surface, Border = Theme.Line, Radius = Theme.ControlRadius, Padding = new Padding(8, 5, 6, 4), Margin = new Padding(0, 4, 6, 4) };
-            address.Dock = DockStyle.Fill;
-            address.Font = monoFont;
-            address.AccessibleName = "临时传输网络地址";
-            address.ItemHeight = 22;
-            address.DrawItem += DrawAddressItem;
-            address.SelectedIndexChanged += delegate { UpdateLinkPreview(); };
-            addressShell.Controls.Add(address);
-            networkRow.Controls.Add(addressShell, 1, 0);
-
-            refreshIp = Theme.IconButton("refresh", "刷新局域网地址", delegate { ReloadAddresses(); }, false);
-            refreshIp.Dock = DockStyle.Fill;
-            refreshIp.Margin = new Padding(0, 4, 0, 4);
-            StyleCardButton(refreshIp, false);
-            tips.SetToolTip(refreshIp, "重新扫描本机局域网地址");
-            networkRow.Controls.Add(refreshIp, 2, 0);
-            configLayout.Controls.Add(networkRow, 0, 2);
-            configCard.Controls.Add(configLayout);
-            body.Controls.Add(configCard, 0, 2);
-
-            // 区块四：访问链接与二维码卡片
-            linkCard = new RoundedPanel { Dock = DockStyle.Fill, Fill = Theme.Surface, Border = Theme.Line, Radius = 12, Padding = new Padding(14, 10, 14, 10), Margin = new Padding(0, 0, 0, 10) };
-            var linkLayout = new TableLayoutPanel { Dock = DockStyle.Fill, BackColor = Theme.Surface, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty };
-            linkLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            linkLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 218));
-            linkLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-
-            var linkTextCol = new TableLayoutPanel { Dock = DockStyle.Fill, BackColor = Theme.Surface, ColumnCount = 1, RowCount = 2, Margin = new Padding(0, 0, 12, 0) };
-            linkTextCol.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            linkTextCol.RowStyles.Add(new RowStyle(SizeType.Absolute, 20));
-            linkTextCol.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            linkCaption.Dock = DockStyle.Fill; linkCaption.AutoEllipsis = true; linkCaption.Margin = Padding.Empty;
-            linkTextCol.Controls.Add(linkCaption, 0, 0);
-            linkBox.Dock = DockStyle.Fill;
+            // 侧栏控制区：独立 elevated 链接卡片 + 轻量开关与网卡选择器。
+            linkCaption.AutoEllipsis = true;
+            linkCaption.TextAlign = ContentAlignment.MiddleLeft;
             linkBox.Font = monoFont;
-            linkBox.Margin = new Padding(0, 6, 0, 0);
             linkBox.AccessibleName = "临时传输链接";
             Theme.AttachEditMenu(linkBox);
-            linkTextCol.Controls.Add(linkBox, 0, 1);
-            linkLayout.Controls.Add(linkTextCol, 0, 0);
+            linkFieldWrap.Controls.Add(linkBox);
+            linkFieldWrap.Layout += delegate { LayoutLinkBox(); };
+            linkBox.FontChanged += delegate { LayoutLinkBox(); };
 
-            var linkActions = new FlowLayoutPanel { Dock = DockStyle.Fill, BackColor = Theme.Surface, FlowDirection = FlowDirection.RightToLeft, WrapContents = false, Margin = Padding.Empty, Padding = new Padding(0, 9, 0, 0) };
-            qr = Theme.Button("显示二维码", delegate { OpenQr(); }, false);
-            qr.Size = new Size(106, 36); qr.Margin = Padding.Empty; StyleCardButton(qr, false);
             copy = Theme.Button("复制链接", delegate { CopyLink(); }, false);
-            copy.Size = new Size(100, 36); copy.Margin = new Padding(0, 0, 8, 0); StyleCardButton(copy, true);
-            linkActions.Controls.Add(qr);
-            linkActions.Controls.Add(copy);
-            linkLayout.Controls.Add(linkActions, 1, 0);
-            linkCard.Controls.Add(linkLayout);
-            body.Controls.Add(linkCard, 0, 3);
+            ((RoundedButton)copy).Glyph = "copy";
+            ((RoundedButton)copy).ShowLabel = true;
+            qr = Theme.Button("二维码", delegate { OpenQr(); }, false);
+            ((RoundedButton)qr).Glyph = "qr";
+            ((RoundedButton)qr).ShowLabel = true;
+            linkBlock.Controls.Add(linkCaption);
+            linkBlock.Controls.Add(linkFieldWrap);
+            linkBlock.Controls.Add(copy);
+            linkBlock.Controls.Add(qr);
 
-            // 底栏：状态与主操作按钮
-            var footer = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Surface, Margin = Padding.Empty, Padding = new Padding(0, 12, 0, 2) };
-            footer.Paint += delegate(object sender, PaintEventArgs e) { using (Pen pen = new Pen(Theme.Line)) e.Graphics.DrawLine(pen, 0, 0, footer.Width, 0); };
+            refreshIp = Theme.IconButton("refresh", "刷新局域网地址", delegate { ReloadAddresses(); }, false);
+            tips.SetToolTip(refreshIp, "重新扫描本机局域网地址");
+            netTitle.AutoSize = true;
 
-            var footerRight = new FlowLayoutPanel { Dock = DockStyle.Right, AutoSize = true, FlowDirection = FlowDirection.RightToLeft, WrapContents = false, BackColor = Theme.Surface, Margin = Padding.Empty, Padding = Padding.Empty };
-            start = Theme.Button("开启临时传输", delegate { Toggle(); }, true);
-            start.Size = new Size(138, 36); start.Margin = Padding.Empty;
-            openTasks = Theme.Button("查看已接收", delegate { main.OpenTransfers(); }, false);
-            openTasks.Size = new Size(108, 36); openTasks.Margin = new Padding(0, 0, 8, 0); StyleCardButton(openTasks, false); openTasks.Visible = false;
-            footerRight.Controls.Add(start);
-            footerRight.Controls.Add(openTasks);
-            footer.Controls.Add(footerRight);
+            inspectorPane.Controls.Add(linkBlock);
+            inspectorPane.Controls.Add(upload);
+            inspectorPane.Controls.Add(netTitle);
+            inspectorPane.Controls.Add(addressPicker);
+            inspectorPane.Controls.Add(refreshIp);
 
-            state.Dock = DockStyle.Fill;
+            workspace.Controls.Add(filesPane);
+            workspace.Controls.Add(inspectorPane);
+
+            // 底栏延续 Canvas 层次，无冗余分割线。
             state.AutoEllipsis = true;
-            state.Padding = new Padding(0, 0, 12, 0);
-            footer.Controls.Add(state);
-            state.BringToFront();
-            body.Controls.Add(footer, 0, 4);
+            state.TextAlign = ContentAlignment.MiddleLeft;
+            openTasks = Theme.Button("查看已接收", delegate { main.OpenTransfers(); }, false);
+            openTasks.Visible = false;
+            start = Theme.Button("开启临时传输", delegate { Toggle(); }, true);
+            footerBar.Controls.Add(state);
+            footerBar.Controls.Add(openTasks);
+            footerBar.Controls.Add(start);
 
-            ReloadAddresses();
-            Shown += delegate { ApplyColors(); UpdateActions(); };
+            Surface.Controls.Add(headerStrip);
+            Surface.Controls.Add(workspace);
+            Surface.Controls.Add(footerBar);
+
+            windowSaveTimer.Tick += delegate { windowSaveTimer.Stop(); SaveWindowPlacement(); };
+            LocationChanged += TrackWindowPlacement;
+            SizeChanged += TrackWindowPlacement;
+            Surface.SizeChanged += delegate { Relayout(); };
+            Shown += delegate { ApplyColors(); Relayout(); UpdateActions(); };
+            DpiChangedAfterParent += delegate { ApplyColors(); Relayout(); };
             Theme.Changed += ApplyColors;
             copyReset.Tick += delegate { copyReset.Stop(); if (!IsDisposed) copy.Text = "复制链接"; };
-            timer.Tick += delegate {
+            timer.Tick += delegate
+            {
                 if (session != null && !session.Active) { Stop(); SetState("本次临时传输已到期结束", false); }
                 else if (session != null) { SetState(StateText(), false); UpdateActions(); }
             };
             timer.Start();
+
+            ReloadAddresses();
             ApplyColors();
             UpdateActions();
+            Relayout();
         }
 
-        private static void StyleCardButton(Button button, bool accentSoft)
+        private float CurrentDpiScale()
+        {
+            if (IsDisposed) return 1F;
+            using (Graphics g = CreateGraphics()) return Math.Max(1F, g.DpiX / 96F);
+        }
+
+        private int MeasureButtonWidth(Button button, float scale, int extra, int minimum)
+        {
+            int textW = TextRenderer.MeasureText(button.Text, button.Font, Size.Empty, TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width;
+            return Math.Max((int)Math.Round(minimum * scale), textW + (int)Math.Round(extra * scale));
+        }
+
+        private void LayoutLinkBox()
+        {
+            int padX = Math.Max(8, (int)Math.Round(10 * CurrentDpiScale()));
+            int boxH = Math.Max(16, linkBox.PreferredHeight);
+            Rectangle bounds = new Rectangle(padX, Math.Max(0, (linkFieldWrap.ClientSize.Height - boxH) / 2), Math.Max(10, linkFieldWrap.ClientSize.Width - padX * 2), boxH);
+            if (linkBox.Bounds != bounds) linkBox.Bounds = bounds;
+        }
+
+        private void Relayout()
+        {
+            if (IsDisposed || Surface.ClientSize.Width <= 0 || Surface.ClientSize.Height <= 0) return;
+            float s = CurrentDpiScale();
+            int w = Surface.ClientSize.Width;
+            int h = Surface.ClientSize.Height;
+            int outer = (int)Math.Round(18 * s);
+            int headerH = (int)Math.Round(42 * s);
+            int footerH = (int)Math.Round(58 * s);
+
+            SuspendLayout();
+            try
+            {
+                headerStrip.Bounds = new Rectangle(0, 0, w, headerH);
+                statusChip.UpdateExtent();
+                statusChip.Location = new Point(outer, (headerH - statusChip.Height) / 2);
+                int hintX = statusChip.Right + (int)Math.Round(12 * s);
+                headerHint.Bounds = new Rectangle(hintX, 0, Math.Max(40, w - hintX - outer), headerH);
+
+                footerBar.Bounds = new Rectangle(0, Math.Max(headerH, h - footerH), w, footerH);
+                int btnH = (int)Math.Round(36 * s);
+                int btnY = (footerH - btnH) / 2;
+                int startW = MeasureButtonWidth(start, s, 32, 122);
+                start.Bounds = new Rectangle(w - outer - startW, btnY, startW, btnH);
+                int leftLimit = start.Left - (int)Math.Round(10 * s);
+                if (openTasks.Visible)
+                {
+                    int tasksW = MeasureButtonWidth(openTasks, s, 26, 96);
+                    openTasks.Bounds = new Rectangle(start.Left - (int)Math.Round(10 * s) - tasksW, btnY, tasksW, btnH);
+                    leftLimit = openTasks.Left - (int)Math.Round(12 * s);
+                }
+                state.Bounds = new Rectangle(outer, 0, Math.Max(40, leftLimit - outer), footerH);
+
+                int wsH = Math.Max(120, footerBar.Top - headerH);
+                workspace.Bounds = new Rectangle(0, headerH, w, wsH);
+                bool split = w >= (int)Math.Round(680 * s);
+                int gap = (int)Math.Round(14 * s);
+
+                if (split)
+                {
+                    int inspW = Math.Max((int)Math.Round(296 * s), Math.Min((int)Math.Round(376 * s), (int)Math.Round(w * 0.37)));
+                    int filesX = outer;
+                    int filesW = Math.Max(220, w - outer * 2 - inspW - gap);
+                    int inspX = filesX + filesW + gap;
+                    filesPane.Bounds = new Rectangle(filesX, 0, filesW, wsH);
+                    inspectorPane.Bounds = new Rectangle(inspX, 0, Math.Max(140, w - outer - inspX), wsH);
+                    LayoutFilesPane(filesW, wsH, s);
+                    LayoutInspectorVertical(inspectorPane.Width, wsH, s);
+                }
+                else
+                {
+                    int leftColW = Math.Max(180, (w - outer * 2 - gap) / 2);
+                    int toggleH = upload.PreferredHeightFor(leftColW);
+                    int pickerH = (int)Math.Round(34 * s);
+                    int settingsNeeded = (int)Math.Round(2 * s) + toggleH + (int)Math.Round(10 * s) + netTitle.PreferredHeight + (int)Math.Round(6 * s) + pickerH + (int)Math.Round(4 * s);
+                    int fieldH = Math.Max((int)Math.Round(36 * s), linkBox.PreferredHeight + (int)Math.Round(14 * s));
+                    int linkNeeded = (int)Math.Round(12 * s) + (int)Math.Round(20 * s) + (int)Math.Round(8 * s) + fieldH + (int)Math.Round(10 * s) + (int)Math.Round(34 * s) + (int)Math.Round(14 * s);
+                    int inspH = Math.Min(Math.Max(110, wsH - (int)Math.Round(120 * s)), Math.Max(settingsNeeded, linkNeeded));
+                    int filesH = Math.Max(110, wsH - inspH - gap);
+                    filesPane.Bounds = new Rectangle(outer, 0, Math.Max(200, w - outer * 2), filesH);
+                    inspectorPane.Bounds = new Rectangle(outer, filesPane.Bottom + gap, Math.Max(200, w - outer * 2), Math.Max(80, wsH - filesH - gap));
+                    LayoutFilesPane(filesPane.Width, filesH, s);
+                    LayoutInspectorHorizontal(inspectorPane.Width, inspectorPane.Height, s);
+                }
+            }
+            finally { ResumeLayout(true); }
+        }
+
+        private void LayoutFilesPane(int pw, int ph, float s)
+        {
+            // 内缩子控件矩形，确保主卡片四周 12px 圆角不被内嵌方框盖住。
+            int padX = (int)Math.Round(16 * s);
+            int padY = (int)Math.Round(6 * s);
+            int hdrH = (int)Math.Round(42 * s);
+            int innerW = Math.Max(80, pw - padX * 2);
+            filesHeader.Bounds = new Rectangle(padX, padY, innerW, hdrH);
+
+            int iconSize = (int)Math.Round(32 * s);
+            int btnY = (hdrH - iconSize) / 2;
+            int gap = (int)Math.Round(6 * s);
+            clearBtn.Bounds = new Rectangle(innerW - iconSize, btnY, iconSize, iconSize);
+            removeBtn.Bounds = new Rectangle(clearBtn.Left - gap - iconSize, btnY, iconSize, iconSize);
+            choose.Bounds = new Rectangle(removeBtn.Left - gap - iconSize, btnY, iconSize, iconSize);
+
+            int titleW = listTitle.PreferredWidth;
+            listTitle.Bounds = new Rectangle(0, (hdrH - listTitle.PreferredHeight) / 2, titleW, listTitle.PreferredHeight);
+            int sumX = listTitle.Right + (int)Math.Round(10 * s);
+            int sumMaxW = Math.Max(0, choose.Left - (int)Math.Round(8 * s) - sumX);
+            fileSummary.Bounds = new Rectangle(sumX, (hdrH - fileSummary.PreferredHeight) / 2, sumMaxW, fileSummary.PreferredHeight);
+
+            listHost.Bounds = new Rectangle(padX, filesHeader.Bottom, innerW, Math.Max(40, ph - filesHeader.Bottom - padY));
+        }
+
+        private void LayoutLinkCard(int x, int y, int cw, float s)
+        {
+            int cardPad = (int)Math.Round(14 * s);
+            int innerW = Math.Max(80, cw - cardPad * 2);
+            int capH = (int)Math.Round(20 * s);
+            int fieldH = Math.Max((int)Math.Round(36 * s), linkBox.PreferredHeight + (int)Math.Round(14 * s));
+            int btnH = (int)Math.Round(34 * s);
+            int gap = (int)Math.Round(8 * s);
+            int btnW = Math.Max(60, (innerW - gap) / 2);
+
+            linkCaption.Bounds = new Rectangle(cardPad, (int)Math.Round(12 * s), innerW, capH);
+            linkFieldWrap.Bounds = new Rectangle(cardPad, linkCaption.Bottom + (int)Math.Round(8 * s), innerW, fieldH);
+            LayoutLinkBox();
+            int btnY = linkFieldWrap.Bottom + (int)Math.Round(10 * s);
+            copy.Bounds = new Rectangle(cardPad, btnY, btnW, btnH);
+            qr.Bounds = new Rectangle(copy.Right + gap, btnY, Math.Max(60, innerW - btnW - gap), btnH);
+            linkBlock.Bounds = new Rectangle(x, y, cw, qr.Bottom + (int)Math.Round(14 * s));
+        }
+
+        private void LayoutInspectorVertical(int pw, int ph, float s)
+        {
+            LayoutLinkCard(0, 0, pw, s);
+
+            int toggleTop = linkBlock.Bottom + (int)Math.Round(18 * s);
+            int toggleH = upload.PreferredHeightFor(pw);
+            upload.Bounds = new Rectangle(0, toggleTop, pw, toggleH);
+
+            int netTop = upload.Bottom + (int)Math.Round(14 * s);
+            netTitle.Bounds = new Rectangle(0, netTop, pw, netTitle.PreferredHeight);
+            int pickerH = (int)Math.Round(36 * s);
+            int refreshSize = pickerH;
+            int pickerTop = netTitle.Bottom + (int)Math.Round(8 * s);
+            refreshIp.Bounds = new Rectangle(pw - refreshSize, pickerTop, refreshSize, refreshSize);
+            addressPicker.Bounds = new Rectangle(0, pickerTop, Math.Max(80, pw - refreshSize - (int)Math.Round(8 * s)), pickerH);
+        }
+
+        private void LayoutInspectorHorizontal(int pw, int ph, float s)
+        {
+            int colGap = (int)Math.Round(16 * s);
+            int leftW = Math.Max(180, (pw - colGap) / 2);
+            int rightX = leftW + colGap;
+            int rightW = Math.Max(180, pw - rightX);
+
+            int toggleH = upload.PreferredHeightFor(leftW);
+            upload.Bounds = new Rectangle(0, (int)Math.Round(2 * s), leftW, toggleH);
+
+            int netTop = upload.Bottom + (int)Math.Round(10 * s);
+            netTitle.Bounds = new Rectangle(0, netTop, leftW, netTitle.PreferredHeight);
+            int pickerH = (int)Math.Round(34 * s);
+            int refreshSize = pickerH;
+            int pickerTop = netTitle.Bottom + (int)Math.Round(6 * s);
+            refreshIp.Bounds = new Rectangle(leftW - refreshSize, pickerTop, refreshSize, refreshSize);
+            addressPicker.Bounds = new Rectangle(0, pickerTop, Math.Max(80, leftW - refreshSize - (int)Math.Round(8 * s)), pickerH);
+
+            LayoutLinkCard(rightX, 0, rightW, s);
+        }
+
+        private static void StyleToolbarIcon(Button button, bool accentTonal)
         {
             RoundedButton rounded = button as RoundedButton;
-            button.BackColor = accentSoft ? Theme.Sky : Theme.Surface;
-            button.ForeColor = accentSoft ? Theme.Blue : Theme.Ink;
-            if (rounded != null) rounded.Border = accentSoft ? Theme.Blend(Theme.Blue, Theme.Line, .35F) : Theme.Line;
+            if (rounded == null) return;
+            rounded.Border = Color.Empty;
+            rounded.Radius = 8;
+            if (accentTonal)
+            {
+                button.BackColor = Theme.Sky;
+                button.ForeColor = Theme.OnPrimaryContainer;
+                rounded.HoverBack = Theme.Blend(Theme.Blue, Theme.Sky, .12F);
+                rounded.HoverFore = Theme.OnPrimaryContainer;
+            }
+            else
+            {
+                button.BackColor = Theme.Surface;
+                button.ForeColor = Theme.Ink;
+                rounded.HoverBack = Theme.Hover;
+                rounded.HoverFore = Theme.Ink;
+            }
+        }
+
+        private static void StyleActionButton(Button button, int toneKind, int radius)
+        {
+            // toneKind: 0=surface on Canvas, 1=Ice tonal inside Surface card, 2=Sky tonal primary, 3=Danger filled, 4=Primary filled
+            RoundedButton rounded = button as RoundedButton;
+            if (rounded != null) { rounded.Border = Color.Empty; rounded.Radius = radius; }
+            switch (toneKind)
+            {
+                case 4: button.BackColor = Theme.Blue; button.ForeColor = Color.White; break;
+                case 3: button.BackColor = Theme.Danger; button.ForeColor = Color.White; break;
+                case 2: button.BackColor = Theme.Sky; button.ForeColor = Theme.OnPrimaryContainer; break;
+                case 1: button.BackColor = Theme.Ice; button.ForeColor = Theme.Ink; break;
+                default: button.BackColor = Theme.Surface; button.ForeColor = Theme.Ink; break;
+            }
         }
 
         private void ApplyColors()
         {
-            summaryCard.Fill = configCard.Fill = Theme.Ice;
-            summaryCard.Border = listCard.Border = configCard.Border = addressShell.Border = Theme.Line;
-            listCard.Fill = addressShell.Fill = Theme.Surface;
-            files.BackColor = emptyPanel.BackColor = Theme.Surface;
-            files.ForeColor = Theme.Ink;
-            address.BackColor = Theme.Surface;
-            address.ForeColor = Theme.Ink;
-            upload.BackColor = Theme.Ice;
-            linkBox.BackColor = Theme.Surface;
-            linkBox.ForeColor = session != null && session.Active ? Theme.Ink : Theme.Muted;
-            fileSummary.ForeColor = Theme.Muted;
+            if (IsDisposed) return;
+            Surface.BackColor = Theme.Canvas;
+            headerStrip.BackColor = headerHint.BackColor = Theme.Canvas;
+            headerHint.ForeColor = Theme.Muted;
+            workspace.BackColor = inspectorPane.BackColor = Theme.Canvas;
+            footerBar.BackColor = state.BackColor = Theme.Canvas;
             state.ForeColor = stateError ? Theme.Danger : Theme.Muted;
-            StyleCardButton(choose, true);
-            StyleCardButton(removeBtn, false);
-            StyleCardButton(clearBtn, false);
-            StyleCardButton(refreshIp, false);
-            StyleCardButton(copy, true);
-            StyleCardButton(qr, false);
-            StyleCardButton(openTasks, false);
+
+            filesPane.BackColor = Theme.Canvas;
+            filesPane.Fill = Theme.Surface;
+            filesHeader.BackColor = listHost.BackColor = files.BackColor = emptyPanel.BackColor = Theme.Surface;
+            listTitle.BackColor = fileSummary.BackColor = Theme.Surface;
+            listTitle.ForeColor = Theme.Ink;
+            fileSummary.ForeColor = Theme.Muted;
+            files.ForeColor = Theme.Ink;
+
+            upload.BackColor = Theme.Canvas;
+            netTitle.BackColor = Theme.Canvas;
+            netTitle.ForeColor = Theme.Ink;
+
+            linkBlock.BackColor = Theme.Canvas;
+            linkBlock.Fill = Theme.Surface;
+            linkCaption.BackColor = Theme.Surface;
+            linkFieldWrap.BackColor = Theme.Surface;
+            linkFieldWrap.Fill = Theme.Ice;
+            linkBox.BackColor = Theme.Ice;
+
+            StyleToolbarIcon(choose, true);
+            StyleToolbarIcon(removeBtn, false);
+            StyleToolbarIcon(clearBtn, false);
+            clearBtn.ForeColor = Theme.Muted;
+
+            StyleActionButton(copy, 2, 8);
+            StyleActionButton(qr, 1, 8);
+            StyleActionButton(refreshIp, 0, 8);
+            refreshIp.ForeColor = Theme.Muted;
+            StyleActionButton(openTasks, 0, 8);
+            bool active = session != null && session.Active;
+            StyleActionButton(start, active ? 3 : 4, 8);
+
             using (Graphics g = files.CreateGraphics())
             {
                 float scale = g.DpiX / 96F;
                 files.ItemHeight = (int)Math.Round(56 * scale);
-                address.ItemHeight = (int)Math.Round(22 * scale);
             }
+            UpdateStatusChip();
             UpdateLinkCardStyle();
+            statusChip.Invalidate();
+            addressPicker.Invalidate();
             files.Invalidate();
             emptyPanel.Invalidate();
-            address.Invalidate();
+            filesPane.Invalidate();
+            headerStrip.Invalidate();
+            footerBar.Invalidate();
+        }
+
+        private void UpdateStatusChip()
+        {
+            bool active = session != null && session.Active;
+            if (active)
+            {
+                int left = Math.Max(0, (int)Math.Ceiling((session.Until - DateTime.UtcNow).TotalMinutes));
+                statusChip.Set("开放中 · 剩余 " + left + " 分钟", true);
+            }
+            else statusChip.Set("未开启", false);
         }
 
         private void UpdateLinkCardStyle()
         {
             bool active = session != null && session.Active;
-            linkCard.Fill = Theme.Surface;
-            linkCard.Border = active ? Theme.Blend(Theme.Blue, Theme.Line, .48F) : Theme.Line;
+            linkBlock.Fill = Theme.Surface;
+            linkBlock.Border = active ? Theme.Blue : Color.Empty;
             linkCaption.ForeColor = active ? Theme.Blue : Theme.Muted;
             linkBox.ForeColor = active ? Theme.Ink : Theme.Muted;
-            linkCard.Invalidate();
+            linkBlock.Invalidate();
         }
 
         private void ReloadAddresses()
         {
-            string previous = address.SelectedItem as string;
             string[] items = network.LoopbackOnly
                 ? new[] { "127.0.0.1" }
                 : LanNetwork.Scan().Select(l => l.Address.ToString()).Distinct().ToArray();
-            address.BeginUpdate();
-            address.Items.Clear();
-            address.Items.AddRange(items);
-            if (previous != null && items.Contains(previous)) address.SelectedItem = previous;
-            else if (address.Items.Count > 0) address.SelectedIndex = 0;
-            address.EndUpdate();
+            addressPicker.SetItems(items);
             UpdateLinkPreview();
         }
 
@@ -417,11 +729,13 @@ namespace FeiqLight
         private void EnableFileDrop(Control target)
         {
             target.AllowDrop = true;
-            target.DragEnter += (sender, e) => {
+            target.DragEnter += (sender, e) =>
+            {
                 bool ok = session == null && e.Data != null && e.Data.GetDataPresent(DataFormats.FileDrop);
                 e.Effect = ok ? DragDropEffects.Copy : DragDropEffects.None;
             };
-            target.DragDrop += (sender, e) => {
+            target.DragDrop += (sender, e) =>
+            {
                 if (session != null || e.Data == null) return;
                 string[] dropped = e.Data.GetData(DataFormats.FileDrop) as string[];
                 if (dropped != null && dropped.Length > 0) AddFiles(dropped);
@@ -434,18 +748,34 @@ namespace FeiqLight
             g.Clear(Theme.Surface);
             g.SmoothingMode = SmoothingMode.AntiAlias;
             float scale = g.DpiX / 96F;
-            float chipSize = 44F * scale;
-            float cx = emptyPanel.Width / 2F;
-            float cy = Math.Max(chipSize / 2F + 6F * scale, emptyPanel.Height / 2F - 20F * scale);
-            RectangleF chip = new RectangleF(cx - chipSize / 2F, cy - chipSize / 2F, chipSize, chipSize);
-            using (GraphicsPath path = Theme.RoundedF(chip, 12F * scale))
-            using (SolidBrush brush = new SolidBrush(Theme.Ice)) g.FillPath(brush, path);
-            float inset = 10F * scale;
-            Theme.Glyph(g, "file", new RectangleF(chip.Left + inset, chip.Top + inset, chip.Width - inset * 2F, chip.Height - inset * 2F), Theme.Blue);
-            Rectangle titleRect = new Rectangle(16, (int)(chip.Bottom + 8F * scale), Math.Max(1, emptyPanel.Width - 32), (int)(22 * scale));
-            TextRenderer.DrawText(g, "暂无待分享文件", Theme.Section, titleRect, Theme.Ink, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
-            Rectangle subRect = new Rectangle(16, titleRect.Bottom + (int)(2 * scale), Math.Max(1, emptyPanel.Width - 32), (int)(20 * scale));
-            TextRenderer.DrawText(g, "点击添加或拖入文件（也可仅开启接收）", Theme.Small, subRect, Theme.Muted, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+            int w = emptyPanel.Width, h = emptyPanel.Height;
+            if (w < 24 || h < 24) return;
+
+            int textWidth = Math.Max(40, w - (int)(48 * scale));
+            int titleH = TextRenderer.MeasureText(g, "暂无待分享文件", Theme.Section, new Size(textWidth, 0), TextFormatFlags.NoPrefix).Height;
+            int subH = TextRenderer.MeasureText(g, "点击添加或拖入文件（也可仅开启接收）", Theme.Small, new Size(textWidth, 0), TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix).Height;
+            bool showIcon = h >= titleH + subH + (int)(74 * scale);
+            float chipSize = showIcon ? 44F * scale : 0F;
+            float gapAfterChip = showIcon ? 12F * scale : 0F;
+            float gapBetweenText = 4F * scale;
+            float totalH = chipSize + gapAfterChip + titleH + gapBetweenText + subH;
+            float startY = Math.Max(6F * scale, (h - totalH) / 2F);
+
+            if (showIcon)
+            {
+                float cx = w / 2F;
+                RectangleF chip = new RectangleF(cx - chipSize / 2F, startY, chipSize, chipSize);
+                using (GraphicsPath path = Theme.RoundedF(chip, 10F * scale))
+                using (SolidBrush brush = new SolidBrush(Theme.Ice)) g.FillPath(brush, path);
+                float inset = 10F * scale;
+                Theme.Glyph(g, "file", new RectangleF(chip.Left + inset, chip.Top + inset, chip.Width - inset * 2F, chip.Height - inset * 2F), Theme.Blue);
+                startY = chip.Bottom + gapAfterChip;
+            }
+
+            Rectangle titleRect = new Rectangle((int)(24 * scale), (int)startY, textWidth, titleH + 2);
+            TextRenderer.DrawText(g, "暂无待分享文件", Theme.Section, titleRect, Theme.Ink, TextFormatFlags.HorizontalCenter | TextFormatFlags.Top | TextFormatFlags.NoPrefix);
+            Rectangle subRect = new Rectangle((int)(24 * scale), titleRect.Bottom + (int)gapBetweenText, textWidth, subH + 4);
+            TextRenderer.DrawText(g, "点击添加或拖入文件（也可仅开启接收）", Theme.Small, subRect, Theme.Muted, TextFormatFlags.HorizontalCenter | TextFormatFlags.Top | TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix);
         }
 
         private static void KindColors(string kind, out Color fill, out Color ink)
@@ -459,7 +789,7 @@ namespace FeiqLight
                 case "archive": fill = dark ? Color.FromArgb(60, 34, 17) : Color.FromArgb(255, 237, 213); ink = dark ? Color.FromArgb(253, 186, 116) : Color.FromArgb(194, 65, 12); break;
                 case "doc": fill = dark ? Color.FromArgb(21, 49, 68) : Color.FromArgb(224, 242, 254); ink = dark ? Color.FromArgb(125, 211, 252) : Color.FromArgb(3, 105, 161); break;
                 case "app": fill = dark ? Color.FromArgb(22, 51, 34) : Color.FromArgb(220, 252, 231); ink = dark ? Color.FromArgb(134, 239, 172) : Color.FromArgb(21, 128, 61); break;
-                default: fill = Theme.Sky; ink = Theme.Blue; break;
+                default: fill = Theme.Sky; ink = Theme.OnPrimaryContainer; break;
             }
         }
 
@@ -472,44 +802,38 @@ namespace FeiqLight
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
             using (Brush back = new SolidBrush(Theme.Surface)) e.Graphics.FillRectangle(back, e.Bounds);
 
-            RectangleF card = new RectangleF(e.Bounds.Left + 2F * scale, e.Bounds.Top + 3F * scale, Math.Max(4F, e.Bounds.Width - 4F * scale), Math.Max(4F, e.Bounds.Height - 6F * scale));
-            using (GraphicsPath cardPath = Theme.RoundedF(card, 9F * scale))
+            if (selected)
             {
-                using (Brush fill = new SolidBrush(selected ? Theme.Sky : Theme.Ice)) e.Graphics.FillPath(fill, cardPath);
-                using (Pen border = new Pen(selected ? Theme.Blend(Theme.Blue, Theme.Surface, .48F) : Theme.Line)) e.Graphics.DrawPath(border, cardPath);
+                RectangleF highlight = new RectangleF(e.Bounds.Left, e.Bounds.Top + 2F * scale, Math.Max(4F, e.Bounds.Width), Math.Max(4F, e.Bounds.Height - 4F * scale));
+                using (GraphicsPath path = Theme.RoundedF(highlight, 8F * scale))
+                using (Brush fill = new SolidBrush(Theme.Sky)) e.Graphics.FillPath(fill, path);
             }
 
             Color badgeFill, badgeInk;
             KindColors(entry.Kind, out badgeFill, out badgeInk);
-            RectangleF badge = new RectangleF(card.Left + 10F * scale, card.Top + (card.Height - 34F * scale) / 2F, 34F * scale, 34F * scale);
+            RectangleF badge = new RectangleF(e.Bounds.Left + 8F * scale, e.Bounds.Top + (e.Bounds.Height - 34F * scale) / 2F, 34F * scale, 34F * scale);
             using (GraphicsPath badgePath = Theme.RoundedF(badge, 8F * scale))
             using (Brush fill = new SolidBrush(badgeFill)) e.Graphics.FillPath(fill, badgePath);
             TextRenderer.DrawText(e.Graphics, entry.Extension, Theme.Small, Rectangle.Round(badge), badgeInk, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
 
-            int sizeWidth = (int)(76 * scale);
-            int textLeft = (int)(badge.Right + 11F * scale);
-            int textWidth = Math.Max(1, (int)(card.Right - textLeft - sizeWidth - 16F * scale));
-            Rectangle titleRect = new Rectangle(textLeft, (int)(card.Top + 6F * scale), textWidth, (int)(20 * scale));
-            TextRenderer.DrawText(e.Graphics, entry.Name, Theme.Section, titleRect, Theme.Ink, TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+            int sizeWidth = (int)(74 * scale);
+            int textLeft = (int)(badge.Right + 12F * scale);
+            int textWidth = Math.Max(1, e.Bounds.Right - textLeft - sizeWidth - (int)(14 * scale));
+            Rectangle titleRect = new Rectangle(textLeft, e.Bounds.Top + (int)(8 * scale), textWidth, (int)(21 * scale));
+            TextRenderer.DrawText(e.Graphics, entry.Name, Theme.Section, titleRect, selected ? Theme.OnPrimaryContainer : Theme.Ink, TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
             Rectangle pathRect = new Rectangle(textLeft, titleRect.Bottom + (int)(2 * scale), textWidth, (int)(17 * scale));
             TextRenderer.DrawText(e.Graphics, entry.Folder, Theme.Small, pathRect, Theme.Muted, TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.PathEllipsis);
-            Rectangle sizeRect = new Rectangle((int)(card.Right - sizeWidth - 10F * scale), (int)card.Top, sizeWidth, (int)card.Height);
-            TextRenderer.DrawText(e.Graphics, Theme.SizeText(entry.Size), Theme.Small, sizeRect, selected ? Theme.Blue : Theme.Muted, TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix);
-        }
+            Rectangle sizeRect = new Rectangle(e.Bounds.Right - sizeWidth - (int)(8 * scale), e.Bounds.Top, sizeWidth, e.Bounds.Height);
+            TextRenderer.DrawText(e.Graphics, Theme.SizeText(entry.Size), Theme.Small, sizeRect, selected ? Theme.OnPrimaryContainer : Theme.Muted, TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix);
 
-        private void DrawAddressItem(object sender, DrawItemEventArgs e)
-        {
-            if (e.Index < 0 || e.Index >= address.Items.Count) return;
-            bool selected = (e.State & DrawItemState.Selected) != 0;
-            using (Brush bg = new SolidBrush(selected ? Theme.Sky : Theme.Surface)) e.Graphics.FillRectangle(bg, e.Bounds);
-            string value = Convert.ToString(address.Items[e.Index]);
-            TextRenderer.DrawText(e.Graphics, value, monoFont, new Rectangle(e.Bounds.Left + 4, e.Bounds.Top, Math.Max(1, e.Bounds.Width - 8), e.Bounds.Height), selected ? Theme.Blue : Theme.Ink, TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+            if (!selected && e.Index < files.Items.Count - 1)
+                using (Pen sep = new Pen(Theme.Line)) e.Graphics.DrawLine(sep, textLeft, e.Bounds.Bottom - 1, e.Bounds.Right - (int)(8 * scale), e.Bounds.Bottom - 1);
         }
 
         private string Link()
         {
             if (session == null || !session.Active) throw new IOException("请先开启临时传输。");
-            string selectedIp = address.SelectedItem as string;
+            string selectedIp = addressPicker.SelectedItem;
             if (string.IsNullOrEmpty(selectedIp)) throw new IOException("没有可用的局域网地址。");
             return session.Url(selectedIp);
         }
@@ -531,9 +855,9 @@ namespace FeiqLight
 
         private void UpdateLinkPreview()
         {
-            if (session != null && session.Active && address.SelectedItem != null)
+            if (session != null && session.Active && addressPicker.SelectedItem != null)
             {
-                linkBox.Text = session.Url((string)address.SelectedItem);
+                linkBox.Text = session.Url(addressPicker.SelectedItem);
                 linkCaption.Text = "访问链接 · 同一局域网扫码或打开";
             }
             else
@@ -569,10 +893,11 @@ namespace FeiqLight
             if (session != null) { Stop(); return; }
             try
             {
-                if (address.SelectedItem == null) ReloadAddresses();
-                if (address.SelectedItem == null) throw new IOException("没有可用的局域网，请先连接 Wi-Fi、热点或以太网。");
+                if (addressPicker.SelectedItem == null) ReloadAddresses();
+                if (addressPicker.SelectedItem == null) throw new IOException("没有可用的局域网，请先连接 Wi-Fi、热点或以太网。");
                 session = new GuestTransfer(files.Items.Cast<ShareEntry>().Select(e => e.FullPath), network.Settings.ReceiveFolder, upload.Checked, network.LoopbackOnly);
-                session.Received = (path, name) => main.Ui(() => {
+                session.Received = (path, name) => main.Ui(() =>
+                {
                     main.GuestReceived(path, name);
                     if (!IsDisposed && session != null && session.Active) { SetState(StateText(), false); UpdateActions(); }
                 });
@@ -591,16 +916,13 @@ namespace FeiqLight
             emptyPanel.Visible = count == 0;
             files.Visible = count > 0;
 
-            if (active)
-            {
-                int left = Math.Max(0, (int)Math.Ceiling((session.Until - DateTime.UtcNow).TotalMinutes));
-                statusPill.Set("开放中 · 剩余 " + left + " 分钟", Theme.Online);
-            }
-            else statusPill.Set("未开启", Theme.Muted);
+            UpdateStatusChip();
+            statusChip.Location = new Point(statusChip.Left, (headerStrip.Height - statusChip.Height) / 2);
+            int hintX = statusChip.Right + (int)Math.Round(12 * CurrentDpiScale());
+            headerHint.Bounds = new Rectangle(hintX, 0, Math.Max(40, headerStrip.Width - hintX - (int)Math.Round(18 * CurrentDpiScale())), headerStrip.Height);
 
             start.Text = active ? "结束临时传输" : "开启临时传输";
-            start.BackColor = active ? Theme.Danger : Theme.Blue;
-            start.ForeColor = Color.White;
+            StyleActionButton(start, active ? 3 : 4, 8);
             start.Invalidate();
 
             choose.Enabled = !active;
@@ -608,8 +930,11 @@ namespace FeiqLight
             clearBtn.Enabled = !active && count > 0;
             upload.Enabled = !active;
             refreshIp.Enabled = !active;
+            addressPicker.Enabled = !active;
             copy.Enabled = qr.Enabled = active;
+            bool tasksWasVisible = openTasks.Visible;
             openTasks.Visible = session != null && session.SavedFiles.Length > 0;
+            if (tasksWasVisible != openTasks.Visible) Relayout();
             UpdateLinkPreview();
         }
 
@@ -626,10 +951,70 @@ namespace FeiqLight
             UpdateActions();
         }
 
+        protected override void OnLoad(EventArgs e)
+        {
+            base.OnLoad(e);
+            Rectangle work = Screen.FromControl(this).WorkingArea;
+            MinimumSize = new Size(Math.Min(680, work.Width), Math.Min(580, work.Height));
+            WindowPlacement saved = main.GuestWindowPlacement;
+            placement = saved;
+            if (saved != null && saved.Width > 0 && saved.Height > 0)
+            {
+                Rectangle requested = new Rectangle(Math.Max(-100000, Math.Min(100000, saved.X)), Math.Max(-100000, Math.Min(100000, saved.Y)), Math.Min(100000, saved.Width), Math.Min(100000, saved.Height));
+                Rectangle area = Screen.FromRectangle(requested).WorkingArea;
+                MinimumSize = new Size(Math.Min(MinimumSize.Width, area.Width), Math.Min(MinimumSize.Height, area.Height));
+                int width = Math.Min(area.Width, Math.Max(MinimumSize.Width, requested.Width));
+                int height = Math.Min(area.Height, Math.Max(MinimumSize.Height, requested.Height));
+                StartPosition = FormStartPosition.Manual;
+                Bounds = new Rectangle(Math.Max(area.Left, Math.Min(requested.X, area.Right - width)), Math.Max(area.Top, Math.Min(requested.Y, area.Bottom - height)), width, height);
+                if (saved.Maximized) WindowState = FormWindowState.Maximized;
+            }
+            else if (Width > work.Width - 16 || Height > work.Height - 16)
+            {
+                int width = Math.Min(work.Width - 16, Math.Max(MinimumSize.Width, Width));
+                int height = Math.Min(work.Height - 16, Math.Max(MinimumSize.Height, Height));
+                Size = new Size(width, height);
+            }
+            windowLoaded = true;
+            Relayout();
+            TrackWindowPlacement(this, EventArgs.Empty);
+        }
+
+        private void TrackWindowPlacement(object sender, EventArgs e)
+        {
+            if (!windowLoaded || !Visible || WindowState == FormWindowState.Minimized) return;
+            Rectangle normal = WindowState == FormWindowState.Normal ? Bounds : RestoreBounds;
+            if (normal.Width <= 0 || normal.Height <= 0) return;
+            bool maximized = WindowState == FormWindowState.Maximized;
+            if (placement != null && placement.X == normal.X && placement.Y == normal.Y && placement.Width == normal.Width && placement.Height == normal.Height && placement.Maximized == maximized) return;
+            placement = new WindowPlacement { X = normal.X, Y = normal.Y, Width = normal.Width, Height = normal.Height, Maximized = maximized };
+            placementPending = true;
+            windowSaveTimer.Stop();
+            windowSaveTimer.Start();
+        }
+
+        private void SaveWindowPlacement()
+        {
+            if (!windowLoaded || placement == null || !placementPending || main.IsDisposed || main.Disposing) return;
+            main.SaveGuestWindowPlacement(placement);
+            placementPending = false;
+        }
+
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            TrackWindowPlacement(this, EventArgs.Empty);
+            windowSaveTimer.Stop();
+            if (placementPending && !main.IsDisposed && !main.Disposing) SaveWindowPlacement();
+            base.OnFormClosing(e);
+        }
+
         protected override void Dispose(bool disposing)
         {
-            if (disposing)
+            if (disposing && !IsDisposed)
             {
+                windowSaveTimer.Stop();
+                if (placementPending && !main.IsDisposed && !main.Disposing) SaveWindowPlacement();
+                windowSaveTimer.Dispose();
                 Theme.Changed -= ApplyColors;
                 timer.Stop(); timer.Dispose();
                 copyReset.Stop(); copyReset.Dispose();

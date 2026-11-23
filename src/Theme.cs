@@ -23,6 +23,13 @@ namespace FeiqLight
         public static Color Danger = Color.FromArgb(225, 62, 62);
         public static Color ScrollThumb = Color.FromArgb(23, 33, 43);
         public static Color Online = Color.FromArgb(60, 179, 79);
+        public static Color SurfaceContainerLow = Color.FromArgb(247, 249, 252);
+        public static Color SurfaceContainerHigh = Color.FromArgb(232, 237, 242);
+        public static Color Canvas = Color.FromArgb(234, 239, 244);
+        public static Color OutlineVariant = Color.FromArgb(223, 229, 235);
+        public static Color OnPrimaryContainer = Color.FromArgb(16, 88, 158);
+        public static Color DangerSurface = Color.FromArgb(252, 236, 236);
+        public static Color DangerInk = Color.FromArgb(168, 34, 34);
         public static Color[] WallpaperColors = { Color.FromArgb(214, 233, 250), Color.FromArgb(198, 214, 246), Color.FromArgb(203, 229, 238), Color.FromArgb(219, 214, 245) };
         public static bool Dark { get; private set; }
         public static bool SystemDark {
@@ -71,6 +78,13 @@ namespace FeiqLight
             Danger=dark?Color.FromArgb(255,110,110):Color.FromArgb(225,62,62);
             ScrollThumb=dark?Color.FromArgb(200,210,220):Color.FromArgb(40,50,60);
             Online=dark?Color.FromArgb(88,196,104):Color.FromArgb(60,179,79);
+            SurfaceContainerLow=dark?Blend(Ice,Surface,.46F):Blend(Ice,Surface,.52F);
+            SurfaceContainerHigh=dark?Blend(Ink,Line,.08F):Blend(Line,Surface,.78F);
+            Canvas=dark?Blend(Color.Black,Surface,.28F):Blend(Line,Ice,.45F);
+            OutlineVariant=dark?Blend(Ink,Line,.10F):Blend(Ink,Line,.04F);
+            OnPrimaryContainer=dark?Blend(Color.White,Blue,.32F):Blend(Ink,Blue,.58F);
+            DangerSurface=Blend(Danger,Surface,dark?.18F:.09F);
+            DangerInk=dark?Blend(Color.White,Danger,.28F):Blend(Ink,Danger,.72F);
         }
         internal static Color Hex(string value) { return ColorTranslator.FromHtml(value); }
         public static Color Blend(Color foreground, Color background, float amount)
@@ -84,8 +98,8 @@ namespace FeiqLight
         public static Color ServiceFill { get { return Color.FromArgb(Dark?150:165,Blend(Color.Black,Wallpaper,Dark?.45F:.42F)); } }
         public static void Change(bool dark,string accent)
         {
-            Color[] old={Blue,Surface,Ink,Muted,Ice,Line,Wallpaper,Sky,Outgoing,Hover};Configure(dark,accent);
-            Color[] next={Blue,Surface,Ink,Muted,Ice,Line,Wallpaper,Sky,Outgoing,Hover};
+            Color[] old={Blue,Surface,Ink,Muted,Ice,Line,Wallpaper,Sky,Outgoing,Hover,SurfaceContainerLow,SurfaceContainerHigh,Canvas,OutlineVariant,DangerSurface,Danger,OnPrimaryContainer,DangerInk};Configure(dark,accent);
+            Color[] next={Blue,Surface,Ink,Muted,Ice,Line,Wallpaper,Sky,Outgoing,Hover,SurfaceContainerLow,SurfaceContainerHigh,Canvas,OutlineVariant,DangerSurface,Danger,OnPrimaryContainer,DangerInk};
             foreach(Form form in Application.OpenForms) if(!form.IsDisposed) Recolor(form,old,next);
             Action handler=Changed;if(handler!=null)handler();
         }
@@ -97,10 +111,11 @@ namespace FeiqLight
             Color back=control.BackColor,fore=control.ForeColor;
             if(back.ToArgb()==old[0].ToArgb())control.BackColor=next[0];
             else if(back.ToArgb()==old[1].ToArgb())control.BackColor=next[1];
-            else for(int i=4;i<old.Length;i++)if(back.ToArgb()==old[i].ToArgb()){control.BackColor=next[i];break;}
+            else for(int i=4;i<=15;i++)if(back.ToArgb()==old[i].ToArgb()){control.BackColor=next[i];break;}
             if(fore.ToArgb()==old[2].ToArgb())control.ForeColor=next[2];
             else if(fore.ToArgb()==old[3].ToArgb())control.ForeColor=next[3];
             else if(fore.ToArgb()==old[0].ToArgb())control.ForeColor=next[0];
+            else for(int i=15;i<old.Length;i++)if(fore.ToArgb()==old[i].ToArgb()){control.ForeColor=next[i];break;}
             RoundedPanel panel=control as RoundedPanel;if(panel!=null){for(int i=0;i<old.Length;i++){if(panel.Fill==old[i])panel.Fill=next[i];if(panel.Border==old[i])panel.Border=next[i];}}
             RoundedButton rounded=control as RoundedButton;if(rounded!=null){Color buttonBorder=rounded.Border;if(!buttonBorder.IsEmpty)for(int i=0;i<old.Length;i++)if(buttonBorder==old[i]){rounded.Border=next[i];break;}}
             if(control.ContextMenuStrip!=null){control.ContextMenuStrip.BackColor=Surface;control.ContextMenuStrip.ForeColor=Ink;}
@@ -364,6 +379,12 @@ namespace FeiqLight
                     case "sun": g.DrawEllipse(p, 8, 8, 8, 8); for (int k = 0; k < 8; k++) { PointF a = Polar(6.2, k * 45), c = Polar(8.6, k * 45); g.DrawLine(p, a, c); } break;
                     case "arrow-down": g.DrawLines(p, new[] { new PointF(6.5F, 10), new PointF(12, 15.5F), new PointF(17.5F, 10) }); break;
                     case "arrow-up": g.DrawLine(p, 12, 19, 12, 5.5F); g.DrawLines(p, new[] { new PointF(6.5F, 11), new PointF(12, 5.5F), new PointF(17.5F, 11) }); break;
+                    case "qr":
+                        foreach (PointF c in new[] { new PointF(4, 4), new PointF(14, 4), new PointF(4, 14) })
+                            using (GraphicsPath sq = RoundedF(new RectangleF(c.X, c.Y, 6, 6), 1.2F)) g.DrawPath(p, sq);
+                        g.FillRectangle(b, 6, 6, 2, 2); g.FillRectangle(b, 16, 6, 2, 2); g.FillRectangle(b, 6, 16, 2, 2);
+                        g.FillRectangle(b, 14, 14, 2.4F, 2.4F); g.FillRectangle(b, 18, 14, 2.4F, 2.4F); g.FillRectangle(b, 14, 18, 2.4F, 2.4F); g.FillRectangle(b, 18, 18, 2.4F, 2.4F);
+                        break;
                     // 以下仅用于聊天壁纸涂鸦。
                     case "heart": using (GraphicsPath heart = new GraphicsPath()) { heart.AddBezier(12, 20, 5, 15.5F, 3, 12, 3, 8.8F); heart.AddBezier(3, 8.8F, 3, 6, 5.2F, 4, 7.8F, 4); heart.AddBezier(7.8F, 4, 9.6F, 4, 11.2F, 5.1F, 12, 6.8F); heart.AddBezier(12, 6.8F, 12.8F, 5.1F, 14.4F, 4, 16.2F, 4); heart.AddBezier(16.2F, 4, 18.8F, 4, 21, 6, 21, 8.8F); heart.AddBezier(21, 8.8F, 21, 12, 19, 15.5F, 12, 20); g.DrawPath(p, heart); } break;
                     case "star": { PointF[] star = new PointF[10]; for (int k = 0; k < 10; k++) star[k] = Polar(k % 2 == 0 ? 9.5 : 4.2, k * 36 - 90); using (GraphicsPath shape = new GraphicsPath()) { shape.AddPolygon(star); g.DrawPath(p, shape); } } break;
@@ -527,8 +548,8 @@ namespace FeiqLight
     {
         public string Glyph = "";
         public int Radius = Theme.ControlRadius;
-        // 标签样式：无底色，激活时强调色文字与指示条由容器绘制；Badge 为未读计数；PlainHover 仅调整前景色不画悬停底色。
-        public bool Tab, Active, PlainHover;
+        // 标签样式：无底色，激活时强调色文字与指示条由容器绘制；Badge 为未读计数；PlainHover 仅调整前景色不画悬停底色；ShowLabel 并排绘制图标与文字。
+        public bool Tab, Active, PlainHover, ShowLabel;
         public int Badge;
         // 窗口关闭键等特殊悬停色与可选圆角边框；为空时按底色自动加深、不画外框。
         public Color HoverBack = Color.Empty, HoverFore = Color.Empty, Border = Color.Empty;
@@ -619,10 +640,22 @@ namespace FeiqLight
             if (Tab) color = Active ? Theme.Blue : Motion.Mix(Theme.Muted, Theme.Ink, h);
             else if (!HoverFore.IsEmpty && Enabled) color = Motion.Mix(ForeColor, HoverFore, h);
             else if (PlainHover && Enabled) color = Motion.Mix(ForeColor, Theme.Ink, h);
-            if (Glyph.Length > 0)
+            if (Glyph.Length > 0 && !ShowLabel)
             {
                 float icon = Math.Min(22 * scale, Math.Min(Width, Height) - 10 * scale) * (float)(1 - .06 * press.Value);
                 Theme.Glyph(g, Glyph, new RectangleF((Width - icon) / 2F, (Height - icon) / 2F, icon, icon), color);
+                return;
+            }
+            if (Glyph.Length > 0 && ShowLabel)
+            {
+                float icon = Math.Min(16 * scale, Height - 12 * scale);
+                Size label = TextRenderer.MeasureText(g, Text, Font, Size.Empty, TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
+                int gap = (int)Math.Round(6 * scale);
+                int totalW = (int)Math.Round(icon) + gap + label.Width;
+                int left = Math.Max((int)Math.Round(8 * scale), (Width - totalW) / 2);
+                Theme.Glyph(g, Glyph, new RectangleF(left, (Height - icon) / 2F, icon, icon), color);
+                Rectangle labelRect = new Rectangle(left + (int)Math.Round(icon) + gap, 0, Math.Max(1, Width - (left + (int)Math.Round(icon) + gap) - (int)Math.Round(6 * scale)), Height);
+                TextRenderer.DrawText(g, Text, Font, labelRect, color, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
                 return;
             }
             Rectangle text = new Rectangle(1, 1, Math.Max(2, Width - 2), Math.Max(2, Height - 2));

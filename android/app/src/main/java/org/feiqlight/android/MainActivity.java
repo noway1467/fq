@@ -1476,7 +1476,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
     }
     private void confirm(String title,String body,String action,Runnable confirm) {
         LinearLayout panel=column();
-        TextView content=text(body,14,MUTED); content.setLineSpacing(dp(4),1f); content.setPadding(dp(2),dp(2),dp(2),dp(16)); panel.addView(content);
+        TextView content=text(body,15,blend(INK,MUTED,.82f)); content.setLineSpacing(dp(5),1f); content.setPadding(dp(2),dp(2),dp(2),dp(16)); panel.addView(content);
         LinearLayout actions=row();
         Button cancel=button("取消",false);
         GradientDrawable cancelBg=shape(PALE,CONTROL_RADIUS); cancelBg.setStroke(dp(1),LINE);

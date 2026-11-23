@@ -4,30 +4,140 @@ using System.Drawing.Drawing2D;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
 using System.Windows.Forms;
 
 namespace FeiqLight
 {
     internal static class DialogLayout
     {
-        // 只读详情框：保留原生拖选、Ctrl+C/Ctrl+A 与滚轮，隐藏会让人误以为输入框的闪烁插入符。
+        private static readonly Font ProseFont = new Font("Microsoft YaHei UI", 9.5F);
+        private static readonly Font EmphasisFont = new Font("Microsoft YaHei UI", 9.5F, FontStyle.Bold);
+        private static readonly Font MonoFont = new Font("Consolas", 9F);
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct PARAFORMAT2
+        {
+            public int cbSize;
+            public uint dwMask;
+            public ushort wNumbering;
+            public ushort wReserved;
+            public int dxStartIndent;
+            public int dxRightIndent;
+            public int dxOffset;
+            public ushort wAlignment;
+            public short cTabCount;
+            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 32)]
+            public int[] rgxTabs;
+            public int dySpaceBefore;
+            public int dySpaceAfter;
+            public int dyLineSpacing;
+            public short sStyle;
+            public byte bLineSpacingRule;
+            public byte bOutlineLevel;
+            public ushort wShadingWeight;
+            public ushort wShadingStyle;
+            public ushort wNumberingStart;
+            public ushort wNumberingStyle;
+            public ushort wNumberingTab;
+            public ushort wBorderSpace;
+            public ushort wBorderWidth;
+            public ushort wBorders;
+        }
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern IntPtr SendMessage(IntPtr handle, int msg, IntPtr w, ref PARAFORMAT2 pf);
+
+        // 只读详情框：保留原生拖选、Ctrl+C/Ctrl+A 与滚轮，隐藏闪烁插入符；支持 MD3 行距与重点文本修饰。
         private sealed class ReadOnlyDetailsBox : RichTextBox
         {
-            [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern bool HideCaret(IntPtr handle);
-            internal ReadOnlyDetailsBox()
+            [DllImport("user32.dll")] private static extern bool HideCaret(IntPtr handle);
+            private readonly bool formatted;
+
+            internal ReadOnlyDetailsBox(bool formatted)
             {
+                this.formatted = formatted;
                 ReadOnly = true; BorderStyle = BorderStyle.None; DetectUrls = false; TabStop = false; Cursor = Cursors.IBeam;
             }
             private void SuppressCaret() { if (IsHandleCreated) HideCaret(Handle); }
+            protected override void OnHandleCreated(EventArgs e)
+            {
+                base.OnHandleCreated(e);
+                if (formatted) ApplyTypography();
+                SuppressCaret();
+            }
             protected override void OnGotFocus(EventArgs e) { base.OnGotFocus(e); SuppressCaret(); }
             protected override void OnMouseDown(MouseEventArgs e) { base.OnMouseDown(e); SuppressCaret(); }
             protected override void OnMouseUp(MouseEventArgs e) { base.OnMouseUp(e); SuppressCaret(); }
             protected override void OnSelectionChanged(EventArgs e) { base.OnSelectionChanged(e); SuppressCaret(); }
             protected override void WndProc(ref Message m) { base.WndProc(ref m); if (m.Msg == 0x0007 || m.Msg == 0x0201 || m.Msg == 0x0202) SuppressCaret(); }
+
+            private void ApplyTypography()
+            {
+                string raw = Text;
+                if (String.IsNullOrEmpty(raw)) return;
+                // RichEdit 内部按单个换行符计算字符索引，先规整 \r\n 避免高亮与分段偏移错位。
+                string normalized = raw.Replace("\r\n", "\n").Replace('\r', '\n');
+                PARAFORMAT2 pf = new PARAFORMAT2();
+                pf.cbSize = Marshal.SizeOf(typeof(PARAFORMAT2));
+                pf.dwMask = 0x00000100; // PFM_LINESPACING
+                pf.bLineSpacingRule = 5;
+                pf.dyLineSpacing = 27; // 1.35x 行距
+                SelectAll();
+                SelectionFont = ProseFont;
+                SelectionColor = Theme.Ink;
+                SendMessage(Handle, 0x0447, IntPtr.Zero, ref pf);
+
+                // 修饰次要解释性分句与路径/IP/快捷键，突出重点而不更改实际 Text 内容。
+                Color secondary = Theme.Blend(Theme.Ink, Theme.Muted, .60F);
+                int semi = normalized.IndexOf('；');
+                int breakIdx = normalized.IndexOf('\n');
+                if (semi > 0 && semi + 1 < normalized.Length && (breakIdx < 0 || semi < breakIdx))
+                {
+                    Select(semi, normalized.Length - semi);
+                    SelectionColor = secondary;
+                }
+                else
+                {
+                    int comma = normalized.IndexOf('，');
+                    if (comma > 0 && normalized.Length - comma > 10 && breakIdx < 0)
+                    {
+                        Select(comma, normalized.Length - comma);
+                        SelectionColor = secondary;
+                    }
+                    else if (breakIdx > 0 && breakIdx + 1 < normalized.Length)
+                    {
+                        string firstLine = normalized.Substring(0, breakIdx).Trim();
+                        bool firstIsPath = firstLine.Contains("\\") || firstLine.Contains(":/") || Regex.IsMatch(firstLine, @"^\d+\.\d+\.\d+\.\d+");
+                        if (firstIsPath)
+                        {
+                            Select(0, breakIdx);
+                            SelectionColor = Theme.OnPrimaryContainer;
+                        }
+                        Select(breakIdx + 1, normalized.Length - breakIdx - 1);
+                        SelectionColor = firstIsPath ? Theme.Ink : secondary;
+                    }
+                }
+                foreach (Match m in Regex.Matches(normalized, @"(Ctrl\+Alt\+F12|(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?|[「『][^」』]{1,32}[」』])"))
+                {
+                    Select(m.Index, m.Length);
+                    SelectionFont = m.Value.StartsWith("「") || m.Value.StartsWith("『") ? EmphasisFont : MonoFont;
+                    SelectionColor = Theme.OnPrimaryContainer;
+                }
+                foreach (Match m in Regex.Matches(normalized, @"(?<=^|[，；\n\s])(?:这台电脑|本机|不可恢复|无法撤销)"))
+                {
+                    Select(m.Index, m.Length);
+                    SelectionFont = EmphasisFont;
+                    SelectionColor = Theme.Ink;
+                }
+                Select(0, 0);
+            }
         }
+
         internal static Panel Body(ModernWindow window)
         {
-            Panel body = new Panel { Dock = DockStyle.Fill, Padding = new Padding(22, 6, 22, 12) };
+            Panel body = new Panel { Dock = DockStyle.Fill, Padding = new Padding(24, 4, 24, 14) };
             window.Surface.Controls.Add(body); return body;
         }
         internal static void StyleSecondary(Button button)
@@ -35,48 +145,36 @@ namespace FeiqLight
             RoundedButton rounded = button as RoundedButton;
             button.BackColor = Theme.Surface;
             button.ForeColor = Theme.Ink;
-            if (rounded != null) rounded.Border = Theme.Line;
+            if (rounded != null) { rounded.Border = Theme.OutlineVariant; rounded.Radius = 8; }
         }
         internal static void Actions(ModernWindow window, Button primary, Button secondary = null)
         {
-            Panel footer = new Panel { Dock = DockStyle.Bottom, Height = 60, Padding = new Padding(22, 12, 22, 12), BackColor = Theme.Surface };
-            footer.Paint += delegate(object sender, PaintEventArgs e) { using (Pen line = new Pen(Theme.Line)) e.Graphics.DrawLine(line, 0, 0, footer.Width, 0); };
-            FlowLayoutPanel row = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, WrapContents = false, Margin = Padding.Empty };
+            Panel footer = new Panel { Dock = DockStyle.Bottom, Height = 62, Padding = new Padding(24, 12, 24, 12), BackColor = Theme.SurfaceContainerLow };
+            footer.Paint += delegate(object sender, PaintEventArgs e) { using (Pen line = new Pen(Theme.OutlineVariant)) e.Graphics.DrawLine(line, 0, 0, footer.Width, 0); };
+            FlowLayoutPanel row = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, WrapContents = false, Margin = Padding.Empty, BackColor = Theme.SurfaceContainerLow };
+            RoundedButton primaryRounded = primary as RoundedButton;
+            if (primaryRounded != null) primaryRounded.Radius = 8;
             if (secondary != null) StyleSecondary(secondary);
             foreach (Button button in new[] { primary, secondary }.Where(b => b != null))
             {
-                button.Size = new Size(Math.Max(84, TextRenderer.MeasureText(button.Text, button.Font).Width + 34), 36);
+                button.Size = new Size(Math.Max(88, TextRenderer.MeasureText(button.Text, button.Font).Width + 36), 36);
                 button.Margin = new Padding(10, 0, 0, 0); row.Controls.Add(button);
             }
             footer.Controls.Add(row); window.Surface.Controls.Add(footer); window.AcceptButton = primary; window.CancelButton = secondary ?? primary;
         }
-        internal static int MeasureBodyHeight(string text, int width)
+        internal static int MeasureBodyHeight(string text, int width, bool prose = false)
         {
-            return TextRenderer.MeasureText(text ?? "", Theme.Body, new Size(Math.Max(120, width), Int32.MaxValue), TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl | TextFormatFlags.NoPrefix).Height;
+            Font font = prose ? ProseFont : Theme.Body;
+            int raw = TextRenderer.MeasureText(text ?? "", font, new Size(Math.Max(120, width), Int32.MaxValue), TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl | TextFormatFlags.NoPrefix).Height;
+            return prose ? (int)Math.Ceiling(raw * 1.44) + 12 : raw;
         }
-        internal static Control Badge(string glyph, Color tone)
-        {
-            Panel host = new Panel { Dock = DockStyle.Left, Width = 48, Margin = Padding.Empty, BackColor = Theme.Surface };
-            host.Paint += delegate(object sender, PaintEventArgs e)
-            {
-                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-                float scale = e.Graphics.DpiX / 96F;
-                float box = 36F * scale;
-                RectangleF chip = new RectangleF(0, 2F * scale, box, box);
-                Color fill = Theme.Blend(tone, Theme.Surface, Theme.Dark ? .26F : .13F);
-                using (GraphicsPath path = Theme.RoundedF(chip, 10F * scale)) using (SolidBrush brush = new SolidBrush(fill)) e.Graphics.FillPath(brush, path);
-                float inset = 8F * scale;
-                Theme.Glyph(e.Graphics, glyph, new RectangleF(chip.Left + inset, chip.Top + inset, chip.Width - inset * 2F, chip.Height - inset * 2F), tone);
-            };
-            return host;
-        }
-        internal static Control ReadOnlyText(string text, string accessible, bool framed)
+        internal static Control ReadOnlyText(string text, string accessible, bool framed, Action<int> onContentHeight = null)
         {
             Color surface = framed ? Theme.Ice : Theme.Surface;
-            ReadOnlyDetailsBox details = new ReadOnlyDetailsBox
+            ReadOnlyDetailsBox details = new ReadOnlyDetailsBox(!framed)
             {
-                Dock = DockStyle.Fill, Text = text ?? "", Font = Theme.Body, BackColor = surface,
-                ForeColor = framed ? Theme.Ink : Theme.Blend(Theme.Ink, Theme.Muted, .82F),
+                Dock = DockStyle.Fill, Text = text ?? "", Font = framed ? Theme.Body : ProseFont, BackColor = surface,
+                ForeColor = Theme.Ink,
                 ScrollBars = framed ? RichTextBoxScrollBars.Vertical : RichTextBoxScrollBars.None,
                 AccessibleName = accessible
             };
@@ -84,25 +182,35 @@ namespace FeiqLight
             if (!framed)
             {
                 Panel wrap = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Surface, Padding = new Padding(0, 2, 0, 2) };
+                if (onContentHeight != null)
+                {
+                    bool adjusting = false;
+                    details.ContentsResized += delegate(object sender, ContentsResizedEventArgs e)
+                    {
+                        if (adjusting || e.NewRectangle.Height <= 0) return;
+                        adjusting = true;
+                        try { onContentHeight(e.NewRectangle.Height + wrap.Padding.Vertical); }
+                        finally { adjusting = false; }
+                    };
+                }
                 wrap.Controls.Add(details); return wrap;
             }
-            RoundedPanel card = new RoundedPanel { Dock = DockStyle.Fill, Fill = Theme.Ice, Border = Theme.Line, Radius = Theme.ControlRadius, Padding = new Padding(12, 10, 10, 10) };
+            RoundedPanel card = new RoundedPanel { Dock = DockStyle.Fill, Fill = Theme.Ice, Border = Color.Empty, Radius = 8, Padding = new Padding(14, 12, 10, 12) };
             card.Controls.Add(details); return card;
+        }
+        internal static void FitTextHeight(Form form, Control wrap, int neededHeight, int maxHeight)
+        {
+            if (form.IsDisposed || wrap.IsDisposed || !wrap.IsHandleCreated) return;
+            int delta = neededHeight + 6 - wrap.Height;
+            if (delta <= 2) return;
+            int target = Math.Min(maxHeight, form.ClientSize.Height + delta);
+            if (target > form.ClientSize.Height) form.ClientSize = new Size(form.ClientSize.Width, target);
         }
         internal static RoundedPanel OptionCard(ToggleSwitch toggle)
         {
             toggle.Dock = DockStyle.Fill; toggle.BackColor = Theme.Ice;
-            RoundedPanel card = new RoundedPanel { Dock = DockStyle.Bottom, Height = 46, Fill = Theme.Ice, Border = Theme.Line, Radius = Theme.ControlRadius, Padding = new Padding(14, 2, 12, 2), Margin = new Padding(0, 8, 0, 0) };
+            RoundedPanel card = new RoundedPanel { Dock = DockStyle.Bottom, Height = 46, Fill = Theme.Ice, Border = Color.Empty, Radius = 8, Padding = new Padding(14, 2, 12, 2), Margin = new Padding(0, 8, 0, 0) };
             card.Controls.Add(toggle); return card;
-        }
-        internal static string SemanticGlyph(string title, bool danger)
-        {
-            string value = title ?? "";
-            if (danger) return value.Contains("删除") || value.Contains("清空") || value.Contains("清除") ? "trash" : "alert";
-            if (value.Contains("远程") || value.Contains("远控")) return "monitor";
-            if (value.Contains("配对") || value.Contains("信任") || value.Contains("安全")) return "shield";
-            if (value.Contains("无法") || value.Contains("失败") || value.Contains("错误") || value.Contains("无效")) return "alert";
-            return "info";
         }
     }
     internal sealed class ConfirmDialog : ModernWindow
@@ -111,18 +219,18 @@ namespace FeiqLight
         internal bool OptionChecked { get { return option != null && option.Checked; } }
         internal ConfirmDialog(string title, string text, string confirm, bool danger, string optionText = null)
         {
-            int measured = DialogLayout.MeasureBodyHeight(text, 344);
-            bool framed = measured > 128 || (text ?? "").Length > 220;
-            int width = framed ? 512 : 440;
-            int contentHeight = Math.Max(44, Math.Min(240, measured + (framed ? 28 : 14)));
+            int rawMeasured = DialogLayout.MeasureBodyHeight(text, 404, false);
+            bool framed = rawMeasured > 140 || (text ?? "").Length > 240;
+            int width = framed ? 512 : 452;
+            int measured = DialogLayout.MeasureBodyHeight(text, width - 48, !framed);
+            int contentHeight = Math.Max(34, Math.Min(240, measured + (framed ? 26 : 4)));
             int optionHeight = optionText == null ? 0 : 56;
             Text = title; ResizeWindow = false;
-            ClientSize = new Size(width, Math.Max(176, Math.Min(468, 126 + contentHeight + optionHeight)));
-            MinimumSize = new Size(368, 172); StartPosition = FormStartPosition.CenterParent;
+            ClientSize = new Size(width, Math.Max(154, Math.Min(476, 128 + contentHeight + optionHeight)));
+            MinimumSize = new Size(340, 150); StartPosition = FormStartPosition.CenterParent;
             Panel body = DialogLayout.Body(this);
-            Panel content = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Surface };
-            content.Controls.Add(DialogLayout.ReadOnlyText(text, "确认详情", framed));
-            if (!framed) content.Controls.Add(DialogLayout.Badge(DialogLayout.SemanticGlyph(title, danger), danger ? Theme.Danger : Theme.Blue));
+            Control content = null;
+            content = DialogLayout.ReadOnlyText(text, "确认详情", framed, h => DialogLayout.FitTextHeight(this, content, h, 490));
             body.Controls.Add(content);
             if (optionText != null)
             {
@@ -150,9 +258,9 @@ namespace FeiqLight
             Label title=Theme.Label("飞Q",Theme.Title,Theme.Ink);title.Font=new Font(Theme.Body.FontFamily,16F,FontStyle.Bold);title.Dock=DockStyle.Fill;brand.Controls.Add(title,1,0);
             Label version=Theme.Label("Windows  "+typeof(AboutDialog).Assembly.GetName().Version.ToString(3),Theme.Small,Theme.Muted);version.Dock=DockStyle.Fill;brand.Controls.Add(version,1,1);body.Controls.Add(brand,0,0);
             Label intro=Theme.Label("局域网聊天与文件传输 · 无需服务器",Theme.Body,Theme.Muted);intro.Dock=DockStyle.Fill;intro.Margin=Padding.Empty;body.Controls.Add(intro,0,1);
-            RoundedPanel card=new RoundedPanel {Dock=DockStyle.Fill,Fill=Theme.Ice,Border=Theme.Line,Radius=Theme.ControlRadius,Padding=new Padding(14,8,14,8),Margin=new Padding(0,4,0,8)};
+            RoundedPanel card=new RoundedPanel {Dock=DockStyle.Fill,Fill=Theme.Ice,Border=Color.Empty,Radius=8,Padding=new Padding(14,8,14,8),Margin=new Padding(0,4,0,8)};
             Panel sourceIcon=new Panel {Dock=DockStyle.Left,Width=36,BackColor=Theme.Ice};sourceIcon.Paint+=delegate(object sender,PaintEventArgs e){Theme.Glyph(e.Graphics,"code",new Rectangle(0,(sourceIcon.Height-24)/2,24,24),Theme.Blue);};
-            LinkLabel repository=new LinkLabel {Dock=DockStyle.Fill,Text="GitHub 仓库\ngithub.com/noway1467/fq",Font=Theme.Body,BackColor=Theme.Ice,LinkColor=Theme.Blue,ActiveLinkColor=Theme.Blue,VisitedLinkColor=Theme.Blue,TextAlign=ContentAlignment.MiddleLeft,LinkBehavior=LinkBehavior.HoverUnderline,AccessibleName="GitHub 仓库：github.com/noway1467/fq"};repository.Links.Add(0,repository.Text.Length,RepositoryUrl);repository.LinkClicked+=delegate {MessageLinks.Open(repository,RepositoryUrl);};card.Controls.Add(repository);card.Controls.Add(sourceIcon);body.Controls.Add(card,0,2);
+            LinkLabel repository=new LinkLabel {Dock=DockStyle.Fill,Text="GitHub 仓库\ngithub.com/noway1467/fq",Font=Theme.Body,BackColor=Theme.Ice,LinkColor=Theme.OnPrimaryContainer,ActiveLinkColor=Theme.Blue,VisitedLinkColor=Theme.OnPrimaryContainer,TextAlign=ContentAlignment.MiddleLeft,LinkBehavior=LinkBehavior.HoverUnderline,AccessibleName="GitHub 仓库：github.com/noway1467/fq"};repository.Links.Add(0,repository.Text.Length,RepositoryUrl);repository.LinkClicked+=delegate {MessageLinks.Open(repository,RepositoryUrl);};card.Controls.Add(repository);card.Controls.Add(sourceIcon);body.Controls.Add(card,0,2);
             Label note=Theme.Label("新版设备默认 TLS 加密 · 首次核对配对码\n内置表情与头像：Twemoji · CC BY 4.0\n© Twitter, Inc. 及贡献者；许可随程序内置。",Theme.Small,Theme.Muted);note.Dock=DockStyle.Fill;note.Margin=Padding.Empty;body.Controls.Add(note,0,3);
             Surface.Controls.Add(body);
             Button done=Theme.Button("确定",delegate {DialogResult=DialogResult.OK;},true);
@@ -166,25 +274,21 @@ namespace FeiqLight
         public NoticeDialog(string title, string text, string linkText, string linkUrl)
         {
             bool hasLink = !String.IsNullOrWhiteSpace(linkText) && !String.IsNullOrWhiteSpace(linkUrl);
-            int measured = DialogLayout.MeasureBodyHeight(text, 344);
-            bool framed = measured > 128 || (text ?? "").Length > 240;
-            int width = framed ? 528 : 440;
-            int contentHeight = Math.Max(44, Math.Min(290, measured + (framed ? 30 : 14)));
+            int rawMeasured = DialogLayout.MeasureBodyHeight(text, 404, false);
+            bool framed = rawMeasured > 140 || (text ?? "").Length > 240;
+            int width = framed ? 528 : 452;
+            int measured = DialogLayout.MeasureBodyHeight(text, width - 48, !framed);
+            int contentHeight = Math.Max(34, Math.Min(290, measured + (framed ? 28 : 4)));
             Text = title; ResizeWindow = false;
-            ClientSize = new Size(width, Math.Max(176, Math.Min(468, 126 + contentHeight + (hasLink ? 34 : 0))));
-            MinimumSize = new Size(368, 172); StartPosition = FormStartPosition.CenterParent;
+            ClientSize = new Size(width, Math.Max(154, Math.Min(476, 128 + contentHeight + (hasLink ? 34 : 0))));
+            MinimumSize = new Size(340, 150); StartPosition = FormStartPosition.CenterParent;
             Panel body = DialogLayout.Body(this);
-            Panel content = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Surface };
-            content.Controls.Add(DialogLayout.ReadOnlyText(text, "提示详情", framed));
-            if (!framed)
-            {
-                string glyph = DialogLayout.SemanticGlyph(title, false);
-                content.Controls.Add(DialogLayout.Badge(glyph, glyph == "alert" ? Theme.Danger : Theme.Blue));
-            }
+            Control content = null;
+            content = DialogLayout.ReadOnlyText(text, "提示详情", framed, h => DialogLayout.FitTextHeight(this, content, h, 490));
             body.Controls.Add(content);
             if (hasLink)
             {
-                Panel linkPanel = new Panel { Dock = DockStyle.Bottom, Height = 34, Padding = new Padding(framed ? 0 : 48, 6, 0, 0) };
+                Panel linkPanel = new Panel { Dock = DockStyle.Bottom, Height = 34, Padding = new Padding(0, 6, 0, 0) };
                 LinkLabel link = new LinkLabel { Dock = DockStyle.Fill, Text = linkText, Font = Theme.Body, BackColor = Color.Transparent, LinkColor = Theme.Blue, ActiveLinkColor = Theme.Blue, VisitedLinkColor = Theme.Blue, TextAlign = ContentAlignment.MiddleLeft, AccessibleName = linkText };
                 link.Links.Add(0, link.Text.Length, linkUrl);
                 link.LinkClicked += delegate(object sender, LinkLabelLinkClickedEventArgs e) { MessageLinks.Open(link, e.Link.LinkData as string); };
@@ -203,7 +307,7 @@ namespace FeiqLight
                 BackColor = Theme.Ice, ForeColor = Theme.Ink, DetectUrls = false, HideSelection = false, ScrollBars = RichTextBoxScrollBars.Vertical,
                 Text = MessageText.NormalizeLineBreaks(text), AccessibleName = "消息全文（可选择复制）" };
             Theme.AttachEditMenu(content); Theme.ThemeScrollbars(content);
-            RoundedPanel card = new RoundedPanel { Dock = DockStyle.Fill, Fill = Theme.Ice, Border = Theme.Line, Radius = Theme.ControlRadius, Padding = new Padding(14, 12, 10, 10) };
+            RoundedPanel card = new RoundedPanel { Dock = DockStyle.Fill, Fill = Theme.Ice, Border = Color.Empty, Radius = 8, Padding = new Padding(14, 12, 10, 10) };
             card.Controls.Add(content);
             Panel frame = new Panel { Dock = DockStyle.Fill, Padding = new Padding(22, 8, 22, 12) }; frame.Controls.Add(card);
             Surface.Controls.Add(frame);
@@ -272,13 +376,14 @@ namespace FeiqLight
         private readonly ToggleSwitch history;
         public ConversationDialog(Peer peer, bool deleting, bool clearOnly = false)
         {
-            Text=clearOnly?"清空聊天记录":deleting?"删除联系人":"设置备注"; ResizeWindow=false; ClientSize=new Size(436,deleting?248:208); MinimumSize=new Size(368,196); StartPosition=FormStartPosition.CenterParent;
+            Text=clearOnly?"清空聊天记录":deleting?"删除联系人":"设置备注"; ResizeWindow=false;
+            string message=clearOnly?"仅清空本机聊天记录，已接收文件保留。":"仅从本机列表移除，已接收文件保留；收到新消息会自动恢复。";
+            int introHeight=deleting?Math.Max(38,DialogLayout.MeasureBodyHeight(message,408,true)+4):0;
+            ClientSize=new Size(456,deleting?194+introHeight:206); MinimumSize=new Size(368,188); StartPosition=FormStartPosition.CenterParent;
             Panel body=DialogLayout.Body(this);
             if(deleting) {
-                string message=clearOnly?"仅清空本机聊天记录，已接收文件保留。":"仅从本机列表移除，已接收文件保留；收到新消息会自动恢复。";
-                Panel intro=new Panel {Dock=DockStyle.Top,Height=48,BackColor=Theme.Surface,Margin=Padding.Empty};
-                Label hint=Theme.Label(message,Theme.Body,Theme.Muted);hint.Dock=DockStyle.Fill;hint.TextAlign=ContentAlignment.TopLeft;hint.Padding=new Padding(0,2,0,0);intro.Controls.Add(hint);
-                intro.Controls.Add(DialogLayout.Badge(clearOnly?"eraser":"trash",Theme.Danger));
+                Control intro=DialogLayout.ReadOnlyText(message,"操作说明",false);
+                intro.Dock=DockStyle.Top;intro.Height=introHeight;
                 body.Controls.Add(intro);
             } else {
                 Label caption=Theme.Label("备注名称",Theme.Section,Theme.Ink);caption.Dock=DockStyle.Top;caption.Height=26;body.Controls.Add(caption);
@@ -323,33 +428,34 @@ namespace FeiqLight
         public ForwardDialog(Peer[] peers, int attachments = 0)
         {
             Text = attachments<0?"恢复已移除的联系人":attachments>0?"转发 "+attachments+" 个附件":"转发到"; ClientSize = new Size(432, 456); MinimumSize = new Size(368, 320); ResizeWindow = false; StartPosition = FormStartPosition.CenterParent;
-            ListBox list = new ListBox { Dock = DockStyle.Fill, BorderStyle = BorderStyle.None, Font = Theme.Body, BackColor = Theme.Surface, ForeColor = Theme.Ink, IntegralHeight = false };
+            ListBox list = new ListBox { Dock = DockStyle.Fill, BorderStyle = BorderStyle.None, Font = Theme.Body, BackColor = Theme.SurfaceContainerLow, ForeColor = Theme.Ink, IntegralHeight = false };
             foreach (Peer peer in peers) list.Items.Add(peer.DisplayName + "  ·  " + peer.Endpoint);
-            list.DrawMode = DrawMode.OwnerDrawFixed; list.ItemHeight = 62;
+            list.DrawMode = DrawMode.OwnerDrawFixed; list.ItemHeight = 58;
             list.DrawItem += delegate(object sender, DrawItemEventArgs e) {
                 if (e.Index < 0) return; Peer peer = peers[e.Index]; bool selected = (e.State & DrawItemState.Selected) != 0; float scale = e.Graphics.DpiX / 96F;
                 e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-                using (SolidBrush clear = new SolidBrush(Theme.Surface)) e.Graphics.FillRectangle(clear, e.Bounds);
-                RectangleF card = new RectangleF(e.Bounds.Left + 2F * scale, e.Bounds.Top + 3F * scale, Math.Max(4F, e.Bounds.Width - 4F * scale), Math.Max(4F, e.Bounds.Height - 6F * scale));
-                using (GraphicsPath path = Theme.RoundedF(card, 9F * scale))
+                using (SolidBrush clear = new SolidBrush(Theme.SurfaceContainerLow)) e.Graphics.FillRectangle(clear, e.Bounds);
+                if (selected)
                 {
-                    using (SolidBrush brush = new SolidBrush(selected ? Theme.Sky : Theme.Ice)) e.Graphics.FillPath(brush, path);
-                    using (Pen border = new Pen(selected ? Theme.Blend(Theme.Blue, Theme.Surface, .5F) : Theme.Line)) e.Graphics.DrawPath(border, path);
+                    RectangleF card = new RectangleF(e.Bounds.Left + 4F * scale, e.Bounds.Top + 2F * scale, Math.Max(4F, e.Bounds.Width - 8F * scale), Math.Max(4F, e.Bounds.Height - 4F * scale));
+                    using (GraphicsPath path = Theme.RoundedF(card, 6F * scale))
+                    using (SolidBrush brush = new SolidBrush(Theme.Sky)) e.Graphics.FillPath(brush, path);
                 }
-                Bitmap avatar = Theme.CachedAvatar(40, peer.Id, false, peer.Avatar); e.Graphics.DrawImageUnscaled(avatar, (int)(card.Left + 10F * scale) - Theme.AvatarHalo(40), (int)(card.Top + (card.Height - 40) / 2F) - Theme.AvatarHalo(40));
-                int textLeft = (int)(card.Left + 60F * scale), textWidth = Math.Max(1, (int)(card.Right - textLeft - 12F * scale));
-                TextRenderer.DrawText(e.Graphics, peer.DisplayName, Theme.Section, new Rectangle(textLeft, (int)(card.Top + 8F * scale), textWidth, (int)(22 * scale)), Theme.Ink, TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
-                TextRenderer.DrawText(e.Graphics, (peer.DuplicateName?"#"+peer.ConversationNumber+" · ":"")+peer.Endpoint, Theme.Small, new Rectangle(textLeft, (int)(card.Top + 31F * scale), textWidth, (int)(20 * scale)), Theme.Muted, TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+                Bitmap avatar = Theme.CachedAvatar(40, peer.Id, false, peer.Avatar); e.Graphics.DrawImageUnscaled(avatar, e.Bounds.Left + (int)(12F * scale) - Theme.AvatarHalo(40), e.Bounds.Top + (e.Bounds.Height - 40) / 2 - Theme.AvatarHalo(40));
+                int textLeft = e.Bounds.Left + (int)(62F * scale), textWidth = Math.Max(1, e.Bounds.Right - textLeft - (int)(12F * scale));
+                TextRenderer.DrawText(e.Graphics, peer.DisplayName, Theme.Section, new Rectangle(textLeft, e.Bounds.Top + (int)(8F * scale), textWidth, (int)(22 * scale)), selected ? Theme.OnPrimaryContainer : Theme.Ink, TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+                TextRenderer.DrawText(e.Graphics, (peer.DuplicateName?"#"+peer.ConversationNumber+" · ":"")+peer.Endpoint, Theme.Small, new Rectangle(textLeft, e.Bounds.Top + (int)(30F * scale), textWidth, (int)(18 * scale)), Theme.Muted, TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+                if (!selected && e.Index < peers.Length - 1) using (Pen sep = new Pen(Theme.OutlineVariant)) e.Graphics.DrawLine(sep, textLeft, e.Bounds.Bottom - 1, e.Bounds.Right - (int)(12F * scale), e.Bounds.Bottom - 1);
                 if ((e.State & DrawItemState.Focus) != 0) e.DrawFocusRectangle();
             };
             Theme.ThemeScrollbars(list);
             Button send = Theme.Button(attachments<0?"恢复会话":"确认转发", delegate { if (list.SelectedIndex >= 0) { Target = peers[list.SelectedIndex]; DialogResult = DialogResult.OK; } }, true);
             Button cancel = Theme.Button("取消", delegate { DialogResult = DialogResult.Cancel; }, false);
             send.Enabled = false; list.SelectedIndexChanged += delegate { send.Enabled = list.SelectedIndex >= 0; };
-            Panel frame = new Panel { Dock = DockStyle.Fill, Padding = new Padding(20, 6, 20, 12) };
-            RoundedPanel listShell = new RoundedPanel { Dock = DockStyle.Fill, Fill = Theme.Surface, Border = Theme.Line, Radius = 12, Padding = new Padding(6) };
+            Panel frame = new Panel { Dock = DockStyle.Fill, Padding = new Padding(24, 4, 24, 14) };
+            RoundedPanel listShell = new RoundedPanel { Dock = DockStyle.Fill, Fill = Theme.SurfaceContainerLow, Border = Color.Empty, Radius = 8, Padding = new Padding(4) };
             if (peers.Length == 0) {
-                Label empty = Theme.Label(attachments<0?"没有已移除的联系人":"当前没有在线联系人", Theme.Body, Theme.Muted); empty.Dock = DockStyle.Fill; empty.TextAlign = ContentAlignment.MiddleCenter; listShell.Controls.Add(empty);
+                Label empty = Theme.Label(attachments<0?"没有已移除的联系人":"当前没有在线联系人", Theme.Body, Theme.Muted); empty.Dock = DockStyle.Fill; empty.BackColor = Theme.SurfaceContainerLow; empty.TextAlign = ContentAlignment.MiddleCenter; listShell.Controls.Add(empty);
             }
             listShell.Controls.Add(list);
             if (peers.Length == 0) list.Visible = false;
@@ -394,7 +500,7 @@ namespace FeiqLight
             content.RowStyles.Add(new RowStyle(SizeType.Absolute, 84));
             content.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
-            RoundedPanel topCard = new RoundedPanel { Dock = DockStyle.Fill, Fill = Theme.Ice, Border = Theme.Line, Radius = 12, Padding = new Padding(12, 8, 12, 8), Margin = new Padding(0, 0, 0, 10) };
+            RoundedPanel topCard = new RoundedPanel { Dock = DockStyle.Fill, Fill = Theme.Ice, Border = Color.Empty, Radius = 8, Padding = new Padding(12, 8, 12, 8), Margin = new Padding(0, 0, 0, 10) };
             TableLayoutPanel top = new TableLayoutPanel { Dock = DockStyle.Fill, BackColor = Theme.Ice, ColumnCount = 3, RowCount = 1, Margin = Padding.Empty };
             top.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 68)); top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50)); top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
             top.RowStyles.Add(new RowStyle(SizeType.Percent, 100));

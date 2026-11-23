@@ -41,7 +41,13 @@ public sealed class MainForm : ModernWindow
         }
         private void OpenGuest()
         {
-            try{if(guestWindow==null||guestWindow.IsDisposed)guestWindow=new GuestWindow(this,network);guestWindow.Show();if(guestWindow.WindowState==FormWindowState.Minimized)guestWindow.WindowState=FormWindowState.Normal;guestWindow.Activate();}
+            try
+            {
+                if(guestWindow==null||guestWindow.IsDisposed)guestWindow=new GuestWindow(this,network);
+                guestWindow.Show();
+                if(guestWindow.WindowState==FormWindowState.Minimized)guestWindow.WindowState=guestWindow.RestoreMaximized?FormWindowState.Maximized:FormWindowState.Normal;
+                guestWindow.Activate();
+            }
             catch(Exception e){OnError("临时传输未开启："+e.Message);}
         }
         private readonly Dictionary<string, ChatRecord> transferRecords = new Dictionary<string, ChatRecord>();
@@ -85,6 +91,13 @@ public sealed class MainForm : ModernWindow
             network.Settings.TransferWindow = placement;
             try { store.SaveSettings(network.Settings); }
             catch (Exception error) { status.Text = "传输窗口状态保存失败：" + error.Message; }
+        }
+        internal WindowPlacement GuestWindowPlacement { get { return network.Settings.GuestWindow; } }
+        internal void SaveGuestWindowPlacement(WindowPlacement placement)
+        {
+            network.Settings.GuestWindow = placement;
+            try { store.SaveSettings(network.Settings); }
+            catch (Exception error) { status.Text = "临时传输窗口状态保存失败：" + error.Message; }
         }
         private readonly List<ToolsGateway> gateways=new List<ToolsGateway>();
         private bool toolsRestored;
@@ -506,6 +519,7 @@ public sealed class MainForm : ModernWindow
             if (restoreFront && !IsDisposed) Activate();
             next.Window = previous.Window;
             next.TransferWindow = previous.TransferWindow;
+            next.GuestWindow = previous.GuestWindow;
             next.SidebarWidth = previous.SidebarWidth;
             next.KnownPeers = previous.KnownPeers;
             next.Conversations = previous.Conversations;
