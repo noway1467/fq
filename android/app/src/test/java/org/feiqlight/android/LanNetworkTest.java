@@ -355,7 +355,7 @@ public final class LanNetworkTest {
         assertFalse("绑定尚未被拒绝时不应允许默认路由重试",route.shouldRetryWithoutSourceBind(target));
         try(RecordingSocket socket=new RecordingSocket()){route.bind(socket,target);assertEquals(new InetSocketAddress("192.168.10.25",0),socket.source);}
         assertTrue(route.shouldRetryWithoutSourceBind(target));route.changed();assertTrue("同一网络的缓存刷新不能丢失绑定受限状态",route.shouldRetryWithoutSourceBind(target));
-        for(String address:new String[]{"192.168.10.255","192.168.99.42","10.8.0.2","8.8.8.8","255.255.255.255","127.0.0.1","::1"})
+        for(String address:new String[]{"192.168.10.0","192.168.10.25","192.168.10.255","192.168.99.42","10.8.0.2","8.8.8.8","255.255.255.255","127.0.0.1","::1"})
             assertFalse("不安全 TCP 重试目标："+address,route.shouldRetryWithoutSourceBind(InetAddress.getByName(address)));
         shadowOf(cm).removeNetwork(vpn);route.changed();assertFalse("无 VPN 时不得使用默认路由回退",route.shouldRetryWithoutSourceBind(target));
         add(cm,993,NetworkCapabilities.TRANSPORT_VPN,"198.18.0.1",16);shadowOf(cm).removeNetwork(wifi);add(cm,995,NetworkCapabilities.TRANSPORT_WIFI,"192.168.10.25",24);route.changed();
@@ -370,6 +370,29 @@ public final class LanNetworkTest {
         LanNetwork route=new LanNetwork(cm,NO_LOCAL);InetAddress target=InetAddress.getByName("192.168.10.42");
         try(Socket socket=new Socket(java.net.Proxy.NO_PROXY)){route.bind(socket,target);}
         assertFalse(route.shouldRetryWithoutSourceBind(target));
+    }
+    @Test @Config(shadows=BlockingBindNetwork.class)
+    public void vpnUnicastSkipsSubnetEndpoints()throws Exception {
+        ConnectivityManager manager=RuntimeEnvironment.getApplication().getSystemService(ConnectivityManager.class);
+        for(boolean physical:new boolean[]{false,true})for(int prefix:new int[]{24,30}) {
+            shadowOf(manager).clearAllNetworks();add(manager,9992,NetworkCapabilities.TRANSPORT_VPN,"198.18.0.1",16);
+            if(physical)add(manager,9993,NetworkCapabilities.TRANSPORT_WIFI,"192.168.10.25",prefix);
+            List<InetSocketAddress> sources=new ArrayList<>();List<SocketAddress> delivered=new ArrayList<>();List<DatagramSocket> created=new ArrayList<>();
+            LanNetwork route=new LanNetwork(manager,physical?NO_LOCAL:()->Collections.singletonList(iface("ap0",true,false,false,false,"192.168.10.25",prefix)),source->{
+                sources.add(source);DatagramSocket socket=new DatagramSocket((SocketAddress)null){@Override public void send(DatagramPacket packet)throws IOException{if(source!=null)throw new SocketException("模拟物理源绑定被VPN拒绝");delivered.add(packet.getSocketAddress());}};created.add(socket);return socket;
+            });
+            try(DatagramSocket receiver=new DatagramSocket((SocketAddress)null){@Override public void send(DatagramPacket packet){fail("未绑定的接收 socket 不能发送");}}) {
+                route.bind(receiver);InetAddress peer=InetAddress.getByName(prefix==24?"192.168.10.42":"192.168.10.26");assertTrue(route.shouldRetryWithoutSourceBind(peer));
+                String network=prefix==24?"192.168.10.0":"192.168.10.24",broadcast=prefix==24?"192.168.10.255":"192.168.10.27";
+                for(String address:new String[]{network,"192.168.10.25",broadcast}) {
+                    InetAddress target=InetAddress.getByName(address);assertFalse("子网端点不能无源TCP重试："+address,route.shouldRetryWithoutSourceBind(target));sources.clear();
+                    assertThrows(IOException.class,()->route.send(receiver,new byte[]{1},new InetSocketAddress(target,2425)));assertEquals(Collections.singletonList(new InetSocketAddress("192.168.10.25",0)),sources);assertTrue("子网端点进入默认UDP路由",delivered.isEmpty());
+                }
+                for(String address:new String[]{"192.168.99.42","255.255.255.255"}) {sources.clear();assertFalse(route.shouldRetryWithoutSourceBind(InetAddress.getByName(address)));assertThrows(IOException.class,()->route.send(receiver,new byte[]{2},new InetSocketAddress(address,2425)));assertTrue(sources.isEmpty());}
+                sources.clear();route.send(receiver,new byte[]{3},new InetSocketAddress(peer,2425));assertEquals(Arrays.asList(new InetSocketAddress("192.168.10.25",0),null),sources);assertEquals(Collections.singletonList(new InetSocketAddress(peer,2425)),delivered);
+            }
+            for(DatagramSocket socket:created)assertTrue("重试socket未关闭",socket.isClosed());
+        }
     }
     @Test @Config(shadows=BlockingBindNetwork.class)
     public void recoveredBindOnSamePhysicalNetworkClearsUnboundRetryPermission()throws Exception {

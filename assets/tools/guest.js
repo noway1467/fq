@@ -73,7 +73,8 @@
   };
   function add(files) {
     if (ended) { message('本次传输已结束'); return; }
-    if (queue.length + files.length > 100 || queue.reduce((sum, t) => sum + t.file.size, 0) + [...files].reduce((sum, f) => sum + f.size, 0) > 10737418240) { message('本次最多接收100个文件、合计10 GiB，请分批开启'); return; }
+    const active = queue.filter(t => t.state !== 'canceled');
+    if (active.length + files.length > 100 || active.reduce((sum, t) => sum + t.file.size, 0) + [...files].reduce((sum, f) => sum + f.size, 0) > 10737418240) { message('本次最多接收100个文件、合计10 GiB，请分批开启'); return; }
     for (const file of files) {
       const view = row(file.name), bar = document.createElement('progress'); bar.max = file.size || 1; bar.value = 0; view.main.append(bar);
       const retry = document.createElement('button'); retry.textContent = '继续'; retry.className = 'soft'; retry.hidden = true;

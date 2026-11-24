@@ -156,46 +156,74 @@ public final class FileFeaturesTest {
         throw new IOException("未找到同时空闲的TCP/UDP测试端口");
     }
     private static File source(Context c,String text)throws Exception { File f=File.createTempFile("received-",".txt",c.getCacheDir()); Files.write(f.toPath(),text.getBytes(StandardCharsets.UTF_8)); return f; }
+    private static File receivedSource(Context context,String text)throws Exception {
+        File directory=new File(context.getFilesDir(),"received");assertTrue(directory.isDirectory()||directory.mkdirs());
+        File file=new File(directory,SharedFiles.random(32));Files.write(file.toPath(),text.getBytes(StandardCharsets.UTF_8));return file;
+    }
     private static void fails(Throwing action)throws Exception { try { action.run(); fail("操作应当被拒绝"); } catch(IOException|SecurityException expected) { } }
     private interface Throwing { void run()throws Exception; }
     public static final class Docs extends DocumentsProvider {
-        final Map<String,File> files=new LinkedHashMap<>(); final Map<String,String> names=new LinkedHashMap<>(); int sequence; boolean deny, failOpen, reuse, refuseDelete;
+        final Map<String,File> files=new LinkedHashMap<>();final Map<String,String> names=new LinkedHashMap<>(),parents=new LinkedHashMap<>();final Set<String> directories=new HashSet<>();
+        int sequence,missingResponse;boolean deny,failOpen,reuse,refuseDelete,corruptRead;CountDownLatch openedGate,releaseGate,queryGate,queryRelease;String blockedQuery;
         @Override public boolean onCreate() { return true; }
         private void check() { if(deny) throw new SecurityException("授权已撤销"); }
         private String[] columns(String[] p) { return p==null?new String[]{DocumentsContract.Document.COLUMN_DOCUMENT_ID,DocumentsContract.Document.COLUMN_DISPLAY_NAME,DocumentsContract.Document.COLUMN_MIME_TYPE,DocumentsContract.Document.COLUMN_FLAGS}:p; }
         private void row(MatrixCursor c,String id) { Object[] data=new Object[c.getColumnCount()]; String[] cols=c.getColumnNames(); for(int i=0;i<cols.length;i++) {
             if(cols[i].equals(DocumentsContract.Document.COLUMN_DOCUMENT_ID)) data[i]=id;
             else if(cols[i].equals(DocumentsContract.Document.COLUMN_DISPLAY_NAME)) data[i]=id.equals("root")?"测试接收目录":names.get(id);
-            else if(cols[i].equals(DocumentsContract.Document.COLUMN_MIME_TYPE)) data[i]=id.equals("root")?DocumentsContract.Document.MIME_TYPE_DIR:"text/plain";
-            else if(cols[i].equals(DocumentsContract.Document.COLUMN_FLAGS)) data[i]=id.equals("root")?DocumentsContract.Document.FLAG_DIR_SUPPORTS_CREATE:DocumentsContract.Document.FLAG_SUPPORTS_WRITE;
+            else if(cols[i].equals(DocumentsContract.Document.COLUMN_MIME_TYPE)) data[i]=id.equals("root")||directories.contains(id)?DocumentsContract.Document.MIME_TYPE_DIR:"text/plain";
+            else if(cols[i].equals(DocumentsContract.Document.COLUMN_FLAGS)) data[i]=id.equals("root")||directories.contains(id)?DocumentsContract.Document.FLAG_DIR_SUPPORTS_CREATE:DocumentsContract.Document.FLAG_SUPPORTS_WRITE;
+            else if(cols[i].equals(DocumentsContract.Document.COLUMN_SIZE)) data[i]=files.containsKey(id)?files.get(id).length():0L;
         } c.addRow(data); }
         @Override public Cursor queryRoots(String[] p) { return new MatrixCursor(new String[]{DocumentsContract.Root.COLUMN_ROOT_ID}); }
-        @Override public Cursor queryDocument(String id,String[] p)throws FileNotFoundException { check(); if(!id.equals("root")&&!files.containsKey(id)) throw new FileNotFoundException(); MatrixCursor c=new MatrixCursor(columns(p)); row(c,id); return c; }
-        @Override public Cursor queryChildDocuments(String parent,String[] p,String sort) { check(); MatrixCursor c=new MatrixCursor(columns(p)); for(String id:files.keySet()) row(c,id); return c; }
-        @Override public boolean isChildDocument(String parent,String child) { return parent.equals("root")&&files.containsKey(child); }
-        @Override public String createDocument(String parent,String mime,String name)throws FileNotFoundException { check(); if(reuse) return files.keySet().iterator().next(); try { String id="file"+(++sequence); File f=File.createTempFile("doc-",".tmp",getContext().getCacheDir()); files.put(id,f); names.put(id,name); return id; } catch(IOException e) { throw new FileNotFoundException(); } }
-        @Override public void deleteDocument(String id)throws FileNotFoundException { if(refuseDelete) throw new FileNotFoundException(); File file=files.remove(id); names.remove(id); if(file!=null) file.delete(); }
-        @Override public ParcelFileDescriptor openDocument(String id,String mode,CancellationSignal signal)throws FileNotFoundException { check(); if(failOpen) throw new FileNotFoundException("写入失败"); return ParcelFileDescriptor.open(files.get(id),ParcelFileDescriptor.parseMode(mode)); }
+        @Override public Cursor queryDocument(String id,String[] p)throws FileNotFoundException {
+            check();
+            if(id.equals(blockedQuery)){queryGate.countDown();try{if(!queryRelease.await(5,TimeUnit.SECONDS))throw new FileNotFoundException("查询超时");}catch(InterruptedException e){Thread.currentThread().interrupt();throw new FileNotFoundException("已取消查询");}}
+            MatrixCursor cursor=new MatrixCursor(columns(p));
+            if(!id.equals("root")&&!directories.contains(id)&&(!files.containsKey(id)||!files.get(id).isFile())) {
+                if(missingResponse==1)return cursor;if(missingResponse==2)return null;if(missingResponse==3)throw new IllegalArgumentException("文件已删除");throw new FileNotFoundException();
+            }
+            row(cursor,id);return cursor;
+        }
+        @Override public Cursor queryChildDocuments(String parent,String[] p,String sort) {check();MatrixCursor cursor=new MatrixCursor(columns(p));for(String id:names.keySet())if(parent.equals(parents.get(id)))row(cursor,id);return cursor;}
+        @Override public boolean isChildDocument(String parent,String child) {for(String ancestor=parents.get(child);ancestor!=null;ancestor=parents.get(ancestor))if(parent.equals(ancestor))return true;return false;}
+        @Override public String createDocument(String parent,String mime,String name)throws FileNotFoundException {
+            check();if(reuse)return files.keySet().iterator().next();
+            try {
+                String id="file"+(++sequence);
+                if(DocumentsContract.Document.MIME_TYPE_DIR.equals(mime))directories.add(id);
+                else files.put(id,File.createTempFile("doc-",".tmp",getContext().getCacheDir()));
+                names.put(id,name);parents.put(id,parent);return id;
+            }catch(IOException e){throw new FileNotFoundException();}
+        }
+        @Override public void deleteDocument(String id)throws FileNotFoundException {check();if(refuseDelete)throw new FileNotFoundException("提供方拒绝删除");File file=files.remove(id);names.remove(id);directories.remove(id);if(file!=null)file.delete();}
+        @Override public ParcelFileDescriptor openDocument(String id,String mode,CancellationSignal signal)throws FileNotFoundException {
+            check();if(failOpen||!files.containsKey(id))throw new FileNotFoundException("写入失败");
+            if(mode.equals("r")&&openedGate!=null){openedGate.countDown();try{if(!releaseGate.await(5,TimeUnit.SECONDS))throw new FileNotFoundException("读取超时");}catch(InterruptedException e){Thread.currentThread().interrupt();throw new FileNotFoundException("已取消读取");}}
+            if(corruptRead&&mode.equals("r"))try {byte[] bytes=Files.readAllBytes(files.get(id).toPath());if(bytes.length>0)bytes[0]^=1;Files.write(files.get(id).toPath(),bytes);}catch(IOException e){throw new FileNotFoundException();}
+            return ParcelFileDescriptor.open(files.get(id),ParcelFileDescriptor.parseMode(mode));
+        }
     }
-    private static Docs provider(Context context) {
-        Docs docs=new Docs(); ProviderInfo info=new ProviderInfo(); info.authority="feiq.documents"; info.exported=true; info.grantUriPermissions=true; info.readPermission=info.writePermission="android.permission.MANAGE_DOCUMENTS"; docs.attachInfo(context,info); ShadowContentResolver.registerProviderInternal(info.authority,docs); return docs;
+    static Docs provider(Context context) {
+        Docs docs=new Docs();ProviderInfo info=new ProviderInfo();info.authority="feiq.documents";info.exported=true;info.grantUriPermissions=true;info.readPermission=info.writePermission="android.permission.MANAGE_DOCUMENTS";docs.attachInfo(context,info);ShadowContentResolver.registerProviderInternal(info.authority,docs);
+        android.content.pm.ResolveInfo resolved=new android.content.pm.ResolveInfo();resolved.providerInfo=info;shadowOf(context.getPackageManager()).addResolveInfoForIntent(new Intent(DocumentsContract.PROVIDER_INTERFACE),resolved);return docs;
     }
     @Test public void directoryGrantPersistsAndSameNamesNeverOverwrite()throws Exception {
         Context c=RuntimeEnvironment.getApplication(); Docs docs=provider(c); ReceivedStorage storage=new ReceivedStorage(c);
         assertTrue(storage.automatic()); assertNull(storage.tree()); storage.choose(TREE,FLAGS); assertEquals(TREE,new ReceivedStorage(c).tree());
         String old=docs.createDocument("root","text/plain","报告.txt"); Files.write(docs.files.get(old).toPath(),"原文件".getBytes(StandardCharsets.UTF_8));
-        File file=source(c,"新文件"); Uri saved=storage.save(file,"报告.txt",new LanNode.Transfer());
+        File file=receivedSource(c,"新文件");Uri saved=storage.save(file,"报告.txt",new LanNode.Transfer());assertFalse("保存目录提交后仍留下第二份文件",file.exists());
         assertEquals("报告 (1).txt",docs.names.get(DocumentsContract.getDocumentId(saved))); assertEquals("原文件",new String(Files.readAllBytes(docs.files.get(old).toPath()),StandardCharsets.UTF_8));
         assertEquals("新文件",new String(Files.readAllBytes(docs.files.get(DocumentsContract.getDocumentId(saved)).toPath()),StandardCharsets.UTF_8));
-        assertEquals(saved,new ReceivedStorage(c).saved(file)); assertEquals(saved,storage.save(file,"报告.txt",new LanNode.Transfer())); assertEquals(2,docs.files.size());
-        storage.useInternal(); assertNull(storage.tree()); assertEquals(saved,storage.saved(file)); assertNull(storage.save(file,"报告.txt",new LanNode.Transfer()));
+        assertEquals(saved,new ReceivedStorage(c).existingSaved(file));assertEquals(saved,storage.save(file,"报告.txt",new LanNode.Transfer()));assertEquals(2,docs.files.size());
+        storage.useInternal();assertNull(storage.tree());assertEquals(saved,storage.existingSaved(file));assertNull(storage.save(file,"报告.txt",new LanNode.Transfer()));
     }
     @Test public void revokedPermissionAndFailedWriteKeepPrivateCopy()throws Exception {
-        Context c=RuntimeEnvironment.getApplication(); Docs docs=provider(c); ReceivedStorage storage=new ReceivedStorage(c); storage.choose(TREE,FLAGS); File file=source(c,"保留完整副本");
+        Context c=RuntimeEnvironment.getApplication();Docs docs=provider(c);ReceivedStorage storage=new ReceivedStorage(c);storage.choose(TREE,FLAGS);File file=receivedSource(c,"保留完整文件");
         fails(()->storage.choose(TREE,Intent.FLAG_GRANT_READ_URI_PERMISSION)); assertEquals(TREE,storage.tree());
         docs.deny=true; fails(()->storage.save(file,"资料.txt",new LanNode.Transfer())); assertTrue(file.isFile()); assertNull(storage.saved(file));
         docs.deny=false; docs.failOpen=true; fails(()->storage.save(file,"资料.txt",new LanNode.Transfer())); assertTrue(docs.files.isEmpty()); assertTrue(file.isFile());
-        docs.failOpen=false; assertNotNull(storage.save(file,"资料.txt",new LanNode.Transfer()));
+        docs.failOpen=false;assertNotNull(storage.save(file,"资料.txt",new LanNode.Transfer()));assertFalse(file.exists());assertTrue(storage.exists(file));
     }
     @Test public void deletingReceivedFileRemovesOnlyItsPrivateAndSavedCopies()throws Exception {
         Context c=RuntimeEnvironment.getApplication();Docs docs=provider(c);ReceivedStorage storage=new ReceivedStorage(c);storage.choose(TREE,FLAGS);
@@ -203,6 +231,7 @@ public final class FileFeaturesTest {
         File directory=new File(c.getFilesDir(),"received");assertTrue(directory.isDirectory()||directory.mkdirs());File file=new File(directory,"selected");Files.write(file.toPath(),new byte[]{1,2,3});
         String other=docs.createDocument("root","text/plain","另一个文件.txt");Files.write(docs.files.get(other).toPath(),new byte[]{9});
         Uri saved=storage.save(file,"已接收.txt",new LanNode.Transfer());storage.useInternal();
+        Files.write(file.toPath(),new byte[]{1,2,3}); // 兼容旧版遗留双份数据，删除仍必须清理两处。
         storage.delete(file);assertFalse(file.exists());assertNull(new ReceivedStorage(c).saved(file));assertFalse(docs.files.containsKey(DocumentsContract.getDocumentId(saved)));assertTrue(docs.files.containsKey(other));
         File outside=source(c,"原文件保留");fails(()->storage.delete(outside));assertTrue(outside.isFile());
     }
@@ -210,6 +239,7 @@ public final class FileFeaturesTest {
         Context c=RuntimeEnvironment.getApplication();Docs docs=provider(c);ReceivedStorage storage=new ReceivedStorage(c);storage.choose(TREE,FLAGS);
         android.content.pm.ResolveInfo resolved=new android.content.pm.ResolveInfo();resolved.providerInfo=new ProviderInfo();resolved.providerInfo.authority="feiq.documents";shadowOf(c.getPackageManager()).addResolveInfoForIntent(new Intent(DocumentsContract.PROVIDER_INTERFACE),resolved);
         File directory=new File(c.getFilesDir(),"received");assertTrue(directory.isDirectory()||directory.mkdirs());File file=new File(directory,"preserved");Files.write(file.toPath(),new byte[]{4,5,6});Uri saved=storage.save(file,"保留.txt",new LanNode.Transfer());
+        Files.write(file.toPath(),new byte[]{4,5,6});
         docs.deny=true;fails(()->storage.delete(file));assertTrue(file.isFile());assertEquals(saved,storage.saved(file));
         docs.deny=false;docs.refuseDelete=true;fails(()->storage.delete(file));assertTrue(file.isFile());assertEquals(saved,storage.saved(file));
         docs.refuseDelete=false;storage.delete(file);assertFalse(file.exists());assertNull(storage.saved(file));
@@ -234,22 +264,36 @@ public final class FileFeaturesTest {
         if(view instanceof ViewGroup)for(int i=0;i<((ViewGroup)view).getChildCount();i++){Button found=findButton(((ViewGroup)view).getChildAt(i),text);if(found!=null)return found;}return null;
     }
     @Test public void cancellationAndProviderReturningExistingDocumentAreSafe()throws Exception {
-        Context c=RuntimeEnvironment.getApplication(); Docs docs=provider(c); ReceivedStorage storage=new ReceivedStorage(c); storage.choose(TREE,FLAGS); File file=source(c,"新内容");
+        Context c=RuntimeEnvironment.getApplication();Docs docs=provider(c);ReceivedStorage storage=new ReceivedStorage(c);storage.choose(TREE,FLAGS);File file=receivedSource(c,"新内容");
         LanNode.Transfer cancelled=new LanNode.Transfer(); cancelled.close(); fails(()->storage.save(file,"文件.txt",cancelled)); assertTrue(docs.files.isEmpty());
         String old=docs.createDocument("root","text/plain","旧文件.txt"); Files.write(docs.files.get(old).toPath(),"不可覆盖".getBytes(StandardCharsets.UTF_8)); docs.reuse=true;
         fails(()->storage.save(file,"新名字.txt",new LanNode.Transfer())); assertEquals(1,docs.files.size()); assertEquals("不可覆盖",new String(Files.readAllBytes(docs.files.get(old).toPath()),StandardCharsets.UTF_8));
     }
-    @Test public void exportedCleanupRequiresOptInAndMatchingBytes()throws Exception {
+    @Test public void singleSaveChecksBytesBeforeDeleting()throws Exception {
         Context c=RuntimeEnvironment.getApplication();Docs docs=provider(c);ReceivedStorage storage=new ReceivedStorage(c);storage.choose(TREE,FLAGS);
-        File directory=new File(c.getFilesDir(),"received");assertTrue(directory.isDirectory()||directory.mkdirs());File file=new File(directory,"c".repeat(64));Files.write(file.toPath(),"保留完整副本 😀".getBytes(StandardCharsets.UTF_8));LanNode.Transfer task=new LanNode.Transfer();Uri saved=storage.save(file,"报告.txt",task);
-        storage.cleanExported(file,task);assertTrue("默认不能清理内部副本",file.isFile());
-        storage.settings().edit().putBoolean(ReceivedStorage.CLEAN_EXPORTED,true).commit();
-        File exported=docs.files.get(DocumentsContract.getDocumentId(saved));byte[] original=Files.readAllBytes(file.toPath());Files.write(exported.toPath(),new byte[]{1});
-        fails(()->storage.cleanExported(file,task));assertTrue("损坏的另存副本不能导致原文件被删",file.isFile());
-        Files.write(exported.toPath(),original);storage.cleanExported(file,task);assertFalse(file.exists());assertArrayEquals(original,Files.readAllBytes(exported.toPath()));assertEquals(saved,storage.saved(file));
+        File file=receivedSource(c,"保留完整文件 😀");byte[] original=Files.readAllBytes(file.toPath());docs.corruptRead=true;
+        fails(()->storage.save(file,"报告.txt",new LanNode.Transfer()));assertArrayEquals(original,Files.readAllBytes(file.toPath()));assertTrue(docs.files.isEmpty());assertNull(storage.saved(file));
+        docs.corruptRead=false;Uri saved=storage.save(file,"报告.txt",new LanNode.Transfer());assertFalse(file.exists());assertArrayEquals(original,Files.readAllBytes(docs.files.get(DocumentsContract.getDocumentId(saved)).toPath()));assertEquals(saved,storage.existingSaved(file));
+        SharedPreferences records=c.getSharedPreferences("received_locations",0);assertEquals(original.length,records.getLong(file.getName()+".size",-1));assertEquals("报告.txt",records.getString(file.getName()+".name",""));
+    }
+    @Test public void singleSaveKeepsRelativeFolders()throws Exception {
+        Context context=RuntimeEnvironment.getApplication();Docs docs=provider(context);ReceivedStorage storage=new ReceivedStorage(context);storage.choose(TREE,FLAGS);
+        String unrelated=docs.createDocument("root","text/plain","用户文件.txt");Files.write(docs.files.get(unrelated).toPath(),new byte[]{9});
+        File file=receivedSource(context,"目录中的文件");Uri saved=storage.save(file,"报告.txt","项目/子目录/报告.txt",new LanNode.Transfer());
+        String document=DocumentsContract.getDocumentId(saved),parent=docs.parents.get(document);assertEquals("子目录",docs.names.get(parent));assertEquals("项目",docs.names.get(docs.parents.get(parent)));assertEquals(2,docs.directories.size());assertFalse(file.exists());
+        storage.delete(file);assertFalse(storage.exists(file));assertTrue(docs.files.containsKey(unrelated));assertEquals(2,docs.directories.size());
+    }
+    @Test public void missingSavedFilesDiscardOnlyStaleLocations()throws Exception {
+        Context context=RuntimeEnvironment.getApplication();Docs docs=provider(context);ReceivedStorage storage=new ReceivedStorage(context);storage.choose(TREE,FLAGS);
+        for(int response=0;response<4;response++) {
+            docs.missingResponse=response;File file=receivedSource(context,"唯一正式文件");Uri saved=storage.save(file,"已接收.txt",new LanNode.Transfer());assertTrue(storage.exists(file));
+            docs.deny=true;assertNull(storage.existingSaved(file));assertFalse(storage.exists(file));assertEquals("权限失效不能丢掉位置",saved,storage.saved(file));docs.deny=false;assertEquals(saved,storage.existingSaved(file));
+            docs.deleteDocument(DocumentsContract.getDocumentId(saved));assertNull(storage.existingSaved(file));assertFalse(storage.exists(file));assertNull(storage.saved(file));assertNull(storage.savedTree(file));assertFalse(context.getSharedPreferences("received_locations",0).contains(file.getName()+".size"));
+            File direct=receivedSource(context,"直接清理失效位置");Uri document=storage.save(direct,"失效.txt",new LanNode.Transfer());docs.deleteDocument(DocumentsContract.getDocumentId(document));storage.delete(direct);assertNull(storage.saved(direct));assertFalse(storage.exists(direct));
+        }
     }
     @Test public void incompleteExternalDocumentIsExplicitWhenProviderRefusesCleanup()throws Exception {
-        Context c=RuntimeEnvironment.getApplication(); Docs docs=provider(c); ReceivedStorage storage=new ReceivedStorage(c); storage.choose(TREE,FLAGS); docs.failOpen=docs.refuseDelete=true; File file=source(c,"完整内容");
+        Context c=RuntimeEnvironment.getApplication();Docs docs=provider(c);ReceivedStorage storage=new ReceivedStorage(c);storage.choose(TREE,FLAGS);docs.failOpen=docs.refuseDelete=true;File file=receivedSource(c,"完整内容");
         try { storage.save(file,"文件.txt",new LanNode.Transfer()); fail(); } catch(IOException e) { assertTrue(e.getMessage().contains("不完整副本")); }
         assertTrue(file.isFile()); assertNull(storage.saved(file)); assertEquals(1,docs.files.size());
     }
@@ -260,14 +304,16 @@ public final class FileFeaturesTest {
             settle(service);node.start();set(service,"node",node);Docs docs=provider(service);ReceivedStorage storage=new ReceivedStorage(service);storage.choose(TREE,FLAGS);
             LanNode.Peer source=new LanNode.Peer(LanNode.endpoint("127.0.0.1:32425"),"source","host","来源","测试"),target=new LanNode.Peer(LanNode.endpoint("127.0.0.1:"+socket.getLocalPort()),"target","host","目标","测试");target.utf8=true;
             LanNode.Message message=new LanNode.Message();message.number=123;message.text="SAF转发";byte[] bytes="授权副本".getBytes(StandardCharsets.UTF_8);Protocol.Attachment file=new Protocol.Attachment(0,"导出文件.txt",bytes.length,0);message.files.add(file);
-            File local=service.receivedFile(source,message.number,file);assertTrue(local.getParentFile().isDirectory()||local.getParentFile().mkdirs());Files.write(local.toPath(),bytes);storage.save(local,file.name,new LanNode.Transfer());Files.delete(local.toPath());
+            File local=service.receivedFile(source,message.number,file);assertTrue(local.getParentFile().isDirectory()||local.getParentFile().mkdirs());Files.write(local.toPath(),bytes);Uri saved=storage.save(local,file.name,new LanNode.Transfer());assertFalse(local.exists());
             List<Boolean> result=new ArrayList<>();service.forward(source,message,target,result::add);waitFor(service,()->!result.isEmpty());assertEquals(Collections.singletonList(true),result);
             assertEquals(1,docs.files.size());assertArrayEquals(bytes,Files.readAllBytes(docs.files.values().iterator().next().toPath()));
             File offers=new File(service.getFilesDir(),"offers");File[] folders=offers.listFiles();assertNotNull(folders);assertEquals(1,folders.length);assertArrayEquals(bytes,Files.readAllBytes(new File(folders[0],file.name).toPath()));
+            docs.deleteDocument(DocumentsContract.getDocumentId(saved));result.clear();service.forward(source,message,target,result::add);waitFor(service,()->!result.isEmpty());assertEquals(Collections.singletonList(false),result);assertFalse(storage.exists(local));assertNull(storage.saved(local));assertEquals(1,Objects.requireNonNull(offers.listFiles()).length);
         }finally{controller.destroy();}
     }
     @Test public void backgroundBatchReceiveSwitchAndDirectoryFailureRetry()throws Exception {
         ServiceController<ChatService> controller=Robolectric.buildService(ChatService.class).create(); ChatService service=controller.get();
+        List<String> errors=new ArrayList<>();service.observe(new ChatService.Observer(){public void changed(){}public void error(String text){errors.add(text);}});
         int aPort=port(), bPort=port(); while(aPort==bPort) bPort=port();
         LanNode.Listener quiet=new LanNode.Listener(){ public void peersChanged(){} public void error(String text){} public void message(LanNode.Peer p,LanNode.Message m,boolean update){} };
         LanNode.Listener incoming=new LanNode.Listener(){ public void peersChanged(){} public void error(String text){} public void message(LanNode.Peer p,LanNode.Message m,boolean update){service.incoming(p,m,update);} };
@@ -285,14 +331,18 @@ public final class FileFeaturesTest {
             Docs docs=provider(service); ReceivedStorage storage=new ReceivedStorage(service); storage.choose(TREE,FLAGS); docs.deny=true;
             LanNode.Message failure=sender.sendMessage(sender.peers().get(0),"目录权限失效",Collections.singletonList(one)); File cached=service.receivedFile(remote,failure.number,failure.files.get(0));
             waitFor(service,()->cached.isFile()&&!service.busy()); assertNull(storage.saved(cached)); assertTrue(((Map<?,?>)field(service,"waiting")).isEmpty());
-            docs.deny=false; service.saveToFolder(cached,one.getName()); waitFor(service,()->storage.saved(cached)!=null&&!service.busy()); assertTrue(cached.isFile());
+            assertEquals("已保存",service.progress(remote.id(),failure.number,failure.files.get(0).id,false).state);
+            assertTrue(errors.toString(),errors.stream().anyMatch(text->text.contains("保存目录不可用")&&text.contains("文件已保存在应用内接收区")));
+            docs.deny=false;LanNode.Message restored=sender.sendMessage(sender.peers().get(0),"目录恢复后的新接收",Collections.singletonList(one));File external=service.receivedFile(remote,restored.number,restored.files.get(0));
+            waitFor(service,()->storage.exists(external)&&!service.busy());assertFalse(external.exists());assertTrue("恢复目录不能另行搬走之前的内部正式文件",cached.isFile());assertArrayEquals(Files.readAllBytes(one.toPath()),Files.readAllBytes(docs.files.get(DocumentsContract.getDocumentId(storage.existingSaved(external))).toPath()));
+            docs.deleteDocument(DocumentsContract.getDocumentId(storage.existingSaved(external)));assertFalse(storage.exists(external));service.receive(remote,restored.number,restored.files.get(0));waitFor(service,()->storage.exists(external)&&!service.busy());assertFalse(external.exists());
             storage.settings().edit().putBoolean(ReceivedStorage.AUTO,false).apply();
             LanNode.Message partial=sender.sendMessage(sender.peers().get(0),"部分接收后拒绝剩余",Arrays.asList(one,empty));
             waitFor(service,()->((Map<?,?>)uncheckedField(service,"waiting")).size()==2);
-            service.receive(remote,partial.number,partial.files.get(0)); File kept=service.receivedFile(remote,partial.number,partial.files.get(0)); waitFor(service,()->kept.isFile()&&!service.busy());
+            service.receive(remote,partial.number,partial.files.get(0));File kept=service.receivedFile(remote,partial.number,partial.files.get(0));waitFor(service,()->storage.exists(kept)&&!service.busy());
             service.reject(remote,partial.number); settle(service);
             LanNode.Message record=((ChatStore)field(service,"store")).history(remote.id()).stream().filter(m->m.number==partial.number).findFirst().get();
-            assertEquals(1,record.files.size()); assertTrue(kept.isFile()); assertTrue(((Map<?,?>)field(service,"waiting")).isEmpty());
+            assertEquals(1,record.files.size());assertTrue(storage.exists(kept));assertFalse(kept.isFile());assertTrue(((Map<?,?>)field(service,"waiting")).isEmpty());
             LanNode.Message failed=new LanNode.Message();failed.number=98765;failed.time=System.currentTimeMillis();failed.outgoing=true;failed.text="失败重发测试";failed.state="未确认送达，请检查网络后重发";
             ((ExecutorService)field(service,"io")).submit(()->((ChatStore)uncheckedField(service,"store")).message(remote,failed,false,true)).get(5,TimeUnit.SECONDS);
             java.util.List<Boolean> outcomes=new ArrayList<>();service.retryMessage(remote,failed,outcomes::add);waitFor(service,()->outcomes.size()==1);assertTrue(outcomes.get(0));
@@ -334,6 +384,20 @@ public final class FileFeaturesTest {
                 assertTrue(errors.toString(),errors.stream().anyMatch(text->text.contains("已本地拒收")&&text.contains("拒绝通知未送达")));
                 assertTrue(((Map<?,?>)field(service,"waiting")).isEmpty());
             } finally {if(local!=null)local.close();controller.destroy();}
+        }
+    }
+    @Test public void deleteThenCancelKeepsRecord()throws Exception {
+        for(boolean revoked:new boolean[]{false,true}) {
+            ServiceController<ChatService> controller=Robolectric.buildService(ChatService.class).create();ChatService service=controller.get();
+            try {
+                settle(service);service.getSharedPreferences("settings",0).edit().putBoolean(ReceivedStorage.AUTO,false).commit();
+                LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:"+port()),"deleted-saved","host","已保存后删除","");long packet=revoked?911:910;LanNode.Message message=interrupted(service,peer,packet);
+                File file=service.receivedFile(peer,packet,message.files.get(0)),part=LanNode.partialFile(peer,packet,message.files.get(1),service.receivedFile(peer,packet,message.files.get(1)));
+                Docs docs=provider(service);ReceivedStorage storage=new ReceivedStorage(service);storage.choose(TREE,FLAGS);Uri saved=storage.save(file,"saved.bin",new LanNode.Transfer());docs.deleteDocument(DocumentsContract.getDocumentId(saved));
+                service.fileTasks(rows->{});settle(service);assertEquals("本机文件已删除",service.progress(peer.id(),packet,0,false).state);
+                if(revoked)service.offerCanceled(peer,packet);else service.reject(peer,packet);settle(service);
+                LanNode.Message stored=((ChatStore)field(service,"store")).findMessage(peer.id(),packet,false);assertNotNull(stored);assertEquals(1,stored.files.size());assertEquals(0,stored.files.get(0).id);assertEquals("本机文件已删除",service.progress(peer.id(),packet,0,false).state);assertFalse(storage.exists(file));assertFalse(part.exists());
+            }finally{controller.destroy();}
         }
     }
     @Test public void deletePartialsAllHistory()throws Exception {
@@ -395,13 +459,14 @@ public final class FileFeaturesTest {
             assertEquals("飞Q",((TextView)field(activity,"title")).getText().toString());
             Method open=MainActivity.class.getDeclaredMethod("open",String.class); open.setAccessible(true); open.invoke(activity,peer.id()); settle(service);
             View attachment=views(activity.getWindow().getDecorView()).stream().filter(v->"资料.txt，文件操作".contentEquals(v.getContentDescription()==null?"":v.getContentDescription())).findFirst().orElseThrow(AssertionError::new);
-            assertTrue(attachment.performLongClick()); Dialog dialog=org.robolectric.shadows.ShadowDialog.getLatestDialog(); assertNotNull(label(dialog,"查看保存位置")); assertNotNull(label(dialog,"另存为…")); label(dialog,"打开文件").performClick();
+            assertTrue(attachment.performLongClick());Dialog dialog=org.robolectric.shadows.ShadowDialog.getLatestDialog();assertNotNull(label(dialog,"查看保存位置"));assertFalse(views(dialog.getWindow().getDecorView()).stream().anyMatch(v->v instanceof TextView&&Arrays.asList("另存为…","保存到相册","保存到设置目录 / 重试").contains(((TextView)v).getText().toString())));label(dialog,"打开文件").performClick();
             Intent view=shadowOf(activity).getNextStartedActivity(); assertEquals(Intent.ACTION_VIEW,view.getAction()); assertEquals("content",view.getData().getScheme()); assertEquals(FLAGS&Intent.FLAG_GRANT_READ_URI_PERMISSION,view.getFlags()&FLAGS); assertNotNull(view.getClipData());
             attachment.performLongClick(); label(org.robolectric.shadows.ShadowDialog.getLatestDialog(),"分享文件").performClick(); Intent chooser=shadowOf(activity).getNextStartedActivity(); assertEquals(Intent.ACTION_CHOOSER,chooser.getAction()); Intent share=chooser.getParcelableExtra(Intent.EXTRA_INTENT); assertEquals(Intent.ACTION_SEND,share.getAction()); assertNotNull(share.getClipData());
             EditText editor=(EditText)field(activity,"editor"); assertNotNull(editor.getCustomSelectionActionModeCallback()); assertNotNull(editor.getCustomInsertionActionModeCallback());
             editor.requestFocus(); assertTrue(editor.isFocused()); editor.setText("复制文本"); editor.setSelection(0,2); assertTrue(editor.onTextContextMenuItem(android.R.id.copy)); assertEquals("复制",activity.getSystemService(ClipboardManager.class).getPrimaryClip().getItemAt(0).getText().toString());
             editor.requestFocus(); editor.setSelection(0,2); assertTrue(editor.onTextContextMenuItem(android.R.id.cut)); assertEquals("文本",editor.getText().toString()); editor.setSelection(0); assertTrue(editor.onTextContextMenuItem(android.R.id.pasteAsPlainText)); assertEquals("复制文本",editor.getText().toString()); editor.onTextContextMenuItem(android.R.id.selectAll); assertEquals(editor.length(),editor.getSelectionEnd()-editor.getSelectionStart());
             Method settings=MainActivity.class.getDeclaredMethod("settings"); settings.setAccessible(true); settings.invoke(activity); Dialog config=org.robolectric.shadows.ShadowDialog.getLatestDialog();
+            assertFalse(views(config.getWindow().getDecorView()).stream().anyMatch(v->v instanceof Switch&&"另存后清理应用内副本".contentEquals(((Switch)v).getText())));
             Switch automatic=(Switch)views(config.getWindow().getDecorView()).stream().filter(v->v instanceof Switch && "自动接收文件".contentEquals(v.getContentDescription())).findFirst().get(); assertTrue(automatic.isChecked()); automatic.setChecked(false);
             label(config,"选择保存文件夹").performClick(); var requested=shadowOf(activity).getNextStartedActivityForResult(); assertEquals(22,requested.requestCode); assertEquals(Intent.ACTION_OPEN_DOCUMENT_TREE,requested.intent.getAction()); assertEquals(FLAGS,requested.intent.getFlags()&FLAGS);
             provider(activity); activity.onActivityResult(22,Activity.RESULT_OK,new Intent().setData(TREE).addFlags(FLAGS)); assertEquals(TREE,new ReceivedStorage(activity).tree());

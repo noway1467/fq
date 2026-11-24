@@ -388,12 +388,12 @@ public final class ReliabilityTest {
     @Test public void cancellingForwardDuringAuthorizedReadCleansItsFolder()throws Exception {
         ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService s=sc.get();CountDownLatch release=new CountDownLatch(1);
         try(DatagramSocket socket=new DatagramSocket(0,InetAddress.getLoopbackAddress());LanNode n=node()) {
-            settle(s);set(s,"node",n);TestProvider provider=provider(s,1L,1);provider.openedGate=new CountDownLatch(1);provider.releaseGate=release;
+            settle(s);set(s,"node",n);FileFeaturesTest.Docs docs=FileFeaturesTest.provider(s);ReceivedStorage storage=new ReceivedStorage(s);storage.choose(Uri.parse("content://feiq.documents/tree/root"),Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
             LanNode.Peer source=peer(32425);LanNode.Message original=message();Protocol.Attachment a=new Protocol.Attachment(0,"saved.txt",1,1);original.files.add(a);
-            s.getSharedPreferences("received_locations",0).edit().putString(s.receivedFile(source,original.number,a).getName(),"content://feiq.test/file").commit();
-            List<Boolean> result=new ArrayList<>();s.forward(source,original,peer(socket.getLocalPort()),result::add);assertTrue(provider.openedGate.await(5,TimeUnit.SECONDS));
+            File local=s.receivedFile(source,original.number,a);Files.write(local.toPath(),new byte[]{1});Uri saved=storage.save(local,a.name,new LanNode.Transfer());File document=docs.files.get(android.provider.DocumentsContract.getDocumentId(saved));assertFalse(local.exists());docs.openedGate=new CountDownLatch(1);docs.releaseGate=release;
+            List<Boolean> result=new ArrayList<>();s.forward(source,original,peer(socket.getLocalPort()),result::add);assertTrue(docs.openedGate.await(5,TimeUnit.SECONDS));
             s.cancelTransfer();release.countDown();transferDone(s);assertEquals(Collections.singletonList(false),result);
-            assertEquals(0,new File(s.getFilesDir(),"offers").list().length);assertTrue(provider.source.isFile());assertTrue(((Map<?,?>)field(n,"offers")).isEmpty());
+            assertEquals(0,new File(s.getFilesDir(),"offers").list().length);assertTrue(document.isFile());assertEquals(saved,storage.existingSaved(local));assertTrue(((Map<?,?>)field(n,"offers")).isEmpty());
         }finally {release.countDown();sc.destroy();}
     }
     @Test public void outgoingAttachmentPathsSurviveStoreAndAckCopy()throws Exception {
@@ -468,12 +468,12 @@ public final class ReliabilityTest {
         try { LanNode.requireSpace(nearlyFull,2); fail(); } catch(IOException expected) { }
         ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();
         try {
-            Method copy=ChatService.class.getDeclaredMethod("copy",InputStream.class,OutputStream.class,LanNode.Transfer.class,long.class); copy.setAccessible(true);
+            Method copy=ChatService.class.getDeclaredMethod("copy",InputStream.class,OutputStream.class,LanNode.Transfer.class,long.class,String.class); copy.setAccessible(true);
             ByteArrayOutputStream output=new ByteArrayOutputStream();
-            try { copy.invoke(sc.get(),new ByteArrayInputStream(new byte[2]),output,new LanNode.Transfer(),1L); fail(); }
+            try { copy.invoke(sc.get(),new ByteArrayInputStream(new byte[2]),output,new LanNode.Transfer(),1L,"暂存空间不足"); fail(); }
             catch(InvocationTargetException e) { assertTrue(e.getCause() instanceof IOException); }
             assertEquals(0,output.size());
-            copy.invoke(sc.get(),new ByteArrayInputStream(new byte[0]),output,new LanNode.Transfer(),0L);
+            copy.invoke(sc.get(),new ByteArrayInputStream(new byte[0]),output,new LanNode.Transfer(),0L,"暂存空间不足");
         } finally { sc.destroy(); }
     }
     @Test public void keyboardImageCopyKeepsBytesAndReleasesOnSuccessFailureAndBusy()throws Exception {
@@ -510,20 +510,24 @@ public final class ReliabilityTest {
             assertTrue("已经取消的排队清理仍删除了文件",file.isFile());assertArrayEquals(new byte[]{1,2,3},Files.readAllBytes(file.toPath()));assertTrue(s.transferStatus(),s.transferStatus().contains("取消"));
         }finally{release.countDown();sc.destroy();}
     }
-    @Test public void clearingReceivedFilesReportsCountsAndKeepsFolderCopies()throws Exception {
+    @Test public void clearReceivedDeletesOnlyRegistered()throws Exception {
         ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService s=sc.get();List<String> errors=new ArrayList<>();
         try {
             settle(s);s.observe(new ChatService.Observer(){public void changed(){}public void error(String e){errors.add(e);}});
             File received=new File(s.getFilesDir(),"received");assertTrue(received.isDirectory()||received.mkdirs());
-            File exported=new File(received,"c".repeat(64)),internal=new File(received,"d".repeat(64)),partial=new File(received,"e".repeat(64)+".part"),nested=new File(received,"nested");
-            Files.write(exported.toPath(),new byte[5]);Files.write(internal.toPath(),new byte[7]);Files.write(partial.toPath(),new byte[11]);assertTrue(nested.mkdir());
-            s.getSharedPreferences("received_locations",0).edit().putString(exported.getName(),"content://feiq.test/tree/document").commit();
-            ChatService.Usage before=s.receivedUsage();assertEquals(3,before.files);assertEquals(23,before.bytes);assertEquals(1,before.saved);
+            s.getSharedPreferences("settings",0).edit().putBoolean(ReceivedStorage.AUTO,false).commit();LanNode.Peer peer=peer(32425);LanNode.Message message=message();message.state="已保存";message.files=Arrays.asList(new Protocol.Attachment(0,"目录.txt",5,1),new Protocol.Attachment(1,"内部.txt",7,1));s.incoming(peer,message,false);settle(s);
+            File exported=s.receivedFile(peer,message.number,message.files.get(0)),internal=s.receivedFile(peer,message.number,message.files.get(1)),partial=new File(received,"e".repeat(64)+".part"),nested=new File(received,"nested");
+            Files.write(exported.toPath(),new byte[5]);Files.write(internal.toPath(),new byte[7]);Files.write(partial.toPath(),new byte[11]);assertTrue(nested.mkdir());File nestedFile=new File(nested,"用户文件.txt");Files.write(nestedFile.toPath(),new byte[]{8});
+            FileFeaturesTest.Docs docs=FileFeaturesTest.provider(s);ReceivedStorage storage=new ReceivedStorage(s);storage.choose(Uri.parse("content://feiq.documents/tree/root"),Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_WRITE_URI_PERMISSION);Uri saved=storage.save(exported,"目录.txt",new LanNode.Transfer());Files.write(exported.toPath(),new byte[5]);
+            String unrelated=docs.createDocument("root","text/plain","用户文件.txt");Files.write(docs.files.get(unrelated).toPath(),new byte[]{9});String stale="f".repeat(64);
+            docs.parents.put("missing","root");
+            s.getSharedPreferences("received_locations",0).edit().putString(stale,"content://feiq.documents/tree/root/document/missing").putString(stale+".tree","content://feiq.documents/tree/root").putLong(stale+".size",99).commit();
+            ChatService.Usage before=s.receivedUsage();assertEquals("旧版双份数据不能重复计数",2,before.files);assertEquals(17,before.bytes);assertEquals(0,before.guestFiles);assertFalse(s.getSharedPreferences("received_locations",0).contains(stale));
             List<ChatService.Usage> results=new ArrayList<>();s.clearFiles(results::add);transferDone(s);
-            assertEquals(1,results.size());assertEquals(3,results.get(0).files);assertEquals(23,results.get(0).bytes);assertEquals(1,results.get(0).saved);
-            assertFalse(exported.exists());assertFalse(internal.exists());assertFalse(partial.exists());assertTrue("清理不应删除子目录",nested.isDirectory());
-            // 映射保留：保存文件夹里的副本没有被删，聊天中仍要能打开。
-            assertEquals("content://feiq.test/tree/document",s.getSharedPreferences("received_locations",0).getString(exported.getName(),""));
+            assertEquals(1,results.size());assertEquals(2,results.get(0).files);assertEquals(17,results.get(0).bytes);assertEquals(0,results.get(0).guestFiles);
+            assertFalse(exported.exists());assertFalse(internal.exists());assertTrue("清理必须保留断点残片",partial.exists());assertTrue("清理不应删除子目录",nested.isDirectory());assertArrayEquals(new byte[]{8},Files.readAllBytes(nestedFile.toPath()));
+            assertNull(storage.saved(exported));assertFalse(docs.files.containsKey(android.provider.DocumentsContract.getDocumentId(saved)));assertArrayEquals(new byte[]{9},Files.readAllBytes(docs.files.get(unrelated).toPath()));
+            for(Protocol.Attachment file:message.files)assertEquals("本机文件已删除",s.progress(peer.id(),message.number,file.id,false).state);assertEquals(2,io(s).submit(()->store(s).history(peer.id()).get(0).files.size()).get(5,TimeUnit.SECONDS).intValue());
             assertEquals("",s.transferStatus());assertTrue(errors.toString(),errors.isEmpty());
             s.clearFiles(results::add);transferDone(s);assertEquals(2,results.size());assertEquals(0,results.get(1).files);assertEquals(0,s.receivedUsage().files);
         }finally{sc.destroy();}

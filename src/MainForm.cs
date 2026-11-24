@@ -44,6 +44,7 @@ public sealed class MainForm : ModernWindow
             try
             {
                 if(guestWindow==null||guestWindow.IsDisposed)guestWindow=new GuestWindow(this,network);
+                else guestWindow.ReloadAddresses();
                 guestWindow.Show();
                 if(guestWindow.WindowState==FormWindowState.Minimized)guestWindow.WindowState=guestWindow.RestoreMaximized?FormWindowState.Maximized:FormWindowState.Normal;
                 guestWindow.Activate();

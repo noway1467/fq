@@ -116,8 +116,23 @@ namespace FeiqLight
             else if(fore.ToArgb()==old[3].ToArgb())control.ForeColor=next[3];
             else if(fore.ToArgb()==old[0].ToArgb())control.ForeColor=next[0];
             else for(int i=15;i<old.Length;i++)if(fore.ToArgb()==old[i].ToArgb()){control.ForeColor=next[i];break;}
-            RoundedPanel panel=control as RoundedPanel;if(panel!=null){for(int i=0;i<old.Length;i++){if(panel.Fill==old[i])panel.Fill=next[i];if(panel.Border==old[i])panel.Border=next[i];}}
-            RoundedButton rounded=control as RoundedButton;if(rounded!=null){Color buttonBorder=rounded.Border;if(!buttonBorder.IsEmpty)for(int i=0;i<old.Length;i++)if(buttonBorder==old[i]){rounded.Border=next[i];break;}}
+            RoundedPanel panel=control as RoundedPanel;
+            if(panel!=null)
+            {
+                Color fill=panel.Fill,border=panel.Border;
+                if(!fill.IsEmpty)for(int i=0;i<old.Length;i++)if(fill.ToArgb()==old[i].ToArgb()){panel.Fill=next[i];break;}
+                if(!border.IsEmpty)for(int i=0;i<old.Length;i++)if(border.ToArgb()==old[i].ToArgb()){panel.Border=next[i];break;}
+            }
+            RoundedButton rounded=control as RoundedButton;
+            if(rounded!=null)
+            {
+                Color buttonBorder=rounded.Border,hoverBack=rounded.HoverBack,hoverFore=rounded.HoverFore;
+                if(!buttonBorder.IsEmpty)for(int i=0;i<old.Length;i++)if(buttonBorder.ToArgb()==old[i].ToArgb()){rounded.Border=next[i];break;}
+                if(!hoverBack.IsEmpty)for(int i=0;i<old.Length;i++)if(hoverBack.ToArgb()==old[i].ToArgb()){rounded.HoverBack=next[i];break;}
+                // 系统红底关闭键使用固定白字，不能把它当作浅色主题的白色 Surface 换算。
+                if(!hoverFore.IsEmpty&&hoverBack.ToArgb()!=Color.FromArgb(232,17,35).ToArgb())
+                    for(int i=0;i<old.Length;i++)if(hoverFore.ToArgb()==old[i].ToArgb()){rounded.HoverFore=next[i];break;}
+            }
             if(control.ContextMenuStrip!=null){control.ContextMenuStrip.BackColor=Surface;control.ContextMenuStrip.ForeColor=Ink;}
             if(control.IsHandleCreated&&(control is TextBoxBase||control is ListBox||(control is ScrollableControl&&((ScrollableControl)control).AutoScroll)))ApplyScrollTheme(control);
             foreach(Control child in control.Controls)Recolor(child,old,next);control.Invalidate();

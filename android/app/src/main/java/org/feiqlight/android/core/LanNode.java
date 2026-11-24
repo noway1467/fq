@@ -160,11 +160,14 @@ public final class LanNode implements AutoCloseable {
     private static void closeSocket(Socket socket){try{socket.close();}catch(IOException ignored){}}
     private Socket connectSocket(Socket socket,InetSocketAddress target,Set<Socket> registered,java.util.function.Consumer<Socket> beforeConnect,PeerConnector connector)throws IOException {
         if(loopback&&!target.getAddress().isLoopbackAddress())throw new IOException("测试模式不能访问局域网");
+        SocketBinding binding=socketBinding;
+        if(!loopback&&binding!=null&&!binding.allows(target.getAddress())){
+            binding.bind(socket,target.getAddress());
+            throw new IOException("目标不在当前物理局域网或共享子网内");
+        }
         int epoch; synchronized(gate){epoch=transportEpoch;}
         if(beforeConnect!=null)beforeConnect.accept(socket);
-        SocketBinding binding=socketBinding;
-        if(!loopback&&binding!=null)binding.bind(socket,target.getAddress());
-        try {connector.connect(socket,target);return socket;}
+        try {if(!loopback&&binding!=null)binding.bind(socket,target.getAddress());connector.connect(socket,target);return socket;}
         catch(IOException failure) {
             // 只重试建连，握手和业务请求不重放；取消、关停及切网不能借重试复活旧任务。
             if(closed||socket.isClosed()||loopback||binding==null||!binding.shouldRetryWithoutSourceBind(target.getAddress())||!binding.allows(target.getAddress()))throw failure;
@@ -980,8 +983,9 @@ public final class LanNode implements AutoCloseable {
             IOException failure=null;
             try {
                 direct=connectSocket(direct,new InetSocketAddress(peer.endpoint.getAddress(),targetPort),connections,s->{
+                    attempted[0]=true;
                     if(activeRequest!=null)synchronized(gate){activeRequest.direct=s;if(activeRequest.client!=null)closeSocket(s);}
-                },(active,target)->{attempted[0]=true;peerConnector.connect(active,target);});
+                },(active,target)->peerConnector.connect(active,target));
             }catch(IOException e){if(!attempted[0])throw e;failure=e;}
             if(failure==null){synchronized(gate){reverseRequests.remove(ticket);if(request==null||request.client==null){direct.setSoTimeout(45000);return direct;}}}
             direct.close();releaseConnection(direct);

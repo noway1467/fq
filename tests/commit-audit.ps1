@@ -1,7 +1,8 @@
-param()
+param([string]$TemporaryDirectory)
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$out = Join-Path $projectRoot 'build/tmp/commit-audit'
+$out = if($TemporaryDirectory){[IO.Path]::GetFullPath($TemporaryDirectory)}else{Join-Path $projectRoot 'build/tmp/commit-audit'}
+if(!$out.StartsWith([IO.Path]::GetFullPath((Join-Path $projectRoot 'build/tmp')).TrimEnd('\','/')+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)){throw '临时目录必须位于项目 build/tmp 内'}
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 $env:TEMP=$out; $env:TMP=$out; $env:TMPDIR=$out
 $compiler = Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
@@ -13,7 +14,7 @@ foreach ($asset in @('index.html','app.css','app.js')) { $arguments += "/resourc
 $auditSource = Join-Path $projectRoot 'tests\CommitAuditTests.cs'
 & $compiler @arguments @sources $auditSource
 if ($LASTEXITCODE -ne 0) { throw '提交审计定向回归编译失败' }
-$data = Join-Path $projectRoot ('build/test-data/commit-audit-' + [Guid]::NewGuid().ToString('N'))
+$data = if($TemporaryDirectory){Join-Path $out ('data-' + [Guid]::NewGuid().ToString('N'))}else{Join-Path $projectRoot ('build/test-data/commit-audit-' + [Guid]::NewGuid().ToString('N'))}
 Write-Output "DATA $data"
 & "$out/CommitAuditTests.exe" $data
 if ($LASTEXITCODE -ne 0) { throw '提交审计定向回归失败' }

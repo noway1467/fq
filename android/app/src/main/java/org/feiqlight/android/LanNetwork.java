@@ -251,8 +251,15 @@ final class LanNetwork implements LanNode.SocketBinding {
     }
     @Override public synchronized boolean shouldRetryWithoutSourceBind(InetAddress destination)throws IOException {
         select();
-        return cachedVpn&&(cachedBindSocketBlocked||cachedLocal)&&localLink(destination)!=null
-            && !cachedLocalBroadcasts.contains(destination)&&allows(destination);
+        return cachedVpn&&(cachedBindSocketBlocked||cachedLocal)&&localUnicast(destination)&&allows(destination);
+    }
+    private boolean localUnicast(InetAddress destination) {
+        LocalLink link=localLink(destination);
+        if(link==null||cachedLocalBroadcasts.contains(destination)||"255.255.255.255".equals(destination.getHostAddress()))return false;
+        for(LocalLink local:cachedLocalLinks)if(local.address.equals(destination))return false;
+        byte[] network=link.address.getAddress();
+        for(int i=0;i<4;i++){int bits=Math.max(0,Math.min(8,link.prefix-i*8)),mask=(255<<(8-bits))&255;network[i]=(byte)(network[i]&mask);}
+        return !Arrays.equals(network,destination.getAddress());
     }
     @Override public synchronized void send(DatagramSocket receiver,byte[] bytes,InetSocketAddress destination)throws IOException {
         Network network=select();
@@ -276,7 +283,7 @@ final class LanNetwork implements LanNode.SocketBinding {
             if(boundFailure!=null)error.addSuppressed(boundFailure);
             InetAddress target=destination.getAddress();
             // 无源地址的默认路由仅用于 VPN 允许的当前私网单播；广播绝不进入 TUN 或默认网关。
-            if(cachedVpn&&allows(target)&&!broadcasts().contains(target)&&!"255.255.255.255".equals(target.getHostAddress())) {
+            if(cachedVpn&&localUnicast(target)&&allows(target)) {
                 try(DatagramSocket sender=datagramFactory.create(null)){sender.send(new DatagramPacket(bytes,bytes.length,destination));return;}
                 catch(IOException retryError){retryError.addSuppressed(error);throw blocked(retryError);}
             }

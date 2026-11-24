@@ -93,7 +93,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
     private long historyRequestVersion, historyAppliedVersion;
     private ActionMode selectionMode;
     private TextView selectionOwner;
-    private String selected="", pickerPeer="", exportPath="", historySignature="";
+    private String selected="", pickerPeer="", historySignature="";
     private String pendingMessageLocation, locatedMessage;
     private LanNode.Message archiveAnchor;
     private Button returnToLatest;
@@ -147,18 +147,18 @@ public final class MainActivity extends Activity implements ChatService.Observer
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         drafts=new DraftStore(this); receivedStorage=new ReceivedStorage(this); media=new MediaPreview(this);
-        if(state!=null) { selected=state.getString("peer",""); pickerPeer=state.getString("picker",""); exportPath=state.getString("export","");shareHandled=state.getBoolean("share_handled",false); }
+        if(state!=null) { selected=state.getString("peer",""); pickerPeer=state.getString("picker","");shareHandled=state.getBoolean("share_handled",false); }
         if(Build.VERSION.SDK_INT>=33) { backCallback=()->{ if(selectingMessages)endMessageSelection();else if(!selected.isEmpty()) open(""); else finish(); }; getOnBackInvokedDispatcher().registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT,backCallback); }
         renderPage(); bound=bindService(new Intent(this,ChatService.class),connection,BIND_AUTO_CREATE);
     }
     // 熄屏期间对端可能已切网离开，亮屏回到页面时立即复核头像在线光晕。
-    @Override protected void onStart() { super.onStart(); visible=true; if(SystemBars.isDark(this)!=DARK)rerenderPreservingState(); if(service!=null) { service.observe(this); service.active(selected); service.verifyPresence(); } restoreConnection(); }
+    @Override protected void onStart() { super.onStart(); visible=true; if(SystemBars.isDark(this)!=DARK)rerenderPreservingState(); if(service!=null) { service.observe(this); service.active(selected); service.verifyPresence(); changed(); } restoreConnection(); }
     @Override protected void onResume() { super.onResume();resumed=true;restoreConnection(); }
     @Override protected void onPause() { resumed=false;super.onPause(); }
     @Override public void onWindowFocusChanged(boolean hasFocus) { super.onWindowFocusChanged(hasFocus); if(hasFocus) SystemBars.appearance(getWindow(),DARK); }
     @Override protected void onStop() { pendingMessageLocation=null;scrollPositionVersion++;historyAppliedVersion=++historyRequestVersion; closeHistory(); finishSelection(); saveDraft(); visible=false; if(service!=null) { service.remove(this); service.active(""); } super.onStop(); }
     @Override protected void onDestroy() { avatarLoader.shutdownNow();avatarImageRequest=null;if(avatarSelection!=null&&avatarSelection.dialog!=null)avatarSelection.dialog.dismiss();if(media!=null) media.close(); if(backgroundBitmap!=null){backgroundBitmap.recycle();backgroundBitmap=null;} if(service!=null){service.remove(this);if(service.securityConfirmation==securityPrompt)service.securityConfirmation=null;} if(bound) unbindService(connection); if(Build.VERSION.SDK_INT>=33&&backCallback!=null) getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(backCallback); super.onDestroy(); }
-    @Override protected void onSaveInstanceState(Bundle state) { saveDraft(); state.putString("peer",selected); state.putString("picker",pickerPeer); state.putString("export",exportPath);state.putBoolean("share_handled",shareHandled); super.onSaveInstanceState(state); }
+    @Override protected void onSaveInstanceState(Bundle state) { saveDraft(); state.putString("peer",selected); state.putString("picker",pickerPeer);state.putBoolean("share_handled",shareHandled); super.onSaveInstanceState(state); }
     @Override public void onConfigurationChanged(android.content.res.Configuration configuration) {
         super.onConfigurationChanged(configuration);
         if(!getSharedPreferences("settings",MODE_PRIVATE).getBoolean("follow_system_theme",false))return;
@@ -438,7 +438,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
             outgoingMessageAvatar=new AvatarDrawable(this,ownIdentity,false,dp(2),SURFACE,ONLINE,ownAvatar);
             messageAvatarSignature=avatarSignature;for(View avatar:messageAvatarViews)avatar.invalidate();
         }
-        for(LanNode.Message m:rows) { fingerprint.append(m.number).append(m.outgoing).append(m.state); if(conversation!=null) for(int i=0;i<m.files.size();i++) { File local=service.receivedFile(conversation.peer,m.number,m.files.get(i)); fingerprint.append(m.outgoing?outgoingUri(m,i):local.isFile()).append(m.outgoing?null:receivedStorage.saved(local)); } }
+        for(LanNode.Message m:rows) { fingerprint.append(m.number).append(m.outgoing).append(m.state); if(conversation!=null) for(int i=0;i<m.files.size();i++) { File local=service.receivedFile(conversation.peer,m.number,m.files.get(i)); fingerprint.append(m.outgoing?outgoingUri(m,i):local.isFile()).append(m.outgoing||local.isFile()?null:receivedStorage.existingSaved(local)); } }
         boolean newOutgoing=!historySignature.isEmpty()&&rows.stream().anyMatch(m->m.outgoing&&!displayedOutgoing.contains(m.number));
         if(fingerprint.toString().equals(historySignature)) { transfersChanged(); if(pendingMessageLocation!=null)positionBeforeDraw(false,scroll.getScrollY());else if(forceLatest) {forceLatest=false;scrollToLatest();} return; }
         fileProgressViews.clear(); progressPeer=selected;
@@ -506,9 +506,9 @@ public final class MainActivity extends Activity implements ChatService.Observer
                     attachment.setOnLongClickListener(v->{sentFileActions(sentUri,f.name,m,conversation==null?null:conversation.peer);return true;});
                 } else if(conversation!=null) {
                     File saved=service.receivedFile(conversation.peer,m.number,f);
-                    boolean available=saved.isFile()||receivedStorage.saved(saved)!=null;
+                    Uri mediaUri=saved.isFile()?ReceivedFileProvider.uri(this,saved,f.name):receivedStorage.existingSaved(saved);
+                    boolean available=mediaUri!=null;
                     if(available&&MediaPreview.supported(f.name)&&previewCount++<24) {
-                        Uri mediaUri=saved.isFile()?ReceivedFileProvider.uri(this,saved,f.name):receivedStorage.saved(saved);
                         bubble.addView(media.thumbnail(mediaUri,f.name,Math.min(dp(260),maxWidth-dp(35)),()->openFile(mediaUri,f.name,false),()->fileActions(conversation.peer,m.number,f)),bubble.getChildCount()-1);
                     }
                     attachment.setContentDescription(f.name+(available?"，文件操作":"，接收文件"));
@@ -519,7 +519,20 @@ public final class MainActivity extends Activity implements ChatService.Observer
             }
             if(m.files.size()>1){
                 TextView total=text("",12,MUTED);total.setMaxWidth(maxWidth-dp(35));bubble.addView(total);ChatService sourceService=service;ChatStore.Conversation sourceConversation=conversation;
-                Runnable update=()->{if(service!=sourceService||!cardPeer.equals(selected))return;double bytes=0,done=0;int savedCount=0;for(Protocol.Attachment file:m.files){ChatService.FileProgress p=sourceService.progress(cardPeer,m.number,file.id,m.outgoing);boolean saved=p!=null&&(p.state.equals("已保存")||p.state.equals("对方已校验保存"));if(!m.outgoing&&sourceConversation!=null){File local=sourceService.receivedFile(sourceConversation.peer,m.number,file);saved|=local.isFile()||receivedStorage.saved(local)!=null;}double weight=Math.max(1,file.size);bytes+=weight;done+=weight*(saved?100:p==null?0:p.percent)/100.0;if(saved)savedCount++;}total.setText("总进度 "+(int)(done*100/bytes)+"% · 已保存 "+savedCount+" / "+m.files.size());};fileProgressViews.add(update);update.run();
+                Runnable update=()->{
+                    if(service!=sourceService||!cardPeer.equals(selected))return;
+                    double bytes=0,done=0;int savedCount=0;
+                    for(Protocol.Attachment file:m.files) {
+                        ChatService.FileProgress p=sourceService.progress(cardPeer,m.number,file.id,m.outgoing);
+                        boolean saved=p!=null&&taskComplete(p.state);int percent=p==null?0:p.percent;
+                        if(!m.outgoing&&sourceConversation!=null) {
+                            saved=receivedStorage.exists(sourceService.receivedFile(sourceConversation.peer,m.number,file));
+                            if(!saved&&(p==null?ChatService.wasStored(m.state):ChatService.wasStored(p.state)))percent=0;
+                        }
+                        double weight=Math.max(1,file.size);bytes+=weight;done+=weight*(saved?100:percent)/100.0;if(saved)savedCount++;
+                    }
+                    total.setText("总进度 "+(int)(done*100/bytes)+"% · 已保存 "+savedCount+" / "+m.files.size());
+                };fileProgressViews.add(update);update.run();
             }
             if(m.outgoing&&(m.state.contains("未确认")||m.state.equals("发送失败"))) {
                 TextView retry=text("发送未确认 · 点击重试",13,BLUE);retry.setPadding(0,dp(8),0,dp(8));bubble.addView(retry);
@@ -575,9 +588,13 @@ public final class MainActivity extends Activity implements ChatService.Observer
             if(service!=source||source==null||!selected.equals(peer))return;
             ChatService.FileProgress progress=source.progress(peer,message.number,file.id,message.outgoing);
             boolean saved=false;
-            if(!message.outgoing&&conversation!=null) {File local=source.receivedFile(conversation.peer,message.number,file);saved=local.isFile()||receivedStorage.saved(local)!=null;}
+            if(!message.outgoing&&conversation!=null)saved=receivedStorage.exists(source.receivedFile(conversation.peer,message.number,file));
             int percent=progress!=null?progress.percent:saved?100:0;
             String state=progress!=null?progress.state:message.outgoing?(source.offering(peer,message.number,file.id)?"等待对方接收":"历史邀请 · 无活动传输"):saved?"已保存":"待接收 · 点击接收";
+            if(!message.outgoing&&(progress==null||!taskActive(progress.state))) {
+                if(saved){state="已保存";percent=100;}
+                else if(ChatService.wasStored(message.state)||progress!=null&&ChatService.wasStored(progress.state)){state="本机文件已删除";percent=0;}
+            }
             if(outgoingUnavailable)state="文件已删除或不可用";
             String rate=progress!=null&&(state.equals("发送中")||state.startsWith("接收中"))?" · "+size((long)progress.bytesPerSecond)+"/s":"";
             label.setText(percent+"%"+rate+" · "+state);bar.setProgress(percent);
@@ -872,10 +889,15 @@ public final class MainActivity extends Activity implements ChatService.Observer
         });
     }
     private String taskState(ChatStore.FileTask item) {
-        if(item.guestFile!=null)return item.guestFile.isFile()||receivedStorage.saved(item.guestFile)!=null?"已保存":"本机文件已删除";
+        if(item.guestFile!=null)return receivedStorage.exists(item.guestFile)?"已保存":"本机文件已删除";
         ChatService.FileProgress progress=service==null?null:service.progress(item.peer,item.message.number,item.file.id,item.message.outgoing);
+        if(!item.message.outgoing) {
+            boolean available=service==null?item.stored:receivedStorage.exists(service.receivedFile(item.peer,item.message.number,item.file));
+            if(progress!=null&&taskActive(progress.state))return progress.state;
+            if(available)return "已保存";
+            if(item.stored||ChatService.wasStored(item.message.state)||progress!=null&&ChatService.wasStored(progress.state))return "本机文件已删除";
+        }
         if(progress!=null)return progress.state;
-        if(item.stored)return "已保存";
         if(item.message.state!=null&&(item.message.state.equals("对方已取消发送")||item.message.state.equals("已拒绝")||item.message.state.equals("已取消发送")))return item.message.state;
         return item.message.outgoing?"等待对方接收":"待接收";
     }
@@ -899,8 +921,8 @@ public final class MainActivity extends Activity implements ChatService.Observer
             StringBuilder content=new StringBuilder();
             for(ChatStore.FileTask item:all){String state=taskState(item);ChatStore.Conversation contact=conversation(item.peer);String name=item.guestFile!=null?"浏览器访客":contact==null?"已移除的设备":contact.displayName();
                 if(!(item.file.name+" "+name).toLowerCase(Locale.ROOT).contains(query)||filter==1&&!taskActive(state)||filter==2&&(taskActive(state)||taskComplete(state))||filter==3&&!taskComplete(state))continue;
-                next.add(item);if(taskComplete(state))completed++;ChatService.FileProgress p=service==null?null:service.progress(item.peer,item.message.number,item.file.id,item.message.outgoing);total+=item.file.size;done+=item.file.size*(taskComplete(state)?1:p==null?0:p.percent/100.0);
-                int percent=taskComplete(state)?100:p==null?0:p.percent;
+                next.add(item);if(taskComplete(state))completed++;ChatService.FileProgress p=service==null?null:service.progress(item.peer,item.message.number,item.file.id,item.message.outgoing);
+                int percent=taskComplete(state)?100:state.equals("本机文件已删除")?0:p==null?0:p.percent;total+=item.file.size;done+=item.file.size*percent/100.0;
                 content.append(item.peer).append('\0').append(item.message.number).append('\0').append(item.message.outgoing).append('\0').append(item.file.id).append('\0')
                     .append(item.file.name).append('\0').append(item.file.size).append('\0').append(name).append('\0').append(state).append('\0').append(percent).append('\0')
                     .append(taskLabel(item,state,p)).append('\0').append(item.guestFile==null?"":item.guestFile.getAbsolutePath()).append('\0');
@@ -921,16 +943,22 @@ public final class MainActivity extends Activity implements ChatService.Observer
             ChatStore.Conversation contact=conversation(item.peer);String state=taskState(item);ChatService.FileProgress p=service==null?null:service.progress(item.peer,item.message.number,item.file.id,item.message.outgoing);
             ((TextView)box.getChildAt(0)).setText(item.file.name);((TextView)box.getChildAt(1)).setText((item.message.outgoing?"发送给 ":"来自 ")+(item.guestFile!=null?"浏览器访客":contact==null?"已移除的设备":contact.displayName())+" · "+size(item.file.size));
             String label=taskLabel(item,state,p);
-            TextView status=(TextView)box.getChildAt(2);status.setText(label);status.setTextColor(taskComplete(state)?ONLINE:taskActive(state)?BLUE:MUTED);ProgressBar bar=(ProgressBar)box.getChildAt(3);bar.setProgress(taskComplete(state)?100:p==null?0:p.percent);bar.setVisibility(taskEnded(state)?View.GONE:View.VISIBLE);box.setContentDescription(item.file.name+"，"+label);return box;
+            TextView status=(TextView)box.getChildAt(2);status.setText(label);status.setTextColor(taskComplete(state)?ONLINE:taskActive(state)?BLUE:MUTED);ProgressBar bar=(ProgressBar)box.getChildAt(3);bar.setProgress(taskComplete(state)?100:state.equals("本机文件已删除")?0:p==null?0:p.percent);bar.setVisibility(taskEnded(state)?View.GONE:View.VISIBLE);box.setContentDescription(item.file.name+"，"+label);return box;
         }
     }
     private void taskActions(ChatStore.FileTask item) {
         if(item.guestFile!=null) {
             LinearLayout box=column();box.addView(text("浏览器访客 · "+taskState(item),13,MUTED));Dialog dialog=sheet(item.file.name,box,null,null);
-            Uri uri=item.guestFile.isFile()?ReceivedFileProvider.uri(this,item.guestFile,item.file.name):receivedStorage.saved(item.guestFile);
-            if(uri!=null){fileAction(box,dialog,"打开文件",()->openFile(uri,item.file.name,false));fileAction(box,dialog,"分享文件",()->openFile(uri,item.file.name,true));}
-            if(item.guestFile.isFile()){fileAction(box,dialog,"另存为…",()->export(item.guestFile,item.file.name));if(receivedStorage.tree()!=null)fileAction(box,dialog,"保存到设置目录",()->service.saveToFolder(item.guestFile,item.file.name));}
-            fileAction(box,dialog,"查看保存位置",()->showFileLocation(item.guestFile));return;
+            Uri uri=item.guestFile.isFile()?ReceivedFileProvider.uri(this,item.guestFile,item.file.name):receivedStorage.existingSaved(item.guestFile);
+            if(uri!=null){
+                fileAction(box,dialog,"打开文件",()->openFile(uri,item.file.name,false));
+                fileAction(box,dialog,"打开方式…",()->openFileWith(uri,item.file.name,false,true));
+                fileAction(box,dialog,"分享文件",()->openFile(uri,item.file.name,true));
+                ChatService source=service;
+                fileAction(box,dialog,"删除本机文件",()->confirm("删除这个文件？",item.file.name+"\n将删除本机保存的文件，接收记录保留，无法重新接收。此操作无法撤销。","删除文件",()->{if(source!=null&&service==source)source.deleteGuestFile(item.guestFile);}));
+            }
+            fileAction(box,dialog,"查看保存位置",()->showFileLocation(item.guestFile));
+            fileAction(box,dialog,"复制文件名",()->copyText("文件名",item.file.name));return;
         }
         if(service==null)return;ChatStore.Conversation contact=conversation(item.peer);if(contact==null){error("联系人已移除，请重新添加后操作");return;}
         LinearLayout content=column();content.addView(text(taskState(item)+" · "+size(item.file.size),13,MUTED));Dialog actions=sheet(item.file.name,content,null,null);String state=taskState(item);
@@ -1276,8 +1304,6 @@ public final class MainActivity extends Activity implements ChatService.Observer
         Button clear=button("清理已接收文件",false); Button clearOffers=button("清理发送缓存",false);
         LinearLayout.LayoutParams clrP=weight();clrP.rightMargin=dp(8);clearRow.addView(clear,clrP);clearRow.addView(clearOffers,weight());box.addView(clearRow,settingSpacing(6,8));
         clear.setOnClickListener(v->clearReceivedFiles());
-        Switch cleanupSaved=settingSwitch("另存后清理应用内副本",prefs.getBoolean(ReceivedStorage.CLEAN_EXPORTED,false));box.addView(cleanupSaved,settingSpacing(4,0));
-        box.addView(text("核验另存文件完整后才清理内部副本，不影响已导出文件",12,MUTED));
         clearOffers.setOnClickListener(v->confirm("清理发送缓存","撤销尚未接收的文件邀请并删除暂存副本？原文件不受影响。","清理",()->{
             if(service==null) { error("连接服务尚未就绪，请稍后重试"); return; }
             service.clearOffers(result->error(result.files==0?"没有可清理的发送缓存":"已撤销未接收的文件邀请，删除 "+result.files+" 个暂存副本，释放 "+size(result.bytes)));
@@ -1300,7 +1326,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
             View backdrop=backgrounds.findViewById(backgrounds.getCheckedRadioButtonId());String backdropKey=backdrop==null?"orbits":backdrop.getTag().toString();
             if(backdropKey.equals("image")&&prefs.getString("background_image","").isEmpty()){dialog.getWindow().getDecorView().findViewWithTag("settings-tab:1").performClick();error("请先选择背景图片");return;}
             int nextSize=fontSize.getProgress()+14;boolean nextDark=follow.isChecked()?systemDark():dark.isChecked();String nextBgImage=prefs.getString("background_image","");
-            boolean saved=prefs.edit().putBoolean(ReceivedStorage.CLEAN_EXPORTED,cleanupSaved.isChecked()).putBoolean("allow_legacy_protocol",legacy.isChecked()).putInt("legacy_protocol_policy",ChatService.LEGACY_POLICY_VERSION).putString("avatar",avatarValue[0]).putString("name",n).putString("group",g).putInt("port",p).putBoolean("auto_connect",autoConnect.isChecked()).putBoolean("diagnostics",diagnosticSwitch.isChecked()).putBoolean(ReceivedStorage.AUTO,automatic.isChecked()).putBoolean("follow_system_theme",follow.isChecked()).putBoolean("dark_mode",dark.isChecked()).putString("accent",accentKey).putInt("chat_font_size",nextSize).putString("chat_background",backdropKey).commit();
+            boolean saved=prefs.edit().putBoolean("allow_legacy_protocol",legacy.isChecked()).putInt("legacy_protocol_policy",ChatService.LEGACY_POLICY_VERSION).putString("avatar",avatarValue[0]).putString("name",n).putString("group",g).putInt("port",p).putBoolean("auto_connect",autoConnect.isChecked()).putBoolean("diagnostics",diagnosticSwitch.isChecked()).putBoolean(ReceivedStorage.AUTO,automatic.isChecked()).putBoolean("follow_system_theme",follow.isChecked()).putBoolean("dark_mode",dark.isChecked()).putString("accent",accentKey).putInt("chat_font_size",nextSize).putString("chat_background",backdropKey).commit();
             if(!saved){error("设置未保存，请检查设备存储空间");return;}if(service!=null){service.receiveSettingsChanged();service.profileSettingsChanged();}dialog.dismiss();
             boolean visualChanged=nextDark!=DARK||!accentKey.equals(initialAccent)||nextSize!=initialFontSize||!backdropKey.equals(initialBackground)||!nextBgImage.equals(initialBackgroundImage);
             if(visualChanged) {
@@ -1546,34 +1572,27 @@ public final class MainActivity extends Activity implements ChatService.Observer
     // 先说明删什么、留什么再确认；没有可清理的文件直接提示，完成后报告实际结果，不让按钮“点了没反应”。
     private void clearReceivedFiles() {
         if(service==null) { error("连接服务尚未就绪，请稍后重试"); return; }
-        ChatService.Usage usage=service.receivedUsage();
-        if(usage.files==0) { error("应用内没有可清理的已接收文件"+(receivedStorage.tree()!=null?"；保存文件夹里的文件不会被飞Q删除，可在系统文件管理中处理":"")); return; }
-        String rest="需要重新接收才能打开，邀请已过期的需请对方重发。";
-        String detail=usage.saved==usage.files?"它们都已另存到保存文件夹，那里的文件不会删除，聊天中仍可打开。":usage.saved>0?"其中 "+usage.saved+" 个已另存到保存文件夹，那里的文件不会删除，聊天中仍可打开；其余附件"+rest:"聊天记录保留，清理后的附件"+rest;
-        confirm("清理已接收文件","删除应用内的 "+usage.files+" 个已接收文件，共 "+size(usage.bytes)+"。"+detail,"清理",()->{
+        ChatService.Usage usage;
+        try {usage=service.receivedUsage();}catch(java.io.IOException e){error("无法统计已接收文件："+e.getMessage());return;}
+        if(usage.files==0) { error("没有可清理的已接收文件"); return; }
+        String detail="删除本机已接收的 "+usage.files+" 个文件，共 "+size(usage.bytes)+"。聊天与传输记录保留，删除后文件不再保留；聊天附件在对方在线且邀请有效时可重新接收。";
+        if(usage.guestFiles>0)detail+="\n注意：其中 "+usage.guestFiles+" 个来自临时浏览器传输，清理后无法重新接收。";
+        confirm("清理已接收文件",detail,"清理",()->{
             if(service==null) { error("连接服务尚未就绪，请稍后重试"); return; }
-            service.clearFiles(result->error(result.files==0?"应用内没有可清理的已接收文件":"已清理 "+result.files+" 个应用内文件，释放 "+size(result.bytes)+(result.saved>0?"；保存文件夹中的 "+result.saved+" 个副本未删除":"")));
+            service.clearFiles(result->error("已清理 "+result.files+" 个已接收文件，释放 "+size(result.bytes)));
         });
     }
     private void fileActions(LanNode.Peer peer,long packet,Protocol.Attachment file) {
         if(service==null) return;
-        File cached=service.receivedFile(peer,packet,file); Uri exported=receivedStorage.saved(cached);
+        File cached=service.receivedFile(peer,packet,file);Uri uri=cached.isFile()?ReceivedFileProvider.uri(this,cached,file.name):receivedStorage.existingSaved(cached);
         LinearLayout options=column(); Dialog dialog=sheet(file.name,options,null,null);
-        if(cached.isFile()||exported!=null) {
-            // 应用内副本更可靠；清理缓存后仍可使用保存目录中的历史 URI。
-            Uri uri=cached.isFile()?ReceivedFileProvider.uri(this,cached,file.name):exported;
+        if(uri!=null) {
             fileAction(options,dialog,"打开文件",()->openFile(uri,file.name,false));
             fileAction(options,dialog,"打开方式…",()->openFileWith(uri,file.name,false,true));
             fileAction(options,dialog,"分享文件",()->openFile(uri,file.name,true));
             fileAction(options,dialog,"查看保存位置",()->showFileLocation(cached));
             ChatService source=service;
-            fileAction(options,dialog,"删除本机文件",()->confirm("删除这个文件？",file.name+"\n将删除应用内副本"+(exported==null?"":"和保存目录中的对应文件")+"，聊天记录与对方文件保留。此操作无法撤销。","删除文件",()->{if(service==source)source.deleteReceivedFile(peer,packet,file);}));
-            if(cached.isFile()) {
-                fileAction(options,dialog,"另存为…",()->export(cached,file.name));
-                String mime=ReceivedStorage.mime(file.name);
-                if(Build.VERSION.SDK_INT>=29&&(mime.startsWith("image/")||mime.startsWith("video/")))fileAction(options,dialog,"保存到相册",()->{if(service!=null)service.saveToGallery(cached,file.name);});
-                if(receivedStorage.tree()!=null) fileAction(options,dialog,"保存到设置目录 / 重试",()->{ if(service!=null) service.saveToFolder(cached,file.name); });
-            }
+            fileAction(options,dialog,"删除本机文件",()->confirm("删除这个文件？",file.name+"\n将删除本机保存的文件，聊天记录与对方文件保留。此操作无法撤销。","删除文件",()->{if(service==source)source.deleteReceivedFile(peer,packet,file);}));
         } else {
             fileAction(options,dialog,"接收文件",()->{ if(service!=null) service.receive(peer,packet,file); });
             fileAction(options,dialog,"拒绝这批文件",()->{ if(service!=null) service.reject(peer,packet); });
@@ -1583,19 +1602,19 @@ public final class MainActivity extends Activity implements ChatService.Observer
     private void openFile(Uri uri,String name,boolean share) { openFileWith(uri,name,share,false); }
     private void openFileWith(Uri uri,String name,boolean share,boolean chooser) {
         if(!share&&name.toLowerCase(Locale.ROOT).endsWith(".apk")&&!getPackageManager().canRequestPackageInstalls()){
-            confirm("允许安装此来源的应用","系统尚未允许飞Q请求安装 APK。请在下一页允许此来源，返回后再次点击打开文件；安装仍需系统确认。只安装可信来源的文件。","前往系统设置",()->{try{startActivity(new Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,Uri.parse("package:"+getPackageName())));}catch(ActivityNotFoundException e){error("系统不提供安装授权页面，请另存 APK 后使用系统文件管理器打开");}});return;
+            confirm("允许安装此来源的应用","系统尚未允许飞Q请求安装 APK。请在下一页允许此来源，返回后再次点击打开文件；安装仍需系统确认。只安装可信来源的文件。","前往系统设置",()->{try{startActivity(new Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,Uri.parse("package:"+getPackageName())));}catch(ActivityNotFoundException e){error("系统不提供安装授权页面，可使用分享文件交给支持安装的应用");}});return;
         }
         Intent intent=new Intent(share?Intent.ACTION_SEND:Intent.ACTION_VIEW).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
         if(share) { intent.setType(ReceivedStorage.mime(name)); intent.putExtra(Intent.EXTRA_STREAM,uri); }
         else intent.setDataAndType(uri,ReceivedStorage.mime(name));
         intent.setClipData(ClipData.newRawUri(name,uri));
         try { startActivity(share||chooser?Intent.createChooser(intent,share?"分享文件":"选择打开方式"):intent); }
-        catch(ActivityNotFoundException e) { sheet("没有可用的打开方式",text("系统没有支持此文件格式的应用（"+ReceivedStorage.mime(name)+"）。请安装支持该格式的应用，或使用另存为/分享。",15,INK),"确定",Dialog::dismiss); }
-        catch(SecurityException e) { error("文件授权已失效，请重新选择保存目录或使用应用内副本"); }
+        catch(ActivityNotFoundException e) { sheet("没有可用的打开方式",text("系统没有支持此文件格式的应用（"+ReceivedStorage.mime(name)+"）。请安装支持该格式的应用，或使用分享文件交给其他应用。",15,INK),"确定",Dialog::dismiss); }
+        catch(SecurityException e) { error("文件授权已失效，请在设置中重新选择保存文件夹后重试"); }
     }
     private void showFileLocation(File file) {
-        Uri tree=receivedStorage.savedTree(file), saved=receivedStorage.saved(file);
-        LinearLayout content=column(); String location=tree==null?"应用私有接收区，其他文件管理器不能直接访问。可使用另存为导出。":DocumentsContract.getTreeDocumentId(tree);
+        Uri saved=file.isFile()?null:receivedStorage.existingSaved(file),tree=saved==null?null:receivedStorage.savedTree(file);
+        LinearLayout content=column();String location=file.isFile()?"保存在应用内接收区；可在设置中选择保存文件夹供后续接收使用。":saved==null?"本机文件已删除":DocumentsContract.getTreeDocumentId(tree);
         TextView path=text(location,15,INK); selectable(path); content.addView(path);
         Dialog dialog=sheet("保存位置",content,null,null);
         if(tree!=null) fileAction(content,dialog,"打开保存文件夹",()->{
@@ -1603,7 +1622,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
             Intent intent=new Intent(Intent.ACTION_VIEW).setDataAndType(folder,DocumentsContract.Document.MIME_TYPE_DIR).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
             try { startActivity(intent); }
             catch(ActivityNotFoundException e) {
-                try { startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*").addCategory(Intent.CATEGORY_OPENABLE).putExtra(DocumentsContract.EXTRA_INITIAL_URI,folder),23); }
+                try { startActivity(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*").addCategory(Intent.CATEGORY_OPENABLE).putExtra(DocumentsContract.EXTRA_INITIAL_URI,folder)); }
                 catch(ActivityNotFoundException missing) { error("系统文件管理器不支持打开此位置"); }
             } catch(SecurityException e) { error("目录权限已失效，请在设置中重新选择目录"); }
         });
@@ -1628,10 +1647,6 @@ public final class MainActivity extends Activity implements ChatService.Observer
         if(service==null||!service.online()) { error("请先连接局域网"); return; } if(service.busy()) { error("已有文件任务，请等待或取消"); return; }
         pickerPeer=selected; Intent intent=new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*").addCategory(Intent.CATEGORY_OPENABLE).putExtra(Intent.EXTRA_ALLOW_MULTIPLE,true).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
         try { startActivityForResult(intent,20); } catch(ActivityNotFoundException e) { error("系统没有可用的文件选择器"); }
-    }
-    private void export(File file,String name) {
-        exportPath=file.getAbsolutePath(); Intent intent=new Intent(Intent.ACTION_CREATE_DOCUMENT).setType("application/octet-stream").addCategory(Intent.CATEGORY_OPENABLE).putExtra(Intent.EXTRA_TITLE,name);
-        try { startActivityForResult(intent,21); } catch(ActivityNotFoundException e) { error("系统没有可用的保存选择器"); }
     }
     @Override protected void onActivityResult(int request,int result,Intent data) {
         super.onActivityResult(request,result,data);
@@ -1673,14 +1688,13 @@ public final class MainActivity extends Activity implements ChatService.Observer
             try { receivedStorage.choose(data.getData(),data.getFlags()); if(folderLabel!=null) folderLabel.setText(receivedStorage.folderLabel()); if(service!=null) service.receiveSettingsChanged(); error("保存目录已更新，之后接收的文件会自动保存到此目录"); }
             catch(Exception e) { error("目录授权未保存："+e.getMessage()); } return;
         }
-        if(request!=20&&request!=21) return;
+        if(request!=20) return;
         if(service==null) { error("连接服务尚未就绪，请重新选择文件"); return; }
         if(request==20) {
             ChatStore.Conversation peer=conversation(pickerPeer);
             try { List<Uri> files=selectedFiles(data);if((data.getFlags()&Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)!=0)for(Uri uri:files)try{getContentResolver().takePersistableUriPermission(uri,Intent.FLAG_GRANT_READ_URI_PERMISSION);}catch(SecurityException ignored){/* 无持久权限的来源仍使用受限副本。 */}if(peer!=null) service.sendFiles(peer.peer,files); else error("联系人已失效，请重新选择"); }
             catch(IllegalArgumentException e) { error(e.getMessage()); }
         }
-        if(request==21) { File file=new File(exportPath); if(file.isFile()&&file.getParentFile().equals(new File(getFilesDir(),"received"))) service.exportFile(file,data.getData()); else error("应用内文件已不存在"); }
     }
     private boolean currentAvatarRequest(AvatarSelection state,int revision) {
         return !isDestroyed()&&!isFinishing()&&avatarSelection==state&&state.revision==revision&&state.dialog.isShowing();

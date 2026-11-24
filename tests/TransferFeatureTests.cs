@@ -20,6 +20,8 @@ namespace FeiqLight.Tests
         private static string root,output;
         private static int passed,failed;
         [DllImport("user32.dll")] private static extern bool PrintWindow(IntPtr window,IntPtr dc,uint flags);
+        [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)]
+        [return:MarshalAs(UnmanagedType.I1)] private static extern bool CreateSymbolicLink(string link,string target,int flags);
         private static void SaveSnapshot(Form form,string name){form.Refresh();Application.DoEvents();Thread.Sleep(80);using(var image=new Bitmap(form.Width,form.Height)){using(Graphics g=Graphics.FromImage(image)){IntPtr dc=g.GetHdc();try{Check(PrintWindow(form.Handle,dc,2),"窗口渲染失败："+name);}finally{g.ReleaseHdc(dc);}}image.Save(Path.Combine(output,name+".png"),System.Drawing.Imaging.ImageFormat.Png);}}
         private static void Check(bool value,string message){if(!value)throw new Exception(message);}
         private static void Run(string name,Action test){try{test();passed++;Console.WriteLine("PASS "+name);}catch(Exception e){failed++;Console.WriteLine("FAIL "+name+" "+e);}}
@@ -142,6 +144,30 @@ namespace FeiqLight.Tests
                     Json(server,"/api/prepare",new{name="unfinished.bin",size=99});server.Dispose();Check(!Directory.EnumerateFiles(folder,"*.part").Any(),"关闭遗留未完成断点");Check(File.ReadAllText(Path.Combine(folder,"same.txt"))=="original","清理删除了用户文件");
                 }
             });
+            Run("访客取消归还配额和有效文件名额，重复取消不重复归还",()=>{
+                using(var server=new GuestTransfer(new string[0],Path.Combine(root,"cancel-quota"),true,true))
+                {
+                    long large=6L*1024*1024*1024;
+                    Reply prepared=Json(server,"/api/prepare",new{name="large.bin",size=large});Check(prepared.Code==200,"大文件准备失败");string id=(string)Data(prepared)["id"];
+                    Check(Json(server,"/api/prepare",new{name="blocked.bin",size=large}).Code==409,"未取消时未限制总配额");
+                    Check(Json(server,"/api/cancel?id="+id,new{}).Code==200,"取消大文件失败");
+                    Reply replacement=Json(server,"/api/prepare",new{name="replacement.bin",size=large});Check(replacement.Code==200,"取消后未归还大文件配额");
+                    Check(Json(server,"/api/cancel?id="+id,new{}).Code==410,"重复取消未保持取消终态");
+                    Check(Json(server,"/api/prepare",new{name="overflow.bin",size=5L*1024*1024*1024}).Code==409,"重复取消多归还了配额");
+                    Check(Json(server,"/api/cancel?id="+(string)Data(replacement)["id"],new{}).Code==200,"取消替换任务失败");
+                    var ids=new List<string>();for(int i=0;i<100;i++){Reply ready=Json(server,"/api/prepare",new{name="empty-"+i+".txt",size=0});Check(ready.Code==200,"有效文件名额过早用完");ids.Add((string)Data(ready)["id"]);}
+                    Check(Json(server,"/api/prepare",new{name="extra.txt",size=0}).Code==409,"超过100个有效任务仍获准上传");
+                    Check(Json(server,"/api/finish?id="+ids[0],new{}).Code==200,"完整任务无法保存");Check(Json(server,"/api/cancel?id="+ids[0],new{}).Code==409,"已保存文件被取消");
+                    Check(Json(server,"/api/cancel?id="+ids[1],new{}).Code==200,"取消有效任务失败");Check(Json(server,"/api/prepare",new{name="new-empty.txt",size=0}).Code==200,"取消后未释放100个文件名额");
+                }
+            });
+            Run("访客取消历史有硬上限，禁止无限准备任务耗内存",()=>{
+                using(var server=new GuestTransfer(new string[0],Path.Combine(root,"cancel-history"),true,true))
+                {
+                    for(int i=0;i<1024;i++){Reply ready=Json(server,"/api/prepare",new{name="empty.txt",size=0});Check(ready.Code==200,"取消历史过早阻断有效名额");Check(Json(server,"/api/cancel?id="+(string)Data(ready)["id"],new{}).Code==200,"取消历史任务失败");}
+                    Check(Json(server,"/api/prepare",new{name="excess.txt",size=0}).Code==409,"任务历史没有1024条内存上限");
+                }
+            });
             Run("暂停保留断点并从实际偏移续传",PauseResume);
             Run("TLS接收暂停保留断点并完成SHA-256校验",()=>{
                 string source=Path.Combine(root,"tls-source.bin"),target=Path.Combine(root,"tls-received.bin");
@@ -205,6 +231,58 @@ namespace FeiqLight.Tests
                     main.Show();MethodInfo open=typeof(MainForm).GetMethod("OpenGuest",BindingFlags.Instance|BindingFlags.NonPublic);open.Invoke(main,null);Application.DoEvents();GuestWindow guest=Field<GuestWindow>(main,"guestWindow");Check(guest!=null&&guest.Visible,"访客窗口未打开");
                     guest.WindowState=FormWindowState.Minimized;Application.DoEvents();open.Invoke(main,null);Application.DoEvents();Check(Object.ReferenceEquals(guest,Field<GuestWindow>(main,"guestWindow"))&&guest.WindowState==FormWindowState.Normal&&guest.Visible,"重复打开未恢复已有访客窗口");guest.Close();main.ExitApplication();
                 }
+            });
+            Run("访客窗口：过滤不安全条目，开启、停止和重开刷新地址且保留接收入口",()=>{
+                Theme.Configure(false,"blue");var store=new LocalStore(Path.Combine(root,"guest-refresh"));
+                using(var network=new LanService(new AppSettings{CloseToTray=false,Notifications=false,ReceiveFolder=Path.Combine(store.Root,"received")},FreePort(),true,"guest-refresh"))
+                using(var main=new MainForm(network,store))
+                {
+                    main.Show();MethodInfo open=typeof(MainForm).GetMethod("OpenGuest",BindingFlags.Instance|BindingFlags.NonPublic);open.Invoke(main,null);Application.DoEvents();GuestWindow guest=Field<GuestWindow>(main,"guestWindow");
+                    Control picker=Controls(guest).Single(c=>c.AccessibleName=="临时传输网络地址");MethodInfo setItems=picker.GetType().GetMethod("SetItems",BindingFlags.Instance|BindingFlags.NonPublic);
+                    setItems.Invoke(picker,new object[]{new[]{"192.0.2.90"}});open.Invoke(main,null);Check(picker.Text=="127.0.0.1","唤醒闲置窗口未剔除失效IP");
+                    string unsafeName=Path.Combine(root,new string('测',81)+".txt");File.WriteAllText(unsafeName,"名称超过UTF-8字节上限");
+                    Check(!Protocol.SafeFileName(Path.GetFileName(unsafeName)),"非法文件名测试资料不成立");
+                    typeof(GuestWindow).GetMethod("AddFiles",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(guest,new object[]{new[]{sample,unsafeName,root,Path.Combine(root,"missing-file.txt")}});
+                    Check(Field<ListBox>(guest,"files").Items.Count==1,"拖入非法条目未被跳过");Check(Field<Label>(guest,"state").Text.Contains("已忽略"),"跳过条目没有提示");
+                    Field<ToggleSwitch>(guest,"upload").Checked=true;setItems.Invoke(picker,new object[]{new[]{"192.0.2.91"}});Field<Button>(guest,"start").PerformClick();
+                    GuestTransfer session=Field<GuestTransfer>(guest,"session");Check(session!=null&&picker.Text=="127.0.0.1","开启前未刷新失效IP");
+                    string id=(string)Data(Json(session,"/api/prepare",new{name="received.txt",size=0}))["id"];Check(Json(session,"/api/finish?id="+id,new{}).Code==200,"窗口接收文件失败");
+                    setItems.Invoke(picker,new object[]{new[]{"192.0.2.92"}});guest.Stop();Check(picker.Text=="127.0.0.1","停止时未刷新局域网地址");
+                    Check(Field<Button>(guest,"openTasks").Visible,"停止后隐藏了查看已接收入口");PumpFor(100);Check(main.TransferRecords.Any(r=>r.PeerId=="browser-guests"),"完成回调未保存访客任务");
+                    Field<Button>(guest,"openTasks").PerformClick();Application.DoEvents();Check(Field<TransferWindow>(main,"transferWindow").Visible,"结束后的查看已接收按钮不能打开任务页");
+                    SaveSnapshot(guest,"guest-stopped-received-light");guest.Close();main.ExitApplication();
+                }
+            });
+            Run("访客拖入符号链接时跳过链接并保留普通文件",()=>{
+                string link=Path.Combine(root,"guest-link.txt");
+                bool createdSymlink=CreateSymbolicLink(link,sample,2);
+                int linkError=createdSymlink?0:Marshal.GetLastWin32Error();
+                if(!createdSymlink){Check(linkError==1314,"符号链接测试资料创建失败，Win32="+linkError);File.WriteAllText(link,"reparse-fallback");}
+                var store=new LocalStore(Path.Combine(root,"guest-links"));
+                using(var network=new LanService(new AppSettings{CloseToTray=false,Notifications=false,ReceiveFolder=Path.Combine(store.Root,"received")},FreePort(),true,"guest-links"))
+                using(var main=new MainForm(network,store))using(var guest=new GuestWindow(main,network))
+                {
+                    if(!createdSymlink){string fullLink=Path.GetFullPath(link);guest.ReadAttributes=info=>String.Equals(info.FullName,fullLink,StringComparison.OrdinalIgnoreCase)?(info.Attributes|FileAttributes.ReparsePoint):info.Attributes;}
+                    main.Show();guest.Show();typeof(GuestWindow).GetMethod("AddFiles",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(guest,new object[]{new[]{sample,link}});
+                    Check(Field<ListBox>(guest,"files").Items.Count==1,"符号链接混入待分享文件");Check(Field<Label>(guest,"state").Text.Contains("链接"),"跳过链接没有提示");guest.Close();main.ExitApplication();
+                }
+            });
+            Run("已保存入站文件移除后显示路径提示，接收中操作保持原契约",()=>{
+                foreach(bool dark in new[]{false,true})
+                {
+                    Theme.Configure(dark,"blue");var store=new LocalStore(Path.Combine(root,"missing-saved-"+dark));string local=Path.Combine(store.Root,"moved.bin");File.WriteAllText(local,"file");
+                    using(var network=new LanService(new AppSettings{CloseToTray=false,Notifications=false,DarkMode=dark,ReceiveFolder=Path.Combine(store.Root,"received")},FreePort(),true,"missing-saved"))
+                    using(var main=new MainForm(network,store))using(var window=new TransferWindow(main))
+                    {
+                        main.Show();var file=new FileTransferState{Id=0,Name="已保存.bin",Size=4,Status="已保存",Percent=100,LocalPath=local};main.TrackTransfer(new ChatRecord{PeerId="browser-guests",Packet=1,Sender="浏览器访客",Time=DateTime.Now,Transfers=new[]{file}});
+                        window.Show();PumpFor(60);ListBox list=Field<ListBox>(window,"list");list.SelectedIndex=0;Check(Field<Button>(window,"action").Text=="打开文件位置","已有文件打开操作异常");
+                        File.Delete(local);list.SelectedIndex=-1;list.SelectedIndex=0;Check(Field<Label>(window,"detail").Text=="本机文件已移动或删除："+local,"缺失的已保存文件仍显示保存成功");
+                        Check(!Field<Button>(window,"action").Enabled,"已完成且缺失文件仍可重新接收");SaveSnapshot(window,"transfer-missing-saved-"+(dark?"dark":"light"));
+                        file.Status="接收中";typeof(TransferWindow).GetMethod("RefreshRows",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(window,null);Check(Field<Button>(window,"action").Text=="继续接收","未完成文件受已保存提示逻辑影响");
+                        window.Close();main.ExitApplication();
+                    }
+                }
+                Theme.Configure(false,"blue");
             });
             Run("传输定时刷新：静止零重绘、仅刷新变化行、隐藏和最小化恢复",()=>{
                 Theme.Configure(false,"blue");var store=new LocalStore(Path.Combine(root,"redraw"));
@@ -441,6 +519,48 @@ namespace FeiqLight.Tests
                     }
                 }
                 Theme.Configure(false,"blue");
+            });
+            Run("长说明触顶后自动滚动并保留中文、英文和尾部原文",()=>{
+                foreach(bool dark in new[]{false,true})
+                {
+                    Theme.Configure(dark,"blue");using(var dialog=new ConfirmDialog("长说明","短说明","继续",false))
+                    {
+                        dialog.Show();Application.DoEvents();RichTextBox details=Controls(dialog).OfType<RichTextBox>().Single(r=>r.AccessibleName=="确认详情");Check(details.ScrollBars==RichTextBoxScrollBars.None,"短说明误开滚动条");
+                        string text=String.Join("\n",Enumerable.Range(1,70).Select(i=>i+" 行 中文 English 😀"))+"\n尾部不会丢失";details.Text=text;PumpFor(80);
+                        DialogLayout.FitTextHeight(dialog,details.Parent,2000,490);PumpFor(80);float scale;using(Graphics g=dialog.CreateGraphics())scale=Math.Max(1F,g.DpiY/96F);
+                        int limit=Math.Min(Screen.FromControl(dialog).WorkingArea.Height-(int)Math.Round(64*scale),(int)Math.Round(490*scale));Check(dialog.ClientSize.Height<=limit,"弹窗超过当前DPI或屏幕工作区上限");
+                        Check(details.ScrollBars==RichTextBoxScrollBars.Vertical,"说明触顶后没有启用滚动条");Check(details.Text.Replace("\r\n","\n")==text,"长说明原文被裁掉或改写");
+                        details.Select(details.TextLength,0);details.ScrollToCaret();Application.DoEvents();Point last=details.GetPositionFromCharIndex(details.TextLength-1);Check(last.Y>=0&&last.Y<details.ClientSize.Height,"长说明尾部无法滚动到可见区域");
+                        SaveSnapshot(dialog,"confirm-long-scroll-"+(dark?"dark":"light"));dialog.Close();
+                    }
+                }
+                Theme.Configure(false,"blue");
+            });
+            Run("富文本配对码、昵称标点与主题切换保持可读，关闭悬停色正确",()=>{
+                Theme.Configure(false,"blue");using(var regular=new ModernWindow())using(var confirm=new ConfirmDialog("核对安全身份","正在与「研发，评审；设备」配对。\nA1B2 C3D4 E5F6 7890\n请核对两端。","信任",false))
+                {
+                    var panel=new RoundedPanel{Fill=Color.White,Border=Color.FromArgb(Theme.Line.ToArgb()),Size=new Size(80,40)};regular.Surface.Controls.Add(panel);regular.Show();confirm.Show();Application.DoEvents();
+                    RoundedButton fixedClose=Controls(confirm).OfType<RoundedButton>().Single(b=>b.AccessibleName=="关闭窗口"),redClose=Controls(regular).OfType<RoundedButton>().Single(b=>b.AccessibleName=="关闭窗口");
+                    RichTextBox details=Controls(confirm).OfType<RichTextBox>().Single(r=>r.AccessibleName=="确认详情");string raw=details.Text;
+                    details.Select(raw.IndexOf("配对。",StringComparison.Ordinal),1);Check(details.SelectionColor.ToArgb()==Theme.Ink.ToArgb(),"昵称引号中的分号或逗号误刷灰后文");
+                    foreach(bool dark in new[]{false,true,false})
+                    {
+                        Theme.Change(dark,"blue");Color fixedBack=fixedClose.HoverBack,fixedFore=fixedClose.HoverFore,redBack=redClose.HoverBack,redFore=redClose.HoverFore,fill=panel.Fill,border=panel.Border;
+                        Check(fixedBack.ToArgb()==Theme.Hover.ToArgb()&&fixedFore.ToArgb()==Theme.Ink.ToArgb(),"固定弹窗关闭键悬停颜色未更新");
+                        Check(redBack.ToArgb()==Color.FromArgb(232,17,35).ToArgb()&&redFore.ToArgb()==Color.White.ToArgb(),"系统红色关闭键白字被映射为主题背景");
+                        Check(fill.ToArgb()==Theme.Surface.ToArgb()&&border.ToArgb()==Theme.Line.ToArgb(),"命名Color的面板填充或边框没有按ARGB更新");
+                        details.Select(raw.IndexOf("A1B2",StringComparison.Ordinal),4);Check(details.SelectionColor.ToArgb()==Theme.OnPrimaryContainer.ToArgb()&&details.SelectionFont.FontFamily.Name=="Consolas","实际十六进制配对码没有高亮");
+                        details.Select(raw.IndexOf("请核对",StringComparison.Ordinal),3);Check(details.SelectionColor.ToArgb()==Theme.Blend(Theme.Ink,Theme.Muted,.60F).ToArgb(),"富文本解释段沿用了旧主题颜色");
+                        int start=details.SelectionStart;Theme.Change(dark,"green");Check(details.SelectionStart==start&&details.SelectionLength==3,"主题切换丢失富文本选区");Check(details.Text==raw,"主题切换改变配对原文");
+                        SaveSnapshot(confirm,"confirm-pair-"+(dark?"dark":"light"));
+                    }
+                    confirm.Close();regular.Close();
+                }
+                foreach(string code in new[]{"123456","123 456"})using(var dialog=new ConfirmDialog("配对","核对配对码：\n"+code+"\n两端应一致。","信任",false))
+                {
+                    dialog.Show();Application.DoEvents();RichTextBox details=Controls(dialog).OfType<RichTextBox>().Single(r=>r.AccessibleName=="确认详情");details.Select(details.Text.IndexOf(code,StringComparison.Ordinal),code.Length);Check(details.SelectionColor.ToArgb()==Theme.OnPrimaryContainer.ToArgb(),"纯数字或分组配对码被解释段刷灰");dialog.Close();
+                }
+                Theme.Change(false,"blue");
             });
             Console.WriteLine("TOTAL "+passed+" passed, "+failed+" failed");return failed==0?0:1;
         }

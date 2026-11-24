@@ -20,6 +20,7 @@ namespace FeiqLight
         private readonly string destination;
         private readonly bool allowUpload;
         private long reserved;
+        private int activeUploads;
         private volatile bool closed;
         internal const long UploadQuota=10L*1024*1024*1024;
         internal readonly string Token;
@@ -71,10 +72,11 @@ namespace FeiqLight
                 if(!Protocol.SafeFileName(name)||!Int64.TryParse(Convert.ToString(data.ContainsKey("size")?data["size"]:null),out size)||size<0||size>UploadQuota)throw new ToolsHttp.HttpError(400,"文件名或大小无效。");
                 Upload upload;
                 lock(gate) {
-                    Check();if(uploads.Count>=100||size>UploadQuota-reserved)throw new ToolsHttp.HttpError(409,"本次接收已达 100 个文件或 10 GiB 上限，请重新开启。");
+                    Check();if(uploads.Count>=1024)throw new ToolsHttp.HttpError(409,"本次上传任务过多，请重新开启临时传输。");
+                    if(activeUploads>=100||size>UploadQuota-reserved)throw new ToolsHttp.HttpError(409,"本次接收已达 100 个文件或 10 GiB 上限，请重新开启。");
                     if(new DriveInfo(Path.GetPathRoot(destination)).AvailableFreeSpace<size+16L*1024*1024)throw new ToolsHttp.HttpError(409,"接收设备剩余空间不足。");
                     string id=Guid.NewGuid().ToString("N");upload=new Upload{Id=id,Name=name,Size=size,Partial=Path.Combine(destination,".fq-guest-"+id+".part")};
-                    using(FileStream create=new FileStream(upload.Partial,FileMode.CreateNew,FileAccess.Write)){}uploads.Add(id,upload);reserved+=size;
+                    using(FileStream create=new FileStream(upload.Partial,FileMode.CreateNew,FileAccess.Write)){}uploads.Add(id,upload);reserved+=size;activeUploads++;
                 }
                 response.Json(new{id=upload.Id,offset=0});return;
             }
@@ -82,7 +84,12 @@ namespace FeiqLight
             lock(current) {
                 Check();if(current.Canceled)throw new ToolsHttp.HttpError(410,"上传已取消。");
                 if(request.Method=="GET"&&request.Path=="/api/upload-status"){response.Json(new{offset=current.Offset,complete=current.Saved!=null});return;}
-                if(request.Method=="POST"&&request.Path=="/api/cancel") {if(current.Saved!=null)throw new ToolsHttp.HttpError(409,"文件已保存。");current.Canceled=true;File.Delete(current.Partial);response.Json(new{ok=true});return;}
+                if(request.Method=="POST"&&request.Path=="/api/cancel") {
+                    if(current.Saved!=null)throw new ToolsHttp.HttpError(409,"文件已保存。");
+                    File.Delete(current.Partial);
+                    lock(gate){current.Canceled=true;reserved=Math.Max(0,reserved-current.Size);activeUploads--;}
+                    response.Json(new{ok=true});return;
+                }
                 if(current.Saved!=null){response.Json(new{offset=current.Offset,complete=true});return;}
                 if(request.Method=="POST"&&request.Path=="/api/chunk") {
                     long offset;if(!Int64.TryParse(request.Parameter("offset"),out offset)||offset!=current.Offset||request.Body.Length==0||request.Body.LongLength>current.Size-current.Offset)throw new ToolsHttp.HttpError(409,"上传位置已变化，请重试。");

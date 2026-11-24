@@ -199,6 +199,7 @@ namespace FeiqLight
                 if (action.Text != actionText) action.Text = actionText;
                 if (action.Enabled != actionEnabled) action.Enabled = actionEnabled;
                 detailText = local ? item.File.LocalPath : String.IsNullOrEmpty(item.File.Error) ? item.State : item.File.Error;
+                if (!local && item.Complete && !item.Record.Outgoing && !String.IsNullOrEmpty(item.File.LocalPath)) detailText = "本机文件已移动或删除：" + item.File.LocalPath;
             }
             if (detail.Text != detailText) detail.Text = detailText;
             string tooltip = item == null ? "" : detailText;
@@ -208,7 +209,7 @@ namespace FeiqLight
         {
             Item item=list.SelectedItem as Item;if(item==null)return;
             try {
-                if(!String.IsNullOrEmpty(item.File.LocalPath)&&File.Exists(item.File.LocalPath))System.Diagnostics.Process.Start("explorer.exe","/select,\""+item.File.LocalPath+"\"");
+                if(!String.IsNullOrEmpty(item.File.LocalPath)&&File.Exists(item.File.LocalPath))BubbleHistory.RevealFile(this,item.File.LocalPath);
                 else if(item.Record.Outgoing){Peer peer=main.TransferPeer(item.Record.PeerId);if(peer!=null){main.Restore();main.OpenChat(peer);}}
                 else if(!item.Ended)main.TransferAction(item.Record,item.File.Id,main.ReceivingTask(item.Record,item.File.Id));
             }catch(Exception error){using(var notice=new NoticeDialog("任务未完成",error.Message))notice.ShowDialog(this);}

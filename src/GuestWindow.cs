@@ -252,6 +252,8 @@ namespace FeiqLight
         private readonly Timer windowSaveTimer = new Timer { Interval = 500 };
         private readonly ToolTip tips = new ToolTip();
         private GuestTransfer session;
+        internal Func<FileInfo, FileAttributes> ReadAttributes = info => info.Attributes;
+        private bool hasReceivedFiles;
         private bool stateError;
         private bool windowLoaded, placementPending;
         private WindowPlacement placement;
@@ -674,8 +676,9 @@ namespace FeiqLight
             linkBlock.Invalidate();
         }
 
-        private void ReloadAddresses()
+        internal void ReloadAddresses()
         {
+            if (session != null) return;
             string[] items = network.LoopbackOnly
                 ? new[] { "127.0.0.1" }
                 : LanNetwork.Scan().Select(l => l.Address.ToString()).Distinct().ToArray();
@@ -699,13 +702,19 @@ namespace FeiqLight
             foreach (string raw in paths)
             {
                 if (string.IsNullOrWhiteSpace(raw) || !File.Exists(raw) || Directory.Exists(raw)) { skipped++; continue; }
-                string full = Path.GetFullPath(raw);
-                if (!existing.Add(full)) continue;
-                if (files.Items.Count >= 1000) { SetState("单次最多选择 1000 个文件", true); break; }
-                files.Items.Add(ShareEntry.FromPath(full));
+                try
+                {
+                    FileInfo info = new FileInfo(raw);
+                    if ((ReadAttributes(info) & FileAttributes.ReparsePoint) != 0 || !Protocol.SafeFileName(info.Name)) { skipped++; continue; }
+                    if (!existing.Add(info.FullName)) continue;
+                    if (files.Items.Count >= 1000) { SetState("单次最多选择 1000 个文件", true); break; }
+                    files.Items.Add(ShareEntry.FromPath(info.FullName));
+                }
+                catch (IOException) { skipped++; }
+                catch (UnauthorizedAccessException) { skipped++; }
             }
             files.EndUpdate();
-            if (skipped > 0) SetState("已忽略文件夹或不可读取的条目，仅支持普通文件", false);
+            if (skipped > 0) SetState("已忽略文件夹、链接及名称不安全或不可读取的条目，仅支持普通文件", false);
             else SetState("已就绪，点击「开启临时传输」生成链接", false);
             UpdateActions();
         }
@@ -893,13 +902,18 @@ namespace FeiqLight
             if (session != null) { Stop(); return; }
             try
             {
-                if (addressPicker.SelectedItem == null) ReloadAddresses();
+                ReloadAddresses();
                 if (addressPicker.SelectedItem == null) throw new IOException("没有可用的局域网，请先连接 Wi-Fi、热点或以太网。");
                 session = new GuestTransfer(files.Items.Cast<ShareEntry>().Select(e => e.FullPath), network.Settings.ReceiveFolder, upload.Checked, network.LoopbackOnly);
                 session.Received = (path, name) => main.Ui(() =>
                 {
+                    if (!IsDisposed) hasReceivedFiles = true;
                     main.GuestReceived(path, name);
-                    if (!IsDisposed && session != null && session.Active) { SetState(StateText(), false); UpdateActions(); }
+                    if (!IsDisposed)
+                    {
+                        if (session != null && session.Active) SetState(StateText(), false);
+                        UpdateActions();
+                    }
                 });
                 SetState(StateText(), false);
                 UpdateActions();
@@ -933,7 +947,7 @@ namespace FeiqLight
             addressPicker.Enabled = !active;
             copy.Enabled = qr.Enabled = active;
             bool tasksWasVisible = openTasks.Visible;
-            openTasks.Visible = session != null && session.SavedFiles.Length > 0;
+            openTasks.Visible = hasReceivedFiles || (session != null && session.SavedFiles.Length > 0);
             if (tasksWasVisible != openTasks.Visible) Relayout();
             UpdateLinkPreview();
         }
@@ -944,10 +958,12 @@ namespace FeiqLight
             copy.Text = "复制链接";
             if (session != null)
             {
+                if (session.SavedFiles.Length > 0) hasReceivedFiles = true;
                 session.Dispose();
                 SetState(session.CleanupError ?? "临时传输已结束，完整文件已保留", session.CleanupError != null);
                 session = null;
             }
+            ReloadAddresses();
             UpdateActions();
         }
 

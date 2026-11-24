@@ -59,6 +59,7 @@ namespace FeiqLight
             {
                 this.formatted = formatted;
                 ReadOnly = true; BorderStyle = BorderStyle.None; DetectUrls = false; TabStop = false; Cursor = Cursors.IBeam;
+                Theme.Changed += RefreshTypography;
             }
             private void SuppressCaret() { if (IsHandleCreated) HideCaret(Handle); }
             protected override void OnHandleCreated(EventArgs e)
@@ -72,11 +73,18 @@ namespace FeiqLight
             protected override void OnMouseUp(MouseEventArgs e) { base.OnMouseUp(e); SuppressCaret(); }
             protected override void OnSelectionChanged(EventArgs e) { base.OnSelectionChanged(e); SuppressCaret(); }
             protected override void WndProc(ref Message m) { base.WndProc(ref m); if (m.Msg == 0x0007 || m.Msg == 0x0201 || m.Msg == 0x0202) SuppressCaret(); }
+            private void RefreshTypography() { if (formatted && IsHandleCreated) ApplyTypography(); }
+            protected override void Dispose(bool disposing)
+            {
+                if (disposing) Theme.Changed -= RefreshTypography;
+                base.Dispose(disposing);
+            }
 
             private void ApplyTypography()
             {
                 string raw = Text;
                 if (String.IsNullOrEmpty(raw)) return;
+                int selectionStart = SelectionStart, selectionLength = SelectionLength;
                 // RichEdit 内部按单个换行符计算字符索引，先规整 \r\n 避免高亮与分段偏移错位。
                 string normalized = raw.Replace("\r\n", "\n").Replace('\r', '\n');
                 PARAFORMAT2 pf = new PARAFORMAT2();
@@ -91,7 +99,18 @@ namespace FeiqLight
 
                 // 修饰次要解释性分句与路径/IP/快捷键，突出重点而不更改实际 Text 内容。
                 Color secondary = Theme.Blend(Theme.Ink, Theme.Muted, .60F);
-                int semi = normalized.IndexOf('；');
+                int semi = -1, comma = -1, quoted = 0;
+                for (int i = 0; i < normalized.Length; i++)
+                {
+                    char c = normalized[i];
+                    if (c == '「' || c == '『') quoted++;
+                    else if (c == '」' || c == '』') quoted = Math.Max(0, quoted - 1);
+                    else if (quoted == 0)
+                    {
+                        if (c == '；' && semi < 0) semi = i;
+                        if (c == '，' && comma < 0) comma = i;
+                    }
+                }
                 int breakIdx = normalized.IndexOf('\n');
                 if (semi > 0 && semi + 1 < normalized.Length && (breakIdx < 0 || semi < breakIdx))
                 {
@@ -100,7 +119,6 @@ namespace FeiqLight
                 }
                 else
                 {
-                    int comma = normalized.IndexOf('，');
                     if (comma > 0 && normalized.Length - comma > 10 && breakIdx < 0)
                     {
                         Select(comma, normalized.Length - comma);
@@ -131,7 +149,13 @@ namespace FeiqLight
                     SelectionFont = EmphasisFont;
                     SelectionColor = Theme.Ink;
                 }
-                Select(0, 0);
+                foreach (Match m in Regex.Matches(normalized, @"(?m)^[ \t]*(?:\d{4,}|\d{2,}(?:[ \t-]+\d{2,})+|[A-Fa-f0-9]{4}(?:[ \t-]+[A-Fa-f0-9]{4}){3})[ \t]*$"))
+                {
+                    Select(m.Index, m.Length);
+                    SelectionFont = MonoFont;
+                    SelectionColor = Theme.OnPrimaryContainer;
+                }
+                Select(selectionStart, selectionLength);
             }
         }
 
@@ -201,10 +225,18 @@ namespace FeiqLight
         internal static void FitTextHeight(Form form, Control wrap, int neededHeight, int maxHeight)
         {
             if (form.IsDisposed || wrap.IsDisposed || !wrap.IsHandleCreated) return;
+            float scale;
+            using (Graphics g = form.CreateGraphics()) scale = Math.Max(1F, g.DpiY / 96F);
+            int limit = Math.Max(1, Math.Min(Screen.FromControl(form).WorkingArea.Height - (int)Math.Round(64 * scale), (int)Math.Round(maxHeight * scale)));
             int delta = neededHeight + 6 - wrap.Height;
-            if (delta <= 2) return;
-            int target = Math.Min(maxHeight, form.ClientSize.Height + delta);
-            if (target > form.ClientSize.Height) form.ClientSize = new Size(form.ClientSize.Width, target);
+            int target = Math.Min(limit, form.ClientSize.Height + Math.Max(0, delta));
+            if ((delta > 2 || form.ClientSize.Height > limit) && target != form.ClientSize.Height) form.ClientSize = new Size(form.ClientSize.Width, target);
+            RichTextBox details = wrap.Controls.OfType<RichTextBox>().FirstOrDefault();
+            if (details != null)
+            {
+                RichTextBoxScrollBars scrollBars = neededHeight > wrap.ClientSize.Height ? RichTextBoxScrollBars.Vertical : RichTextBoxScrollBars.None;
+                if (details.ScrollBars != scrollBars) details.ScrollBars = scrollBars;
+            }
         }
         internal static RoundedPanel OptionCard(ToggleSwitch toggle)
         {

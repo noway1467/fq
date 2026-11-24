@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$SdkRoot = $env:ANDROID_HOME,
     [string]$JavaHome = $env:JAVA_HOME,
     [string]$GradleHome,
@@ -38,7 +38,7 @@ if (!$SdkRoot) {
 }
 . "$root/tools/android-package.ps1"
 $previousApks = @(Get-ChildItem -LiteralPath (Join-Path $root 'dist') -Filter '*.apk' -ErrorAction SilentlyContinue)
-if ($previousApks.Count -gt 0 -and !(Test-Path -LiteralPath (Join-Path $env:ANDROID_USER_HOME 'debug.keystore'))) {
+if ($previousApks.Count -gt 0 -and !(Test-Path -LiteralPath (Join-Path $root 'build/android-home/debug.keystore'))) {
     throw '原 Android 签名文件缺失，拒绝自动生成新签名。请恢复 build/android-home/debug.keystore，不要卸载旧应用。'
 }
 $gradle = if ($GradleHome) { Join-Path $GradleHome 'bin\gradle.bat' } else { Join-Path $android 'gradlew.bat' }
@@ -48,6 +48,7 @@ try {
     $env:JAVA_HOME = $JavaHome
     $previousPackages = @($previousApks | ForEach-Object { Get-AndroidPackageInfo -Apk $_.FullName -SdkRoot $SdkRoot })
     $tasks = @('-p',$android,'--no-daemon','assemblePreview','lintPreview')
+    if($TemporaryDirectory){$tasks+=@('--project-cache-dir',(Join-Path $temporary 'pc'))}
     if ($Test) { $tasks += @('testDebugUnitTest','lintDebug') }
     if ($Offline) { $tasks += '--offline' }
     & $gradle @tasks

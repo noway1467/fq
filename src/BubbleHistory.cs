@@ -215,7 +215,8 @@ namespace FeiqLight
             {
                 if (!Path.IsPathRooted(path) || !File.Exists(path)) throw new IOException("文件已移动、删除或尚未接收完成。\n" + path);
                 // 仅打开资源管理器并选中文件，不启动附件，也不经过 cmd 或 PowerShell。
-                Process.Start(new ProcessStartInfo("explorer.exe", "/select,\"" + Path.GetFullPath(path) + "\"") { UseShellExecute = true });
+                string explorerPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe");
+                Process.Start(new ProcessStartInfo(explorerPath, "/select,\"" + Path.GetFullPath(path) + "\"") { UseShellExecute = true });
             }
             catch (Exception e) { using (NoticeDialog dialog = new NoticeDialog("无法定位文件", e.Message)) dialog.ShowDialog(owner.FindForm()); }
         }
