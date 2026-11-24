@@ -3,6 +3,7 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
 using System.Linq;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace FeiqLight
@@ -68,7 +69,7 @@ namespace FeiqLight
         private readonly Label summary = Theme.Label("正在读取传输记录…", Theme.Small, Theme.Muted);
         private readonly Label detail = Theme.Label("选择任务查看保存位置和操作", Theme.Small, Theme.Muted);
         private readonly Label empty = Theme.Label("暂无传输任务\n收到或发送的文件会显示在这里", Theme.Body, Theme.Muted);
-        private readonly Button action, more;
+        private readonly Button action, secondary, more;
         private readonly Timer timer = new Timer { Interval = 500 };
         private readonly Timer windowSaveTimer = new Timer { Interval = 500 };
         private readonly ToolTip tips = new ToolTip();
@@ -80,6 +81,8 @@ namespace FeiqLight
         private string signature;
         private string localFileSignature;
         private bool localFileExists;
+        private bool taskOperationPending;
+        private Point? contextPoint;
         private bool windowLoaded, placementPending;
         private WindowPlacement placement;
         private FormWindowState refreshWindowState;
@@ -103,12 +106,18 @@ namespace FeiqLight
             list.Dock = DockStyle.Fill; list.BorderStyle = BorderStyle.None; list.DrawMode = DrawMode.OwnerDrawFixed; list.ItemHeight = 96;
             list.IntegralHeight = false; list.AccessibleName = "传输任务列表"; list.DrawItem += DrawItem; list.SelectedIndexChanged += delegate { localFileSignature = null; UpdateActions(); };
             list.DoubleClick += delegate { RunAction(); }; list.KeyDown += (sender, e) => { if(e.KeyCode==Keys.Enter){e.Handled=true;RunAction();} };
+            list.MouseDown += (sender,e) => {
+                if(e.Button!=MouseButtons.Right)return;
+                int index=list.IndexFromPoint(e.Location);if(index<0)return;
+                list.SelectedIndex=index;contextPoint=e.Location;ShowActions();
+            };
             Theme.ThemeScrollbars(list);var listFrame=new Panel { Dock=DockStyle.Fill,Margin=Padding.Empty };listFrame.Controls.Add(list);empty.Dock=DockStyle.Fill;empty.TextAlign=ContentAlignment.MiddleCenter;listFrame.Controls.Add(empty);empty.BringToFront();body.Controls.Add(listFrame, 0, 3);
-            var footer = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1, Padding = new Padding(0, 10, 0, 0), Margin = Padding.Empty };
-            footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); footer.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 118)); footer.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 44));
+            var footer = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, RowCount = 1, Padding = new Padding(0, 10, 0, 0), Margin = Padding.Empty };
+            footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); footer.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 118)); footer.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 112)); footer.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 44));
             detail.Dock = DockStyle.Fill; detail.AutoEllipsis = true; footer.Controls.Add(detail, 0, 0);
             action = Theme.Button("继续接收", delegate { RunAction(); }, true); action.Dock = DockStyle.Fill; action.Margin = new Padding(8, 0, 4, 0); footer.Controls.Add(action, 1, 0);
-            more = Theme.IconButton("more", "任务操作", delegate { ShowActions(); }, false); more.Dock = DockStyle.Fill; more.Margin = Padding.Empty; footer.Controls.Add(more, 2, 0); body.Controls.Add(footer, 0, 4);
+            secondary = Theme.Button("打开文件", delegate { RunSecondary(); }, false); secondary.Dock = DockStyle.Fill; secondary.Margin = new Padding(4, 0, 4, 0); footer.Controls.Add(secondary, 2, 0);
+            more = Theme.IconButton("more", "任务操作", delegate { contextPoint=null;ShowActions(); }, false); more.Dock = DockStyle.Fill; more.Margin = Padding.Empty; footer.Controls.Add(more, 3, 0); body.Controls.Add(footer, 0, 4);
             Shown += async delegate { ApplyColors();try { await main.LoadTransfers(); if(!IsDisposed)RefreshRows(); } catch(Exception error){if(!IsDisposed)summary.Text="读取失败："+error.Message;} };
             Theme.Changed += ApplyColors;
             timer.Tick += delegate { if (Visible && WindowState != FormWindowState.Minimized) RefreshRows(); };
@@ -147,6 +156,7 @@ namespace FeiqLight
                 item.Record = rows[i].Record; item.File = rows[i].File; item.Peer = rows[i].Peer; item.Fingerprint = rows[i].Fingerprint;
                 list.Invalidate(list.GetItemRectangle(i));
             }
+            if(list.Items.Count>0&&list.SelectedIndex<0)list.SelectedIndex=0;
             bool emptyVisible = rows.Length == 0;
             string emptyText = String.IsNullOrEmpty(query.Text) ? "暂无传输任务\n收到或发送的文件会显示在这里" : "没有匹配的文件或设备";
             if (empty.Visible != emptyVisible) empty.Visible = emptyVisible;
@@ -179,9 +189,10 @@ namespace FeiqLight
         private void UpdateActions()
         {
             Item item = list.SelectedItem as Item;
-            bool actionVisible = item != null, moreVisible = item != null && item.Record.PeerId != "browser-guests";
+            bool actionVisible = item != null, moreVisible = item != null;
             if (action.Visible != actionVisible) action.Visible = actionVisible;
             if (more.Visible != moreVisible) more.Visible = moreVisible;
+            bool secondaryVisible=false;
             string detailText = "选择任务查看保存位置和操作";
             if (item != null)
             {
@@ -198,9 +209,21 @@ namespace FeiqLight
                 bool actionEnabled = local || receiving || item.Record.Outgoing || !item.Ended;
                 if (action.Text != actionText) action.Text = actionText;
                 if (action.Enabled != actionEnabled) action.Enabled = actionEnabled;
+                string secondaryText=null;
+                if(item.Record.Outgoing&&main.CanCancelTransfer(item.Record))secondaryText="取消发送";
+                else if(local)secondaryText="打开文件";
+                else if(!item.Record.Outgoing&&!item.Ended)secondaryText=receiving?"取消接收":"拒绝";
+                secondaryVisible=secondaryText!=null;
+                if(secondaryVisible)
+                {
+                    if(secondary.Text!=secondaryText)secondary.Text=secondaryText;
+                    Color color=secondaryText=="打开文件"?Theme.Ink:Theme.Danger;if(secondary.ForeColor!=color)secondary.ForeColor=color;
+                    bool enabled=!taskOperationPending;if(secondary.Enabled!=enabled)secondary.Enabled=enabled;
+                }
                 detailText = local ? item.File.LocalPath : String.IsNullOrEmpty(item.File.Error) ? item.State : item.File.Error;
                 if (!local && item.Complete && !item.Record.Outgoing && !String.IsNullOrEmpty(item.File.LocalPath)) detailText = "本机文件已移动或删除：" + item.File.LocalPath;
             }
+            if(secondary.Visible!=secondaryVisible)secondary.Visible=secondaryVisible;
             if (detail.Text != detailText) detail.Text = detailText;
             string tooltip = item == null ? "" : detailText;
             if (tips.GetToolTip(detail) != tooltip) tips.SetToolTip(detail, tooltip);
@@ -215,17 +238,61 @@ namespace FeiqLight
             }catch(Exception error){using(var notice=new NoticeDialog("任务未完成",error.Message))notice.ShowDialog(this);}
             localFileSignature = null; RefreshRows();
         }
+        private async void RunSecondary()
+        {
+            Item item=list.SelectedItem as Item;if(item==null||taskOperationPending)return;
+            try
+            {
+                if(item.Record.Outgoing&&main.CanCancelTransfer(item.Record))main.CancelTransfer(item.Record);
+                else if(!String.IsNullOrEmpty(item.File.LocalPath)&&File.Exists(item.File.LocalPath))MediaPreview.OpenFile(this,item.File.LocalPath,false);
+                else if(!item.Record.Outgoing&&!item.Ended)await RunTaskOperation(item,!main.ReceivingTask(item.Record,item.File.Id));
+            }
+            catch(Exception error){using(var notice=new NoticeDialog("任务未完成",error.Message))notice.ShowDialog(this);}
+            if(!IsDisposed){localFileSignature=null;RefreshRows();}
+        }
+        private async Task RunTaskOperation(Item item,bool reject)
+        {
+            if(taskOperationPending)return;
+            taskOperationPending=true;secondary.Enabled=false;
+            try
+            {
+                if(reject)
+                {
+                    using(var confirm=new ConfirmDialog("拒绝这批文件？","将拒绝这条消息中尚未保存的附件，并清理接收断点；已保存文件和聊天记录保留。","拒绝",true))
+                        if(confirm.ShowDialog(this)!=DialogResult.OK)return;
+                    await main.RejectTransfer(item.Record);
+                }
+                else await main.CancelReceiveTask(item.Record,item.File.Id);
+            }
+            catch(Exception error){using(var notice=new NoticeDialog("任务未完成",error.Message))notice.ShowDialog(this);}
+            finally{taskOperationPending=false;if(!IsDisposed){localFileSignature=null;RefreshRows();}}
+        }
         private void ShowActions()
         {
             foreach(ToolStripItem entry in menu.Items.Cast<ToolStripItem>().ToArray())entry.Dispose();menu.Items.Clear();Item item=list.SelectedItem as Item;if(item==null)return;
-            menu.Items.Add("查看所在会话",null,delegate {Peer peer=main.TransferPeer(item.Record.PeerId);if(peer!=null){main.Restore();main.OpenChat(peer);}});
-            if(main.CanCancelTransfer(item.Record))menu.Items.Add("取消这批发送",null,delegate {try{main.CancelTransfer(item.Record);}catch(Exception error){using(var notice=new NoticeDialog("取消未完成",error.Message))notice.ShowDialog(this);}});
-            if(!item.Record.Outgoing&&!item.Ended) {
-                menu.Items.Add("暂停并保留断点",null,delegate {RunTransferAction(item,true);});
-                menu.Items.Add("继续所有未完成接收",null,delegate {foreach(Item pending in list.Items.Cast<Item>().Where(i=>!i.Record.Outgoing&&!i.Ended&&!i.Active).ToArray())if(!RunTransferAction(pending,false))break;});
+            bool local=!String.IsNullOrEmpty(item.File.LocalPath)&&File.Exists(item.File.LocalPath);
+            if(local)
+            {
+                menu.Items.Add("打开文件",null,delegate {MediaPreview.OpenFile(this,item.File.LocalPath,false);});
+                menu.Items.Add("打开方式…",null,delegate {MediaPreview.OpenFile(this,item.File.LocalPath,true);});
+                menu.Items.Add("打开文件位置",null,delegate {BubbleHistory.RevealFile(this,item.File.LocalPath);});
+                if(!item.Record.Outgoing)menu.Items.Add("删除本机文件",null,delegate {main.DeleteTransferFile(item.Record,item.File.LocalPath);localFileSignature=null;if(!IsDisposed)RefreshRows();}).ForeColor=Theme.Danger;
+            }
+            else if(!item.Record.Outgoing&&!item.Ended) {
+                bool receiving=main.ReceivingTask(item.Record,item.File.Id);
+                menu.Items.Add(receiving?"暂停并保留断点":"继续接收",null,delegate {RunTransferAction(item,receiving);});
+                menu.Items.Add("取消接收并清理断点",null,async delegate {await RunTaskOperation(item,false);}).ForeColor=Theme.Danger;
+                menu.Items.Add("拒绝这批文件",null,async delegate {await RunTaskOperation(item,true);}).ForeColor=Theme.Danger;
+                menu.Items.Add("继续所有未完成接收",null,delegate {foreach(Item pending in list.Items.Cast<Item>().Where(i=>!i.Record.Outgoing&&!i.Ended&&!main.ReceivingTask(i.Record,i.File.Id)).ToArray())if(!RunTransferAction(pending,false))break;});
                 menu.Items.Add("暂停当前列表中的接收",null,delegate {foreach(Item pending in list.Items.Cast<Item>().Where(i=>!i.Record.Outgoing&&!i.Ended).ToArray())if(!RunTransferAction(pending,true))break;});
             }
-            menu.Show(more,new Point(more.Width,0),ToolStripDropDownDirection.AboveLeft);
+            else if(!item.Record.Outgoing&&item.State=="本机文件已删除"&&item.Record.PeerId!="browser-guests")menu.Items.Add("重新接收",null,delegate {RunTransferAction(item,false);});
+            if(item.Record.PeerId!="browser-guests")menu.Items.Add("查看所在会话",null,delegate {Peer peer=main.TransferPeer(item.Record.PeerId);if(peer!=null){main.Restore();main.OpenChat(peer);}});
+            if(main.CanCancelTransfer(item.Record))menu.Items.Add("取消这批发送",null,delegate {try{main.CancelTransfer(item.Record);}catch(Exception error){using(var notice=new NoticeDialog("取消未完成",error.Message))notice.ShowDialog(this);}}).ForeColor=Theme.Danger;
+            Point? point=contextPoint;contextPoint=null;
+            if(menu.Items.Count==0)return;
+            if(point.HasValue)menu.Show(list,point.Value);
+            else menu.Show(more,new Point(more.Width,0),ToolStripDropDownDirection.AboveLeft);
         }
         private bool RunTransferAction(Item item,bool pause)
         {

@@ -365,8 +365,138 @@ public final class TransferFeatureTest {
                 queue.add(constructor.newInstance((Runnable)()->{},(Runnable)()->{}));activity.transfersChanged();assertTrue(count.getText().toString().contains("另有 1 项"));assertEquals(0,changes.count);
                 CharSequence summary=count.getText();activity.transfersChanged();assertSame("等值摘要不应重复设置文本",summary,count.getText());assertEquals(0,changes.count);
                 queue.clear();activity.transfersChanged();assertFalse(count.getText().toString().contains("排队中"));assertEquals(0,changes.count);
+                queue.add(constructor.newInstance((Runnable)()->{},(Runnable)()->{}));
+                findDescription(dialog.getWindow().getDecorView(),"传输任务操作").performClick();View menu=ShadowDialog.getLatestDialog().getWindow().getDecorView();
+                assertNotNull(findButton(menu,"继续所有未完成接收"));assertNotNull(findButton(menu,"暂停所有接收"));assertNotNull(findButton(menu,"取消排队发送任务"));
+                findButton(menu,"取消排队发送任务").performClick();findButton(ShadowDialog.getLatestDialog().getWindow().getDecorView(),"取消排队").performClick();assertTrue(queue.isEmpty());activity.transfersChanged();assertEquals(0,changes.count);
             }finally{dialog.dismiss();}
         }finally{serviceController.destroy();}
+    }
+    @SuppressWarnings("unchecked")
+    @Test public void taskQuickActionChangesRefreshRowsWithoutChangingStatusOrProgress()throws Exception {
+        Context context=RuntimeEnvironment.getApplication();disableConnection(context);
+        ServiceController<ChatService> serviceController=Robolectric.buildService(ChatService.class).create();ChatService service=serviceController.get();
+        Shadows.shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(context,ChatService.class),service.onBind(new Intent()));
+        try(ActivityController<MainActivity> controller=Robolectric.buildActivity(MainActivity.class).setup()) {
+            MainActivity activity=controller.get();settle(service);LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:31234"),"action-signature","host","任务操作","");
+            ChatStore.FileTask item=task(peer.id(),1,"状态不变.txt",4096);service.incoming(peer,item.message,false);settle(service);showTasks(activity);settle(service);
+            BaseAdapter adapter=(BaseAdapter)field(activity,"taskAdapter");Map<String,ChatService.FileProgress> progress=(Map<String,ChatService.FileProgress>)field(service,"fileProgress");String key=ChatService.fileKey(peer.id(),1,0,false);
+            progress.put(key,new ChatService.FileProgress(10,"接收中",null));refresh(adapter);Changes changes=new Changes();adapter.registerDataSetObserver(changes);
+            LinearLayout row=taskRow(activity,item);assertNotNull(findButton(row,"继续接收"));assertNull(findButton(row,"暂停"));
+            progress.put(key,new ChatService.FileProgress(10,"接收中",new LanNode.Transfer()));refresh(adapter);assertEquals(1,changes.count);
+            row=taskRow(activity,item);assertNotNull(findButton(row,"暂停"));assertNotNull(findButton(row,"取消"));assertTrue(row.getChildAt(2) instanceof TextView);assertTrue(row.getChildAt(3) instanceof ProgressBar);assertTrue(row.getChildAt(4) instanceof LinearLayout);
+            for(int index=0;index<((LinearLayout)row.getChildAt(4)).getChildCount();index++){View button=((LinearLayout)row.getChildAt(4)).getChildAt(index);assertFalse(button.isFocusable());assertFalse(button.isFocusableInTouchMode());}
+            for(int index=0;index<5;index++)refresh(adapter);assertEquals("快捷动作相同不能额外重绑行",1,changes.count);
+            ((Dialog)field(activity,"tasksDialog")).dismiss();
+        }finally{serviceController.destroy();}
+    }
+    // 此回归验证任务操作；Robolectric 的模拟 Conscrypt 证书链不能替代真实设备的 TLS 验收。
+    @Test @ConscryptMode(ConscryptMode.Mode.OFF) public void taskButtonsReceivePauseCancelRejectOpenAndReReceive()throws Exception {
+        Context context=RuntimeEnvironment.getApplication();disableConnection(context);context.getSharedPreferences("settings",0).edit().putBoolean(ReceivedStorage.AUTO,false).commit();
+        ServiceController<ChatService> serviceController=Robolectric.buildService(ChatService.class).create();ChatService service=serviceController.get();List<String> errors=new CopyOnWriteArrayList<>();
+        Shadows.shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(context,ChatService.class),service.onBind(new Intent()));
+        LanNode.Listener quiet=new LanNode.Listener(){public void peersChanged(){}public void error(String text){errors.add(text);}public void message(LanNode.Peer peer,LanNode.Message message,boolean update){}};
+        LanNode.Listener incoming=new LanNode.Listener(){public void peersChanged(){}public void error(String text){errors.add(text);}public void message(LanNode.Peer peer,LanNode.Message message,boolean update){service.incoming(peer,message,update);}public void offerCanceled(LanNode.Peer peer,long packet){service.offerCanceled(peer,packet);}};
+        int senderPort=chatPort(),receiverPort=chatPort();while(receiverPort==senderPort)receiverPort=chatPort();
+        java.util.concurrent.atomic.AtomicBoolean throttle=new java.util.concurrent.atomic.AtomicBoolean();
+        try(LanNode sender=new LanNode(senderPort,true,"task-sender","host","发送方", "",quiet);LanNode receiver=new LanNode(receiverPort,true,"task-receiver","host","接收方","",incoming)) {
+            settle(service);setField(service,"node",receiver);service.observe(new ChatService.Observer(){public void changed(){}public void error(String text){errors.add(text);}});
+            sender.setDeviceId("5".repeat(32));receiver.setDeviceId("6".repeat(32));
+            File senderSecurity=new File(service.getFilesDir(),"task-sender-security"),receiverSecurity=new File(service.getFilesDir(),"task-receiver-security");
+            SecureIdentity senderIdentity=new SecureIdentity(senderSecurity),receiverIdentity=new SecureIdentity(receiverSecurity);
+            senderIdentity.confirmation=(name,code)->true;receiverIdentity.confirmation=(name,code)->true;
+            sender.configureSecurity(senderSecurity,senderIdentity,(name,code)->true);receiver.configureSecurity(receiverSecurity,receiverIdentity,(name,code)->true);
+            sender.start();receiver.start();sender.probe(LanNode.endpoint("127.0.0.1:"+receiver.port()));waitUntil(service,()->sender.peers().size()==1&&receiver.peers().size()==1&&sender.peers().get(0).fingerprint!=null&&receiver.peers().get(0).fingerprint!=null);
+            LanNode.Peer target=sender.peers().get(0),peer=receiver.peers().get(0);
+            senderIdentity.ensureTrusted(target.deviceId,target.fingerprint,target.name);receiverIdentity.ensureTrusted(peer.deviceId,peer.fingerprint,peer.name);
+            File original=new File(service.getFilesDir(),"保留的中文 English 原文件.txt"),deletedOriginal=new File(service.getFilesDir(),"已删除的接收副本.txt"),slowOriginal=new File(service.getFilesDir(),"中文 English 很长的暂停拒收文件名-2026-delivery.bin");
+            Files.write(original.toPath(),new byte[]{1,2,3});Files.write(deletedOriginal.toPath(),new byte[]{4,5,6});byte[] bytes=new byte[2*1024*1024];new Random(84).nextBytes(bytes);Files.write(slowOriginal.toPath(),bytes);
+            sender.sendSources(target,Arrays.asList(taskSource(original,null),taskSource(deletedOriginal,null),taskSource(slowOriginal,throttle)));
+            try {waitUntil(service,()->service.conversations().size()==1&&((Map<?,?>)uncheckedField(service,"waiting")).size()==3);}
+            catch(AssertionError failure){throw new AssertionError("邀请入库状态：会话 "+service.conversations().size()+"，待接收 "+((Map<?,?>)field(service,"waiting")).size()+"，节点错误 "+errors,failure);}
+            List<ChatStore.FileTask> tasks=fileTasks(service);ChatStore.FileTask saved=tasks.stream().filter(item->item.file.name.equals(original.getName())).findFirst().orElseThrow(),deleted=tasks.stream().filter(item->item.file.name.equals(deletedOriginal.getName())).findFirst().orElseThrow(),slow=tasks.stream().filter(item->item.file.name.equals(slowOriginal.getName())).findFirst().orElseThrow();
+            File savedLocal=service.receivedFile(peer,saved.message.number,saved.file),deletedLocal=service.receivedFile(peer,deleted.message.number,deleted.file),slowLocal=service.receivedFile(peer,slow.message.number,slow.file),part=LanNode.partialFile(peer,slow.message.number,slow.file,slowLocal);
+            try(ActivityController<MainActivity> controller=Robolectric.buildActivity(MainActivity.class).setup()) {
+                MainActivity activity=controller.get();settle(service);showTasks(activity);settle(service);
+                LinearLayout row=taskRow(activity,saved);Button receive=findButton(row,"接收");assertNotNull(receive);assertNotNull(findButton(row,"拒绝"));assertFalse(receive.isFocusable());
+                ListView list=find(((Dialog)field(activity,"tasksDialog")).getWindow().getDecorView(),ListView.class);BaseAdapter adapter=(BaseAdapter)field(activity,"taskAdapter");
+                assertTrue(list.performItemClick(row,taskIndex(adapter,saved),0));assertNotNull(findButton(ShadowDialog.getLatestDialog().getWindow().getDecorView(),"接收文件"));assertNotNull(findButton(ShadowDialog.getLatestDialog().getWindow().getDecorView(),"拒绝这批文件"));ShadowDialog.getLatestDialog().dismiss();
+                receive.performClick();waitUntil(service,()->savedLocal.isFile()&&!service.busy());assertArrayEquals(Files.readAllBytes(original.toPath()),Files.readAllBytes(savedLocal.toPath()));
+                findButton(taskRow(activity,saved),"打开").performClick();Intent opened=Shadows.shadowOf(activity).getNextStartedActivity();assertNotNull(opened);assertEquals(Intent.ACTION_VIEW,opened.getAction());assertNotNull(opened.getData());assertTrue((opened.getFlags()&Intent.FLAG_GRANT_READ_URI_PERMISSION)!=0);
+                findButton(taskRow(activity,deleted),"接收").performClick();waitUntil(service,()->deletedLocal.isFile()&&!service.busy());
+                taskActions(activity,deleted);View menu=ShadowDialog.getLatestDialog().getWindow().getDecorView();
+                for(String label:new String[]{"打开文件","打开方式…","分享文件","查看保存位置","删除本机文件","查看所在会话","复制文件名"})assertNotNull(label,findButton(menu,label));assertNull(findButton(menu,"文件与保存位置"));
+                findButton(menu,"删除本机文件").performClick();findButton(ShadowDialog.getLatestDialog().getWindow().getDecorView(),"删除文件").performClick();transferDone(service);assertFalse(deletedLocal.exists());assertTrue(deletedOriginal.isFile());
+                taskActions(activity,deleted);menu=ShadowDialog.getLatestDialog().getWindow().getDecorView();assertNotNull(findButton(menu,"重新接收"));assertNull(findButton(menu,"删除本机文件"));findButton(menu,"重新接收").performClick();waitUntil(service,()->deletedLocal.isFile()&&!service.busy());
+                taskActions(activity,deleted);findButton(ShadowDialog.getLatestDialog().getWindow().getDecorView(),"删除本机文件").performClick();findButton(ShadowDialog.getLatestDialog().getWindow().getDecorView(),"删除文件").performClick();transferDone(service);
+                for(boolean dark:new boolean[]{false,true}) {
+                    ((Dialog)field(activity,"tasksDialog")).dismiss();settle(service);context.getSharedPreferences("settings",0).edit().putBoolean("dark_mode",dark).commit();invokeNoArgs(activity,"rerenderPreservingState");showTasks(activity);settle(service);
+                    View view=((Dialog)field(activity,"tasksDialog")).getWindow().getDecorView();measure(view,786,1500);preview(view,"transfers-direct-actions-"+(dark?"dark":"light")+".png",(Integer)field(activity,"SURFACE"));
+                }
+                throttle.set(true);findButton(taskRow(activity,slow),"接收").performClick();waitUntil(service,()->part.length()>0&&service.busy());
+                invokeOpen(activity,peer.id());settle(service);invokeMessageSelection(activity,slow.message);((Button)field(activity,"deleteSelectedFiles")).performClick();findButton(ShadowDialog.getLatestDialog().getWindow().getDecorView(),"删除文件").performClick();
+                Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(100));assertEquals("请先完成或取消正在接收的文件，再批量删除文件",org.robolectric.shadows.ShadowToast.getTextOfLatestToast());assertEquals(true,field(activity,"selectingMessages"));assertTrue(savedLocal.isFile());
+                invokeNoArgs(activity,"endMessageSelection");row=taskRow(activity,slow);assertNotNull(findButton(row,"暂停"));assertNotNull(findButton(row,"取消"));findButton(row,"暂停").performClick();waitUntil(service,()->!service.busy()&&"已暂停".equals(service.progress(peer.id(),slow.message.number,slow.file.id,false).state));assertTrue("暂停必须保留断点",part.length()>0);
+                taskActions(activity,slow);assertNotNull(findButton(ShadowDialog.getLatestDialog().getWindow().getDecorView(),"继续接收"));findButton(ShadowDialog.getLatestDialog().getWindow().getDecorView(),"取消接收并清理断点").performClick();findButton(ShadowDialog.getLatestDialog().getWindow().getDecorView(),"取消接收").performClick();settle(service);assertFalse(part.exists());
+                assertNotNull(findButton(taskRow(activity,slow),"继续接收"));findButton(taskRow(activity,slow),"继续接收").performClick();waitUntil(service,()->part.length()>0&&service.busy());
+                findButton(taskRow(activity,slow),"取消").performClick();findButton(ShadowDialog.getLatestDialog().getWindow().getDecorView(),"取消接收").performClick();
+                waitUntil(service,()->!service.busy()&&!part.exists());assertTrue(service.progress(peer.id(),slow.message.number,slow.file.id,false).state.startsWith("已取消"));
+                findButton(taskRow(activity,slow),"继续接收").performClick();waitUntil(service,()->part.length()>0&&service.busy());
+                LanNode.Message queuedMessage=sender.sendMessage(target,"排队文件",Collections.singletonList(original));waitUntil(service,()->((ChatStore)uncheckedField(service,"store")).findMessage(peer.id(),queuedMessage.number,false)!=null);
+                ChatStore.FileTask queued=fileTasks(service).stream().filter(item->item.message.number==queuedMessage.number).findFirst().orElseThrow();findButton(taskRow(activity,queued),"接收").performClick();assertEquals("排队中",service.progress(peer.id(),queued.message.number,queued.file.id,false).state);assertNotNull(findButton(taskRow(activity,queued),"暂停排队"));
+                findDescription(((Dialog)field(activity,"tasksDialog")).getWindow().getDecorView(),"传输任务操作").performClick();menu=ShadowDialog.getLatestDialog().getWindow().getDecorView();assertNotNull(findButton(menu,"继续所有未完成接收"));assertNotNull(findButton(menu,"暂停所有接收"));assertNull(findButton(menu,"取消排队发送任务"));findButton(menu,"暂停所有接收").performClick();
+                waitUntil(service,()->!service.busy()&&"已暂停".equals(service.progress(peer.id(),slow.message.number,slow.file.id,false).state));assertEquals("已暂停",service.progress(peer.id(),queued.message.number,queued.file.id,false).state);assertTrue(((Map<?,?>)field(service,"waiting")).isEmpty());assertTrue(part.isFile());
+                findDescription(((Dialog)field(activity,"tasksDialog")).getWindow().getDecorView(),"传输任务操作").performClick();findButton(ShadowDialog.getLatestDialog().getWindow().getDecorView(),"继续所有未完成接收").performClick();
+                File queuedLocal=service.receivedFile(peer,queued.message.number,queued.file);waitUntil(service,()->queuedLocal.isFile()&&part.length()>0&&service.busy());
+                taskActions(activity,slow);menu=ShadowDialog.getLatestDialog().getWindow().getDecorView();assertNotNull(findButton(menu,"暂停并保留断点"));assertNotNull(findButton(menu,"取消接收并清理断点"));assertNotNull(findButton(menu,"拒绝这批文件"));assertNull(findButton(menu,"文件与保存位置"));findButton(menu,"拒绝这批文件").performClick();
+                assertTrue(dialogText(ShadowDialog.getLatestDialog()).contains("将拒绝该消息中未接收的文件并清理断点；已保存的文件保留。"));findButton(ShadowDialog.getLatestDialog().getWindow().getDecorView(),"拒绝这批文件").performClick();
+                waitUntil(service,()->!service.busy()&&!part.exists()&&"已拒绝".equals(service.progress(peer.id(),slow.message.number,slow.file.id,false).state));
+                LanNode.Message stored=((ChatStore)field(service,"store")).findMessage(peer.id(),slow.message.number,false);assertEquals("已拒绝",stored.state);assertEquals(2,stored.files.size());assertEquals("本机文件已删除",service.progress(peer.id(),deleted.message.number,deleted.file.id,false).state);assertTrue(savedLocal.isFile());assertFalse(deletedLocal.exists());assertTrue(original.isFile());assertTrue(deletedOriginal.isFile());assertTrue(slowOriginal.isFile());
+                LanNode.Message rejected=sender.sendMessage(target,"直接拒收",Collections.singletonList(original));waitUntil(service,()->((ChatStore)uncheckedField(service,"store")).findMessage(peer.id(),rejected.number,false)!=null);ChatStore.FileTask pending=fileTasks(service).stream().filter(item->item.message.number==rejected.number).findFirst().orElseThrow();
+                findButton(taskRow(activity,pending),"拒绝").performClick();findButton(ShadowDialog.getLatestDialog().getWindow().getDecorView(),"拒绝这批文件").performClick();settle(service);assertEquals("已拒绝",service.progress(peer.id(),pending.message.number,pending.file.id,false).state);assertFalse(service.receivedFile(peer,pending.message.number,pending.file).exists());
+                LanNode.Message outbound=receiver.sendMessage(peer,"取消发送",Collections.singletonList(original));waitUntil(service,()->((ChatStore)uncheckedField(service,"store")).findMessage(peer.id(),outbound.number,true)!=null);ChatStore.FileTask outgoing=fileTasks(service).stream().filter(item->item.message.number==outbound.number&&item.message.outgoing).findFirst().orElseThrow();
+                findButton(taskRow(activity,outgoing),"取消发送").performClick();findButton(ShadowDialog.getLatestDialog().getWindow().getDecorView(),"取消发送").performClick();settle(service);assertFalse(receiver.offering(peer.id(),outbound.number,outgoing.file.id));assertTrue(original.isFile());assertEquals(View.GONE,taskRow(activity,outgoing).getChildAt(4).getVisibility());
+                assertFalse(errors.toString(),errors.stream().anyMatch(text->text.contains("请先取消当前文件任务")||text.contains("接收失败")||text.contains("文件任务已取消")));
+                ((Dialog)field(activity,"tasksDialog")).dismiss();
+            }
+        }finally{throttle.set(false);serviceController.destroy();}
+    }
+    @Test public void rejectUnrelatedOfferWhileBusyClearsOnlyItsOwnPartial()throws Exception {
+        Context context=RuntimeEnvironment.getApplication();disableConnection(context);ServiceController<ChatService> controller=Robolectric.buildService(ChatService.class).create();ChatService service=controller.get();
+        try {
+            settle(service);LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:31234"),"unrelated-reject","host","独立邀请","");ChatStore.FileTask item=task(peer.id(),84,"未完成.bin",8192);
+            service.incoming(peer,item.message,false);settle(service);File local=service.receivedFile(peer,84,item.file),part=LanNode.partialFile(peer,84,item.file,local);Files.write(part.toPath(),new byte[128]);File unrelated=new File(part.getParentFile(),"unrelated-task.part");Files.write(unrelated.toPath(),new byte[]{9});
+            java.util.concurrent.atomic.AtomicBoolean busy=(java.util.concurrent.atomic.AtomicBoolean)field(service,"busy");LanNode.Transfer task=new LanNode.Transfer();setField(service,"transfer",task);busy.set(true);service.reject(peer,84);settle(service);
+            assertTrue(busy.get());assertFalse(task.isCancelled());assertFalse(part.exists());assertTrue(unrelated.isFile());assertEquals("已拒绝",service.progress(peer.id(),84,item.file.id,false).state);assertEquals("已拒绝",((ChatStore)field(service,"store")).findMessage(peer.id(),84,false).state);
+            busy.set(false);setField(service,"transfer",null);
+        }finally{controller.destroy();}
+    }
+    @Test public void batchFileDeleteUsesStoredHistoryDeduplicatesAndRespectsSafPermission()throws Exception {
+        Context context=RuntimeEnvironment.getApplication();disableConnection(context);
+        ServiceController<ChatService> controller=Robolectric.buildService(ChatService.class).create();ChatService service=controller.get();
+        try {
+            settle(service);ReceivedStorage storage=new ReceivedStorage(context);FileFeaturesTest.Docs docs=documents(context);
+            ChatStore store=(ChatStore)field(service,"store");ExecutorService io=(ExecutorService)field(service,"io");
+            for(boolean external:new boolean[]{false,true}) {
+                if(external)storage.choose(documentTree(),Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_WRITE_URI_PERMISSION);else storage.useInternal();
+                LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:31234"),"batch-history-"+external,"host","历史接收文件","");
+                ChatStore.FileTask saved=task(peer.id(),83,"已保存.txt",3),missing=task(peer.id(),84,"外部已删除.txt",3);
+                io.submit(()->{store.message(peer,saved.message,false,false);store.message(peer,missing.message,false,false);store.transfer(ChatService.fileKey(peer.id(),84,missing.file.id,false),peer.id(),84,100,"已接收");}).get(5,TimeUnit.SECONDS);
+                File local=service.receivedFile(peer,83,saved.file);Files.write(local.toPath(),new byte[]{1,2,3});storage.save(local,saved.file.name,new LanNode.Transfer());
+                List<ChatService.BatchFileDeleteResult> result=new ArrayList<>();
+                if(external) {
+                    docs.deny=true;service.deleteReceivedFiles(peer.id(),Collections.singletonList(saved.message),result::add);transferDone(service);
+                    assertTrue(result.isEmpty());assertNotNull("授权失效不能抹掉保存位置",storage.saved(local));
+                    docs.deny=false;assertTrue("授权恢复后原文件必须仍在",storage.exists(local));
+                }
+                service.deleteReceivedFiles(peer.id(),Arrays.asList(saved.message,missing.message,saved.message),result::add);transferDone(service);
+                assertEquals(1,result.size());assertEquals(1,result.get(0).deleted);assertEquals(1,result.get(0).skippedDeleted);assertEquals(0,result.get(0).unreceived);
+                assertFalse(storage.exists(local));assertEquals("本机文件已删除",service.progress(peer.id(),84,missing.file.id,false).state);
+                assertEquals(1,store.findMessage(peer.id(),83,false).files.size());assertEquals(1,store.findMessage(peer.id(),84,false).files.size());
+                result.clear();service.deleteReceivedFiles(peer.id(),Arrays.asList(saved.message,missing.message,saved.message),result::add);transferDone(service);
+                assertEquals(1,result.size());assertEquals(0,result.get(0).deleted);assertEquals(2,result.get(0).skippedDeleted);
+            }
+        }finally{controller.destroy();}
     }
     @Test public void taskSnapshotKeepsNewSave()throws Exception {
         Context context=RuntimeEnvironment.getApplication();disableConnection(context);ServiceController<ChatService> controller=Robolectric.buildService(ChatService.class).create();ChatService service=controller.get();CountDownLatch release=new CountDownLatch(1);
@@ -429,6 +559,53 @@ public final class TransferFeatureTest {
     private static final class Changes extends android.database.DataSetObserver {int count;@Override public void onChanged(){count++;}}
     private static void disableConnection(Context context){context.getSharedPreferences("settings",0).edit().putBoolean("auto_connect",false).putBoolean("connection_enabled",false).commit();}
     private static Object field(Object target,String name)throws Exception {java.lang.reflect.Field field=target.getClass().getDeclaredField(name);field.setAccessible(true);return field.get(target);}
+    private static Object uncheckedField(Object target,String name) {try{return field(target,name);}catch(Exception error){throw new AssertionError(error);}}
+    private static void setField(Object target,String name,Object value)throws Exception {java.lang.reflect.Field field=target.getClass().getDeclaredField(name);field.setAccessible(true);field.set(target,value);}
+    private static void invokeNoArgs(MainActivity activity,String name)throws Exception {java.lang.reflect.Method method=MainActivity.class.getDeclaredMethod(name);method.setAccessible(true);method.invoke(activity);}
+    private static void invokeOpen(MainActivity activity,String peer)throws Exception {java.lang.reflect.Method method=MainActivity.class.getDeclaredMethod("open",String.class);method.setAccessible(true);method.invoke(activity,peer);}
+    private static void invokeMessageSelection(MainActivity activity,LanNode.Message message)throws Exception {java.lang.reflect.Method method=MainActivity.class.getDeclaredMethod("beginMessageSelection",LanNode.Message.class);method.setAccessible(true);method.invoke(activity,message);}
+    private static int chatPort()throws IOException {
+        for(int attempt=0;attempt<20;attempt++)try(DatagramSocket udp=new DatagramSocket(0,InetAddress.getLoopbackAddress())) {
+            try(ServerSocket tcp=new ServerSocket(udp.getLocalPort(),1,InetAddress.getLoopbackAddress())){return udp.getLocalPort();}
+            catch(BindException occupied){/* 节点同时需要空闲的 TCP 和 UDP 端口。 */}
+        }
+        throw new IOException("未找到回环测试端口");
+    }
+    private static LanNode.Source taskSource(File file,java.util.concurrent.atomic.AtomicBoolean throttle) {
+        return new LanNode.Source() {
+            public String key(){return file.getAbsolutePath();}public String name(){return file.getName();}public long size(){return file.length();}public long modified(){return file.lastModified();}
+            public InputStream open(long offset)throws IOException {
+                FileInputStream input=new FileInputStream(file);input.skipNBytes(offset);
+                return new FilterInputStream(input) {
+                    @Override public int read(byte[] bytes,int start,int length)throws IOException {
+                        // 只减慢真实回环发送流，给 UI 操作留下稳定窗口；不创建大文件或模拟接收结果。
+                        if(throttle!=null&&throttle.get())try{Thread.sleep(8);}catch(InterruptedException error){Thread.currentThread().interrupt();throw new InterruptedIOException("回环发送已停止");}
+                        return super.read(bytes,start,Math.min(length,4096));
+                    }
+                };
+            }
+        };
+    }
+    private static void waitUntil(ChatService service,java.util.function.BooleanSupplier condition)throws Exception {
+        long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(8);
+        while(!condition.getAsBoolean()&&System.nanoTime()<deadline) {
+            ((ExecutorService)field(service,"io")).submit(()->{}).get(5,TimeUnit.SECONDS);
+            Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(20));Thread.sleep(10);
+        }
+        assertTrue("等待传输状态超时："+service.transferStatus(),condition.getAsBoolean());
+    }
+    private static int taskIndex(BaseAdapter adapter,ChatStore.FileTask expected) {
+        for(int index=0;index<adapter.getCount();index++) {
+            ChatStore.FileTask item=(ChatStore.FileTask)adapter.getItem(index);
+            if(item.peer.equals(expected.peer)&&item.message.number==expected.message.number&&item.message.outgoing==expected.message.outgoing&&item.file.id==expected.file.id)return index;
+        }
+        throw new AssertionError("任务未显示："+expected.file.name);
+    }
+    private static LinearLayout taskRow(MainActivity activity,ChatStore.FileTask item)throws Exception {
+        BaseAdapter adapter=(BaseAdapter)field(activity,"taskAdapter");refresh(adapter);
+        ListView parent=find(((Dialog)field(activity,"tasksDialog")).getWindow().getDecorView(),ListView.class);
+        return (LinearLayout)adapter.getView(taskIndex(adapter,item),null,parent);
+    }
     private static android.net.Uri documentTree(){return android.net.Uri.parse("content://feiq.documents/tree/root");}
     private static FileFeaturesTest.Docs documents(Context context) {
         return FileFeaturesTest.provider(context);
@@ -448,7 +625,7 @@ public final class TransferFeatureTest {
     private static void dialogText(View view,StringBuilder text) {if(view instanceof TextView&&!(view instanceof Button))text.append(((TextView)view).getText()).append('\n');if(view instanceof ViewGroup)for(int i=0;i<((ViewGroup)view).getChildCount();i++)dialogText(((ViewGroup)view).getChildAt(i),text);}
     private static void refresh(Object adapter)throws Exception {java.lang.reflect.Method refresh=adapter.getClass().getDeclaredMethod("refresh");refresh.setAccessible(true);refresh.invoke(adapter);}
     private static void showTasks(MainActivity activity)throws Exception {java.lang.reflect.Method show=MainActivity.class.getDeclaredMethod("showTasks");show.setAccessible(true);show.invoke(activity);}
-    private static ChatStore.FileTask task(String peer,long packet,String name,long size){LanNode.Message message=new LanNode.Message();message.number=packet;message.state="已收到";Protocol.Attachment file=new Protocol.Attachment(0,name,size,1);message.files.add(file);return new ChatStore.FileTask(peer,message,file);}
+    private static ChatStore.FileTask task(String peer,long packet,String name,long size){LanNode.Message message=new LanNode.Message();message.number=packet;message.text=name;message.state="已收到";Protocol.Attachment file=new Protocol.Attachment(0,name,size,1);message.files.add(file);return new ChatStore.FileTask(peer,message,file);}
     private static void settle(ChatService service)throws Exception {
         ExecutorService io=(ExecutorService)field(service,"io");
         for(int i=0;i<3;i++){io.submit(()->{}).get(5,TimeUnit.SECONDS);Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(100));}

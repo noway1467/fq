@@ -46,7 +46,7 @@ namespace FeiqLight.Tests
         private static Reply Json(GuestTransfer server,string path,object body){return Request(server.Port,path,server.Token,Encoding.UTF8.GetBytes(new JavaScriptSerializer().Serialize(body)),"POST","Content-Type: application/json\r\n");}
         private static System.Collections.Generic.Dictionary<string,object> Data(Reply reply){return (System.Collections.Generic.Dictionary<string,object>)new JavaScriptSerializer().DeserializeObject(Encoding.UTF8.GetString(reply.Body));}
         private static System.Collections.Generic.IEnumerable<Control> Controls(Control parent){foreach(Control child in parent.Controls){yield return child;foreach(Control nested in Controls(child))yield return nested;}}
-        private static T Field<T>(object target,string name){return (T)target.GetType().GetField(name,BindingFlags.Instance|BindingFlags.NonPublic).GetValue(target);}
+        private static T Field<T>(object target,string name){return (T)target.GetType().GetField(name,BindingFlags.Instance|BindingFlags.Public|BindingFlags.NonPublic).GetValue(target);}
         private static void Tick(System.Windows.Forms.Timer timer){typeof(System.Windows.Forms.Timer).GetMethod("OnTick",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(timer,new object[]{EventArgs.Empty});}
         private static void PumpFor(int milliseconds)
         {
@@ -59,6 +59,51 @@ namespace FeiqLight.Tests
             var clock=System.Diagnostics.Stopwatch.StartNew();
             while(!ready()&&clock.ElapsedMilliseconds<5000){Application.DoEvents();Thread.Sleep(10);}
             Check(ready(),message);
+        }
+        private static string FinishDialogs(Action action,string confirmTitle,string confirmButton,Func<bool> finished=null,Action beforeConfirm=null)
+        {
+            string noticeText=null;bool confirmed=false;Exception callbackError=null;
+            using(var timer=new System.Windows.Forms.Timer{Interval=20})
+            {
+                timer.Tick+=delegate {
+                    try
+                    {
+                        ConfirmDialog confirm=Application.OpenForms.OfType<ConfirmDialog>().FirstOrDefault();
+                        if(confirm!=null)
+                        {
+                            Check(confirmTitle!=null&&confirm.Text==confirmTitle,"出现意外确认框："+confirm.Text);
+                            if(beforeConfirm!=null)beforeConfirm();confirmed=true;
+                            Controls(confirm).OfType<Button>().Single(button=>button.Text==confirmButton).PerformClick();
+                        }
+                        NoticeDialog notice=Application.OpenForms.OfType<NoticeDialog>().FirstOrDefault();
+                        if(notice!=null)
+                        {
+                            noticeText=notice.Text+"\n"+String.Join(" ",Controls(notice).OfType<TextBoxBase>().Select(box=>box.Text));
+                            Controls(notice).OfType<Button>().Single(button=>button.Text=="确定").PerformClick();
+                        }
+                    }
+                    catch(Exception error){callbackError=error;foreach(Form dialog in Application.OpenForms.Cast<Form>().Where(form=>form is ConfirmDialog||form is NoticeDialog).ToArray())dialog.Close();}
+                };
+                timer.Start();action();
+                if(finished!=null)Pump(()=>callbackError!=null||finished(),"文件操作未完成");
+                Check(callbackError==null,"弹窗处理失败："+callbackError);
+                if(confirmTitle!=null)Check(confirmed,"操作未显示确认框："+confirmTitle);
+            }
+            return noticeText;
+        }
+        private static int TransferIndex(ListBox list,long packet,int fileId)
+        {
+            return list.Items.Cast<object>().Select((item,index)=>new{Item=item,Index=index}).Single(entry=>Field<ChatRecord>(entry.Item,"Record").Packet==packet&&Field<FileTransferState>(entry.Item,"File").Id==fileId).Index;
+        }
+        private static void RightClickTransfer(ListBox list,int index)
+        {
+            list.TopIndex=index;Rectangle bounds=list.GetItemRectangle(index);
+            typeof(Control).GetMethod("OnMouseDown",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(list,new object[]{new MouseEventArgs(MouseButtons.Right,1,bounds.Left+12,bounds.Top+20,0)});
+            Check(list.SelectedIndex==index,"右键没有先选中目标任务");
+        }
+        private static void SaveMenu(ContextMenuStrip menu,string name)
+        {
+            using(var image=new Bitmap(menu.Width,menu.Height)){menu.DrawToBitmap(image,new Rectangle(Point.Empty,image.Size));image.Save(Path.Combine(output,name+".png"),System.Drawing.Imaging.ImageFormat.Png);}
         }
         private static void CheckPlacement(WindowPlacement placement,Rectangle bounds,bool maximized,string message)
         {
@@ -109,9 +154,141 @@ namespace FeiqLight.Tests
             }
             Check(serving.Wait(5000),"发送测试未结束");
         }
+        private static void BatchDeleteRegression()
+        {
+            foreach(bool dark in new[]{false,true})
+            {
+                Theme.Configure(dark,"blue");var store=new LocalStore(Path.Combine(root,"batch-delete-"+dark));
+                var settings=new AppSettings{CloseToTray=false,Notifications=false,AutoReceiveFiles=false,ReceiveFolder=Path.Combine(store.Root,"received"),Conversations=new[]{new SavedConversation{Endpoint="127.0.0.1:"+FreePort(),Login="batch-peer",Nickname="批量删除 中文 English"}}};
+                using(var network=new LanService(settings,FreePort(),true,"batch-delete"))using(var main=new MainForm(network,store))
+                {
+                    Peer peer=network.Peers.Single();string saved=Path.Combine(store.Root,"已保存.txt"),missing=Path.Combine(store.Root,"外部已删.txt"),original=Path.Combine(store.Root,"发送原文件.txt");
+                    File.WriteAllText(saved,"received");File.WriteAllText(missing,"removed externally");File.Delete(missing);File.WriteAllText(original,"sender original");
+                    var pending=new FileTransferState{Id=4,Name="待接收.bin",Size=4096,Modified=1,Sha256=new string('a',64),RelativePath="未接收/待接收.bin",Status="已暂停",Percent=40};
+                    var incoming=new ChatRecord{PeerId=peer.Id,Packet=11,Sender=peer.Nickname,Text="保留整条消息",Time=DateTime.Now,State="已收到",HasAttachments=true,LocalFiles=new[]{saved,missing},Transfers=new[]{
+                        new FileTransferState{Id=0,Name="已保存.txt",LocalPath=saved,Status="已保存",Percent=100},
+                        new FileTransferState{Id=1,Name="外部已删.txt",LocalPath=missing,Status="已保存",Percent=100},
+                        new FileTransferState{Id=2,Name="以前已删.txt",Status="本机文件已删除"},
+                        new FileTransferState{Id=3,Name="旧保存记录.txt",Status="已保存",Percent=100},pending}};
+                    string alias=Path.Combine(store.Root,"规范化目录","..",Path.GetFileName(saved));
+                    var duplicate=new ChatRecord{PeerId=peer.Id,Packet=12,Sender=peer.Nickname,Text="同路径附件",Time=DateTime.Now,HasAttachments=true,LocalFiles=new[]{alias},Transfers=new[]{new FileTransferState{Id=0,Name="已保存.txt",LocalPath=alias,Status="已保存",Percent=100}}};
+                    var outgoing=new ChatRecord{PeerId=peer.Id,Packet=13,Sender="自己",Text="原文件保留",Time=DateTime.Now,Outgoing=true,State="已送达",HasAttachments=true,LocalFiles=new[]{original},Transfers=new[]{new FileTransferState{Id=0,Name="发送原文件.txt",LocalPath=original,Status="等待对方接收"}}};
+                    foreach(ChatRecord record in new[]{incoming,duplicate,outgoing}){store.Append(record);main.TrackTransfer(record);}
+                    var attachment=new Attachment{Id=pending.Id,Name=pending.Name,Size=pending.Size,Modified=pending.Modified,Sha256=pending.Sha256,RelativePath=pending.RelativePath};
+                    string partial=LanService.PartialPath(peer,incoming.Packet,attachment,SendBatch.Destination(settings.ReceiveFolder,attachment));File.WriteAllBytes(partial,new byte[128]);
+                    main.Show();main.OpenChat(peer);ChatForm chat=main.ActiveChat;BubbleHistory history=Field<BubbleHistory>(chat,"history");
+                    Button deleteFiles=Controls(chat).OfType<Button>().Single(button=>button.AccessibleName=="批量删除本机文件");
+                    history.SetRecords(new[]{outgoing});history.SelectAllMessages();Check(!deleteFiles.Enabled,"只选发送原文件时仍可批量删文件");
+                    history.SetRecords(new[]{incoming,duplicate,outgoing});history.SelectAllMessages();typeof(BubbleHistory).GetField("selected",BindingFlags.Instance|BindingFlags.NonPublic).SetValue(history,0);
+                    Check(deleteFiles.Enabled&&deleteFiles.ForeColor.ToArgb()==Theme.Danger.ToArgb(),"混合入站附件未启用危险色删除文件按钮");
+                    TableLayoutPanel bar=Controls(chat).OfType<TableLayoutPanel>().Single(panel=>panel.AccessibleName=="消息多选操作栏");
+                    Check(bar.ColumnCount==5&&new[]{"全选","删除","取消"}.All(text=>bar.Controls.OfType<Button>().Any(button=>button.Text==text)),"旧多选按钮文案或列数被破坏");
+                    main.ClientSize=new Size(720,620);Application.DoEvents();foreach(Button button in bar.Controls.OfType<Button>())Check(bar.ClientRectangle.Contains(button.Bounds)&&button.Width>=TextRenderer.MeasureText(button.Text,button.Font,Size.Empty,TextFormatFlags.NoPadding).Width+8,"720px多选按钮裁切："+button.Text);
+                    SaveSnapshot(main,"batch-selection-"+(dark?"dark":"light")+"-720");
+                    history.ContextMenuStrip.Show(history,new Point(20,40));Application.DoEvents();Check(history.ContextMenuStrip.Items.OfType<ToolStripMenuItem>().Single(item=>item.Text=="删除所选本机文件").Enabled,"多选右键缺少删除文件操作");SaveMenu(history.ContextMenuStrip,"batch-menu-"+(dark?"dark":"light"));history.ContextMenuStrip.Close();
+                    FinishDialogs(()=>deleteFiles.PerformClick(),"删除选中的本机文件？","取消");Check(File.Exists(saved)&&incoming.Transfers[1].LocalPath==missing&&incoming.Transfers[3].Status=="已保存"&&history.SelectionMode,"确认取消后删除、订正了文件或退出多选");
+                    string feedback=FinishDialogs(()=>deleteFiles.PerformClick(),"删除选中的本机文件？","删除文件",null,()=>Check(File.Exists(saved)&&File.Exists(original)&&incoming.Transfers[1].LocalPath==missing,"确认之前已经修改文件"));
+                    string result="已删除 1 个本机文件，3 个已删除跳过。";
+                    Check(feedback!=null&&feedback.StartsWith("文件删除完成\n")&&feedback.Contains(result)&&feedback.Contains("1 个未接收附件未处理"),"删除统计错误："+feedback);
+                    Check(Field<Label>(main,"status").Text.Contains(result)&&!history.SelectionMode,"结果没有同步状态栏或退出多选");
+                    Check(!File.Exists(saved)&&File.ReadAllText(original)=="sender original"&&File.Exists(partial)&&pending.Status=="已暂停","批量删除误删发送原文件、断点或待接收状态");
+                    ChatRecord[] restored=new LocalStore(store.Root).History(peer.Id,10).ToArray();Check(restored.Length==3&&restored.Single(record=>record.Packet==11).Text=="保留整条消息","文件删除同时删除了聊天记录");
+                    Check(restored.Where(record=>!record.Outgoing).SelectMany(record=>record.Transfers).Where(file=>file.Id!=4).All(file=>file.LocalPath==null&&file.Status=="本机文件已删除"&&file.Percent==0),"重启丢失文件删除或失效路径订正");
+                    var unreceived=new ChatRecord{PeerId=peer.Id,Packet=21,Text="尚未接收",Time=DateTime.Now,HasAttachments=true,Transfers=new[]{new FileTransferState{Id=0,Name="未保存.bin",Status="已暂停",Percent=30}}};
+                    main.TrySave(unreceived);history.SetRecords(new[]{unreceived});history.SelectAllMessages();feedback=FinishDialogs(()=>deleteFiles.PerformClick(),null,null);
+                    Check(feedback!=null&&feedback.Contains("没有可删除的本机文件")&&feedback.Contains("传输任务")&&history.SelectionMode&&unreceived.Transfers[0].Status=="已暂停","未接收附件没有正确提示或被改写");
+                    unreceived.Transfers[0].Status="接收中";feedback=FinishDialogs(()=>deleteFiles.PerformClick(),null,null);
+                    Check(feedback!=null&&feedback.Contains("请先处理文件")&&feedback.Contains("正在接收")&&history.SelectionMode,"活跃接收没有阻断文件删除并保留多选");
+                    main.ExitApplication();
+                }
+            }
+        }
+        private static void TransferOperationsRegression()
+        {
+            foreach(bool dark in new[]{false,true})
+            {
+                Theme.Configure(dark,"blue");var store=new LocalStore(Path.Combine(root,"transfer-actions-"+dark));
+                var settings=new AppSettings{CloseToTray=false,Notifications=false,AutoReceiveFiles=false,ReceiveFolder=Path.Combine(store.Root,"received"),Conversations=new[]{new SavedConversation{Endpoint="127.0.0.1:"+FreePort(),Login="actions-peer",Nickname="传输操作设备"}}};
+                using(var network=new LanService(settings,FreePort(),true,"transfer-actions"))using(var main=new MainForm(network,store))using(var window=new TransferWindow(main))
+                {
+                    Peer peer=network.Peers.Single();string saved=Path.Combine(store.Root,"聊天接收.txt"),guestFile=Path.Combine(store.Root,"访客接收.txt");File.WriteAllText(saved,"saved");File.WriteAllText(guestFile,"guest");
+                    var file=new FileTransferState{Id=0,Name="拒绝.bin",Status="已暂停",Size=4096,Modified=1,Sha256=new string('a',64),RelativePath="拒绝/空子目录/拒绝.bin",Percent=30};
+                    var record=new ChatRecord{PeerId=peer.Id,Packet=101,Text="混合状态邀请",Sender=peer.Nickname,Time=DateTime.Now,State="已接收 1 / 3",HasAttachments=true,LocalFiles=new[]{saved},Transfers=new[]{file,new FileTransferState{Id=1,Name="聊天接收.txt",LocalPath=saved,Status="已保存",Percent=100},new FileTransferState{Id=2,Name="之前删除.txt",Status="本机文件已删除"}}};
+                    var canceled=new ChatRecord{PeerId=peer.Id,Packet=102,Text="清理暂停断点",Sender=peer.Nickname,Time=DateTime.Now.AddMinutes(-2),HasAttachments=true,Transfers=new[]{new FileTransferState{Id=0,Name="暂停.bin",Status="已暂停",Size=4096,Modified=1,Sha256=new string('b',64),RelativePath="暂停/暂停.bin",Percent=40}}};
+                    var guest=new ChatRecord{PeerId="browser-guests",Packet=103,Sender="浏览器访客",Text="访客接收记录",Time=DateTime.Now.AddMinutes(-1),State="已保存",HasAttachments=true,LocalFiles=new[]{guestFile},Transfers=new[]{new FileTransferState{Id=0,Name="访客接收.txt",LocalPath=guestFile,Status="已保存",Percent=100}}};
+                    foreach(ChatRecord item in new[]{record,canceled,guest}){store.Append(item);main.TrackTransfer(item);}
+                    Func<ChatRecord,string> partPath=item=>{FileTransferState state=item.Transfers[0];var attachment=new Attachment{Id=state.Id,Name=state.Name,Size=state.Size,Modified=state.Modified,Sha256=state.Sha256,RelativePath=state.RelativePath};return LanService.PartialPath(peer,item.Packet,attachment,SendBatch.Destination(settings.ReceiveFolder,attachment));};
+                    string rejectedPart=partPath(record),canceledPart=partPath(canceled);File.WriteAllBytes(rejectedPart,new byte[128]);File.WriteAllBytes(canceledPart,new byte[128]);
+                    main.Show();window.Show();PumpFor(60);ListBox list=Field<ListBox>(window,"list");Button secondary=Field<Button>(window,"secondary"),more=Field<Button>(window,"more");
+                    Check(main.ActiveChat==null&&list.SelectedIndex==0&&secondary.Visible&&secondary.Text=="拒绝"&&Field<Button>(window,"action").Text=="继续接收","默认任务未选中或拒绝次操作缺失");
+                    var footer=(TableLayoutPanel)secondary.Parent;Check(footer.ColumnCount==4&&footer.GetColumn(secondary)==2&&footer.GetColumn(more)==3,"次操作未位于主操作和菜单之间");
+                    window.ClientSize=new Size(620,560);Application.DoEvents();foreach(Button button in footer.Controls.OfType<Button>().Where(button=>button.Visible))Check(footer.ClientRectangle.Contains(button.Bounds),"窄窗传输操作越界："+button.Text);SaveSnapshot(window,"transfer-refuse-"+(dark?"dark":"light"));
+                    FinishDialogs(()=>secondary.PerformClick(),"拒绝这批文件？","拒绝",()=>store.IncomingAttachments(peer.Id,101).Single().Transfers[0].Status=="已拒绝");
+                    ChatRecord refused=store.IncomingAttachments(peer.Id,101).Single();Check(refused.State==record.State&&refused.Transfers[1].Status=="已保存"&&refused.Transfers[2].Status=="本机文件已删除"&&File.Exists(saved)&&!File.Exists(rejectedPart)&&!Directory.Exists(Path.GetDirectoryName(rejectedPart)),"未打开会话拒绝误改已存附件或残留断点");
+                    typeof(TransferWindow).GetMethod("RefreshRows",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(window,null);
+                    RightClickTransfer(list,TransferIndex(list,101,1));ContextMenuStrip menu=Field<ContextMenuStrip>(window,"menu");Check(menu.Visible&&secondary.Text=="打开文件"&&Field<Button>(window,"action").Text=="打开文件位置","已保存文件次操作或右键菜单缺失");
+                    foreach(string text in new[]{"打开文件","打开方式…","打开文件位置","删除本机文件","查看所在会话"})Check(menu.Items.Cast<ToolStripItem>().Any(item=>item.Text==text),"已存任务缺少菜单："+text);SaveMenu(menu,"transfer-saved-menu-"+(dark?"dark":"light"));
+                    FinishDialogs(()=>menu.Items.Cast<ToolStripItem>().Single(item=>item.Text=="删除本机文件").PerformClick(),"删除这个文件？","删除文件");menu.Close();Check(!File.Exists(saved)&&store.IncomingAttachments(peer.Id,101).Single().Transfers[1].Status=="本机文件已删除","任务菜单删除文件未执行或未落盘");
+                    more.PerformClick();Check(menu.Items.Cast<ToolStripItem>().Any(item=>item.Text=="重新接收"),"已删除聊天附件缺少重新接收入口");menu.Close();
+                    RightClickTransfer(list,TransferIndex(list,102,0));Check(menu.Items.Cast<ToolStripItem>().Any(item=>item.Text=="继续接收")&&menu.Items.Cast<ToolStripItem>().Any(item=>item.Text=="继续所有未完成接收")&&menu.Items.Cast<ToolStripItem>().Any(item=>item.Text=="暂停当前列表中的接收"),"待处理任务菜单缺少调度操作");
+                    FinishDialogs(()=>menu.Items.Cast<ToolStripItem>().Single(item=>item.Text=="取消接收并清理断点").PerformClick(),null,null,()=>store.IncomingAttachments(peer.Id,102).Single().Transfers[0].Status=="已取消 · 点击重试");menu.Close();Check(!File.Exists(canceledPart)&&store.IncomingAttachments(peer.Id,102).Single().Transfers[0].Percent==0,"取消暂停任务未清断点或清进度");
+                    RightClickTransfer(list,TransferIndex(list,103,0));Check(more.Visible&&menu.Visible&&secondary.Text=="打开文件"&&!menu.Items.Cast<ToolStripItem>().Any(item=>item.Text=="查看所在会话"),"访客文件菜单缺失或显示了假会话操作");SaveMenu(menu,"transfer-guest-menu-"+(dark?"dark":"light"));
+                    FinishDialogs(()=>menu.Items.Cast<ToolStripItem>().Single(item=>item.Text=="删除本机文件").PerformClick(),"删除这个文件？","删除文件");menu.Close();Check(!File.Exists(guestFile)&&new LocalStore(store.Root).AttachmentHistory("browser-guests").Single().Transfers[0].Status=="本机文件已删除","访客本机文件删除未持久化");
+                    window.Close();main.ExitApplication();
+                }
+            }
+        }
+        private static void ActiveTransferOperationsRegression()
+        {
+            foreach(bool reject in new[]{false,true})
+            {
+                Console.WriteLine("DETAIL 活跃接收开始："+(reject?"拒绝":"取消"));
+                Theme.Configure(reject,"blue");var store=new LocalStore(Path.Combine(root,"active-actions-"+reject));TcpListener server=new TcpListener(IPAddress.Loopback,0);server.Start();
+                using(var release=new ManualResetEventSlim(false))
+                {
+                    Task serving=Task.Run(()=>{try{using(TcpClient socket=server.AcceptTcpClient()){Stream stream=socket.GetStream();byte[] request=new byte[4096];stream.Read(request,0,request.Length);byte[] bytes=new byte[131072];stream.Write(bytes,0,bytes.Length);release.Wait(5000);}}catch(IOException){}catch(SocketException){}});
+                    var settings=new AppSettings{CloseToTray=false,Notifications=false,AutoReceiveFiles=false,ReceiveFolder=Path.Combine(store.Root,"received"),Conversations=new[]{new SavedConversation{Endpoint=server.LocalEndpoint.ToString(),Login="active-peer",Nickname="真实停滞发送端"}}};
+                    try
+                    {
+                        using(var network=new LanService(settings,FreePort(),true,"active-actions"))using(var main=new MainForm(network,store))using(var window=new TransferWindow(main))
+                        {
+                            Peer peer=network.Peers.Single();string saved=Path.Combine(store.Root,"此前已存.txt");File.WriteAllText(saved,"keep");
+                            var active=new FileTransferState{Id=0,Name="活跃.bin",Size=1048576,Modified=1,Sha256=new string('a',64),RelativePath="活跃/空目录/活跃.bin",Status="已暂停"};
+                            var paused=new FileTransferState{Id=1,Name="同批暂停.bin",Size=4096,Modified=1,Sha256=new string('b',64),RelativePath="另一断点/同批暂停.bin",Status="已暂停",Percent=30};
+                            var record=new ChatRecord{PeerId=peer.Id,Packet=201,Sender=peer.Nickname,Text="活跃接收取消边界",Time=DateTime.Now,State="已接收 1 / 4",HasAttachments=true,LocalFiles=new[]{saved},Transfers=new[]{active,paused,new FileTransferState{Id=2,Name="此前已存.txt",Status="已保存",Percent=100,LocalPath=saved},new FileTransferState{Id=3,Name="此前已删.txt",Status="本机文件已删除"}}};
+                            store.Append(record);main.TrackTransfer(record);
+                            Func<FileTransferState,string> partPath=file=>{var attachment=new Attachment{Id=file.Id,Name=file.Name,Size=file.Size,Modified=file.Modified,Sha256=file.Sha256,RelativePath=file.RelativePath};return LanService.PartialPath(peer,record.Packet,attachment,SendBatch.Destination(settings.ReceiveFolder,attachment));};
+                            string activePart=partPath(active),pausedPart=partPath(paused);File.WriteAllBytes(pausedPart,new byte[128]);
+                            main.Show();main.OpenChat(peer);Console.WriteLine("DETAIL 活跃接收排队");main.TransferAction(record,0,false);Pump(()=>main.ReceivingTask(record,0)&&File.Exists(activePart)&&new FileInfo(activePart).Length>0,"真实接收未形成非空活跃断点");Console.WriteLine("DETAIL 活跃断点已形成");
+                            window.Show();PumpFor(50);ListBox list=Field<ListBox>(window,"list");list.SelectedIndex=TransferIndex(list,201,0);Check(Field<Button>(window,"secondary").Text=="取消接收"&&Field<Button>(window,"action").Text=="暂停接收","活跃接收主次操作文案错误");
+                            Console.WriteLine("DETAIL 传输窗口已选中活跃任务");if(reject)
+                            {
+                                RightClickTransfer(list,list.SelectedIndex);ContextMenuStrip menu=Field<ContextMenuStrip>(window,"menu");Check(menu.Items.Cast<ToolStripItem>().Any(item=>item.Text=="暂停并保留断点"),"活跃接收菜单没有暂停操作");
+                                FinishDialogs(()=>menu.Items.Cast<ToolStripItem>().Single(item=>item.Text=="拒绝这批文件").PerformClick(),"拒绝这批文件？","拒绝",()=>!main.ReceivingTask(record,0)&&main.ActiveChat.PendingFileCount==0);menu.Close();
+                            }
+                            else
+                            {
+                                Field<Button>(window,"secondary").PerformClick();Pump(()=>!main.ReceivingTask(record,0)&&!File.Exists(activePart)&&store.IncomingAttachments(peer.Id,201).Single().Transfers[0].Status=="已取消 · 点击重试","直接取消接收未停止真实下载或清断点");
+                            }
+                            Console.WriteLine("DETAIL 活跃操作完成");ChatRecord stored=new LocalStore(store.Root).IncomingAttachments(peer.Id,201).Single();Check(!File.Exists(activePart)&&!Directory.Exists(Path.GetDirectoryName(activePart))&&File.ReadAllText(saved)=="keep"&&stored.Transfers[2].Status=="已保存"&&stored.Transfers[3].Status=="本机文件已删除","活跃取消/拒绝误删已保存文件、覆盖终态或残留断点目录");
+                            Check(reject?stored.Transfers[0].Status=="已拒绝"&&stored.Transfers[1].Status=="已拒绝"&&!File.Exists(pausedPart):stored.Transfers[0].Percent==0&&stored.Transfers[1].Status=="已暂停"&&File.Exists(pausedPart)&&main.ActiveChat.PendingFileCount==2,"活跃操作清理范围或持久化状态错误");
+                            Check(!Application.OpenForms.OfType<NoticeDialog>().Any()&&!Field<Label>(main,"status").Text.Contains("接收失败"),"正常取消或拒绝出现迟到失败提示");SaveSnapshot(window,"transfer-active-"+(reject?"reject-dark":"cancel-light"));window.Close();main.ExitApplication();
+                        }
+                    }
+                    finally{release.Set();server.Stop();Check(serving.Wait(5000),"停滞接收测试进程未退出");}
+                }
+            }
+            Theme.Configure(false,"blue");
+        }
         [STAThread] private static int Main(string[] args)
         {
             Console.OutputEncoding=new UTF8Encoding(false);root=Path.GetFullPath(args[0]);output=Path.GetFullPath(args[1]);Directory.CreateDirectory(root);Directory.CreateDirectory(output);
+            if(args.Length>2&&args[2]=="active-actions")
+            {
+                Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);
+                Run("传输任务真实停滞TCP：直接取消与活跃拒绝释放句柄、保留同批终态",ActiveTransferOperationsRegression);
+                Console.WriteLine("TOTAL "+passed+" passed, "+failed+" failed");return failed==0?0:1;
+            }
             string sample=Path.Combine(root,"资料 中文 English.txt");File.WriteAllText(sample,"访客下载原文 😀",new UTF8Encoding(false));
             if(args.Length>2&&args[2]=="server"){
                 using(var server=new GuestTransfer(new[]{sample},Path.Combine(root,"browser-received"),true,true)){
@@ -190,7 +367,10 @@ namespace FeiqLight.Tests
                 var store=new LocalStore(Path.Combine(root,"archive"));var record=new ChatRecord{PeerId="test",Packet=1,Text="附件",HasAttachments=true,Transfers=new[]{new FileTransferState{Id=1,Name="one",Size=8}}};store.Append(record);
                 for(int i=2;i<302;i++)store.Append(new ChatRecord{PeerId="test",Packet=i,Text="普通文字",Time=DateTime.Now});Check(store.AttachmentHistory("test").Count==1,"旧页附件遗漏");store.DeleteRecords("test",new[]{record});Check(store.AttachmentHistory("test").Count==0,"删除消息被任务页复活");
             });
-            Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);
+            Run("多选删除：入站文件统计、出站保护、断点保留、确认取消及重启状态",BatchDeleteRegression);
+            Run("传输任务：默认选中、直接拒绝、暂停断点清理、右键和访客文件删除",TransferOperationsRegression);
+            Run("传输任务真实停滞TCP：直接取消与活跃拒绝释放句柄、保留同批终态",ActiveTransferOperationsRegression);
             Run("传输背景边界：极小高度、原生TopIndex=-1和ItemHeight=0不崩溃",()=>{
                 Type type=typeof(TransferWindow).GetNestedType("TransferListBox",BindingFlags.NonPublic);
                 using(var host=new Form())using(var list=(ListBox)Activator.CreateInstance(type,true))
@@ -298,7 +478,7 @@ namespace FeiqLight.Tests
                     foreach(Label label in new[]{Field<Label>(window,"summary"),Field<Label>(window,"detail"),Field<Label>(window,"empty")})label.TextChanged+=delegate{textChanges++;};
                     Button action=Field<Button>(window,"action"),more=Field<Button>(window,"more");action.TextChanged+=delegate{textChanges++;};action.VisibleChanged+=delegate{visibilityChanges++;};more.VisibleChanged+=delegate{visibilityChanges++;};
                     System.Windows.Forms.Timer timer=Field<System.Windows.Forms.Timer>(window,"timer");timer.Tick+=delegate{ticks++;};
-                    PumpFor(1150);Check(ticks>=2,"真实500ms定时器未运行");Check(invalidated.Count==0,"无变化仍触发列表重绘");Check(textChanges==0&&visibilityChanges==0,"静止时反复修改摘要或操作控件");Check(!more.Visible,"访客任务错误显示会话操作");
+                    PumpFor(1150);Check(ticks>=2,"真实500ms定时器未运行");Check(invalidated.Count==0,"无变化仍触发列表重绘");Check(textChanges==0&&visibilityChanges==0,"静止时反复修改摘要或操作控件");Check(more.Visible,"访客任务缺少文件操作菜单");
                     file.Percent=35;Tick(timer);Check(invalidated.Count==1&&invalidated[0]==list.GetItemRectangle(0),"进度变化未局限于对应任务行");Check(Field<Label>(window,"summary").Text.Contains("3.5 MB"),"总摘要未随进度更新");
                     invalidated.Clear();file.BytesPerSecond+=1;Tick(timer);Check(invalidated.Count==0,"显示速度与剩余时间未变仍重绘");
                     file.Status="已暂停";Tick(timer);Check(invalidated.Count==1&&invalidated[0]==list.GetItemRectangle(0),"状态变化没有精确刷新");Check(Field<Label>(window,"detail").Text=="已暂停","任务详情未更新状态");
@@ -338,8 +518,8 @@ namespace FeiqLight.Tests
                     using(var network=new LanService(settings,FreePort(),true,"chat-transfer"))using(var main=new MainForm(network,store))
                     {
                         main.Show();main.OpenChat(network.Peers.Single());ChatForm chat=main.ActiveChat;Application.DoEvents();
-                        string[] names={"传输任务","聊天记录","收到的文件","会话菜单"};Button[] buttons=names.Select(name=>Controls(chat).OfType<Button>().Single(button=>button.AccessibleName==name)).ToArray();
-                        TableLayoutPanel head=Field<TableLayoutPanel>(chat,"head");Check(head.ColumnCount==6,"顶部栏列数未更新");
+                        string[] names={"传输任务","聊天记录","会话菜单"};Button[] buttons=names.Select(name=>Controls(chat).OfType<Button>().Single(button=>button.AccessibleName==name)).ToArray();
+                        TableLayoutPanel head=Field<TableLayoutPanel>(chat,"head");Check(head.ColumnCount==5,"顶部栏列数未更新");Check(!Controls(chat).Any(control=>control.AccessibleName=="收到的文件"||control.AccessibleName=="收到的文件列表"),"聊天页仍保留收到文件按钮或抽屉");
                         for(int i=0;i<buttons.Length;i++){Check(head.GetColumn(buttons[i])==i+2,"顶部按钮顺序错误");Check(Field<ToolTip>(chat,"headTips").GetToolTip(buttons[i])==names[i],"顶部按钮缺少提示");}
                         Check(((RoundedButton)buttons[0]).Glyph=="transfer"&&Theme.MenuGlyph("传输任务…")=="transfer"&&Theme.MenuGlyph("临时浏览器传输…")=="link","传输或访客菜单图标未匹配");
                         foreach(int width in new[]{1120,720})

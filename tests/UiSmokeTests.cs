@@ -245,11 +245,15 @@ namespace FeiqLight.Tests
                         Pump(()=>previews.ContainsKey(saved.GetLocalFiles()[0])&&previews[saved.GetLocalFiles()[0]]!=null,"接收图片未生成预览");
                         Render(main,"preview-single-image-received");
                     });
-                    test("附件队列绘制：完成移除后的旧索引回调不越界",()=>{
-                        Check(chat.PendingFileCount==0,"前置接收尚未完成");ListBox list=Find<ListBox>(chat,"收到的文件列表");
-                        using(Bitmap bitmap=new Bitmap(220,60))using(Graphics g=Graphics.FromImage(bitmap)){
-                            MethodInfo draw=typeof(ChatForm).GetMethod("DrawFile",BindingFlags.Instance|BindingFlags.NonPublic);
-                            foreach(int index in new[]{-1,0,3})draw.Invoke(chat,new object[]{list,new DrawItemEventArgs(g,Theme.Body,new Rectangle(0,0,220,60),index,DrawItemState.None)});
+                    test("传输列表绘制：完成移除后的旧索引回调不越界",()=>{
+                        Check(chat.PendingFileCount==0,"前置接收尚未完成");
+                        using(var window=new TransferWindow(main)) {
+                            window.Show();ListBox list=Find<ListBox>(window,"传输任务列表");list.Items.Clear();
+                            using(Bitmap bitmap=new Bitmap(220,60))using(Graphics g=Graphics.FromImage(bitmap)){
+                                MethodInfo draw=typeof(TransferWindow).GetMethod("DrawItem",BindingFlags.Instance|BindingFlags.NonPublic);
+                                foreach(int index in new[]{-1,0,3})draw.Invoke(window,new object[]{list,new DrawItemEventArgs(g,Theme.Body,new Rectangle(0,0,220,60),index,DrawItemState.None)});
+                            }
+                            window.Close();
                         }
                     });
                     test("旧重复完成行：只隐藏已有邀请关联的副本，不删除独立记录",()=>{
@@ -263,9 +267,9 @@ namespace FeiqLight.Tests
                     test("自动接收失败：无抢焦点弹窗、不无限重试、修正目录后手动重试", () =>
                     {
                         receiver.Settings.ReceiveFolder = source; sender.SendMessage(sender.Peers.Single(), "失败后重试", new[] { source });
-                        Pump(() => chat.PendingFileCount == 1 && !chat.HasAutomaticFile && Button(chat, "接收").Enabled, "错误目录未进入可重试状态");
+                        Pump(() => chat.PendingFileCount == 1 && !chat.HasAutomaticFile, "错误目录未进入可重试状态");
                         Check(!Application.OpenForms.OfType<NoticeDialog>().Any(), "自动失败弹窗阻塞界面");
-                        receiver.Settings.ReceiveFolder = Path.Combine(directory, "重试成功"); main.OpenChat(peer); Button(chat, "接收").PerformClick();
+                        receiver.Settings.ReceiveFolder = Path.Combine(directory, "重试成功"); main.OpenChat(peer); ChatRecord retryRecord=store.IncomingAttachments(peer.Id).OrderByDescending(record=>record.Packet).First();main.TransferAction(retryRecord,retryRecord.Transfers.Single().Id,false);
                         Pump(() => chat.PendingFileCount == 0, "手动重试未完成"); Check(File.ReadAllText(Path.Combine(receiver.Settings.ReceiveFolder, "后台附件.txt")) == File.ReadAllText(source), "重试文件不正确");
                     });
                     test("自动接收开关：关闭时等待、设置恢复后处理排队文件、目录持久化", () =>
@@ -310,10 +314,10 @@ namespace FeiqLight.Tests
                                 byte[] bytes = Protocol.Encode(42, "cancel-ui", "local", Protocol.SendMessage | Protocol.FileAttach | Protocol.Utf8, "取消测试", Protocol.FileList(new[] { new Attachment { Id = 0, Name = "取消.bin", Size = 1048576 } }));
                                 announce.Send(bytes, bytes.Length, new IPEndPoint(IPAddress.Loopback, receiverPort));
                                 Pump(() => Directory.Exists(cancelledFolder) && Directory.GetFiles(cancelledFolder, "*.part").Length == 1, "自动接收未连接停滞测试服务器");
-                                main.OpenChat(receiver.Peers.Single(p => p.Login == "cancel-ui")); ChatForm cancelChat = main.ActiveChat; Find<Button>(cancelChat, "文件接收按钮").PerformClick();
-                                Pump(() => !Directory.GetFiles(cancelledFolder).Any() && All(cancelChat).OfType<Button>().Any(button => button.Text == "接收" && button.Enabled) && Button(cancelChat,"拒绝").Enabled, "取消没有中止传输或清理半成品");
+                                Peer cancelPeer=receiver.Peers.Single(p=>p.Login=="cancel-ui");main.OpenChat(cancelPeer); ChatForm cancelChat = main.ActiveChat;ChatRecord cancelRecord=store.IncomingAttachments(cancelPeer.Id,42).Single();Task cancel=main.CancelReceiveTask(cancelRecord,0);
+                                Pump(() => cancel.IsCompleted&&!Directory.GetFiles(cancelledFolder).Any()&&!main.ReceivingTask(cancelRecord,0), "取消没有中止传输或清理半成品");cancel.GetAwaiter().GetResult();
                                 Check(cancelChat.PendingFileCount == 1 && !cancelChat.HasAutomaticFile, "取消后立即重试或丢失任务");
-                                Button(cancelChat,"拒绝").PerformClick(); Check(cancelChat.PendingFileCount == 0, "取消后不能拒绝邀请");
+                                Task refused=main.RejectTransfer(cancelRecord);Pump(()=>refused.IsCompleted&&cancelChat.PendingFileCount==0,"取消后不能拒绝邀请");refused.GetAwaiter().GetResult();
                             }
                             finally { release.Set(); server.Stop(); try { hold.Wait(7000); } catch (AggregateException) { } }
                         }
@@ -569,7 +573,7 @@ namespace FeiqLight.Tests
                     Render(main, "preview-messages-multi-select");
                     using(System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 20 }) {
                         timer.Tick += delegate { ConfirmDialog confirm = Application.OpenForms.OfType<ConfirmDialog>().FirstOrDefault(); if(confirm != null) { timer.Stop(); Button(confirm, "删除").PerformClick(); } };
-                        timer.Start(); Button(Find<TableLayoutPanel>(chat, "消息多选操作栏"), "删除").PerformClick();
+                        timer.Start(); Find<TableLayoutPanel>(chat, "消息多选操作栏").Controls.OfType<Button>().Single(button=>button.Text=="删除").PerformClick();
                     }
                     Check(store.History(peer.Id, 20).Count == 3 && !history.SelectionMode && !history.Text.Contains("消息 0") && !history.Text.Contains("消息 1"), "批量删除结果不符");
                     MethodInfo select = typeof(BubbleHistory).GetMethod("SelectMessage", BindingFlags.Instance | BindingFlags.NonPublic);
@@ -1316,14 +1320,18 @@ namespace FeiqLight.Tests
                             Check(Find<ConversationList>(mainA, "会话列表").Items.Count == 0, "打开会话后未清除未读");
                             Button(mainA, "全部").PerformClick(); input.Clear(); chatA.SaveDraft(); Check(storeA.LoadDraft(a.Peers.Single(p => p.Login == "ui-b").Id) == "", "空草稿未清理");
                         });
-                        test("自绘 UI：附件抽屉、拒绝与最小窗口布局", () =>
+                        test("自绘 UI：聊天无附件抽屉、传输任务拒绝与最小窗口布局", () =>
                         {
                             string file = Path.Combine(directory, "界面附件.txt"); File.WriteAllText(file, "仅用于界面附件验证");
                             b.SendMessage(b.Peers.Single(p => p.Login == "ui-a"), "附件", new[] { file });
-                            ListBox attachments = Find<ListBox>(chatA, "收到的文件列表"); Pump(() => attachments.Items.Count == 1 && attachments.Visible, "附件抽屉未展示");
-                            Check(attachments.DrawMode == DrawMode.OwnerDrawFixed && attachments.BorderStyle == BorderStyle.None, "文件列表未自绘");
-                            foreach (Button button in All(mainA).OfType<Button>().Where(c => c.Visible)) Check(button.Parent.ClientRectangle.Contains(button.Bounds), "附件展开时按钮越界：" + button.Text);
-                            Render(mainA, "preview-files"); Button(chatA, "拒绝").PerformClick(); Check(attachments.Items.Count == 0 && !attachments.Visible, "拒绝后抽屉未收起");
+                            Pump(()=>chatA.PendingFileCount==1,"附件没有进入内部接收队列");Check(!All(chatA).Any(control=>control.AccessibleName=="收到的文件列表"||control.AccessibleName=="收到的文件"),"聊天仍显示附件抽屉或旧顶栏按钮");
+                            Find<Button>(chatA,"传输任务").PerformClick();TransferWindow window=Application.OpenForms.OfType<TransferWindow>().Single();ListBox attachments=Find<ListBox>(window,"传输任务列表");Pump(()=>attachments.Items.Count>0&&attachments.SelectedIndex>=0,"传输任务未自动选中");
+                            Check(attachments.DrawMode==DrawMode.OwnerDrawFixed&&attachments.BorderStyle==BorderStyle.None,"传输列表未自绘");Render(window,"preview-files");
+                            using(var timer=new System.Windows.Forms.Timer{Interval=40}) {
+                                timer.Tick+=delegate {ConfirmDialog confirm=Application.OpenForms.OfType<ConfirmDialog>().FirstOrDefault();if(confirm!=null)Button(confirm,"拒绝").PerformClick();};
+                                timer.Start();Button(window,"拒绝").PerformClick();Pump(()=>chatA.PendingFileCount==0,"传输窗口拒绝后队列未移除");
+                            }
+                            foreach(Button button in All(window).OfType<Button>().Where(control=>control.Visible))Check(button.Parent.ClientRectangle.Contains(button.Bounds),"传输操作按钮越界："+button.Text);window.Close();
                         });
                     }
                     test("菜单回归：主菜单鼠标选择设置并保存", () =>

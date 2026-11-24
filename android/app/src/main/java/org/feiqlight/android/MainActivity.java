@@ -135,6 +135,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
     private LinearLayout messageSelectionBar;
     private TextView messageSelectionCount;
     private Button deleteSelectedMessages;
+    private Button deleteSelectedFiles;
     private Integer themeScrollPosition;
     private final ServiceConnection connection=new ServiceConnection() {
         @Override public void onServiceConnected(ComponentName name,IBinder binder) {
@@ -245,10 +246,11 @@ public final class MainActivity extends Activity implements ChatService.Observer
         if(!selected.isEmpty()) {
             messageSelectionBar=row();messageSelectionBar.setContentDescription("消息多选操作栏");messageSelectionBar.setPadding(dp(12),dp(4),dp(12),dp(4));messageSelectionBar.setVisibility(View.GONE);
             messageSelectionCount=text("已选 0 条",14,INK);messageSelectionCount.setSingleLine();messageSelectionCount.setEllipsize(TextUtils.TruncateAt.END);messageSelectionBar.addView(messageSelectionCount,weight());
-            Button all=button("全选",false);deleteSelectedMessages=button("删除",false);deleteSelectedMessages.setTextColor(0xffd24e54);Button cancel=button("取消",false);
-            for(Button button:new Button[]{all,deleteSelectedMessages,cancel}){button.setPadding(dp(12),dp(8),dp(12),dp(8));button.setMinimumWidth(0);LinearLayout.LayoutParams gap=new LinearLayout.LayoutParams(-2,-2);gap.leftMargin=dp(4);messageSelectionBar.addView(button,gap);}
+            Button all=button("全选",false);deleteSelectedFiles=button("删除文件",false);deleteSelectedFiles.setTextColor(0xffd24e54);deleteSelectedMessages=button("删除",false);deleteSelectedMessages.setTextColor(0xffd24e54);Button cancel=button("取消",false);
+            for(Button button:new Button[]{all,deleteSelectedFiles,deleteSelectedMessages,cancel}){button.setPadding(dp(10),dp(8),dp(10),dp(8));button.setMinWidth(0);button.setMinimumWidth(0);LinearLayout.LayoutParams gap=new LinearLayout.LayoutParams(-2,-2);gap.leftMargin=dp(4);messageSelectionBar.addView(button,gap);}
             all.setOnClickListener(v->{messageMarks.clear();for(LanNode.Message message:messageRows)messageMarks.add(messageKey(message));updateMessageSelection();});cancel.setOnClickListener(v->endMessageSelection());
             deleteSelectedMessages.setOnClickListener(v->{List<LanNode.Message> selectedRows=new ArrayList<>();for(LanNode.Message message:messageRows)if(messageMarks.contains(messageKey(message)))selectedRows.add(message);requestDeleteMessages(selectedRows);});
+            deleteSelectedFiles.setOnClickListener(v->requestDeleteSelectedFiles());
             root.addView(messageSelectionBar,new LinearLayout.LayoutParams(-1,-2));
         }
         body=column(); root.addView(body,new LinearLayout.LayoutParams(-1,0,1));
@@ -687,6 +689,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         if(!message.text.isEmpty())fileAction(options,dialog,"查看全文 / 选段复制",()->showFullText(message.text));
         fileAction(options,dialog,"转发…",()->forward(message,source));
         fileAction(options,dialog,"选择多条消息",()->{if(selected.equals(source.id())&&generation==editorGeneration)beginMessageSelection(message);});
+        if(selectingMessages)fileAction(options,dialog,"删除所选本机文件",()->{if(selected.equals(source.id())&&generation==editorGeneration)requestDeleteSelectedFiles();});
         fileAction(options,dialog,"删除这条消息",()->{if(selected.equals(source.id())&&generation==editorGeneration)requestDeleteMessages(Collections.singletonList(message));});
     }
     private static String messageKey(LanNode.Message message) {return message.number+":"+message.outgoing;}
@@ -694,7 +697,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
     private void toggleMessage(LanNode.Message message) {String key=messageKey(message);if(!messageMarks.add(key))messageMarks.remove(key);updateMessageSelection();}
     private void endMessageSelection() {selectingMessages=false;messageMarks.clear();updateMessageSelection();}
     private void updateMessageSelection() {
-        if(messageSelectionBar!=null){messageSelectionBar.setVisibility(selectingMessages?View.VISIBLE:View.GONE);messageSelectionCount.setText("已选 "+messageMarks.size()+" 条");deleteSelectedMessages.setEnabled(!messageMarks.isEmpty());}
+        if(messageSelectionBar!=null){messageSelectionBar.setVisibility(selectingMessages?View.VISIBLE:View.GONE);messageSelectionCount.setText("已选 "+messageMarks.size()+" 条");deleteSelectedMessages.setEnabled(!messageMarks.isEmpty());deleteSelectedFiles.setEnabled(messageRows.stream().anyMatch(message->messageMarks.contains(messageKey(message))&&!message.outgoing&&!message.files.isEmpty()));}
         for(Map.Entry<String,View> entry:messageViews.entrySet()) {
             if(selectingMessages?messageMarks.contains(entry.getKey()):entry.getKey().equals(locatedMessage)){GradientDrawable border=shape(Color.TRANSPARENT,CONTROL_RADIUS);border.setStroke(dp(2),BLUE);entry.getValue().setForeground(border);}
             else entry.getValue().setForeground(null);
@@ -715,6 +718,24 @@ public final class MainActivity extends Activity implements ChatService.Observer
         confirm(messages.size()==1?"删除这条消息？":"删除选中的 "+messages.size()+" 条消息？",body,"删除",()->{
             if(service!=source||!peer.equals(selected)||generation!=editorGeneration)return;
             source.deleteMessages(peer,messages,success->{if(success&&!isDestroyed()&&!isFinishing()&&service==source&&peer.equals(selected)&&generation==editorGeneration){endMessageSelection();changed();}});
+        });
+    }
+    private void requestDeleteSelectedFiles() {
+        List<LanNode.Message> selectedRows=new ArrayList<>();
+        for(LanNode.Message message:messageRows)if(messageMarks.contains(messageKey(message)))selectedRows.add(message);
+        if(selectedRows.stream().noneMatch(message->!message.outgoing&&!message.files.isEmpty())) {
+            error("所选消息没有接收附件，发送的原文件不能通过聊天删除");return;
+        }
+        if(service==null){error("连接服务尚未就绪，请稍后重试");return;}
+        ChatService source=service;String peer=selected;int generation=editorGeneration;
+        confirm("删除选中的本机文件？","将删除所选消息中已保存的本机接收文件，聊天记录保留，此前已删除的文件自动跳过。此操作无法撤销。","删除文件",()->{
+            if(service!=source||!peer.equals(selected)||generation!=editorGeneration)return;
+            source.deleteReceivedFiles(peer,selectedRows,result->{
+                if(isDestroyed()||isFinishing()||service!=source||!peer.equals(selected)||generation!=editorGeneration)return;
+                endMessageSelection();changed();
+                if(result.deleted==0&&result.skippedDeleted==0)error("所选消息没有已保存的本机文件（未接收附件请在传输任务中处理）");
+                else error("已删除 "+result.deleted+" 个本机文件，"+result.skippedDeleted+" 个已删除跳过"+(result.unreceived>0?"（另有 "+result.unreceived+" 个未接收附件未处理）":""));
+            });
         });
     }
     private void send() {
@@ -860,7 +881,13 @@ public final class MainActivity extends Activity implements ChatService.Observer
         LinearLayout header=row();header.setPadding(dp(8),dp(6),dp(12),dp(6));
         IconButton back=new IconButton("back","返回",MUTED);header.addView(back,new LinearLayout.LayoutParams(dp(48),dp(48)));back.setOnClickListener(v->dialog.dismiss());
         TextView caption=text("传输任务",20,INK);caption.setTypeface(null,Typeface.BOLD);header.addView(caption,weight());page.addView(header);
-        IconButton queueMenu=new IconButton("more","排队任务操作",MUTED);header.addView(queueMenu,new LinearLayout.LayoutParams(dp(48),dp(48)));queueMenu.setOnClickListener(v->{if(service==null)return;if(service.queuedTransfers()==0){error("当前没有排队的文件操作");return;}confirm("取消排队任务","取消尚未开始的 "+service.queuedTransfers()+" 项文件操作？正在传输和已保存的文件不受影响。","取消排队",()->service.cancelQueuedTransfers());});
+        IconButton queueMenu=new IconButton("more","传输任务操作",MUTED);header.addView(queueMenu,new LinearLayout.LayoutParams(dp(48),dp(48)));queueMenu.setOnClickListener(v->{
+            if(service==null)return;ChatService source=service;LinearLayout options=column();Dialog menu=sheet("传输任务操作",options,null,null);
+            fileAction(options,menu,"继续所有未完成接收",this::continueAllReceives);
+            fileAction(options,menu,"暂停所有接收",()->{if(service==source)source.pauseAllReceives();});
+            int queued=source.queuedTransfers();
+            if(queued>0)fileAction(options,menu,"取消排队发送任务",()->confirm("取消排队发送任务？","取消尚未开始的 "+queued+" 项发送任务？正在传输和已保存的文件不受影响。","取消排队",()->{if(service==source)source.cancelQueuedTransfers();}));
+        });
         EditText input=new EditText(this);configureInput(input);input.setSingleLine();input.setTextSize(15);input.setTextColor(INK);input.setHintTextColor(MUTED);input.setHint("搜索文件或设备");input.setPadding(dp(14),dp(8),dp(14),dp(8));input.setBackground(shape(PALE,CONTROL_RADIUS));
         LinearLayout.LayoutParams ip=new LinearLayout.LayoutParams(-1,dp(46));ip.setMargins(dp(16),dp(4),dp(16),dp(8));page.addView(input,ip);
         TextView count=text("正在读取传输记录…",12,MUTED);count.setPadding(dp(20),dp(8),dp(20),dp(10));
@@ -912,6 +939,49 @@ public final class MainActivity extends Activity implements ChatService.Observer
         }
         return label;
     }
+    private Uri taskUri(ChatStore.FileTask item) {
+        if(item.message.outgoing||item.guestFile==null&&service==null)return null;
+        File local=item.guestFile==null?service.receivedFile(item.peer,item.message.number,item.file):item.guestFile;
+        return local.isFile()?ReceivedFileProvider.uri(this,local,item.file.name):receivedStorage.existingSaved(local);
+    }
+    private List<String> taskQuickActions(ChatStore.FileTask item,String state,ChatService.FileProgress progress,ChatStore.Conversation contact) {
+        List<String> actions=new ArrayList<>();
+        if(item.guestFile==null&&!item.message.outgoing&&service!=null&&contact!=null&&!taskEnded(state)) {
+            if(progress!=null&&progress.task!=null) {actions.add("暂停");actions.add("取消");}
+            else if(state.equals("排队中")) {actions.add("暂停排队");actions.add("拒绝");}
+            else {actions.add((progress==null||progress.percent==0)&&state.startsWith("待接收")?"接收":"继续接收");actions.add("拒绝");}
+        }
+        if(!item.message.outgoing&&taskComplete(state)&&(item.guestFile!=null||service!=null))actions.add("打开");
+        if(item.message.outgoing&&service!=null&&service.canCancelOutgoing(item.peer,item.message.number))actions.add("取消发送");
+        return actions;
+    }
+    private void taskButton(LinearLayout row,String label,Runnable action) {
+        Button button=button(label,false);button.setTextSize(14);button.setTextColor(label.equals("拒绝")||label.startsWith("取消")?0xffd24e54:BLUE);
+        button.setPadding(dp(12),dp(6),dp(12),dp(6));button.setMinWidth(0);button.setMinimumWidth(0);button.setFocusable(false);button.setFocusableInTouchMode(false);
+        LinearLayout.LayoutParams spacing=new LinearLayout.LayoutParams(-2,-2);spacing.rightMargin=dp(8);row.addView(button,spacing);button.setOnClickListener(v->action.run());
+    }
+    private void requestCancelFile(ChatStore.FileTask item) {
+        ChatService source=service;if(source==null)return;
+        confirm("取消接收","已下载但尚未完成的数据将被清理，之后需要重新接收。","取消接收",()->{if(service==source)source.cancelFile(item.peer,item.message.number,item.file.id);});
+    }
+    private void requestRejectFiles(LanNode.Peer peer,long packet) {
+        ChatService source=service;if(source==null)return;
+        confirm("拒绝这批文件？","将拒绝该消息中未接收的文件并清理断点；已保存的文件保留。","拒绝这批文件",()->{if(service==source)source.reject(peer,packet);});
+    }
+    private void requestCancelOutgoingTask(ChatStore.FileTask item) {
+        ChatService source=service;if(source==null)return;
+        confirm("取消发送？","撤销这批未完成的文件邀请；原文件和对方已保存的文件保留。","取消发送",()->{if(service==source)source.cancelOutgoing(item.peer,item.message,success->{if(success)loadTaskRows();});});
+    }
+    private void continueAllReceives() {
+        ChatService source=service;if(source==null)return;
+        source.fileTasks(rows->{
+            if(service!=source||isDestroyed()||isFinishing())return;
+            for(ChatStore.FileTask item:rows) {
+                ChatStore.Conversation contact=conversation(item.peer);String state=taskState(item);
+                if(item.guestFile==null&&contact!=null&&!item.message.outgoing&&!taskEnded(state)&&!taskActive(state))source.receive(contact.peer,item.message.number,item.file);
+            }
+        });
+    }
     private final class TaskAdapter extends BaseAdapter {
         List<ChatStore.FileTask> all=new ArrayList<>(),items=new ArrayList<>();final TextView count;final EditText input;int filter;
         private String contentSignature,summaryText;
@@ -925,7 +995,8 @@ public final class MainActivity extends Activity implements ChatService.Observer
                 int percent=taskComplete(state)?100:state.equals("本机文件已删除")?0:p==null?0:p.percent;total+=item.file.size;done+=item.file.size*percent/100.0;
                 content.append(item.peer).append('\0').append(item.message.number).append('\0').append(item.message.outgoing).append('\0').append(item.file.id).append('\0')
                     .append(item.file.name).append('\0').append(item.file.size).append('\0').append(name).append('\0').append(state).append('\0').append(percent).append('\0')
-                    .append(taskLabel(item,state,p)).append('\0').append(item.guestFile==null?"":item.guestFile.getAbsolutePath()).append('\0');
+                    .append(taskLabel(item,state,p)).append('\0').append(item.guestFile==null?"":item.guestFile.getAbsolutePath()).append('\0')
+                    .append(taskQuickActions(item,state,p,contact)).append('\0');
             }
             String signature=content.toString();int queued=service==null?0:service.queuedTransfers();
             String summary=next.size()+" 个文件 · "+completed+" 个已完成"+(total>0?" · "+size((long)done)+" / "+size((long)total):"")+(queued>0?"\n另有 "+queued+" 项文件操作排队中":"");
@@ -939,11 +1010,24 @@ public final class MainActivity extends Activity implements ChatService.Observer
         public int getCount(){return items.size();}public Object getItem(int position){return items.get(position);}public long getItemId(int position){return position;}
         public View getView(int position,View old,ViewGroup parent) {
             ChatStore.FileTask item=items.get(position);LinearLayout box;
-            if(old==null){box=column();box.setPadding(dp(20),dp(12),dp(20),dp(12));TextView name=text("",15,INK);name.setTypeface(null,Typeface.BOLD);name.setSingleLine();name.setEllipsize(TextUtils.TruncateAt.END);box.addView(name);TextView meta=text("",12,MUTED);meta.setSingleLine();meta.setEllipsize(TextUtils.TruncateAt.END);meta.setPadding(0,dp(5),0,dp(4));box.addView(meta);TextView status=text("",12,MUTED);status.setMaxLines(2);box.addView(status);ProgressBar bar=new ProgressBar(MainActivity.this,null,android.R.attr.progressBarStyleHorizontal);bar.setMax(100);bar.setProgressTintList(android.content.res.ColorStateList.valueOf(BLUE));bar.setProgressBackgroundTintList(android.content.res.ColorStateList.valueOf(LINE));LinearLayout.LayoutParams bp=new LinearLayout.LayoutParams(-1,dp(3));bp.topMargin=dp(8);box.addView(bar,bp);}else box=(LinearLayout)old;
+            if(old==null){box=column();box.setPadding(dp(20),dp(12),dp(20),dp(12));TextView name=text("",15,INK);name.setTypeface(null,Typeface.BOLD);name.setSingleLine();name.setEllipsize(TextUtils.TruncateAt.END);box.addView(name);TextView meta=text("",12,MUTED);meta.setSingleLine();meta.setEllipsize(TextUtils.TruncateAt.END);meta.setPadding(0,dp(5),0,dp(4));box.addView(meta);TextView status=text("",12,MUTED);status.setMaxLines(2);box.addView(status);ProgressBar bar=new ProgressBar(MainActivity.this,null,android.R.attr.progressBarStyleHorizontal);bar.setMax(100);bar.setProgressTintList(android.content.res.ColorStateList.valueOf(BLUE));bar.setProgressBackgroundTintList(android.content.res.ColorStateList.valueOf(LINE));LinearLayout.LayoutParams bp=new LinearLayout.LayoutParams(-1,dp(3));bp.topMargin=dp(8);box.addView(bar,bp);LinearLayout actions=row();LinearLayout.LayoutParams ap=new LinearLayout.LayoutParams(-1,-2);ap.topMargin=dp(8);box.addView(actions,ap);}else box=(LinearLayout)old;
             ChatStore.Conversation contact=conversation(item.peer);String state=taskState(item);ChatService.FileProgress p=service==null?null:service.progress(item.peer,item.message.number,item.file.id,item.message.outgoing);
             ((TextView)box.getChildAt(0)).setText(item.file.name);((TextView)box.getChildAt(1)).setText((item.message.outgoing?"发送给 ":"来自 ")+(item.guestFile!=null?"浏览器访客":contact==null?"已移除的设备":contact.displayName())+" · "+size(item.file.size));
             String label=taskLabel(item,state,p);
-            TextView status=(TextView)box.getChildAt(2);status.setText(label);status.setTextColor(taskComplete(state)?ONLINE:taskActive(state)?BLUE:MUTED);ProgressBar bar=(ProgressBar)box.getChildAt(3);bar.setProgress(taskComplete(state)?100:state.equals("本机文件已删除")?0:p==null?0:p.percent);bar.setVisibility(taskEnded(state)?View.GONE:View.VISIBLE);box.setContentDescription(item.file.name+"，"+label);return box;
+            TextView status=(TextView)box.getChildAt(2);status.setText(label);status.setTextColor(taskComplete(state)?ONLINE:taskActive(state)?BLUE:MUTED);ProgressBar bar=(ProgressBar)box.getChildAt(3);bar.setProgress(taskComplete(state)?100:state.equals("本机文件已删除")?0:p==null?0:p.percent);bar.setVisibility(taskEnded(state)?View.GONE:View.VISIBLE);
+            LinearLayout actions=(LinearLayout)box.getChildAt(4);actions.removeAllViews();ChatService source=service;
+            for(String action:taskQuickActions(item,state,p,contact))taskButton(actions,action,()->{
+                if(service!=source)return;
+                switch(action) {
+                    case "暂停":case "暂停排队":source.pauseFile(item.peer,item.message.number,item.file.id);break;
+                    case "取消":requestCancelFile(item);break;
+                    case "接收":case "继续接收":source.receive(contact.peer,item.message.number,item.file);break;
+                    case "拒绝":requestRejectFiles(contact.peer,item.message.number);break;
+                    case "打开":Uri uri=taskUri(item);if(uri==null)error("本机文件已删除");else openFile(uri,item.file.name,false);break;
+                    case "取消发送":requestCancelOutgoingTask(item);break;
+                }
+            });
+            actions.setVisibility(actions.getChildCount()==0?View.GONE:View.VISIBLE);box.setContentDescription(item.file.name+"，"+label);return box;
         }
     }
     private void taskActions(ChatStore.FileTask item) {
@@ -961,24 +1045,36 @@ public final class MainActivity extends Activity implements ChatService.Observer
             fileAction(box,dialog,"复制文件名",()->copyText("文件名",item.file.name));return;
         }
         if(service==null)return;ChatStore.Conversation contact=conversation(item.peer);if(contact==null){error("联系人已移除，请重新添加后操作");return;}
-        LinearLayout content=column();content.addView(text(taskState(item)+" · "+size(item.file.size),13,MUTED));Dialog actions=sheet(item.file.name,content,null,null);String state=taskState(item);
-        if(!item.message.outgoing&&!taskEnded(state)) {
+        ChatService source=service;String state=taskState(item);Uri uri=taskUri(item);
+        LinearLayout content=column();content.addView(text(state+" · "+size(item.file.size),13,MUTED));Dialog actions=sheet(item.file.name,content,null,null);
+        if(!item.message.outgoing&&uri!=null) {
+            File local=source.receivedFile(item.peer,item.message.number,item.file);
+            fileAction(content,actions,"打开文件",()->openFile(uri,item.file.name,false));
+            fileAction(content,actions,"打开方式…",()->openFileWith(uri,item.file.name,false,true));
+            fileAction(content,actions,"分享文件",()->openFile(uri,item.file.name,true));
+            fileAction(content,actions,"查看保存位置",()->showFileLocation(local));
+            fileAction(content,actions,"删除本机文件",()->confirm("删除这个文件？",item.file.name+"\n将删除本机保存的文件，聊天记录与对方文件保留。此操作无法撤销。","删除文件",()->{if(service==source)source.deleteReceivedFile(contact.peer,item.message.number,item.file);}));
+        } else if(!item.message.outgoing&&state.equals("本机文件已删除")) {
+            fileAction(content,actions,"重新接收",()->{if(service==source)source.receive(contact.peer,item.message.number,item.file);});
+        } else if(!item.message.outgoing&&!taskEnded(state)) {
             ChatService.FileProgress progress=service.progress(item.peer,item.message.number,item.file.id,false);
             if(progress!=null&&progress.task!=null) {
-                fileAction(content,actions,"暂停并保留断点",()->service.pauseFile(item.peer,item.message.number,item.file.id));
-                fileAction(content,actions,"取消接收并清理断点",()->confirm("取消接收","已下载但尚未完成的数据将被清理，之后需要重新接收。","取消接收",()->service.cancelFile(item.peer,item.message.number,item.file.id)));
+                fileAction(content,actions,"暂停并保留断点",()->{if(service==source)source.pauseFile(item.peer,item.message.number,item.file.id);});
+                fileAction(content,actions,"取消接收并清理断点",()->requestCancelFile(item));
             } else {
-                fileAction(content,actions,"继续接收",()->service.receive(contact.peer,item.message.number,item.file));
-                if(!state.equals("已暂停"))fileAction(content,actions,"暂停排队",()->service.pauseFile(item.peer,item.message.number,item.file.id));
+                String receive=(progress==null||progress.percent==0)&&state.startsWith("待接收")?"接收文件":"继续接收";
+                fileAction(content,actions,receive,()->{if(service==source)source.receive(contact.peer,item.message.number,item.file);});
+                if(state.equals("排队中"))fileAction(content,actions,"暂停排队",()->{if(service==source)source.pauseFile(item.peer,item.message.number,item.file.id);});
+                if(progress!=null&&progress.percent>0||state.equals("已暂停"))fileAction(content,actions,"取消接收并清理断点",()->requestCancelFile(item));
             }
-            fileAction(content,actions,"继续所有未完成接收",()->{for(ChatStore.FileTask task:new ArrayList<>(taskAdapter.all)){ChatStore.Conversation peer=conversation(task.peer);String status=taskState(task);if(peer!=null&&!task.message.outgoing&&!taskEnded(status)&&!taskActive(status))service.receive(peer.peer,task.message.number,task.file);}});
+            fileAction(content,actions,"拒绝这批文件",()->requestRejectFiles(contact.peer,item.message.number));
+            fileAction(content,actions,"继续所有未完成接收",this::continueAllReceives);
         }
-        if(!item.message.outgoing)fileAction(content,actions,"文件与保存位置",()->fileActions(contact.peer,item.message.number,item.file));
         if(item.message.outgoing&&service.canCancelOutgoing(item.peer,item.message.number)) {
-            ChatService source=service;
-            fileAction(content,actions,"取消这批发送",()->confirm("取消发送？","撤销这批未完成的文件邀请；原文件和对方已保存的文件保留。","取消发送",()->{if(service==source)source.cancelOutgoing(item.peer,item.message,success->{if(success)loadTaskRows();});}));
+            fileAction(content,actions,"取消发送",()->requestCancelOutgoingTask(item));
         }
         fileAction(content,actions,"查看所在会话",()->{if(tasksDialog!=null)tasksDialog.dismiss();locateHistoryMessage(item.peer,item.message);});
+        fileAction(content,actions,"复制文件名",()->copyText("文件名",item.file.name));
     }
     private String guestFileName(Uri uri) {
         try(android.database.Cursor cursor=getContentResolver().query(uri,new String[]{android.provider.OpenableColumns.DISPLAY_NAME},null,null,null)) {

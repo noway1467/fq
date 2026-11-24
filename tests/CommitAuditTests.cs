@@ -240,11 +240,11 @@ namespace FeiqLight.Tests
                         File.WriteAllText(Path.Combine(keptDirectory, "保留.txt"), "保留"); main.Show(); main.OpenChat(peer);
                         Check(main.ActiveChat.PendingFileCount == 2, "重启未恢复未完成附件");
                         Check(((ICollection<string>)Field(((ListBox)Field(main.ActiveChat, "files")).Items[0], "PartialPaths")).Count == 0, "重启测试错误地预填了内存路径");
-                        typeof(ChatForm).GetMethod("RejectFile", BindingFlags.Instance | BindingFlags.NonPublic).Invoke(main.ActiveChat, new object[] { null, EventArgs.Empty }); Application.DoEvents();
+                        Await(main.RejectTransfer(record)); Application.DoEvents();
                         ChatRecord result = store.IncomingAttachments(peer.Id, record.Packet).Single();
                         Check(!File.Exists(emptyPart) && !File.Exists(keepPart) && !Directory.Exists(Path.GetDirectoryName(emptyPart)), "拒绝后残留断点或空子目录");
                         Check(Directory.Exists(settings.ReceiveFolder) && File.Exists(Path.Combine(keptDirectory, "保留.txt")) && File.Exists(saved), "拒绝误删非空目录或已保存文件");
-                        Check(result.State == "已拒绝" && result.Transfers[1].Status == "已拒绝" && result.Transfers[0].Status == "已保存" && main.ActiveChat.PendingFileCount == 0, "拒收未本地持久化");
+                        Check(result.State == record.State && result.Transfers[1].Status == "已拒绝" && result.Transfers[0].Status == "已保存" && main.ActiveChat.PendingFileCount == 0, "拒收未本地持久化或覆盖同批已保存记录");
                         main.ExitApplication();
                     }
                 }
@@ -322,6 +322,11 @@ namespace FeiqLight.Tests
         }
         [STAThread] public static int Main(string[] args)
         {
+            AppDomain.CurrentDomain.UnhandledException+=delegate(object sender,UnhandledExceptionEventArgs eventArgs){
+                var error=eventArgs.ExceptionObject as Exception;
+                Console.WriteLine("FATAL "+(error==null?eventArgs.ExceptionObject.GetType().FullName:error.GetType().FullName));
+                if(error!=null){Console.WriteLine("MESSAGE "+error.Message);Console.WriteLine("STACK "+error.StackTrace);}
+            };
             root=Path.GetFullPath(args[0]);Directory.CreateDirectory(root);
             Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);
             Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);

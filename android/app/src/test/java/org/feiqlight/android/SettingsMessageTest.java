@@ -199,6 +199,59 @@ public final class SettingsMessageTest {
             invoke(activity,"open",new Class<?>[]{String.class},"other-peer");assertFalse((Boolean)field(activity,"selectingMessages"));assertTrue(((Set<?>)field(activity,"messageMarks")).isEmpty());
         } finally {ac.pause().stop().destroy();sc.destroy();}
     }
+    @SuppressWarnings("unchecked")
+    @Test public void multiSelectionDeletesOnlyReceivedFilesAndReportsDeletedSkips() throws Exception {
+        Context context=RuntimeEnvironment.getApplication();
+        context.getSharedPreferences("settings",0).edit().putBoolean("auto_connect",false).putBoolean("connection_enabled",false).putBoolean(ReceivedStorage.AUTO,false).commit();
+        ServiceController<ChatService> serviceController=Robolectric.buildService(ChatService.class).create();ChatService service=serviceController.get();
+        shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));
+        try {
+            settle(service);
+            for(boolean dark:new boolean[]{false,true}) {
+                context.getSharedPreferences("settings",0).edit().putBoolean("dark_mode",dark).commit();
+                LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:32425"),"batch-files-"+dark,"host","中文 English 文件联系人","");
+                Protocol.Attachment file=new Protocol.Attachment(0,"已接收的中文 English 资料.txt",3,1);
+                LanNode.Message received=new LanNode.Message();received.number=1;received.time=1;received.text="已保存的接收文件";received.state="已收到";received.files.add(file);
+                LanNode.Message deleted=received.copy();deleted.number=2;deleted.time=2;deleted.text="此前删除的文件";deleted.state="本机文件已删除";
+                LanNode.Message outgoing=received.copy();outgoing.outgoing=true;outgoing.time=3;outgoing.text="发送方原文件必须保留";outgoing.state="已送达";
+                File original=new File(service.getFilesDir(),"offers/original-"+dark+".txt");java.nio.file.Files.write(original.toPath(),new byte[]{4,5,6});outgoing.localPaths=Collections.singletonList(original.getAbsolutePath());
+                LanNode.Message pending=received.copy();pending.number=4;pending.time=4;pending.text="未接收的文件邀请";pending.files=Collections.singletonList(new Protocol.Attachment(0,"未接收.bin",8192,1));
+                File local=service.receivedFile(peer,received.number,file);java.nio.file.Files.write(local.toPath(),new byte[]{1,2,3});
+                File partial=LanNode.partialFile(peer,pending.number,pending.files.get(0),service.receivedFile(peer,pending.number,pending.files.get(0)));java.nio.file.Files.write(partial.toPath(),new byte[128]);
+                for(LanNode.Message message:Arrays.asList(received,deleted,outgoing,pending))service.incoming(peer,message,false);
+                settle(service);
+                try(ActivityController<MainActivity> activityController=Robolectric.buildActivity(MainActivity.class).setup()) {
+                    MainActivity activity=activityController.get();settle(service);invoke(activity,"open",new Class<?>[]{String.class},peer.id());settle(service);
+                    invoke(activity,"beginMessageSelection",new Class<?>[]{LanNode.Message.class},outgoing);
+                    Button deleteFiles=(Button)field(activity,"deleteSelectedFiles");assertFalse("不能通过聊天多选删除发送方原文件",deleteFiles.isEnabled());
+                    invoke(activity,"requestDeleteSelectedFiles",new Class<?>[0]);assertTrue(ShadowToast.getTextOfLatestToast().contains("所选消息没有接收附件"));
+                    LinearLayout bar=(LinearLayout)field(activity,"messageSelectionBar");
+                    views(bar).stream().filter(view->view instanceof Button&&"全选".contentEquals(((Button)view).getText())).findFirst().orElseThrow().performClick();
+                    assertEquals(4,((Set<?>)field(activity,"messageMarks")).size());assertTrue(deleteFiles.isEnabled());
+                    List<String> labels=new ArrayList<>();for(View view:views(bar))if(view instanceof Button)labels.add(((Button)view).getText().toString());
+                    assertEquals(Arrays.asList("全选","删除文件","删除","取消"),labels);
+                    View root=(View)field(activity,"root");
+                    for(int width:new int[]{720,786}) {
+                        root.measure(View.MeasureSpec.makeMeasureSpec(width,View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(1500,View.MeasureSpec.EXACTLY));root.layout(0,0,width,1500);
+                        TextView count=(TextView)field(activity,"messageSelectionCount");assertNotNull(count.getLayout());assertEquals("360dp–393dp 多选计数不应被按钮挤掉",0,count.getLayout().getEllipsisCount(0));
+                        assertTrue(bar.getChildAt(4).getRight()<=bar.getWidth()-bar.getPaddingRight());
+                    }
+                    snapshot(activity.getWindow().getDecorView(),"android-multi-file-delete-"+(dark?"dark":"light"));
+                    deleteFiles.performClick();click(ShadowDialog.getLatestDialog(),"删除文件");
+                    ((ExecutorService)field(service,"transferWorker")).submit(()->{}).get(5,TimeUnit.SECONDS);settle(service);
+                    assertFalse(local.exists());assertTrue(original.isFile());assertTrue(partial.isFile());assertEquals(4,((List<?>)field(activity,"messageRows")).size());assertFalse((Boolean)field(activity,"selectingMessages"));
+                    assertEquals("已删除 1 个本机文件，1 个已删除跳过（另有 1 个未接收附件未处理）",ShadowToast.getTextOfLatestToast());
+                    assertEquals("本机文件已删除",service.progress(peer.id(),received.number,file.id,false).state);
+                    assertEquals("本机文件已删除",service.progress(peer.id(),deleted.number,file.id,false).state);
+                    ChatStore store=(ChatStore)field(service,"store");assertNotNull(store.findMessage(peer.id(),outgoing.number,true));assertEquals(1,store.findMessage(peer.id(),pending.number,false).files.size());assertEquals(4,store.history(peer.id()).size());
+                    assertTrue(((Map<String,?>)field(service,"waiting")).containsKey(service.receivedFile(peer,pending.number,pending.files.get(0)).getName()));
+                    invoke(activity,"beginMessageSelection",new Class<?>[]{LanNode.Message.class},pending);deleteFiles.performClick();click(ShadowDialog.getLatestDialog(),"删除文件");
+                    ((ExecutorService)field(service,"transferWorker")).submit(()->{}).get(5,TimeUnit.SECONDS);settle(service);
+                    assertEquals("所选消息没有已保存的本机文件（未接收附件请在传输任务中处理）",ShadowToast.getTextOfLatestToast());assertTrue(partial.isFile());assertTrue(original.isFile());
+                }
+            }
+        } finally {serviceController.destroy();}
+    }
     @Test public void blankCardRequiresLongPressAndKeepsCornerMenu() throws Exception {
         ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));
         ActivityController<MainActivity> ac=Robolectric.buildActivity(MainActivity.class).create().start().resume().visible();MainActivity activity=ac.get();

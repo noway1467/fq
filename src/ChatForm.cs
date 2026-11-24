@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
-using System.Drawing.Drawing2D;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -12,7 +11,7 @@ namespace FeiqLight
 {
     public sealed class ChatForm : Form
     {
-        private sealed class ReceivedFile { public long Packet; public Attachment File; public ChatRecord Record; public readonly HashSet<string> PartialPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase); public readonly Dictionary<string, string> PartialRoots = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase); public bool AutomaticPending = true, OfferCanceled; public string Status = "待接收"; public override string ToString() { return File.Name; } }
+        private sealed class ReceivedFile { public long Packet; public Attachment File; public ChatRecord Record; public readonly HashSet<string> PartialPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase); public readonly Dictionary<string, string> PartialRoots = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase); public bool AutomaticPending = true, OfferCanceled, Rejected, CancelRequested; public string Status = "待接收"; public override string ToString() { return File.Name; } }
         private readonly Peer peer;
         private readonly LanService network;
         private readonly LocalStore store;
@@ -25,7 +24,7 @@ namespace FeiqLight
         private readonly ListBox files = new ListBox();
         private readonly Label queued = Theme.Label("", Theme.Small, Theme.Muted);
         private readonly Label fileStatus = Theme.Label("", Theme.Small, Theme.Muted);
-        private readonly Button receive, reject, fileButton, emojiButton, attachButton, sendButton;
+        private readonly Button emojiButton, attachButton, sendButton;
         private readonly PictureBox avatar;
         private readonly Label peerName = Theme.Label("", Theme.Title, Theme.Ink);
         private readonly Label peerStatus = Theme.Label("", Theme.Small, Theme.Muted);
@@ -44,18 +43,18 @@ namespace FeiqLight
             history.SetWallpaper(network.Settings.ChatBackground,network.Settings.BackgroundImage);
             history.SetAvatars(peer.Id, peer.Avatar, "device:" + network.Settings.DeviceId, network.Settings.Avatar);
         }
-        private readonly TableLayoutPanel root, head, compose, queue, drawer;
+        private readonly TableLayoutPanel root, head, compose, queue;
         private readonly Panel middle;
         private readonly DropOverlay dropOverlay = new DropOverlay();
         private readonly List<string> attachments = new List<string>();
         private readonly HashSet<string> pastedImages = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private CancellationTokenSource receiving;
+        private TaskCompletionSource<bool> receivingFinished;
         private ReceivedFile activeFile;
         private bool pauseRequested;
         private readonly System.Windows.Forms.Timer draftTimer = new System.Windows.Forms.Timer { Interval = 500 };
         private readonly ToolTip headTips = new ToolTip();
-        private bool drawerOpen;
-        private ContextMenuStrip chatMenu, fileMenu;
+        private ContextMenuStrip chatMenu;
         private EmojiPicker emojiPicker;
         private readonly RoundedPanel inputShell = new RoundedPanel { Fill = Theme.Ice, Radius = 22, Padding = new Padding(16, 12, 16, 12) };
         public ChatForm(Peer peer, LanService network, LocalStore store, MainForm main)
@@ -64,8 +63,8 @@ namespace FeiqLight
             Theme.Apply(this); DoubleBuffered = true; Text = peer.Nickname; FormBorderStyle = FormBorderStyle.None; ClientSize = new Size(760, 720); MinimumSize = Size.Empty;
             root = new BufferedLayoutTable { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, Margin = Padding.Empty, BackColor = Theme.Surface };
             root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); root.RowStyles.Add(new RowStyle(SizeType.Absolute, 74)); root.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); root.RowStyles.Add(new RowStyle(SizeType.Absolute, 0)); root.RowStyles.Add(new RowStyle(SizeType.Absolute, 82)); Controls.Add(root);
-            head = new BufferedLayoutTable { Dock = DockStyle.Fill, ColumnCount = 6, RowCount = 1, Padding = new Padding(16, 8, 12, 8), Margin = Padding.Empty, BackColor = Theme.Surface };
-            head.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 58)); head.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); for (int i = 0; i < 4; i++) head.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 44)); head.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            head = new BufferedLayoutTable { Dock = DockStyle.Fill, ColumnCount = 5, RowCount = 1, Padding = new Padding(16, 8, 12, 8), Margin = Padding.Empty, BackColor = Theme.Surface };
+            head.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 58)); head.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); for (int i = 0; i < 3; i++) head.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 44)); head.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             avatar = new PictureBox { Image = Theme.ContactAvatar(46, peer.Id, peer.Online, peer.Avatar), AccessibleName = "聊天联系人头像", Size = new Size(56, 56), Margin = Padding.Empty, SizeMode = PictureBoxSizeMode.Zoom, Anchor = AnchorStyles.Left }; head.Controls.Add(avatar, 0, 0);
             TableLayoutPanel identity = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 2, ColumnCount = 1, Margin = Padding.Empty }; identity.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); identity.RowStyles.Add(new RowStyle(SizeType.Percent, 56)); identity.RowStyles.Add(new RowStyle(SizeType.Percent, 44));
             peerName.Dock = DockStyle.Fill; peerName.AutoEllipsis = true; peerName.AccessibleName = "聊天联系人昵称"; identity.Controls.Add(peerName, 0, 0);
@@ -75,9 +74,8 @@ namespace FeiqLight
             avatar.Click += delegate { main.ShowContactProfile(peer); };
             Button transferButton = Theme.IconButton("transfer", "传输任务", delegate { main.OpenTransfers(); }, false); transferButton.Dock = DockStyle.Fill; transferButton.Margin = Padding.Empty; head.Controls.Add(transferButton, 2, 0);
             Button search = Theme.IconButton("search", "聊天记录", ShowHistory, false); search.Dock = DockStyle.Fill; search.Margin = Padding.Empty; head.Controls.Add(search, 3, 0);
-            fileButton = Theme.IconButton("inbox", "收到的文件", delegate { SetDrawer(!drawerOpen); }, false); fileButton.Dock = DockStyle.Fill; fileButton.Margin = Padding.Empty; head.Controls.Add(fileButton, 4, 0);
-            Button menu = Theme.IconButton("more", "会话菜单", ShowMenu, false); menu.Dock = DockStyle.Fill; menu.Margin = Padding.Empty; head.Controls.Add(menu, 5, 0);
-            foreach (Button button in new[] { transferButton, search, fileButton, menu }) headTips.SetToolTip(button, button.AccessibleName);
+            Button menu = Theme.IconButton("more", "会话菜单", ShowMenu, false); menu.Dock = DockStyle.Fill; menu.Margin = Padding.Empty; head.Controls.Add(menu, 4, 0);
+            foreach (Button button in new[] { transferButton, search, menu }) headTips.SetToolTip(button, button.AccessibleName);
             root.Controls.Add(head, 0, 0);
             head.Paint += delegate(object sender, PaintEventArgs e) { using (Pen line = new Pen(Theme.Line)) e.Graphics.DrawLine(line, 0, head.Height - 1, head.Width, head.Height - 1); };
             middle = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty, BackColor = Theme.Wallpaper };
@@ -85,41 +83,39 @@ namespace FeiqLight
             history.CanCancelSend = record => record != null && record.Outgoing && network.CanCancelOutgoing(peer.Id, record.Packet);
             history.CancelSendRequested += CancelSendMessage;
             history.AvatarClicked += outgoing => { if (outgoing) main.OpenSettings(); else main.ShowContactProfile(peer); };
-            history.FileRequested += (record, id) => {
+            history.FileRequested += async (record, id) => {
                 ReceivedFile item = files.Items.Cast<ReceivedFile>().FirstOrDefault(f => f.Packet == record.Packet && f.File.Id == id);
-                if (item == null) { main.FileReceiveStatus("此文件邀请已结束；未保存的附件请让对方重新发送。"); return; }
-                if (receiving != null) { if (activeFile == item) receiving.Cancel(); return; }
-                files.SelectedItem = item; ReceiveFile(this, EventArgs.Empty);
+                if (item == null) {
+                    FileTransferState state = (record.Transfers ?? new FileTransferState[0]).FirstOrDefault(f => f.Id == id);
+                    if (!record.Outgoing && state != null && state.Status == "本机文件已删除") QueueTask(record, id);
+                    else main.FileReceiveStatus("此文件邀请已结束；未保存的附件请让对方重新发送。");
+                    return;
+                }
+                if (receiving != null) { if (activeFile == item) await CancelReceiveTask(record, id); return; }
+                await ReceiveAsync(item, false);
             };
             history.ForwardRequested += delegate(ChatRecord record) { main.Forward(record); };
             history.DeleteRequested += DeleteMessages;
             history.DeleteFileRequested += (record,path)=>main.DeleteReceivedFile(peer,record,path);
+            history.DeleteFilesRequested += records => main.DeleteReceivedFiles(peer, records);
             history.Dock = DockStyle.Fill; history.Margin = Padding.Empty; middle.Controls.Add(history);
             returnToLatest=Theme.Button("回到最新消息",delegate {LoadLatest();},false);
             returnToLatest.Dock=DockStyle.Bottom;returnToLatest.Visible=false;middle.Controls.Add(returnToLatest);
             dropOverlay.Dock = DockStyle.Fill; middle.Controls.Add(dropOverlay); dropOverlay.BringToFront();
-            drawer = new TableLayoutPanel { Dock = DockStyle.Right, Width = 292, ColumnCount = 1, RowCount = 4, Padding = new Padding(16, 14, 16, 12), Margin = Padding.Empty, BackColor = Theme.Surface, Visible = false };
-            drawer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); drawer.RowStyles.Add(new RowStyle(SizeType.Absolute, 34)); drawer.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); drawer.RowStyles.Add(new RowStyle(SizeType.Absolute, 46)); drawer.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
-            Label fileTitle = Theme.Label("文件", Theme.Section, Theme.Ink); fileTitle.Dock = DockStyle.Fill; drawer.Controls.Add(fileTitle, 0, 0);
-            files.Dock = DockStyle.Fill; files.BorderStyle = BorderStyle.None; files.DrawMode = DrawMode.OwnerDrawFixed; files.ItemHeight = 62; files.IntegralHeight = false; files.AccessibleName = "收到的文件列表"; files.BackColor = Theme.Surface; files.ForeColor = Theme.Ink; files.DrawItem += DrawFile; drawer.Controls.Add(files, 0, 1);
-            ConfigureFileMenu();
-            TableLayoutPanel actions = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = new Padding(0, 4, 0, 4) }; actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50)); actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50)); actions.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            receive = Theme.Button("接收", ReceiveFile, true); receive.AccessibleName = "文件接收按钮"; reject = Theme.Button("拒绝", RejectFile, false); receive.Dock = reject.Dock = DockStyle.Fill; receive.Enabled = reject.Enabled = false; actions.Controls.Add(receive, 0, 0); actions.Controls.Add(reject, 1, 0); drawer.Controls.Add(actions, 0, 2);
-            files.SelectedIndexChanged += delegate { if (receiving == null) receive.Enabled = reject.Enabled = files.SelectedItem != null; };
-            fileStatus.Dock = DockStyle.Fill; fileStatus.AutoEllipsis = true; drawer.Controls.Add(fileStatus, 0, 3);
-            drawer.Paint += delegate(object sender, PaintEventArgs e) { using (Pen line = new Pen(Theme.Line)) e.Graphics.DrawLine(line, 0, 0, 0, drawer.Height); };
-            middle.Controls.Add(drawer); drawer.BringToFront();
-            TableLayoutPanel selectionBar = new TableLayoutPanel { Dock = DockStyle.Top, Height = 56, ColumnCount = 4, RowCount = 1, Padding = new Padding(12, 8, 12, 8), Visible = false, BackColor = Theme.Surface, AccessibleName = "消息多选操作栏" };
+            // ListBox 仅保留旧接收状态机的任务集合，不再加入聊天控件树。
+            files.Visible = false;
+            TableLayoutPanel selectionBar = new TableLayoutPanel { Dock = DockStyle.Top, Height = 56, ColumnCount = 5, RowCount = 1, Padding = new Padding(12, 8, 12, 8), Visible = false, BackColor = Theme.Surface, AccessibleName = "消息多选操作栏" };
             selectionBar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            foreach(int width in new[] { 72, 92, 72 }) selectionBar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, width));
+            foreach(int width in new[] { 72, 92, 76, 72 }) selectionBar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, width));
             selectionBar.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             Label selectedCount = Theme.Label("已选 0 条", Theme.Section, Theme.Ink); selectedCount.Dock = DockStyle.Fill; selectedCount.AutoEllipsis = true; selectionBar.Controls.Add(selectedCount, 0, 0);
             Button selectAll = Theme.Button("全选", delegate { history.SelectAllMessages(); }, false);
             Button deleteSelected = Theme.Button("删除", delegate { history.DeleteMarkedOrSelected(); }, false); deleteSelected.ForeColor = Theme.Danger;
+            Button deleteFiles = Theme.Button("删除文件", delegate { history.DeleteSelectedFiles(); }, false); deleteFiles.AccessibleName = "批量删除本机文件"; deleteFiles.ForeColor = Theme.Danger;
             Button cancelSelection = Theme.Button("取消", delegate { history.EndSelection(); }, false);
             int selectionColumn = 1;
-            foreach(Button button in new[] { selectAll, deleteSelected, cancelSelection }) { button.Dock = DockStyle.Fill; button.Margin = new Padding(4, 0, 0, 0); selectionBar.Controls.Add(button, selectionColumn++, 0); }
-            history.SelectionChanged += delegate { selectionBar.Visible = history.SelectionMode; selectedCount.Text = "已选 " + history.SelectionCount + " 条"; deleteSelected.Enabled = history.SelectionCount > 0; };
+            foreach(Button button in new[] { selectAll, deleteFiles, deleteSelected, cancelSelection }) { button.Dock = DockStyle.Fill; button.Margin = new Padding(4, 0, 0, 0); selectionBar.Controls.Add(button, selectionColumn++, 0); }
+            history.SelectionChanged += delegate { selectionBar.Visible = history.SelectionMode; selectedCount.Text = "已选 " + history.SelectionCount + " 条"; deleteSelected.Enabled = history.SelectionCount > 0; deleteFiles.Enabled = history.SelectionCount > 0 && history.HasSelectedReceivedFiles; };
             middle.Controls.Add(selectionBar);
             root.Controls.Add(middle, 0, 1);
             queue = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Padding = new Padding(18, 1, 10, 1), Margin = Padding.Empty, Visible = false }; queue.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); queue.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 38)); queue.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
@@ -158,14 +154,12 @@ namespace FeiqLight
             try { var records = store.History(peer.Id, 150).Select(record => { ChatRecord outgoing=record.Outgoing?network.OutgoingRecord(peer.Id,record.Packet):null;if(outgoing!=null&&record.State=="已送达")outgoing.State=record.State;return outgoing??record; }).ToList(); history.SetRecords(records); editor.Text = store.LoadDraft(peer.Id);
                 foreach(ChatRecord record in records.Where(r=>!r.Outgoing))foreach(FileTransferState file in record.Transfers??new FileTransferState[0]) {
                     if(files.Items.Count>=1000)break;
-                    if(file.Status=="已拒绝"||file.Status=="对方已取消发送"||file.Status=="本机文件已删除"||!String.IsNullOrEmpty(file.LocalPath)||!SecureIdentity.ValidFingerprint(file.Sha256))continue;
+                    if(file.Status=="已拒绝"||file.Status=="对方已取消发送"||file.Status=="本机文件已删除"||file.Status=="已保存"||!String.IsNullOrEmpty(file.LocalPath)||!SecureIdentity.ValidFingerprint(file.Sha256))continue;
                     file.Status=file.Status=="已暂停"?"已暂停":"已恢复 · 点击续传";
                     files.Items.Add(new ReceivedFile{Packet=record.Packet,Record=record,File=new Attachment{Id=file.Id,Name=file.Name,Size=file.Size,Modified=file.Modified,Sha256=file.Sha256,RelativePath=file.RelativePath},AutomaticPending=false,Status=file.Status});
                 }
-                if(files.Items.Count>0){files.SelectedIndex=0;SetDrawer(true);}
+                if(files.Items.Count>0)files.SelectedIndex=0;
             } catch (Exception e) { Error("本地记录", e.Message); }
-            // 侧栏宽度随窗口缩放，窄窗口时保持消息区可读。
-            middle.SizeChanged += delegate { drawer.Width = Math.Min(drawer.Width, Math.Max(200, middle.ClientSize.Width / 2)); };
         }
         private bool resizingComposer;
         private float composeScale;
@@ -235,6 +229,7 @@ namespace FeiqLight
             }
         }
         internal void RemoveMessages(ChatRecord[] records) { history.RemoveRecords(records); }
+        internal void EndSelection() { history.EndSelection(); }
         internal bool HasPendingMessages(ChatRecord[] records) {
             return records.Any(r => (!r.Outgoing && files.Items.Cast<ReceivedFile>().Any(f => f.Packet == r.Packet)) ||
                 (r.Outgoing&&network.HasActiveOutgoingTransfer(peer.Id,r.Packet)) ||
@@ -244,19 +239,78 @@ namespace FeiqLight
         internal bool TaskReceiving(long packet, int fileId) { return receiving != null && activeFile != null && activeFile.Packet == packet && activeFile.File.Id == fileId; }
         internal void PauseTask(ChatRecord record, int fileId)
         {
-            FileTransferState state=(record.Transfers??new FileTransferState[0]).FirstOrDefault(f=>f.Id==fileId);
-            if(state==null||record.Outgoing||!String.IsNullOrEmpty(state.LocalPath)||new[]{"已拒绝","对方已取消发送","本机文件已删除"}.Contains(state.Status))return;
+            if(record.Outgoing||record.PeerId!=peer.Id)return;
             ReceivedFile item = files.Items.Cast<ReceivedFile>().FirstOrDefault(f => f.Packet == record.Packet && f.File.Id == fileId);
+            if(item!=null)record=item.Record;
+            FileTransferState state=(record.Transfers??new FileTransferState[0]).FirstOrDefault(f=>f.Id==fileId);
+            if(state==null||!String.IsNullOrEmpty(state.LocalPath)||new[]{"已拒绝","对方已取消发送","本机文件已删除","已保存"}.Contains(state.Status)||item!=null&&(item.Rejected||item.CancelRequested))return;
             if(item==null){item=new ReceivedFile{Packet=record.Packet,Record=record,File=new Attachment{Id=state.Id,Name=state.Name,Size=state.Size,Modified=state.Modified,Sha256=state.Sha256,RelativePath=state.RelativePath}};files.Items.Add(item);}
             item.AutomaticPending = false;
             if (TaskReceiving(record.Packet, fileId)) { pauseRequested = true; receiving.Cancel(); }
             else { item.Status = "已暂停"; FileState(item, null, "已暂停"); main.TrySave(item.Record); }
         }
+        internal async Task CancelReceiveTask(ChatRecord record, int fileId)
+        {
+            if(record.Outgoing||record.PeerId!=peer.Id)return;
+            ReceivedFile item=files.Items.Cast<ReceivedFile>().FirstOrDefault(f=>f.Packet==record.Packet&&f.File.Id==fileId);
+            if(item!=null)record=item.Record;
+            FileTransferState state=(record.Transfers??new FileTransferState[0]).FirstOrDefault(f=>f.Id==fileId);
+            if(state==null||!String.IsNullOrEmpty(state.LocalPath)||new[]{"已保存","本机文件已删除","已拒绝","对方已取消发送"}.Contains(state.Status))return;
+            if(item==null){item=new ReceivedFile{Packet=record.Packet,Record=record,File=new Attachment{Id=state.Id,Name=state.Name,Size=state.Size,Modified=state.Modified,Sha256=state.Sha256,RelativePath=state.RelativePath}};files.Items.Add(item);}
+            if(item.Rejected||item.CancelRequested)return;
+            item.AutomaticPending=false;item.CancelRequested=true;
+            try
+            {
+                if(TaskReceiving(record.Packet,fileId))
+                {
+                    Task finished=receivingFinished.Task;pauseRequested=false;receiving.Cancel();
+                    // 下载任务完成后独占句柄才释放，不能在 Cancel() 后立刻删除断点。
+                    await finished;
+                }
+                if(IsDisposed||item.Rejected||item.OfferCanceled||!String.IsNullOrEmpty(state.LocalPath)||state.Status=="已保存")return;
+                DeletePartials(item);item.Status="已取消，可重试";
+                FileState(item,0,"已取消 · 点击重试");main.TrySave(item.Record);
+                main.FileReceiveStatus("已取消接收并清理断点。");
+            }
+            finally{item.CancelRequested=false;}
+        }
+        internal async Task RejectTransfer(ChatRecord record)
+        {
+            if(record.Outgoing||record.PeerId!=peer.Id)return;
+            ReceivedFile[] pending=files.Items.Cast<ReceivedFile>().Where(f=>f.Packet==record.Packet).ToArray();
+            record=pending.Select(f=>f.Record).FirstOrDefault()??record;
+            foreach(ReceivedFile item in pending){item.AutomaticPending=false;item.Rejected=true;}
+            if(receiving!=null&&activeFile!=null&&activeFile.Packet==record.Packet)
+            {
+                activeFile.Rejected=true;Task finished=receivingFinished.Task;pauseRequested=false;receiving.Cancel();
+                await finished;
+            }
+            if(IsDisposed)return;
+            bool hasSaved=record.GetLocalFiles().Length>0||(record.Transfers??new FileTransferState[0]).Any(f=>!String.IsNullOrEmpty(f.LocalPath)||f.Status=="已保存"||f.Status=="本机文件已删除");
+            Exception cleanupError=null;
+            foreach(FileTransferState state in record.Transfers??new FileTransferState[0])
+            {
+                if(!String.IsNullOrEmpty(state.LocalPath)||state.Status=="已保存"||state.Status=="本机文件已删除")continue;
+                ReceivedFile item=pending.FirstOrDefault(f=>f.File.Id==state.Id)??new ReceivedFile{Packet=record.Packet,Record=record,File=new Attachment{Id=state.Id,Name=state.Name,Size=state.Size,Modified=state.Modified,Sha256=state.Sha256,RelativePath=state.RelativePath}};
+                try{DeletePartials(item);}catch(Exception error){if(cleanupError==null)cleanupError=error;}
+                state.LocalPath=null;state.Percent=0;state.Status="已拒绝";state.BytesPerSecond=0;state.Error=null;state.MarkCurrent();
+            }
+            foreach(ReceivedFile item in pending)files.Items.Remove(item);
+            if(files.Items.Count>0&&files.SelectedIndex<0)files.SelectedIndex=0;
+            if(!hasSaved)record.State="已拒绝";
+            main.TrySave(record);history.Delivery(record);fileStatus.Text="已拒绝";
+            main.FileReceiveStatus("已拒绝这批尚未保存的附件。");
+            try{network.RejectFiles(peer,record.Packet);}
+            catch(Exception error){main.FileReceiveStatus("已本地拒收并清理断点；拒绝通知未送达："+error.Message);}
+            if(cleanupError!=null)throw new IOException("已本地拒收；断点清理未完成："+cleanupError.Message,cleanupError);
+        }
         internal void QueueTask(ChatRecord record, int fileId)
         {
-            FileTransferState state = (record.Transfers ?? new FileTransferState[0]).FirstOrDefault(f => f.Id == fileId);
-            if (state == null || record.Outgoing || !String.IsNullOrEmpty(state.LocalPath) || new[] { "已拒绝", "对方已取消发送", "本机文件已删除" }.Contains(state.Status)) return;
+            if(record.Outgoing||record.PeerId!=peer.Id)return;
             ReceivedFile item = files.Items.Cast<ReceivedFile>().FirstOrDefault(f => f.Packet == record.Packet && f.File.Id == fileId);
+            if(item!=null)record=item.Record;
+            FileTransferState state = (record.Transfers ?? new FileTransferState[0]).FirstOrDefault(f => f.Id == fileId);
+            if (state == null || !String.IsNullOrEmpty(state.LocalPath) || new[] { "已拒绝", "对方已取消发送", "已保存" }.Contains(state.Status) || item!=null&&(item.Rejected||item.CancelRequested)) return;
             if (item == null) {
                 item = new ReceivedFile { Packet = record.Packet, Record = record, File = new Attachment { Id = state.Id, Name = state.Name, Size = state.Size, Modified = state.Modified, Sha256 = state.Sha256, RelativePath = state.RelativePath } };
                 files.Items.Add(item);
@@ -269,29 +323,7 @@ namespace FeiqLight
         {
             foreach (Attachment file in message.Files) {ReceivedFile restored=files.Items.Cast<ReceivedFile>().FirstOrDefault(f=>f.Packet==message.Record.Packet&&f.File.Id==file.Id);if(restored!=null){restored.AutomaticPending=true;continue;}if (files.Items.Count >= 1000) { fileStatus.Text = "待接收文件已达上限"; break; } files.Items.Add(new ReceivedFile { Packet = message.Record.Packet, File = file, Record = message.Record }); }
             if (files.Items.Count > 0 && files.SelectedIndex < 0) files.SelectedIndex = 0;
-            SetDrawer(files.Items.Count > 0); main.ReceiveAutomatically();
-        }
-        // 抽屉以覆盖方式从右侧滑入，消息区宽度不变，阅读位置不被挤动。
-        private void SetDrawer(bool open)
-        {
-            drawerOpen = open && files.Items.Count > 0;
-            fileButton.Enabled = files.Items.Count > 0;
-            if (!drawerOpen) { drawer.Visible = false; return; }
-            drawer.Visible = true; drawer.BringToFront(); Invalidate();
-        }
-        private void DrawFile(object sender, DrawItemEventArgs e)
-        {
-            // 接收完成移除条目后，WinForms 仍可能派发已排队的旧绘制索引。
-            if (e.Index < 0 || e.Index >= files.Items.Count) return; ReceivedFile item = (ReceivedFile)files.Items[e.Index]; bool selected = (e.State & DrawItemState.Selected) != 0;
-            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            using (SolidBrush background = new SolidBrush(Theme.Surface)) e.Graphics.FillRectangle(background, e.Bounds);
-            using (GraphicsPath path = Theme.Rounded(new Rectangle(e.Bounds.X + 1, e.Bounds.Y + 2, Math.Max(4, e.Bounds.Width - 2), Math.Max(4, e.Bounds.Height - 4)), 9))
-            using (SolidBrush b = new SolidBrush(selected ? Theme.Sky : Theme.Surface)) e.Graphics.FillPath(b, path);
-            int pad = 8, circle = 34;
-            using (SolidBrush b = new SolidBrush(selected ? Theme.Blue : Theme.Ice)) e.Graphics.FillEllipse(b, e.Bounds.Left + pad, e.Bounds.Top + (e.Bounds.Height - circle) / 2, circle, circle);
-            Theme.Glyph(e.Graphics, "file", new Rectangle(e.Bounds.Left + pad + 8, e.Bounds.Top + (e.Bounds.Height - circle) / 2 + 8, 18, 18), selected ? Color.White : Theme.Blue);
-            Rectangle name = new Rectangle(e.Bounds.Left + pad + circle + 8, e.Bounds.Top + 10, Math.Max(1, e.Bounds.Width - pad * 2 - circle - 12), 22); TextRenderer.DrawText(e.Graphics, item.File.Name, Theme.Section, name, Theme.Ink, TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
-            name.Y += 24; TextRenderer.DrawText(e.Graphics, Theme.SizeText(item.File.Size) + " · " + item.Status, Theme.Small, name, Theme.Muted, TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+            main.ReceiveAutomatically();
         }
         private bool sending;
         private async void SendMessage()
@@ -479,22 +511,6 @@ namespace FeiqLight
         {
             return ReceiveAsync(files.Items.Cast<ReceivedFile>().First(f => f.AutomaticPending), true);
         }
-        private void ConfigureFileMenu()
-        {
-            fileMenu = Theme.Menu();
-            ToolStripItem accept = fileMenu.Items.Add("接收文件", null, ReceiveFile);
-            ToolStripItem refuse = fileMenu.Items.Add("拒绝本次文件邀请", null, RejectFile);
-            ToolStripItem cancel = fileMenu.Items.Add("取消接收", null, delegate { if (receiving != null) receiving.Cancel(); });
-            fileMenu.Opening += delegate { accept.Enabled = refuse.Enabled = receiving == null && files.SelectedItem != null; cancel.Enabled = receiving != null; };
-            files.MouseDown += delegate(object sender, MouseEventArgs e) { if (e.Button == MouseButtons.Right && receiving == null) files.SelectedIndex = files.IndexFromPoint(e.Location); };
-            files.DoubleClick += delegate { if (receiving == null) ReceiveFile(files, EventArgs.Empty); }; files.ContextMenuStrip = fileMenu;
-        }
-        private async void ReceiveFile(object sender, EventArgs e)
-        {
-            if (receiving != null) { receiving.Cancel(); return; }
-            ReceivedFile selected = files.SelectedItem as ReceivedFile; if (selected == null) return;
-            await ReceiveAsync(selected, false);
-        }
         private sealed class UiProgress : IProgress<TransferProgress>
         {
             private readonly MainForm host;
@@ -504,12 +520,12 @@ namespace FeiqLight
         }
         private async Task ReceiveAsync(ReceivedFile selected, bool automatic)
         {
-            if (receiving != null || IsDisposed) return;
+            if (receiving != null || IsDisposed || selected.OfferCanceled || selected.Rejected || selected.CancelRequested) return;
             if (!main.InvokeRequired && SynchronizationContext.Current == null) SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
             selected.AutomaticPending = false; selected.Status = "接收中"; files.SelectedItem = selected; pauseRequested = false;
             CancellationTokenSource cancel = new CancellationTokenSource(); receiving = cancel; activeFile = selected;
+            var finished = new TaskCompletionSource<bool>(); receivingFinished = finished;
             FileState(selected, 0, "连接中 · 点击取消");
-            receive.Text = "取消"; receive.Enabled = true; reject.Enabled = false; files.Enabled = false; files.Invalidate();
             try
             {
                 string receiveRoot = network.Settings.ReceiveFolder;
@@ -518,12 +534,12 @@ namespace FeiqLight
                 selected.PartialPaths.Add(part); selected.PartialRoots[part] = receiveRoot;
                 fileStatus.Text = "连接中";
                 string saved = await network.ReceiveFileAsync(peer, selected.Packet, selected.File, destination, null, cancel.Token, true, new UiProgress(main, p => {
-                    if (!IsDisposed && receiving == cancel && !cancel.IsCancellationRequested && activeFile == selected && !selected.OfferCanceled && selected.Status != "已保存") {
+                    if (!IsDisposed && receiving == cancel && !cancel.IsCancellationRequested && activeFile == selected && !selected.OfferCanceled && !selected.Rejected && !selected.CancelRequested && selected.Status != "已保存") {
                         FileState(selected, p.Percent, p.Stage ?? "接收中 · 点击取消", null, p.BytesPerSecond);
                         selected.Status = p.Percent + "% · " + Theme.SizeText((long)p.BytesPerSecond) + "/s";
                         fileStatus.Text = selected.Status; files.Invalidate();
                     }
-                }), () => pauseRequested && !selected.OfferCanceled);
+                }), () => pauseRequested && !selected.OfferCanceled && !selected.Rejected && !selected.CancelRequested);
                 if (IsDisposed) return;
                 selected.Status = "已保存";
                 selected.Record.LocalFiles = selected.Record.GetLocalFiles().Concat(new[] { saved }).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
@@ -533,13 +549,13 @@ namespace FeiqLight
                 // 完成状态与本地附件回写原邀请，不另造一条聊天消息或重复媒体卡片。
                 main.TrySave(selected.Record); history.Delivery(selected.Record);
                 files.SelectedIndex=-1;files.Items.Remove(selected); if (files.Items.Count > 0) files.SelectedIndex = 0;
-                SetDrawer(files.Items.Count > 0); fileStatus.Text = "已保存"; main.FileReceiveStatus("文件已保存：" + Path.GetFileName(saved));
+                fileStatus.Text = "已保存"; main.FileReceiveStatus("文件已保存：" + Path.GetFileName(saved));
             }
             catch (OfferRevokedException) { if (!IsDisposed) OfferCanceled(selected.Packet); }
-            catch (OperationCanceledException) { if (!IsDisposed && !selected.OfferCanceled) { selected.Status = pauseRequested ? "已暂停" : "已取消，可重试"; fileStatus.Text = pauseRequested ? "已暂停，保留断点" : "已取消，可重新接收"; FileState(selected, pauseRequested ? (int?)null : 0, pauseRequested ? "已暂停" : "已取消 · 点击重试"); main.TrySave(selected.Record); } }
+            catch (OperationCanceledException) { if (!IsDisposed && !selected.OfferCanceled && !selected.Rejected) { selected.Status = pauseRequested ? "已暂停" : "已取消，可重试"; fileStatus.Text = pauseRequested ? "已暂停，保留断点" : "已取消，可重新接收"; FileState(selected, pauseRequested ? (int?)null : 0, pauseRequested ? "已暂停" : "已取消 · 点击重试"); main.TrySave(selected.Record); } }
             catch (Exception error)
             {
-                if (!IsDisposed && !selected.OfferCanceled)
+                if (!IsDisposed && !selected.OfferCanceled && !selected.Rejected && !selected.CancelRequested)
                 {
                     selected.Status = "失败，可续传"; fileStatus.Text = "重试时继续已有断点";
                     FileTransferState failed=selected.Record.Transfers.FirstOrDefault(f=>f.Id==selected.File.Id);if(failed!=null)failed.Error=error.GetBaseException().Message;
@@ -563,26 +579,10 @@ namespace FeiqLight
                     }
                     catch (Exception e) { main.FileReceiveStatus("对方已取消发送；断点清理未完成：" + e.Message); }
                 }
-                cancel.Dispose(); receiving = null; activeFile = null;
-                if (!IsDisposed) { receive.Text = "接收"; receive.Enabled = reject.Enabled = files.SelectedItem != null; files.Enabled = true; files.Invalidate(); main.ReceiveAutomatically(); }
+                cancel.Dispose(); receiving = null; activeFile = null; receivingFinished = null;
+                finished.TrySetResult(true);
+                if (!IsDisposed) main.ReceiveAutomatically();
             }
-        }
-        private void RejectFile(object sender, EventArgs e)
-        {
-            ReceivedFile selected = files.SelectedItem as ReceivedFile; if (selected == null || receiving != null) return;
-            foreach (ReceivedFile item in files.Items.Cast<ReceivedFile>().Where(f => f.Packet == selected.Packet).ToList())
-            {
-                try { DeletePartials(item); }
-                catch (Exception error) { main.FileReceiveStatus("已本地拒收；断点清理未完成：" + error.Message); }
-                FileState(item, 0, "已拒绝"); files.Items.Remove(item);
-            }
-            selected.Record.State = "已拒绝"; main.TrySave(selected.Record);
-            SetDrawer(files.Items.Count > 0); fileStatus.Text = "已拒绝";
-            try
-            {
-                network.RejectFiles(peer, selected.Packet);
-            }
-            catch (Exception error) { main.FileReceiveStatus("已本地拒收并清理断点；拒绝通知未送达：" + error.Message); }
         }
         private void DeletePartials(ReceivedFile item)
         {
@@ -612,7 +612,7 @@ namespace FeiqLight
                 files.Items.Remove(item);
             }
             main.CancelIncomingOffer(peer, record, !active); history.Delivery(record);
-            SetDrawer(files.Items.Count > 0); fileStatus.Text = "对方已取消发送";
+            fileStatus.Text = "对方已取消发送";
         }
         protected override void OnFormClosing(FormClosingEventArgs e) { if (e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; main.CloseChat(this); return; } if (receiving != null) receiving.Cancel(); base.OnFormClosing(e); }
         private void FileState(ReceivedFile item, int? percent, string status, string path = null, double bytesPerSecond = 0)
@@ -627,6 +627,6 @@ namespace FeiqLight
             main.TrackTransfer(item.Record);
             history.Delivery(item.Record);
         }
-        protected override void Dispose(bool disposing) { if (disposing && !IsDisposed) { ClearPastedImages(); SaveDraft(); draftTimer.Dispose(); headTips.Dispose(); if (emojiPicker != null) emojiPicker.Dispose(); if (chatMenu != null) chatMenu.Dispose(); if (fileMenu != null) fileMenu.Dispose(); if (receiving != null) receiving.Cancel(); if (avatar != null && avatar.Image != null) avatar.Image.Dispose(); } base.Dispose(disposing); if(disposing&&chatFont!=null){chatFont.Dispose();chatFont=null;} }
+        protected override void Dispose(bool disposing) { if (disposing && !IsDisposed) { ClearPastedImages(); SaveDraft(); draftTimer.Dispose(); headTips.Dispose(); if (emojiPicker != null) emojiPicker.Dispose(); if (chatMenu != null) chatMenu.Dispose(); if (receiving != null) receiving.Cancel(); files.Dispose(); fileStatus.Dispose(); if (avatar != null && avatar.Image != null) avatar.Image.Dispose(); } base.Dispose(disposing); if(disposing&&chatFont!=null){chatFont.Dispose();chatFont=null;} }
     }
 }

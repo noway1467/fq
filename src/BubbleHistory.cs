@@ -102,9 +102,12 @@ namespace FeiqLight
         public event Action<ChatRecord,int> FileRequested;
         public event Action<ChatRecord[]> DeleteRequested;
         public event Action<ChatRecord,string> DeleteFileRequested;
+        public event Action<ChatRecord[]> DeleteFilesRequested;
         public event Action SelectionChanged;
         public bool SelectionMode { get { return multiSelectMode; } }
         public int SelectionCount { get { return marked.Count; } }
+        internal ChatRecord[] SelectedMessages { get { return records.Where(marked.Contains).ToArray(); } }
+        internal bool HasSelectedReceivedFiles { get { return marked.Any(r=>r.HasReceivedAttachments); } }
         public int TextLength { get { return Text.Length; } }
         public BubbleHistory()
         {
@@ -131,6 +134,7 @@ namespace FeiqLight
             ToolStripMenuItem delete = new ToolStripMenuItem("删除这条消息");
             delete.Click += delegate { DeleteMarkedOrSelected(); };
             menu.Items.Add(delete);
+            ToolStripItem deleteFiles=menu.Items.Add("删除所选本机文件",null,delegate {DeleteSelectedFiles();});deleteFiles.ForeColor=Theme.Danger;
             ToolStripSeparator fileGroup = new ToolStripSeparator(), retryGroup = new ToolStripSeparator();
             menu.Items.Add(fileGroup);
             ToolStripMenuItem open=new ToolStripMenuItem("打开文件"),openWith=new ToolStripMenuItem("打开方式…");
@@ -157,6 +161,8 @@ namespace FeiqLight
                 selectMode.Visible = delete.Visible = DeleteRequested != null;
                 delete.Text = multiSelectMode ? "删除选中的 " + marked.Count + " 条消息" : "删除这条消息";
                 delete.Enabled = !multiSelectMode || marked.Count > 0;
+                deleteFiles.Visible=multiSelectMode&&DeleteFilesRequested!=null;
+                deleteFiles.Enabled=marked.Count>0&&HasSelectedReceivedFiles;
                 retry.Visible=RetryRequested!=null&&record.Outgoing&&(record.State??"").Contains("未确认");
                 cancelSend.Visible=CancelSendRequested!=null&&CanCancelSend!=null&&!multiSelectMode&&record.Outgoing&&CanCancelSend(record);
                 retryGroup.Visible=retry.Visible||cancelSend.Visible;
@@ -208,6 +214,10 @@ namespace FeiqLight
         {
             ChatRecord[] values = multiSelectMode ? records.Where(marked.Contains).ToArray() : (SelectedRecord == null ? new ChatRecord[0] : new[] { SelectedRecord });
             if (values.Length > 0 && DeleteRequested != null) DeleteRequested(values);
+        }
+        internal void DeleteSelectedFiles()
+        {
+            if(multiSelectMode&&HasSelectedReceivedFiles&&DeleteFilesRequested!=null)DeleteFilesRequested(SelectedMessages);
         }
         public static void RevealFile(Control owner, string path)
         {

@@ -69,9 +69,23 @@ public sealed class MainForm : ModernWindow
         internal bool ReceivingTask(ChatRecord record,int fileId) { ChatForm chat;return chats.TryGetValue(record.PeerId,out chat)&&!chat.IsDisposed&&chat.TaskReceiving(record.Packet,fileId); }
         internal void TransferAction(ChatRecord record,int fileId,bool pause)
         {
-            Peer peer=TransferPeer(record.PeerId);if(peer==null)throw new IOException("联系人已移除，请重新添加后继续。");
-            ChatForm chat=GetOrCreateChat(peer);
+            ChatForm chat;
+            if(!chats.TryGetValue(record.PeerId,out chat)||chat.IsDisposed){Peer peer=TransferPeer(record.PeerId);if(peer==null)throw new IOException("联系人已移除，请重新添加后继续。");chat=GetOrCreateChat(peer);}
             if(pause)chat.PauseTask(record,fileId);else chat.QueueTask(record,fileId);
+        }
+        internal System.Threading.Tasks.Task CancelReceiveTask(ChatRecord record,int fileId)
+        {
+            if(record.Outgoing)return System.Threading.Tasks.Task.FromResult(false);
+            ChatForm chat;
+            if(!chats.TryGetValue(record.PeerId,out chat)||chat.IsDisposed){Peer peer=TransferPeer(record.PeerId);if(peer==null)throw new IOException("联系人已移除，请重新添加后处理断点。");chat=GetOrCreateChat(peer);}
+            return chat.CancelReceiveTask(record,fileId);
+        }
+        internal System.Threading.Tasks.Task RejectTransfer(ChatRecord record)
+        {
+            if(record.Outgoing)return System.Threading.Tasks.Task.FromResult(false);
+            ChatForm chat;
+            if(!chats.TryGetValue(record.PeerId,out chat)||chat.IsDisposed){Peer peer=TransferPeer(record.PeerId);if(peer==null)throw new IOException("联系人已移除，请重新添加后处理文件邀请。");chat=GetOrCreateChat(peer);}
+            return chat.RejectTransfer(record);
         }
         internal bool CanCancelTransfer(ChatRecord record){return record.Outgoing&&network.CanCancelOutgoing(record.PeerId,record.Packet);}
         internal void CancelTransfer(ChatRecord record)
@@ -294,7 +308,7 @@ public sealed class MainForm : ModernWindow
             if (record.Outgoing || record.PeerId != peer.Id) return;
             foreach (FileTransferState state in record.Transfers ?? new FileTransferState[0])
             {
-                if (!String.IsNullOrEmpty(state.LocalPath)) continue;
+                if (!String.IsNullOrEmpty(state.LocalPath)||state.Status=="已保存"||state.Status=="本机文件已删除") continue;
                 Attachment file = new Attachment { Id = state.Id, Name = state.Name, Size = state.Size, Modified = state.Modified, Sha256 = state.Sha256, RelativePath = state.RelativePath };
                 string destination = SendBatch.DestinationPath(network.Settings.ReceiveFolder, file);
                 ReceiveStorage.DeletePartialAndEmptyParents(network.Settings.ReceiveFolder, LanService.PartialPath(peer, record.Packet, file, destination), file.RelativePath);
@@ -362,11 +376,58 @@ public sealed class MainForm : ModernWindow
         internal void DeleteReceivedFile(Peer peer,ChatRecord record,string path)
         {
             if(record.PeerId!=peer.Id||record.Outgoing)return;
-            ChatForm chat;chats.TryGetValue(peer.Id,out chat);
-            if(chat!=null&&chat.HasPendingMessages(new[]{record})){using(NoticeDialog notice=new NoticeDialog("请先处理文件","此消息仍有待接收或传输中的文件，请完成或取消后重试。"))notice.ShowDialog(this);return;}
+            DeleteTransferFile(record,path);
+        }
+        internal void DeleteTransferFile(ChatRecord record,string path)
+        {
+            if(record.Outgoing)return;
+            ChatRecord current;if(transferRecords.TryGetValue(TransferKey(record),out current))record=current;
+            ChatForm chat;chats.TryGetValue(record.PeerId,out chat);
+            if((record.Transfers??new FileTransferState[0]).Any(f=>String.Equals(f.LocalPath,path,StringComparison.OrdinalIgnoreCase)&&ReceivingTask(record,f.Id))){using(NoticeDialog notice=new NoticeDialog("请先处理文件","此文件仍在接收，请等待完成或取消后再删除。"))notice.ShowDialog(this);return;}
             using(ConfirmDialog confirm=new ConfirmDialog("删除这个文件？",path+"\n\n仅删除这个本机文件，聊天记录与对方文件保留。此操作无法撤销。","删除文件",true))if(confirm.ShowDialog(this)!=DialogResult.OK)return;
-            try{store.DeleteReceivedFile(record,path);if(chat!=null)chat.Delivery(record);}
+            try{store.DeleteReceivedFile(record,path);TrackTransfer(record);if(chat!=null&&!chat.IsDisposed)chat.Delivery(record);FileReceiveStatus("已删除本机文件："+Path.GetFileName(path));}
             catch(Exception error){using(NoticeDialog notice=new NoticeDialog("文件删除未完成",error.Message))notice.ShowDialog(this);}
+        }
+        private bool HasReceivingAttachments(ChatRecord[] records)
+        {
+            return records.Any(record=>(record.Transfers??new FileTransferState[0]).Any(file=>{
+                string state=file.DisplayStatus()??"";
+                return ReceivingTask(record,file.Id)||(state.Contains("中")&&!state.Contains("中断")&&file.Percent<100);
+            }));
+        }
+        internal void DeleteReceivedFiles(Peer peer,ChatRecord[] records)
+        {
+            ChatRecord[] incoming=records.Where(record=>record.PeerId==peer.Id&&record.HasReceivedAttachments).Select(record=>{ChatRecord current;return transferRecords.TryGetValue(TransferKey(record),out current)?current:record;}).ToArray();
+            if(incoming.Length==0)return;
+            try
+            {
+                if(HasReceivingAttachments(incoming))
+                {
+                    using(var notice=new NoticeDialog("请先处理文件","选中的消息含有正在接收的文件，请等待完成或取消后再删除本机文件。"))notice.ShowDialog(this);
+                    return;
+                }
+                ReceivedFilesDeletionResult planned=store.DeleteReceivedFiles(incoming,false);
+                if(planned.DeletedCount==0&&planned.SkippedDeletedCount==0)
+                {
+                    using(var notice=new NoticeDialog("没有可删除的本机文件","所选消息中的附件尚未接收保存；如需处理待接收文件，请前往「传输任务」接收或拒绝。"))notice.ShowDialog(this);
+                    return;
+                }
+                using(var confirm=new ConfirmDialog("删除选中的本机文件？","将删除所选消息中已保存的本机接收文件（聊天记录保留，已删除文件自动跳过）。此操作无法撤销。","删除文件",true))
+                    if(confirm.ShowDialog(this)!=DialogResult.OK)return;
+                // 模态确认期间仍会派发接收调度；再次核查，避免删除新启动任务所属的文件。
+                if(HasReceivingAttachments(incoming))
+                {
+                    using(var notice=new NoticeDialog("请先处理文件","选中的消息含有正在接收的文件，请等待完成或取消后再删除本机文件。"))notice.ShowDialog(this);
+                    return;
+                }
+                ReceivedFilesDeletionResult result=store.DeleteReceivedFiles(incoming);
+                ChatForm chat;
+                if(chats.TryGetValue(peer.Id,out chat)&&!chat.IsDisposed){chat.EndSelection();foreach(ChatRecord record in incoming)chat.Delivery(record);}
+                foreach(ChatRecord record in incoming)TrackTransfer(record);
+                FileReceiveStatus(result.Text);
+                using(var notice=new NoticeDialog("文件删除完成",result.Text))notice.ShowDialog(this);
+            }
+            catch(Exception error){using(var notice=new NoticeDialog("文件删除未完成",error.Message))notice.ShowDialog(this);}
         }
         internal void Forward(ChatRecord original)
         {
