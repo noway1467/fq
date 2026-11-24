@@ -93,9 +93,10 @@ public sealed class MainForm : ModernWindow
             using(var confirm=new ConfirmDialog("取消发送？","将撤销这批尚未接收的文件邀请；本机原文件和对方已保存的文件保留。","取消发送",true))
                 if(confirm.ShowDialog(this)==DialogResult.OK)network.CancelOutgoing(record.PeerId,record.Packet,record.State,true);
         }
-        internal void OpenTransfers()
+        internal void OpenTransfers(string sourceId = null)
         {
             if(transferWindow==null||transferWindow.IsDisposed)transferWindow=new TransferWindow(this);
+            if(sourceId!=null)transferWindow.SelectSource(sourceId);
             if(transferWindow.WindowState==FormWindowState.Minimized)
                 transferWindow.WindowState=transferWindow.RestoreMaximized?FormWindowState.Maximized:FormWindowState.Normal;
             transferWindow.Show();transferWindow.Activate();

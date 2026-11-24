@@ -72,7 +72,7 @@ namespace FeiqLight
             avatarIdentity = peer.Id; avatarValue = peer.Avatar; avatarOnline = peer.Online; RefreshPeer();
             avatar.Cursor = Cursors.Hand;
             avatar.Click += delegate { main.ShowContactProfile(peer); };
-            Button transferButton = Theme.IconButton("transfer", "传输任务", delegate { main.OpenTransfers(); }, false); transferButton.Dock = DockStyle.Fill; transferButton.Margin = Padding.Empty; head.Controls.Add(transferButton, 2, 0);
+            Button transferButton = Theme.IconButton("transfer", "传输任务", delegate { main.OpenTransfers(peer.Id); }, false); transferButton.Dock = DockStyle.Fill; transferButton.Margin = Padding.Empty; head.Controls.Add(transferButton, 2, 0);
             Button search = Theme.IconButton("search", "聊天记录", ShowHistory, false); search.Dock = DockStyle.Fill; search.Margin = Padding.Empty; head.Controls.Add(search, 3, 0);
             Button menu = Theme.IconButton("more", "会话菜单", ShowMenu, false); menu.Dock = DockStyle.Fill; menu.Margin = Padding.Empty; head.Controls.Add(menu, 4, 0);
             foreach (Button button in new[] { transferButton, search, menu }) headTips.SetToolTip(button, button.AccessibleName);
@@ -481,21 +481,32 @@ namespace FeiqLight
         private static void ShowPopup(ContextMenuStrip menu, Control source) { menu.Show(source, new Point(source.Width, source.Height + 4), ToolStripDropDownDirection.BelowLeft); }
         private async void ShowHistory(object sender, EventArgs e)
         {
-            int request=++locationVersion;
+            locationVersion++;
             using (HistoryDialog dialog = new HistoryDialog(store, peer, main))
                 if(dialog.ShowDialog(main)==DialogResult.OK&&dialog.LocatedRecord!=null) {
                     main.OpenChat(peer);
-                    try {
-                        ChatRecord target=dialog.LocatedRecord;
-                        if(store.LargeHistory(peer.Id)) {
-                            var context=await Task.Run(()=>store.ReadArchive(peer.Id,"",0,target,CancellationToken.None));
-                            if(IsDisposed || main.ActiveChat!=this || request!=locationVersion)return;
-                            if(!ShowLocation(target,context.Records,context.HasNewer))Error("无法定位","这条消息已删除。");
-                        } else if(!LocateMessage(target))Error("无法定位","这条消息已删除。");
-                    }
-                    catch(IOException error){Error("读取聊天记录失败",error.Message);}
-                    catch(UnauthorizedAccessException error){Error("读取聊天记录失败",error.Message);}
+                    await LocateMessageAsync(dialog.LocatedRecord);
                 }
+        }
+        internal async Task LocateMessageAsync(ChatRecord target)
+        {
+            if(target.PeerId!=peer.Id)return;
+            int request=++locationVersion;
+            if(!InvokeRequired&&SynchronizationContext.Current==null)SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
+            try
+            {
+                bool found;
+                if(store.LargeHistory(peer.Id))
+                {
+                    var context=await Task.Run(()=>store.ReadArchive(peer.Id,"",0,target,CancellationToken.None));
+                    if(IsDisposed||main.IsDisposed||main.ActiveChat!=this||request!=locationVersion)return;
+                    found=ShowLocation(target,context.Records,context.HasNewer);
+                }
+                else found=LocateMessage(target);
+                if(!found)Error("无法定位","这条消息已删除。");
+            }
+            catch(IOException error){if(!IsDisposed&&!main.IsDisposed&&main.ActiveChat==this&&request==locationVersion)Error("读取聊天记录失败",error.Message);}
+            catch(UnauthorizedAccessException error){if(!IsDisposed&&!main.IsDisposed&&main.ActiveChat==this&&request==locationVersion)Error("读取聊天记录失败",error.Message);}
         }
         internal bool LocateMessage(ChatRecord target)
         {

@@ -15,7 +15,7 @@ using System.Windows.Forms;
 
 namespace FeiqLight.Tests
 {
-    internal static class TransferFeatureTests
+    internal static partial class TransferFeatureTests
     {
         private static string root,output;
         private static int passed,failed;
@@ -284,7 +284,7 @@ namespace FeiqLight.Tests
                     foreach(string text in new[]{"打开文件","打开方式…","打开文件位置","删除本机文件","查看所在会话"})Check(menu.Items.Cast<ToolStripItem>().Any(item=>item.Text==text),"已存任务缺少菜单："+text);SaveMenu(menu,"transfer-saved-menu-"+(dark?"dark":"light"));
                     FinishDialogs(()=>menu.Items.Cast<ToolStripItem>().Single(item=>item.Text=="删除本机文件").PerformClick(),"删除这个文件？","删除文件");menu.Close();Check(!File.Exists(saved)&&store.IncomingAttachments(peer.Id,101).Single().Transfers[1].Status=="本机文件已删除","任务菜单删除文件未执行或未落盘");
                     more.PerformClick();Check(menu.Items.Cast<ToolStripItem>().Any(item=>item.Text=="重新接收"),"已删除聊天附件缺少重新接收入口");menu.Close();
-                    RightClickTransfer(list,TransferIndex(list,102,0));Check(menu.Items.Cast<ToolStripItem>().Any(item=>item.Text=="继续接收")&&menu.Items.Cast<ToolStripItem>().Any(item=>item.Text=="继续所有未完成接收")&&menu.Items.Cast<ToolStripItem>().Any(item=>item.Text=="暂停当前列表中的接收"),"待处理任务菜单缺少调度操作");
+                    RightClickTransfer(list,TransferIndex(list,102,0));Check(menu.Items.Cast<ToolStripItem>().Any(item=>item.Text=="继续接收")&&menu.Items.Cast<ToolStripItem>().Any(item=>item.Text=="继续当前列表中的接收")&&menu.Items.Cast<ToolStripItem>().Any(item=>item.Text=="暂停当前列表中的接收"),"待处理任务菜单缺少调度操作");
                     FinishDialogs(()=>menu.Items.Cast<ToolStripItem>().Single(item=>item.Text=="取消接收并清理断点").PerformClick(),null,null,()=>store.IncomingAttachments(peer.Id,102).Single().Transfers[0].Status=="已取消 · 点击重试");menu.Close();Check(!File.Exists(canceledPart)&&store.IncomingAttachments(peer.Id,102).Single().Transfers[0].Percent==0,"取消暂停任务未清断点或清进度");
                     RightClickTransfer(list,TransferIndex(list,103,0));Check(more.Visible&&menu.Visible&&secondary.Text=="打开文件"&&!menu.Items.Cast<ToolStripItem>().Any(item=>item.Text=="查看所在会话"),"访客文件菜单缺失或显示了假会话操作");SaveMenu(menu,"transfer-guest-menu-"+(dark?"dark":"light"));
                     FinishDialogs(()=>menu.Items.Cast<ToolStripItem>().Single(item=>item.Text=="删除本机文件").PerformClick(),"删除这个文件？","删除文件");menu.Close();Check(!File.Exists(guestFile)&&new LocalStore(store.Root).AttachmentHistory("browser-guests").Single().Transfers[0].Status=="本机文件已删除","访客本机文件删除未持久化");
@@ -341,6 +341,14 @@ namespace FeiqLight.Tests
             // 使 await 之后的界面代码落到线程池。固定安装一份，保持与正式程序相同的线程模型。
             
             root=Path.GetFullPath(args[0]);output=Path.GetFullPath(args[1]);Directory.CreateDirectory(root);Directory.CreateDirectory(output);
+            if(args.Length>2&&(args[2]=="sources"||args[2]=="source-layout"||args[2]=="source-location"))
+            {
+                Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);WindowsFormsSynchronizationContext.AutoInstall=false;SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
+                if(args[2]=="source-layout")Run("来源横排渲染：明暗主题、860与620最小尺寸、头像、搜索展开与溢出滚动",TransferSourceLayoutRegression);
+                else if(args[2]=="source-location")Run("文件会话定位：旧历史异步读取、收发身份、已删除提示和旧回调隔离",TransferMessageLocationRegression);
+                else TransferSourceRegressions();
+                Console.WriteLine("TOTAL "+passed+" passed, "+failed+" failed"); return failed==0?0:1;
+            }
             if(args.Length>2&&args[2]=="active-actions")
             {
                 Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);WindowsFormsSynchronizationContext.AutoInstall=false;SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
@@ -426,6 +434,7 @@ namespace FeiqLight.Tests
                 for(int i=2;i<302;i++)store.Append(new ChatRecord{PeerId="test",Packet=i,Text="普通文字",Time=DateTime.Now});Check(store.AttachmentHistory("test").Count==1,"旧页附件遗漏");store.DeleteRecords("test",new[]{record});Check(store.AttachmentHistory("test").Count==0,"删除消息被任务页复活");
             });
             Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);WindowsFormsSynchronizationContext.AutoInstall=false;SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
+            TransferSourceRegressions();
             Run("多选删除：入站文件统计、出站保护、断点保留、确认取消及重启状态",BatchDeleteRegression);
             Run("多选删除：父目录缺失、中途占用继续其余文件并可重试、文件名含环境变量写法",BatchDeleteFailureRegression);
             Run("重新接收遇到失效邀请：恢复本机文件已删除、不改写接收历史并持久化",ExpiredReReceiveRegression);
@@ -533,13 +542,16 @@ namespace FeiqLight.Tests
                     main.TrackTransfer(new ChatRecord{PeerId="browser-guests",Packet=1,Sender="浏览器访客",Time=DateTime.Now,Transfers=new[]{file}});
                     main.TrackTransfer(new ChatRecord{PeerId="other",Packet=2,Sender="另一台设备",Time=DateTime.Now.AddMinutes(-1),Transfers=new[]{new FileTransferState{Id=1,Name="waiting.txt",Size=1024,Status="已暂停"}}});
                     window.Show();PumpFor(650);ListBox list=Controls(window).OfType<ListBox>().Single();Check(list.Items.Count==2,"未加载两条测试任务");list.SelectedIndex=0;Application.DoEvents();
-                    var invalidated=new List<Rectangle>();int textChanges=0,visibilityChanges=0,ticks=0;
+                    var invalidated=new List<Rectangle>();int textChanges=0,visibilityChanges=0,ticks=0,sourceRedraws=0;
+                    TransferSourceStrip sourceStrip=Field<TransferSourceStrip>(window,"sources");TransferSourceStrip.Source[] sourceSnapshot=Field<TransferSourceStrip.Source[]>(sourceStrip,"items");sourceStrip.Invalidated+=delegate{sourceRedraws++;};
                     list.Invalidated+=(sender,e)=>invalidated.Add(e.InvalidRect);
                     foreach(Label label in new[]{Field<Label>(window,"summary"),Field<Label>(window,"detail"),Field<Label>(window,"empty")})label.TextChanged+=delegate{textChanges++;};
                     Button action=Field<Button>(window,"action"),more=Field<Button>(window,"more");action.TextChanged+=delegate{textChanges++;};action.VisibleChanged+=delegate{visibilityChanges++;};more.VisibleChanged+=delegate{visibilityChanges++;};
                     System.Windows.Forms.Timer timer=Field<System.Windows.Forms.Timer>(window,"timer");timer.Tick+=delegate{ticks++;};
                     PumpFor(1150);Check(ticks>=2,"真实500ms定时器未运行");Check(invalidated.Count==0,"无变化仍触发列表重绘");Check(textChanges==0&&visibilityChanges==0,"静止时反复修改摘要或操作控件");Check(more.Visible,"访客任务缺少文件操作菜单");
+                    Check(sourceRedraws==0&&Object.ReferenceEquals(sourceSnapshot,Field<TransferSourceStrip.Source[]>(sourceStrip,"items")),"静止时来源横排被重建或重绘");
                     file.Percent=35;Tick(timer);Check(invalidated.Count==1&&invalidated[0]==list.GetItemRectangle(0),"进度变化未局限于对应任务行");Check(Field<Label>(window,"summary").Text.Contains("3.5 MB"),"总摘要未随进度更新");
+                    Check(sourceRedraws==0&&Object.ReferenceEquals(sourceSnapshot,Field<TransferSourceStrip.Source[]>(sourceStrip,"items")),"进度刷新重建或重绘了来源横排");
                     invalidated.Clear();file.BytesPerSecond+=1;Tick(timer);Check(invalidated.Count==0,"显示速度与剩余时间未变仍重绘");
                     file.Status="已暂停";Tick(timer);Check(invalidated.Count==1&&invalidated[0]==list.GetItemRectangle(0),"状态变化没有精确刷新");Check(Field<Label>(window,"detail").Text=="已暂停","任务详情未更新状态");
                     invalidated.Clear();file.Error="连接中断，请继续接收";Tick(timer);Check(invalidated.Count==1&&Field<Label>(window,"detail").Text==file.Error,"错误变化未更新任务和详情");
@@ -564,7 +576,7 @@ namespace FeiqLight.Tests
                         Check(list.DrawMode==DrawMode.OwnerDrawFixed,"破坏原生OwnerDrawFixed模式");Check(!(bool)typeof(Control).GetMethod("GetStyle",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(list,new object[]{ControlStyles.UserPaint}),"错误开启UserPaint");
                         int bottom=list.GetItemRectangle(0).Bottom;Check(bottom<list.ClientSize.Height,"测试窗口没有尾部空白");
                         using(Bitmap image=EraseBackground(list)){Check(image.GetPixel(2,2).ToArgb()==Color.Magenta.ToArgb(),"背景擦除清空了自绘条目区域");Check(image.GetPixel(2,bottom+1).ToArgb()==list.BackColor.ToArgb(),"尾部空白未使用当前主题背景");}
-                        Controls(window).OfType<TextBox>().Single().Text="不存在";Check(list.Items.Count==0,"空列表测试过滤失败");
+                        Field<Button>(window,"searchButton").PerformClick();Controls(window).OfType<TextBox>().Single().Text="不存在";Check(list.Items.Count==0,"空列表测试过滤失败");
                         using(Bitmap image=EraseBackground(list)){Check(image.GetPixel(2,2).ToArgb()==list.BackColor.ToArgb()&&image.GetPixel(2,image.Height-2).ToArgb()==list.BackColor.ToArgb(),"空列表未填充整个客户区");}
                         window.Close();main.ExitApplication();
                     }
@@ -677,7 +689,7 @@ namespace FeiqLight.Tests
                         main.Show();for(int i=0;i<6;i++)main.TrackTransfer(new ChatRecord{PeerId="device:"+i,Packet=i,Sender="我的设备 "+i,Time=DateTime.Now.AddMinutes(-i),Outgoing=i%2==0,Transfers=new[]{new FileTransferState{Id=1,Name=i==0?"很长的中文文件名称与 English-2026-Project-delivery-资料整理.zip":"项目资料 "+i+".pdf",Size=134217728,Percent=i*15,Status=i==0?"接收中":i==1?"已保存":i==2?"已暂停":"接收失败 · 点击续传",BytesPerSecond=i==0?10485760:0}}});
                         window.Show();Application.DoEvents();Thread.Sleep(600);Application.DoEvents();ListBox list=Controls(window).OfType<ListBox>().Single();Check(list.Items.Count==6,"任务未聚合");list.SelectedIndex=0;
                         foreach(int width in new[]{860,620}){window.ClientSize=new Size(width,560);Application.DoEvents();using(var image=new Bitmap(window.Width,window.Height)){window.DrawToBitmap(image,new Rectangle(Point.Empty,window.Size));image.Save(Path.Combine(output,"transfers-"+(dark?"dark":"light")+"-"+width+".png"));}}
-                        TextBox input=Controls(window).OfType<TextBox>().Single();input.Text="不存在的文件";Application.DoEvents();Check(list.Items.Count==0,"搜索未过滤");Check(Controls(window).OfType<Label>().Any(l=>l.Visible&&l.Text.Contains("没有匹配")),"空状态未显示");window.Close();main.ExitApplication();
+                        Field<Button>(window,"searchButton").PerformClick();TextBox input=Controls(window).OfType<TextBox>().Single();input.Text="不存在的文件";Application.DoEvents();Check(list.Items.Count==0,"搜索未过滤");Check(Controls(window).OfType<Label>().Any(l=>l.Visible&&l.Text.Contains("没有匹配")),"空状态未显示");window.Close();main.ExitApplication();
                     }
                 }
             });

@@ -1,6 +1,7 @@
 using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
@@ -15,6 +16,8 @@ namespace FeiqLight
             internal ChatRecord Record;
             internal FileTransferState File;
             internal string Peer;
+            internal string Meta;
+            internal string MetaSuffix;
             internal string Fingerprint;
             internal string Key { get { return Record.PeerId + "/" + Record.Packet + "/" + Record.Outgoing + "/" + File.Id; } }
             internal string State { get { return File.DisplayStatus() ?? "等待接收"; } }
@@ -77,6 +80,14 @@ namespace FeiqLight
         private readonly TabStrip tabs = new TabStrip { Dock = DockStyle.Fill, Margin = Padding.Empty };
         private readonly RoundedButton[] filters;
         private readonly TextBox query;
+        private readonly SearchBox search;
+        private readonly Button searchButton;
+        private readonly BufferedLayoutTable body;
+        private readonly TransferSourceStrip sources = new TransferSourceStrip { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 4) };
+        private string selectedSourceId = "";
+        private bool searchExpanded;
+        internal Func<DateTime> LocalNow = () => DateTime.Now;
+        internal string SelectedSourceId { get { return selectedSourceId; } }
         private int filter;
         private string signature;
         private string localFileSignature;
@@ -91,18 +102,23 @@ namespace FeiqLight
         internal TransferWindow(MainForm main)
         {
             this.main = main; Text = "传输任务"; ClientSize = new Size(860, 640); MinimumSize = new Size(620, 440); UseSecondaryChrome();
-            var body = new BufferedLayoutTable { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5, Padding = new Padding(24, 12, 24, 16), Margin = Padding.Empty };
+            body = new BufferedLayoutTable { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 6, Padding = new Padding(24, 12, 24, 16), Margin = Padding.Empty };
             body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            foreach (int height in new[] { 46, 42, 32, -1, 56 }) body.RowStyles.Add(new RowStyle(height < 0 ? SizeType.Percent : SizeType.Absolute, height < 0 ? 100 : height));
+            foreach (int height in new[] { 80, 0, 42, 32, -1, 56 }) body.RowStyles.Add(new RowStyle(height < 0 ? SizeType.Percent : SizeType.Absolute, height < 0 ? 100 : height));
             Surface.Controls.Add(body);
-            var search = new SearchBox { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 8), Placeholder = "搜索文件或设备" };
-            query = search.Input; query.AccessibleName = "搜索传输任务"; query.TextChanged += delegate { RefreshRows(); }; body.Controls.Add(search, 0, 0);
+            var sourceHeader = new BufferedLayoutTable { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty };
+            sourceHeader.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); sourceHeader.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 48)); sourceHeader.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            sources.SourceSelected += SelectSource; sourceHeader.Controls.Add(sources, 0, 0);
+            searchButton = Theme.IconButton("search", "搜索", delegate { SetSearchExpanded(!searchExpanded); }, false); searchButton.Dock = DockStyle.Top; searchButton.Margin = new Padding(8, 6, 0, 0); searchButton.AccessibleDescription = "展开搜索"; tips.SetToolTip(searchButton, "搜索"); sourceHeader.Controls.Add(searchButton, 1, 0); body.Controls.Add(sourceHeader, 0, 0);
+            search = new SearchBox { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 8), Placeholder = "搜索文件或设备", Visible = false };
+            query = search.Input; query.AccessibleName = "搜索传输任务";
+            query.TextChanged += delegate { if (!searchExpanded && query.TextLength > 0) { query.Clear(); return; } RefreshRows(); }; body.Controls.Add(search, 0, 1);
             string[] labels = { "全部", "进行中", "待处理", "已完成" }; filters = new RoundedButton[labels.Length];
             for (int i = 0; i < labels.Length; i++) {
                 int selected = i; filters[i] = (RoundedButton)Theme.Button(labels[i], delegate { filter = selected; UpdateTabs(); RefreshRows(); }, false);
                 filters[i].Size = new Size(100, 40); filters[i].Margin = Padding.Empty; tabs.Add(filters[i]);
             }
-            body.Controls.Add(tabs, 0, 1); summary.Dock = DockStyle.Fill; summary.AutoEllipsis = true; body.Controls.Add(summary, 0, 2);
+            body.Controls.Add(tabs, 0, 2); summary.Dock = DockStyle.Fill; summary.AutoEllipsis = true; body.Controls.Add(summary, 0, 3);
             list.Dock = DockStyle.Fill; list.BorderStyle = BorderStyle.None; list.DrawMode = DrawMode.OwnerDrawFixed; list.ItemHeight = 96;
             list.IntegralHeight = false; list.AccessibleName = "传输任务列表"; list.DrawItem += DrawItem; list.SelectedIndexChanged += delegate { localFileSignature = null; UpdateActions(); };
             list.DoubleClick += delegate { RunAction(); }; list.KeyDown += (sender, e) => { if(e.KeyCode==Keys.Enter){e.Handled=true;RunAction();} };
@@ -111,15 +127,17 @@ namespace FeiqLight
                 int index=list.IndexFromPoint(e.Location);if(index<0)return;
                 list.SelectedIndex=index;contextPoint=e.Location;ShowActions();
             };
-            Theme.ThemeScrollbars(list);var listFrame=new Panel { Dock=DockStyle.Fill,Margin=Padding.Empty };listFrame.Controls.Add(list);empty.Dock=DockStyle.Fill;empty.TextAlign=ContentAlignment.MiddleCenter;listFrame.Controls.Add(empty);empty.BringToFront();body.Controls.Add(listFrame, 0, 3);
+            Theme.ThemeScrollbars(list);var listFrame=new Panel { Dock=DockStyle.Fill,Margin=Padding.Empty };listFrame.Controls.Add(list);empty.Dock=DockStyle.Fill;empty.TextAlign=ContentAlignment.MiddleCenter;listFrame.Controls.Add(empty);empty.BringToFront();body.Controls.Add(listFrame, 0, 4);
             var footer = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, RowCount = 1, Padding = new Padding(0, 10, 0, 0), Margin = Padding.Empty };
+            footer.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); footer.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 118)); footer.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 112)); footer.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 44));
             detail.Dock = DockStyle.Fill; detail.AutoEllipsis = true; footer.Controls.Add(detail, 0, 0);
             action = Theme.Button("继续接收", delegate { RunAction(); }, true); action.Dock = DockStyle.Fill; action.Margin = new Padding(8, 0, 4, 0); footer.Controls.Add(action, 1, 0);
             secondary = Theme.Button("打开文件", delegate { RunSecondary(); }, false); secondary.Dock = DockStyle.Fill; secondary.Margin = new Padding(4, 0, 4, 0); footer.Controls.Add(secondary, 2, 0);
-            more = Theme.IconButton("more", "任务操作", delegate { contextPoint=null;ShowActions(); }, false); more.Dock = DockStyle.Fill; more.Margin = Padding.Empty; footer.Controls.Add(more, 3, 0); body.Controls.Add(footer, 0, 4);
+            more = Theme.IconButton("more", "任务操作", delegate { contextPoint=null;ShowActions(); }, false); more.Dock = DockStyle.Fill; more.Margin = Padding.Empty; footer.Controls.Add(more, 3, 0); body.Controls.Add(footer, 0, 5);
             Shown += async delegate { ApplyColors();try { await main.LoadTransfers(); if(!IsDisposed)RefreshRows(); } catch(Exception error){if(!IsDisposed)summary.Text="读取失败："+error.Message;} };
             Theme.Changed += ApplyColors;
+            Surface.SizeChanged += delegate { LayoutSections(); };
             timer.Tick += delegate { if (Visible && WindowState != FormWindowState.Minimized) RefreshRows(); };
             windowSaveTimer.Tick += delegate { windowSaveTimer.Stop(); SaveWindowPlacement(); };
             LocationChanged += TrackWindowPlacement; SizeChanged += TrackWindowPlacement;
@@ -132,17 +150,83 @@ namespace FeiqLight
             };
             timer.Start(); UpdateTabs(); ApplyColors();
         }
+        internal void SelectSource(string id)
+        {
+            selectedSourceId = id ?? "";
+            RefreshRows();
+            sources.EnsureSelectedVisible();
+        }
+        private void SetSearchExpanded(bool expanded)
+        {
+            if (searchExpanded != expanded)
+            {
+                searchExpanded = expanded;
+                if (!expanded) query.Clear();
+                search.Visible = expanded;
+                LayoutSections();
+                searchButton.AccessibleDescription = expanded ? "收起搜索" : "展开搜索";
+            }
+            if (expanded) query.Focus();
+            else searchButton.Focus();
+        }
+        protected override bool ProcessCmdKey(ref Message message, Keys keyData)
+        {
+            if (keyData == (Keys.Control | Keys.F)) { SetSearchExpanded(true); return true; }
+            if (keyData == Keys.Escape && searchExpanded) { SetSearchExpanded(false); return true; }
+            return base.ProcessCmdKey(ref message, keyData);
+        }
+        internal static string FormatTime(DateTime time, DateTime now)
+        {
+            if (time.Year == 1 || time.ToUniversalTime() == new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)) return "";
+            DateTime local = time.Kind == DateTimeKind.Utc ? time.ToLocalTime() : time;
+            string format = local.Date == now.Date ? "HH:mm" : local.Year == now.Year ? "MM-dd HH:mm" : "yyyy-MM-dd HH:mm";
+            return local.ToString(format, CultureInfo.InvariantCulture);
+        }
         private void UpdateTabs() { tabs.Active=filter;for(int i=0;i<filters.Length;i++)filters[i].Active=i==filter; }
-        private void ApplyColors() { list.BackColor=empty.BackColor=Theme.Surface;list.ForeColor=Theme.Ink;summary.ForeColor=detail.ForeColor=empty.ForeColor=Theme.Muted;using(Graphics g=list.CreateGraphics())list.ItemHeight=(int)(100*g.DpiX/96F);list.Invalidate(); }
+        private void ApplyColors() { list.BackColor=empty.BackColor=Theme.Surface;list.ForeColor=Theme.Ink;summary.ForeColor=detail.ForeColor=empty.ForeColor=Theme.Muted;using(Graphics g=list.CreateGraphics())list.ItemHeight=(int)(100*g.DpiX/96F);LayoutSections();list.Invalidate(); }
+        private void LayoutSections()
+        {
+            if(body==null||!body.IsHandleCreated)return;
+            float scale;using(Graphics graphics=list.CreateGraphics())scale=Math.Max(DeviceDpi,graphics.DpiX)/96F;
+            int sourceHeight=(int)Math.Round(76*scale);
+            bool compact=Surface.ClientSize.Height-sourceHeight-(searchExpanded?46:0)-42-32-56-28<list.ItemHeight;
+            // 最小高度优先保留一整行；收紧固定区间距，底栏仍保留四列与原操作。
+            var padding=new Padding(24,compact?6:12,24,compact?6:16);
+            int[] heights={sourceHeight,searchExpanded?(compact?38:46):0,compact?34:42,compact?24:32,-1,compact?44:56};
+            body.SuspendLayout();
+            if(body.Padding!=padding)body.Padding=padding;
+            for(int i=0;i<heights.Length;i++)if(heights[i]>=0&&body.RowStyles[i].Height!=heights[i])body.RowStyles[i].Height=heights[i];
+            body.ResumeLayout(true);
+        }
         private void RefreshRows()
         {
             Item previous=list.SelectedItem as Item;
-            var rows=main.TransferRecords.OrderByDescending(r=>r.Time).ThenByDescending(r=>r.Packet).ThenBy(r=>r.PeerId,StringComparer.Ordinal).SelectMany(r=>(r.Transfers??new FileTransferState[0]).Select(f=>new Item{Record=r,File=f,Peer=main.TransferPeer(r.PeerId)==null?r.Sender:main.TransferPeer(r.PeerId).DisplayName}))
+            // 历史反序列化保留 UTC，当前会话使用本地时间；先归到同一时区再比较最近记录。
+            var records=main.TransferRecords.OrderByDescending(r=>r.Time.Kind==DateTimeKind.Utc?r.Time.ToLocalTime():r.Time).ThenByDescending(r=>r.Packet).ThenBy(r=>r.PeerId,StringComparer.Ordinal).ToArray();
+            var sourceItems=records.Where(record=>record.Transfers!=null&&record.Transfers.Length>0).GroupBy(record=>record.PeerId,StringComparer.Ordinal).Select(group=>
+            {
+                ChatRecord latest=group.First(); Peer peer=main.TransferPeer(latest.PeerId);
+                return new TransferSourceStrip.Source { Id=latest.PeerId,Name=latest.PeerId=="browser-guests"?"浏览器访客":peer==null?latest.Sender:peer.DisplayName,Avatar=peer==null?null:peer.Avatar,Glyph=latest.PeerId=="browser-guests"?"link":"",LatestTime=latest.Time.Kind==DateTimeKind.Utc?latest.Time.ToLocalTime():latest.Time };
+            }).OrderByDescending(source=>source.LatestTime).ThenBy(source=>source.Name,StringComparer.Ordinal).ThenBy(source=>source.Id,StringComparer.Ordinal).ToList();
+            if(selectedSourceId.Length>0&&!sourceItems.Any(source=>source.Id==selectedSourceId))
+            {
+                Peer peer=main.TransferPeer(selectedSourceId); TransferSourceStrip.Source previousSource=sources.Items.FirstOrDefault(source=>source.Id==selectedSourceId);
+                sourceItems.Insert(0,new TransferSourceStrip.Source { Id=selectedSourceId,Name=selectedSourceId=="browser-guests"?"浏览器访客":peer==null?(previousSource==null?selectedSourceId:previousSource.Name):peer.DisplayName,Avatar=peer==null?null:peer.Avatar,Glyph=selectedSourceId=="browser-guests"?"link":"" });
+            }
+            sourceItems.Insert(0,new TransferSourceStrip.Source { Id="",Name="全部",Glyph="transfer" }); sources.SetItems(sourceItems.ToArray(),selectedSourceId);
+            DateTime now=LocalNow();
+            var rows=records.SelectMany(r=>(r.Transfers??new FileTransferState[0]).Select(f=>new Item{Record=r,File=f,Peer=main.TransferPeer(r.PeerId)==null?r.Sender:main.TransferPeer(r.PeerId).DisplayName}))
+                .Where(i=>selectedSourceId.Length==0||i.Record.PeerId==selectedSourceId)
                 .Where(i=>filter==0||filter==1&&i.Active||filter==2&&!i.Complete&&!i.Active||filter==3&&i.Complete)
                 .Where(i=>(i.File.Name+" "+i.Peer).IndexOf(query.Text.Trim(),StringComparison.OrdinalIgnoreCase)>=0).ToArray();
             // 文件状态会在原对象上变化，因此缓存字符串快照，而不是对比共享对象的当前字段。
             foreach (Item row in rows)
-                row.Fingerprint = String.Join("\0", new[] { row.Key, row.File.Name, row.File.Size.ToString(), row.Peer, row.State, row.File.Percent.ToString(), row.StatusText, row.File.LocalPath, row.File.Error });
+            {
+                string time=FormatTime(row.Record.Time,now);
+                row.MetaSuffix=" · "+Theme.SizeText(row.File.Size)+(time.Length>0?" · "+time:"");
+                row.Meta=(row.Record.Outgoing?"发送给 ":"来自 ")+row.Peer+row.MetaSuffix;
+                row.Fingerprint = String.Join("\0", new[] { row.Key, row.File.Name, row.File.Size.ToString(), row.Peer, row.Meta, row.State, row.File.Percent.ToString(), row.StatusText, row.File.LocalPath, row.File.Error });
+            }
             string next=String.Join("|",rows.Select(i=>i.Key));
             if(signature!=next) {
                 signature=next;int top=list.TopIndex;list.BeginUpdate();list.Items.Clear();list.Items.AddRange(rows);
@@ -153,7 +237,7 @@ namespace FeiqLight
             {
                 Item item = (Item)list.Items[i];
                 if (item.Fingerprint == rows[i].Fingerprint) continue;
-                item.Record = rows[i].Record; item.File = rows[i].File; item.Peer = rows[i].Peer; item.Fingerprint = rows[i].Fingerprint;
+                item.Record = rows[i].Record; item.File = rows[i].File; item.Peer = rows[i].Peer; item.Meta = rows[i].Meta; item.MetaSuffix = rows[i].MetaSuffix; item.Fingerprint = rows[i].Fingerprint;
                 list.Invalidate(list.GetItemRectangle(i));
             }
             if(list.Items.Count>0&&list.SelectedIndex<0)list.SelectedIndex=0;
@@ -177,8 +261,15 @@ namespace FeiqLight
             Theme.Glyph(g,"file",new Rectangle(x+(int)(9*s),y+(int)(9*s),(int)(22*s),(int)(22*s)),Theme.Blue);
             var flags=TextFormatFlags.NoPrefix|TextFormatFlags.SingleLine|TextFormatFlags.EndEllipsis|TextFormatFlags.VerticalCenter;
             TextRenderer.DrawText(g,item.File.Name,Theme.Strong,new Rectangle(left,y,width,(int)(24*s)),Theme.Ink,flags);
-            string meta=(item.Record.Outgoing?"发送给 ":"来自 ")+item.Peer+" · "+Theme.SizeText(item.File.Size);
-            TextRenderer.DrawText(g,meta,Theme.Small,new Rectangle(left,y+(int)(26*s),width,(int)(20*s)),Theme.Muted,flags);
+            // 给大小和时间保留完整尾部，超长联系人名称单独省略，避免日期随整行省略消失。
+            string metaPrefix=(item.Record.Outgoing?"发送给 ":"来自 ")+item.Peer;
+            var metaFlags=flags|TextFormatFlags.NoPadding;
+            var measureFlags=TextFormatFlags.NoPrefix|TextFormatFlags.SingleLine|TextFormatFlags.NoPadding;
+            int metaLeft=left+(int)(3*s),metaWidth=Math.Max(0,width-(int)(3*s));
+            int suffixWidth=Math.Min(metaWidth,TextRenderer.MeasureText(g,item.MetaSuffix,Theme.Small,Size.Empty,measureFlags).Width);
+            int prefixWidth=Math.Min(Math.Max(0,metaWidth-suffixWidth),TextRenderer.MeasureText(g,metaPrefix,Theme.Small,Size.Empty,measureFlags).Width);
+            if(prefixWidth>0)TextRenderer.DrawText(g,metaPrefix,Theme.Small,new Rectangle(metaLeft,y+(int)(26*s),prefixWidth,(int)(20*s)),Theme.Muted,metaFlags);
+            TextRenderer.DrawText(g,item.MetaSuffix,Theme.Small,new Rectangle(metaLeft+prefixWidth,y+(int)(26*s),suffixWidth,(int)(20*s)),Theme.Muted,measureFlags|TextFormatFlags.VerticalCenter);
             TextRenderer.DrawText(g,item.StatusText,Theme.Small,new Rectangle(left,y+(int)(48*s),width,(int)(20*s)),item.Complete?Theme.Online:item.Active?Theme.Blue:Theme.Muted,flags);
             if(!item.Ended) {
                 Rectangle bar=new Rectangle(left,e.Bounds.Bottom-(int)(10*s),width,Math.Max(2,(int)(3*s)));
@@ -228,15 +319,22 @@ namespace FeiqLight
             string tooltip = item == null ? "" : detailText;
             if (tips.GetToolTip(detail) != tooltip) tips.SetToolTip(detail, tooltip);
         }
-        private void RunAction()
+        private async void RunAction()
         {
             Item item=list.SelectedItem as Item;if(item==null)return;
             try {
                 if(!String.IsNullOrEmpty(item.File.LocalPath)&&File.Exists(item.File.LocalPath))BubbleHistory.RevealFile(this,item.File.LocalPath);
-                else if(item.Record.Outgoing){Peer peer=main.TransferPeer(item.Record.PeerId);if(peer!=null){main.Restore();main.OpenChat(peer);}}
+                else if(item.Record.Outgoing)await ShowConversation(item);
                 else if(!item.Ended)main.TransferAction(item.Record,item.File.Id,main.ReceivingTask(item.Record,item.File.Id));
-            }catch(Exception error){using(var notice=new NoticeDialog("任务未完成",error.Message))notice.ShowDialog(this);}
-            localFileSignature = null; RefreshRows();
+            }catch(Exception error){if(IsDisposed||Disposing)main.FileReceiveStatus("任务未完成："+error.Message);else using(var notice=new NoticeDialog("任务未完成",error.Message))notice.ShowDialog(this);}
+            if(!IsDisposed){localFileSignature = null; RefreshRows();}
+        }
+        private async Task ShowConversation(Item item)
+        {
+            Peer peer=main.TransferPeer(item.Record.PeerId);
+            if(peer==null)return;
+            main.Restore();main.OpenChat(peer);
+            await main.ActiveChat.LocateMessageAsync(item.Record);
         }
         private async void RunSecondary()
         {
@@ -294,11 +392,11 @@ namespace FeiqLight
                 menu.Items.Add(receiving?"暂停并保留断点":"继续接收",null,delegate {RunTransferAction(item,receiving);});
                 menu.Items.Add("取消接收并清理断点",null,async delegate {await RunTaskOperation(item,false);}).ForeColor=Theme.Danger;
                 menu.Items.Add("拒绝这批文件",null,async delegate {await RunTaskOperation(item,true);}).ForeColor=Theme.Danger;
-                menu.Items.Add("继续所有未完成接收",null,delegate {foreach(Item pending in list.Items.Cast<Item>().Where(i=>!i.Record.Outgoing&&!i.Ended&&!main.ReceivingTask(i.Record,i.File.Id)).ToArray())if(!RunTransferAction(pending,false))break;});
+                menu.Items.Add("继续当前列表中的接收",null,delegate {foreach(Item pending in list.Items.Cast<Item>().Where(i=>!i.Record.Outgoing&&!i.Ended&&!main.ReceivingTask(i.Record,i.File.Id)).ToArray())if(!RunTransferAction(pending,false))break;});
                 menu.Items.Add("暂停当前列表中的接收",null,delegate {foreach(Item pending in list.Items.Cast<Item>().Where(i=>!i.Record.Outgoing&&!i.Ended).ToArray())if(!RunTransferAction(pending,true))break;});
             }
             else if(!item.Record.Outgoing&&item.State=="本机文件已删除"&&item.Record.PeerId!="browser-guests")menu.Items.Add("重新接收",null,delegate {RunTransferAction(item,false);});
-            if(item.Record.PeerId!="browser-guests")menu.Items.Add("查看所在会话",null,delegate {Peer peer=main.TransferPeer(item.Record.PeerId);if(peer!=null){main.Restore();main.OpenChat(peer);}});
+            if(item.Record.PeerId!="browser-guests")menu.Items.Add("查看所在会话",null,async delegate {try{await ShowConversation(item);}catch(Exception error){if(IsDisposed||Disposing)main.FileReceiveStatus("无法定位："+error.Message);else using(var notice=new NoticeDialog("无法定位",error.Message))notice.ShowDialog(this);}});
             if(main.CanCancelTransfer(item.Record))menu.Items.Add("取消这批发送",null,delegate {try{main.CancelTransfer(item.Record);}catch(Exception error){using(var notice=new NoticeDialog("取消未完成",error.Message))notice.ShowDialog(this);}}).ForeColor=Theme.Danger;
             Point? point=contextPoint;contextPoint=null;
             if(menu.Items.Count==0)return;

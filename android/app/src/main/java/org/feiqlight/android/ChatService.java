@@ -190,6 +190,17 @@ public final class ChatService extends Service {
         if(active!=null)pauseFile(active.peer.id(),active.packet,active.file.id);
         changed();notifyTransfers.run();
     }
+    void pauseReceives(List<ChatStore.FileTask> items) {
+        Set<String> selected=new HashSet<>();
+        for(ChatStore.FileTask item:items)if(item.guestFile==null&&!item.message.outgoing)selected.add(fileKey(item.peer,item.message.number,item.file.id,false));
+        ReceiveRequest active=activeReceive;
+        // 先移走选中的排队项；暂停活跃接收后，队列只能继续启动列表外的任务。
+        for(ReceiveRequest request:new ArrayList<>(waiting.values())) {
+            if(selected.contains(fileKey(request.peer.id(),request.packet,request.file.id,false)))pauseFile(request.peer.id(),request.packet,request.file.id);
+        }
+        if(active!=null&&selected.contains(fileKey(active.peer.id(),active.packet,active.file.id,false)))pauseFile(active.peer.id(),active.packet,active.file.id);
+        changed();notifyTransfers.run();
+    }
     void fileTasks(Consumer<List<ChatStore.FileTask>> result) {
         queue(()->{List<ChatStore.FileTask> rows=store.fileTasks();
             for(ChatStore.FileTask task:rows)if(!task.message.outgoing)task.stored=storage.exists(receivedFile(task.peer,task.message.number,task.file));

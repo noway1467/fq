@@ -119,6 +119,14 @@ public final class ReliabilityTest {
         }
         throw new IOException("没有空闲的 TCP/UDP 测试端口");
     }
+    // 占住 TCP 模拟端口等待时，同号 UDP 也须空闲，否则释放 TCP 后节点仍会被宿主机其他进程的 UDP 占用挡住。
+    private static ServerSocket occupiedTcpWithFreeUdp()throws Exception {
+        for(int i=0;i<20;i++){
+            ServerSocket tcp=new ServerSocket(0,1,InetAddress.getLoopbackAddress());
+            try(DatagramSocket udp=new DatagramSocket(tcp.getLocalPort(),InetAddress.getLoopbackAddress())){return tcp;}catch(BindException occupied){tcp.close();}
+        }
+        throw new IOException("没有空闲的 TCP/UDP 测试端口");
+    }
     private static LanNode node()throws Exception {
         LanNode n=new LanNode(freePort(),true,"android-regression","host","测试","测试",new LanNode.Listener() { public void peersChanged(){} public void message(LanNode.Peer p,LanNode.Message m,boolean update){} public void error(String text){} }); n.start(); return n;
     }
@@ -200,7 +208,7 @@ public final class ReliabilityTest {
     @Test public void portWaitLogsActualReadinessAndRepeatedRestoreKeepsOneNode() throws Exception {
         ServiceController<ChatService> controller=Robolectric.buildService(ChatService.class).create();ChatService service=controller.get();
         java.util.concurrent.atomic.AtomicInteger created=new java.util.concurrent.atomic.AtomicInteger();
-        try(ServerSocket occupied=new ServerSocket(0,1,InetAddress.getLoopbackAddress())) {
+        try(ServerSocket occupied=occupiedTcpWithFreeUdp()) {
             int port=occupied.getLocalPort();settle(service);
             service.getSharedPreferences("settings",0).edit().putBoolean("diagnostics",true).commit();Diagnostics log=new Diagnostics(service);log.clear();
             service.connectionFactory=(prefs,listener)->{created.incrementAndGet();return new LanNode(port,true,"port-wait","host","测试","",listener);};

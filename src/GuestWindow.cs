@@ -358,7 +358,7 @@ namespace FeiqLight
             // 底栏延续 Canvas 层次，无冗余分割线。
             state.AutoEllipsis = true;
             state.TextAlign = ContentAlignment.MiddleLeft;
-            openTasks = Theme.Button("查看已接收", delegate { main.OpenTransfers(); }, false);
+            openTasks = Theme.Button("查看已接收", delegate { main.OpenTransfers("browser-guests"); }, false);
             openTasks.Visible = false;
             start = Theme.Button("开启临时传输", delegate { Toggle(); }, true);
             footerBar.Controls.Add(state);

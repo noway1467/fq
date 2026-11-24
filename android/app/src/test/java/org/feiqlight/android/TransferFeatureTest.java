@@ -345,7 +345,7 @@ public final class TransferFeatureTest {
                 ListView parent=find(dialog.getWindow().getDecorView(),ListView.class);LinearLayout view=(LinearLayout)adapter.getView(0,null,parent);assertEquals(35,((ProgressBar)view.getChildAt(3)).getProgress());assertTrue(((TextView)view.getChildAt(2)).getText().toString().contains("1.0 MB/s"));
                 progress.put(key,new ChatService.FileProgress(35,"接收中",1048577,null));activity.transfersChanged();assertEquals("显示速度与剩余时间相同应跳过刷新",1,changes.count);
                 progress.put(key,new ChatService.FileProgress(35,"已暂停",0,null));activity.transfersChanged();assertEquals(2,changes.count);assertEquals("已暂停",((TextView)((LinearLayout)adapter.getView(0,view,parent)).getChildAt(2)).getText().toString());
-                EditText input=(EditText)field(adapter,"input");input.setText("waiting");assertEquals(1,adapter.getCount());int notifications=changes.count,summaryChanges=textChanges[0];
+                findDescription(dialog.getWindow().getDecorView(),"搜索").performClick();EditText input=(EditText)field(adapter,"input");input.setText("waiting");assertEquals(1,adapter.getCount());int notifications=changes.count,summaryChanges=textChanges[0];
                 progress.put(key,new ChatService.FileProgress(60,"接收中",2097152,null));activity.transfersChanged();assertEquals("筛选外任务变化不应重绑当前列表",notifications,changes.count);assertEquals(summaryChanges,textChanges[0]);
                 input.setText(" WAITING ");assertEquals("相同搜索结果不应重复刷新",notifications,changes.count);
                 all.clear();refresh(adapter);assertEquals(0,adapter.getCount());notifications=changes.count;refresh(adapter);activity.transfersChanged();assertEquals("空列表不应反复刷新",notifications,changes.count);
@@ -367,7 +367,7 @@ public final class TransferFeatureTest {
                 queue.clear();activity.transfersChanged();assertFalse(count.getText().toString().contains("排队中"));assertEquals(0,changes.count);
                 queue.add(constructor.newInstance((Runnable)()->{},(Runnable)()->{}));
                 findDescription(dialog.getWindow().getDecorView(),"传输任务操作").performClick();View menu=ShadowDialog.getLatestDialog().getWindow().getDecorView();
-                assertNotNull(findButton(menu,"继续所有未完成接收"));assertNotNull(findButton(menu,"暂停所有接收"));assertNotNull(findButton(menu,"取消排队发送任务"));
+                assertNotNull(findButton(menu,"继续当前列表中的接收"));assertNotNull(findButton(menu,"暂停当前列表中的接收"));assertNotNull(findButton(menu,"取消排队发送任务"));
                 findButton(menu,"取消排队发送任务").performClick();findButton(ShadowDialog.getLatestDialog().getWindow().getDecorView(),"取消排队").performClick();assertTrue(queue.isEmpty());activity.transfersChanged();assertEquals(0,changes.count);
             }finally{dialog.dismiss();}
         }finally{serviceController.destroy();}
@@ -444,9 +444,9 @@ public final class TransferFeatureTest {
                 findButton(taskRow(activity,slow),"继续接收").performClick();waitUntil(service,()->part.length()>0&&service.busy());
                 LanNode.Message queuedMessage=sender.sendMessage(target,"排队文件",Collections.singletonList(original));waitUntil(service,()->((ChatStore)uncheckedField(service,"store")).findMessage(peer.id(),queuedMessage.number,false)!=null);
                 ChatStore.FileTask queued=fileTasks(service).stream().filter(item->item.message.number==queuedMessage.number).findFirst().orElseThrow();findButton(taskRow(activity,queued),"接收").performClick();assertEquals("排队中",service.progress(peer.id(),queued.message.number,queued.file.id,false).state);assertNotNull(findButton(taskRow(activity,queued),"暂停排队"));
-                findDescription(((Dialog)field(activity,"tasksDialog")).getWindow().getDecorView(),"传输任务操作").performClick();menu=ShadowDialog.getLatestDialog().getWindow().getDecorView();assertNotNull(findButton(menu,"继续所有未完成接收"));assertNotNull(findButton(menu,"暂停所有接收"));assertNull(findButton(menu,"取消排队发送任务"));findButton(menu,"暂停所有接收").performClick();
+                findDescription(((Dialog)field(activity,"tasksDialog")).getWindow().getDecorView(),"传输任务操作").performClick();menu=ShadowDialog.getLatestDialog().getWindow().getDecorView();assertNotNull(findButton(menu,"继续当前列表中的接收"));assertNotNull(findButton(menu,"暂停当前列表中的接收"));assertNull(findButton(menu,"取消排队发送任务"));findButton(menu,"暂停当前列表中的接收").performClick();
                 waitUntil(service,()->!service.busy()&&"已暂停".equals(service.progress(peer.id(),slow.message.number,slow.file.id,false).state));assertEquals("已暂停",service.progress(peer.id(),queued.message.number,queued.file.id,false).state);assertTrue(((Map<?,?>)field(service,"waiting")).isEmpty());assertTrue(part.isFile());
-                findDescription(((Dialog)field(activity,"tasksDialog")).getWindow().getDecorView(),"传输任务操作").performClick();findButton(ShadowDialog.getLatestDialog().getWindow().getDecorView(),"继续所有未完成接收").performClick();
+                findDescription(((Dialog)field(activity,"tasksDialog")).getWindow().getDecorView(),"传输任务操作").performClick();findButton(ShadowDialog.getLatestDialog().getWindow().getDecorView(),"继续当前列表中的接收").performClick();
                 File queuedLocal=service.receivedFile(peer,queued.message.number,queued.file);waitUntil(service,()->{ChatService.FileProgress p=service.progress(peer.id(),slow.message.number,slow.file.id,false);return queuedLocal.isFile()&&part.length()>0&&service.busy()&&p!=null&&p.task!=null;});
                 taskActions(activity,slow);menu=ShadowDialog.getLatestDialog().getWindow().getDecorView();assertNotNull(findButton(menu,"暂停并保留断点"));assertNotNull(findButton(menu,"取消接收并清理断点"));assertNotNull(findButton(menu,"拒绝这批文件"));assertNull(findButton(menu,"文件与保存位置"));findButton(menu,"拒绝这批文件").performClick();
                 assertTrue(dialogText(ShadowDialog.getLatestDialog()).contains("将拒绝该消息中未接收的文件并清理断点；已保存的文件保留。"));findButton(ShadowDialog.getLatestDialog().getWindow().getDecorView(),"拒绝这批文件").performClick();
@@ -551,7 +551,7 @@ public final class TransferFeatureTest {
                     java.lang.reflect.Field all=adapter.getClass().getDeclaredField("all");all.setAccessible(true);all.set(adapter,rows);java.lang.reflect.Method refresh=adapter.getClass().getDeclaredMethod("refresh");refresh.setAccessible(true);refresh.invoke(adapter);
                     View view=dialog.getWindow().getDecorView();view.measure(View.MeasureSpec.makeMeasureSpec(786,View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(1500,View.MeasureSpec.EXACTLY));view.layout(0,0,786,1500);
                     File output=new File(System.getProperty("feiq.previewDir"));assertTrue(output.isDirectory()||output.mkdirs());Bitmap bitmap=Bitmap.createBitmap(786,1500,Bitmap.Config.ARGB_8888);view.draw(new Canvas(bitmap));try(OutputStream stream=new FileOutputStream(new File(output,"transfers-"+(dark?"dark":"light")+".png"))){bitmap.compress(Bitmap.CompressFormat.PNG,100,stream);}bitmap.recycle();
-                    EditText input=find(view,EditText.class);assertNotNull(input);input.setText("不存在");assertEquals(0,((BaseAdapter)adapter).getCount());dialog.dismiss();
+                    EditText input=find(view,EditText.class);assertNotNull(input);assertEquals(View.GONE,input.getVisibility());findDescription(view,"搜索").performClick();assertEquals(View.VISIBLE,input.getVisibility());input.setText("不存在");assertEquals(0,((BaseAdapter)adapter).getCount());dialog.dismiss();
                 }
             }
         }finally{serviceController.destroy();}
