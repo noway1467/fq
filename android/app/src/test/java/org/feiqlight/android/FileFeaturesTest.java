@@ -400,6 +400,56 @@ public final class FileFeaturesTest {
             }finally{controller.destroy();}
         }
     }
+    @Test public void reReceiveExpiredOfferRestoresDeletedState()throws Exception {
+        ServiceController<ChatService> controller=Robolectric.buildService(ChatService.class).create();ChatService service=controller.get();List<String> errors=new java.util.concurrent.CopyOnWriteArrayList<>();
+        try {
+            settle(service);service.observe(new ChatService.Observer(){public void changed(){}public void error(String text){errors.add(text);}});service.getSharedPreferences("settings",0).edit().putBoolean(ReceivedStorage.AUTO,false).commit();
+            LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:"+port()),"expired-offer","host","失效邀请","");long packet=912;LanNode.Message message=interrupted(service,peer,packet);
+            File file=service.receivedFile(peer,packet,message.files.get(0));
+            Docs docs=provider(service);ReceivedStorage storage=new ReceivedStorage(service);storage.choose(TREE,FLAGS);Uri saved=storage.save(file,"saved.bin",new LanNode.Transfer());docs.deleteDocument(DocumentsContract.getDocumentId(saved));
+            service.fileTasks(rows->{});settle(service);assertEquals("本机文件已删除",service.progress(peer.id(),packet,0,false).state);
+            // 点「重新接收」后尚未收回文件，邀请随即失效。
+            service.receive(peer,packet,message.files.get(0));waitFor(service,()->!service.busy());settle(service);
+            assertNotEquals("本机文件已删除",service.progress(peer.id(),packet,0,false).state);
+            assertTrue(service.getSharedPreferences("received_before",0).contains(ChatService.fileKey(peer.id(),packet,0,false)));
+            service.offerCanceled(peer,packet);settle(service);
+            LanNode.Message stored=((ChatStore)field(service,"store")).findMessage(peer.id(),packet,false);assertNotNull(stored);
+            assertEquals("重新接收失效后附件不能从消息中移除",1,stored.files.size());assertEquals(0,stored.files.get(0).id);
+            assertEquals("本机文件已删除",service.progress(peer.id(),packet,0,false).state);assertEquals("对方已取消发送",service.progress(peer.id(),packet,1,false).state);
+            assertEquals("本机文件已删除",((ChatStore)field(service,"store")).transfers().stream().filter(state->state.key.equals(ChatService.fileKey(peer.id(),packet,0,false))).findFirst().orElseThrow().state);
+            assertFalse(service.getSharedPreferences("received_before",0).contains(ChatService.fileKey(peer.id(),packet,0,false)));
+            // 单附件且消息状态已为「已保存」时，重新接收遇到失效邀请也必须恢复删除态并弹出失效提示。
+            long singlePacket=913;LanNode.Message single=new LanNode.Message();single.number=singlePacket;single.time=System.currentTimeMillis();single.state="已保存";single.text="[文件] one.bin";single.files.add(new Protocol.Attachment(0,"one.bin",5,0));
+            service.incoming(peer,single,false);settle(service);File singleFile=service.receivedFile(peer,singlePacket,single.files.get(0));Files.write(singleFile.toPath(),new byte[]{1,2,3,4,5});
+            Uri singleSaved=storage.save(singleFile,"one.bin",new LanNode.Transfer());docs.deleteDocument(DocumentsContract.getDocumentId(singleSaved));
+            service.fileTasks(rows->{});settle(service);assertEquals("本机文件已删除",service.progress(peer.id(),singlePacket,0,false).state);
+            service.receive(peer,singlePacket,single.files.get(0));waitFor(service,()->!service.busy());settle(service);
+            assertNotEquals("本机文件已删除",service.progress(peer.id(),singlePacket,0,false).state);
+            errors.clear();service.offerCanceled(peer,singlePacket);settle(service);
+            assertEquals("本机文件已删除",service.progress(peer.id(),singlePacket,0,false).state);
+            assertTrue("整批已保存消息重收失效缺少提示："+errors,errors.stream().anyMatch(text->text.contains("原邀请已失效")));
+            assertFalse(service.getSharedPreferences("received_before",0).contains(ChatService.fileKey(peer.id(),singlePacket,0,false)));
+        }finally{controller.destroy();}
+    }
+    @Test public void rejectDuringSavingStillPublishesSavedState()throws Exception {
+        ServiceController<ChatService> controller=Robolectric.buildService(ChatService.class).create();ChatService service=controller.get();
+        try {
+            settle(service);service.getSharedPreferences("settings",0).edit().putBoolean(ReceivedStorage.AUTO,false).commit();
+            LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:"+port()),"reject-saving","host","保存中拒绝","");long packet=914;
+            LanNode.Message message=new LanNode.Message();message.number=packet;message.time=System.currentTimeMillis();message.state="已收到";message.text="[文件] saved.bin";message.files.add(new Protocol.Attachment(0,"saved.bin",6,0));
+            service.incoming(peer,message,false);settle(service);
+            File target=service.receivedFile(peer,packet,message.files.get(0));target.getParentFile().mkdirs();Files.write(target.toPath(),new byte[]{1,2,3,4,5,6});
+            Docs docs=provider(service);ReceivedStorage storage=new ReceivedStorage(service);storage.choose(TREE,FLAGS);
+            docs.openedGate=new CountDownLatch(1);docs.releaseGate=new CountDownLatch(1);
+            service.receive(peer,packet,message.files.get(0));assertTrue(docs.openedGate.await(5,TimeUnit.SECONDS));
+            settle(service);assertEquals("保存中 · 点击取消",service.progress(peer.id(),packet,0,false).state);
+            service.reject(peer,packet);docs.releaseGate.countDown();waitFor(service,()->!service.busy());settle(service);
+            ChatService.FileProgress p=service.progress(peer.id(),packet,0,false);assertNotNull(p);
+            assertEquals("保存中拒绝但已落盘的文件不能停在保存中","已保存",p.state);assertEquals(100,p.percent);
+            assertTrue(storage.exists(target));
+            LanNode.Message stored=((ChatStore)field(service,"store")).findMessage(peer.id(),packet,false);assertNotNull(stored);assertEquals(1,stored.files.size());
+        }finally{controller.destroy();}
+    }
     @Test public void deletePartialsAllHistory()throws Exception {
         for(boolean clear:new boolean[]{false,true}) {
             ServiceController<ChatService> controller=Robolectric.buildService(ChatService.class).create();ChatService service=controller.get();

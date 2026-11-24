@@ -289,6 +289,8 @@ namespace FeiqLight
         public string LocalPath { get; set; }
         [ScriptIgnore] public double BytesPerSecond { get; set; }
         public string Error { get; set; }
+        // 曾经保存过又删除本机文件；重新接收遇到邀请失效时据此恢复「本机文件已删除」，不改写成对方取消。
+        public bool SavedBefore { get; set; }
         internal void MarkCurrent() { Session=currentSession; }
         public string DisplayStatus() {
             if (Session != currentSession && (Status == "等待对方接收" || (Status ?? "").Contains("中") || (Status ?? "").StartsWith("待接收"))) return "历史邀请 · 无活动传输";
@@ -344,12 +346,14 @@ namespace FeiqLight
     }
     internal sealed class ReceivedFilesDeletionResult
     {
-        internal int DeletedCount, SkippedDeletedCount, UnreceivedCount;
+        internal int DeletedCount, SkippedDeletedCount, UnreceivedCount, FailedCount;
+        internal string FirstError;
         internal string Text
         {
             get
             {
                 string text = "已删除 " + DeletedCount + " 个本机文件，" + SkippedDeletedCount + " 个已删除跳过。";
+                if (FailedCount > 0) text += FailedCount + " 个删除失败，文件与记录已保留：" + FirstError;
                 return UnreceivedCount == 0 ? text : text + "（另有 " + UnreceivedCount + " 个未接收附件未处理）";
             }
         }
@@ -581,11 +585,13 @@ namespace FeiqLight
         internal void DeleteReceivedFile(ChatRecord record,string path)
         {
             if(record.Outgoing||String.IsNullOrEmpty(path)||!Path.IsPathRooted(path))throw new IOException("只能删除这条消息中已接收的本机文件。");
-            string fullPath=ReceiveStorage.Folder(path);
+            // 登记路径是真实文件名，不能像接收目录设置那样展开 %OS% 之类的环境变量。
+            string fullPath=Path.GetFullPath(path);
             string[] registered=record.GetLocalFiles().Concat((record.Transfers??new FileTransferState[0]).Select(f=>f.LocalPath).Where(p=>!String.IsNullOrEmpty(p))).ToArray();
             if(!registered.Any(p=>Path.IsPathRooted(p)&&String.Equals(Path.GetFullPath(p),fullPath,StringComparison.OrdinalIgnoreCase)))throw new IOException("只能删除这条消息中已接收的本机文件。");
-            if(Directory.Exists(path))throw new IOException("不能通过附件入口删除文件夹。");
-            File.Delete(fullPath);
+            if(Directory.Exists(fullPath))throw new IOException("不能通过附件入口删除文件夹。");
+            // 父目录或磁盘已不存在时文件必然已不在，按已删除订正记录。
+            try{File.Delete(fullPath);}catch(DirectoryNotFoundException){}catch(DriveNotFoundException){}
             record.LocalFiles=registered.Where(p=>!Path.IsPathRooted(p)||!String.Equals(Path.GetFullPath(p),fullPath,StringComparison.OrdinalIgnoreCase)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
             foreach(FileTransferState file in record.Transfers??new FileTransferState[0])if(!String.IsNullOrEmpty(file.LocalPath)&&String.Equals(Path.GetFullPath(file.LocalPath),fullPath,StringComparison.OrdinalIgnoreCase)){file.LocalPath=null;file.Status="本机文件已删除";file.Percent=0;file.BytesPerSecond=0;file.Error=null;file.MarkCurrent();}
             if((record.Transfers==null||record.Transfers.Length==0)&&record.LocalFiles.Length==0){record.HasAttachments=true;record.State="本机文件已删除";}
@@ -607,12 +613,23 @@ namespace FeiqLight
                     var recordPaths=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                     foreach(string path in paths)
                     {
-                        if(!Path.IsPathRooted(path))throw new IOException("已登记的接收文件路径无效，未删除该文件。");
-                        string fullPath=ReceiveStorage.Folder(path);
-                        if(!recordPaths.Add(fullPath))continue;
-                        if(Directory.Exists(fullPath))throw new IOException("不能通过附件入口删除文件夹。");
-                        bool exists=File.Exists(fullPath);
-                        if(apply)DeleteReceivedFile(record,fullPath);
+                        // 单个文件被占用或路径失效只记失败，同批其余文件继续处理。
+                        string fullPath=null;bool exists=false;
+                        try
+                        {
+                            if(!Path.IsPathRooted(path))throw new IOException("已登记的接收文件路径无效，未删除该文件。");
+                            fullPath=Path.GetFullPath(path);
+                            if(!recordPaths.Add(fullPath))continue;
+                            if(Directory.Exists(fullPath))throw new IOException("不能通过附件入口删除文件夹。");
+                            exists=File.Exists(fullPath);
+                            if(apply)DeleteReceivedFile(record,fullPath);
+                        }
+                        catch(Exception error)
+                        {
+                            if(!(error is IOException||error is UnauthorizedAccessException||error is ArgumentException||error is NotSupportedException||error is System.Security.SecurityException))throw;
+                            if(handledPaths.Add(fullPath??path)){result.FailedCount++;if(result.FirstError==null){string trimmed=path.TrimEnd(Path.DirectorySeparatorChar,Path.AltDirectorySeparatorChar);int sep=trimmed.LastIndexOfAny(new[]{Path.DirectorySeparatorChar,Path.AltDirectorySeparatorChar});result.FirstError=(sep>=0?trimmed.Substring(sep+1):trimmed)+" — "+error.Message;}}
+                            continue;
+                        }
                         if(handledPaths.Add(fullPath)) {if(exists)result.DeletedCount++;else result.SkippedDeletedCount++;}
                     }
                     bool corrected=false;

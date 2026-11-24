@@ -124,6 +124,14 @@ public final class ChatService extends Service {
     private boolean transferNotificationQueued;
     private final Runnable notifyTransfers=()->{transferNotificationQueued=false;for(Observer observer:new ArrayList<>(observers))observer.transfersChanged();};
     static String fileKey(String peer,long packet,long file,boolean outgoing) {return peer+"/"+packet+"/"+file+"/"+outgoing;}
+    // 曾保存后又删除本机文件、正在重新接收的附件；持久化后重启、暂停续传期间邀请失效也能恢复删除态。
+    private final Set<String> receivedBefore=java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private void rememberReceivedBefore(String key,boolean value) {
+        if(!(value?receivedBefore.add(key):receivedBefore.remove(key)))return;
+        SharedPreferences.Editor editor=getSharedPreferences("received_before",MODE_PRIVATE).edit();
+        if(value)editor.putBoolean(key,true);else editor.remove(key);
+        editor.apply();
+    }
     static boolean wasStored(String state) {return "已保存".equals(state)||"本机文件已删除".equals(state)||state!=null&&state.startsWith("已接收");}
     FileProgress progress(String peer,long packet,long file,boolean outgoing) {return fileProgress.get(fileKey(peer,packet,file,outgoing));}
     private void fileProgress(String peer,long packet,long file,boolean outgoing,int percent,String state,LanNode.Transfer task) {
@@ -149,6 +157,7 @@ public final class ChatService extends Service {
             if(task!=null)task.close();
             return;
         }
+        if(p!=null&&p.task!=null&&p.task==transfer){p.task.close();return;}
         queue(()->{
             try {
                 LanNode.Message message=store.findMessage(peer,packet,false);
@@ -172,7 +181,8 @@ public final class ChatService extends Service {
         if(active!=null&&active.peer.id().equals(peer)&&active.packet==packet&&active.file.id==file) {
             LanNode.Transfer task=active.task==null?transfer:active.task;
             if(task!=null)task.pause();
-        } else fileProgress(peer,packet,file,false,p==null?0:p.percent,"已暂停",null);
+        } else if(p!=null&&p.task!=null&&p.task==transfer) p.task.pause();
+        else fileProgress(peer,packet,file,false,p==null?0:p.percent,"已暂停",null);
     }
     void pauseAllReceives() {
         ReceiveRequest active=activeReceive;
@@ -237,7 +247,7 @@ public final class ChatService extends Service {
     private boolean networkReady;
     private final Runnable notifyChanges=()->{notificationQueued=false;for (Observer observer:new ArrayList<>(observers)) observer.changed();};
     @Override public void onCreate() {
-        super.onCreate(); store=new ChatStore(this); storage=new ReceivedStorage(this);diagnostics=new Diagnostics(this);
+        super.onCreate(); store=new ChatStore(this); storage=new ReceivedStorage(this);diagnostics=new Diagnostics(this);receivedBefore.addAll(getSharedPreferences("received_before",MODE_PRIVATE).getAll().keySet());
         NotificationManager manager=getSystemService(NotificationManager.class);
         manager.createNotificationChannel(new NotificationChannel("connection","局域网连接",NotificationManager.IMPORTANCE_LOW));
         manager.createNotificationChannel(new NotificationChannel("messages","新消息",NotificationManager.IMPORTANCE_DEFAULT));
@@ -879,6 +889,8 @@ public final class ChatService extends Service {
         } catch(Exception e) { throw new IllegalStateException(e); }
     }
     void receive(LanNode.Peer peer,long packet,Protocol.Attachment file) {
+        String receiveKey=fileKey(peer.id(),packet,file.id,false);FileProgress before=progress(peer.id(),packet,file.id,false);
+        if(before!=null&&wasStored(before.state))rememberReceivedBefore(receiveKey,true);
         if(busy()) {
             if(activeReceive!=null&&activeReceive.peer.id().equals(peer.id())&&activeReceive.packet==packet&&activeReceive.file.id==file.id)return;
             if(waiting.size()>=1000){showError("待接收文件已达 1000 个，请先处理已有任务");return;}
@@ -911,7 +923,7 @@ public final class ChatService extends Service {
             }
             progress.accept(100,"保存中 · 点击取消");
             if(target.isFile())storage.save(target,file.name,file.relativePath,task);
-            progress.accept(100,"已保存");
+            progress.accept(100,"已保存");rememberReceivedBefore(receiveKey,false);
             } catch(LanNode.OfferRevokedException e) {
                 if(request.rejected)return;
                 request.offerCanceled=true;offerCanceled(peer,packet);
@@ -926,10 +938,18 @@ public final class ChatService extends Service {
             if(activeReceive==request)activeReceive=null;
             if(request.offerCanceled||request.rejected)queue(()->{
                 try {
-                    if(!storage.exists(target))Files.deleteIfExists(LanNode.partialFile(peer,packet,file,target).toPath());
-                    if(request.rejected){rejectIncomingOffer(peer,packet);return;}
-                    finishIncomingOffer(peer,packet,"对方已取消发送",null);
-                    main.post(()->{if(!stopped&&!storage.exists(target))fileProgress(peer.id(),packet,file.id,false,0,"对方已取消发送",null);});
+                    boolean saved=storage.exists(target),wasBefore=receivedBefore.contains(receiveKey);
+                    if(!saved)Files.deleteIfExists(LanNode.partialFile(peer,packet,file,target).toPath());
+                    if(request.rejected)rejectIncomingOffer(peer,packet);
+                    else finishIncomingOffer(peer,packet,"对方已取消发送",null);
+                    rememberReceivedBefore(receiveKey,false);
+                    if(saved) {
+                        // 拒绝或取消晚于落盘：文件已保留，被标记拦下的「已保存」终态在此补发，卡片不能停在「保存中」。
+                        main.post(()->{if(!stopped)fileProgress(peer.id(),packet,file.id,false,100,"已保存",null);});
+                    } else if(!request.rejected) {
+                        String ended=wasBefore?"本机文件已删除":"对方已取消发送";
+                        main.post(()->{if(!stopped&&!storage.exists(target))fileProgress(peer.id(),packet,file.id,false,0,ended,null);});
+                    }
                 }catch(IOException e){fail(e);}
             });
         },"","");
@@ -1044,11 +1064,25 @@ public final class ChatService extends Service {
         if(message==null)return;
         Set<String> stored=new HashSet<>();
         for(ChatStore.TransferState item:store.transfers())if(wasStored(item.state))stored.add(item.key);
-        List<Protocol.Attachment> unfinished=new ArrayList<>();
+        List<Protocol.Attachment> unfinished=new ArrayList<>();int kept=0;boolean restored=false;
         for(Protocol.Attachment file:message.files) {
-            File target=receivedFile(peer,packet,file);
+            File target=receivedFile(peer,packet,file);String key=fileKey(peer.id(),packet,file.id,false);
+            if(storage.exists(target)){rememberReceivedBefore(key,false);kept++;continue;}
+            if(receivedBefore.contains(key)) {
+                // 重新接收途中邀请失效或被拒绝：附件此前保存过，只恢复「本机文件已删除」，不从消息里移除。
+                kept++;
+                if(!stored.contains(key))restored=true;
+                if(exiting==null||exiting.file.id!=file.id) {
+                    try {Files.deleteIfExists(LanNode.partialFile(peer,packet,file,target).toPath());}
+                    catch(IOException e){showError(state+"；断点清理未完成："+e.getMessage());}
+                    rememberReceivedBefore(key,false);
+                }
+                store.transfer(key,peer.id(),packet,0,"本机文件已删除");
+                main.post(()->{if(!stopped)fileProgress(peer.id(),packet,file.id,false,0,"本机文件已删除",null);});
+                continue;
+            }
             // 已接收后删除的是本机文件；取消剩余邀请不能再把这条附件历史当成未完成项移除。
-            if(storage.exists(target)||wasStored(message.state)||stored.contains(fileKey(peer.id(),packet,file.id,false)))continue;
+            if(wasStored(message.state)||stored.contains(key)){kept++;continue;}
             unfinished.add(file);
             // 活跃线程的 finally 负责释放句柄；完成回调还会用原附件元数据补清一次。
             if(exiting==null||exiting.file.id!=file.id)
@@ -1057,7 +1091,9 @@ public final class ChatService extends Service {
             store.transfer(fileKey(peer.id(),packet,file.id,false),peer.id(),packet,0,state);
             main.post(()->{if(!stopped)fileProgress(peer.id(),packet,file.id,false,0,state,null);});
         }
-        if(!unfinished.isEmpty()||state.equals("已拒绝")) {
+        if(restored&&unfinished.isEmpty()&&!state.equals("已拒绝"))showError("原邀请已失效，请让对方重新发送");
+        // 整批附件都已保存或保存过时，拒绝不改写消息状态与正文。
+        if(!unfinished.isEmpty()||state.equals("已拒绝")&&kept==0) {
             message.files.removeAll(unfinished);
             String marker=state.equals("已拒绝")?"[附件已拒绝]":"[对方已取消发送]";
             if(!message.text.endsWith(marker))message.text+=(message.text.isEmpty()?"":"\n")+marker;

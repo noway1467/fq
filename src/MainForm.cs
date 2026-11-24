@@ -316,17 +316,22 @@ public sealed class MainForm : ModernWindow
         }
         internal void CancelIncomingOffer(Peer peer, ChatRecord record, bool cleanup)
         {
-            FileReceiveStatus("对方已取消发送；未完成附件不再接收。");
+            FileTransferState[] transfers = record.Transfers ?? new FileTransferState[0];
+            // 重新接收「本机文件已删除」的附件时邀请失效，只恢复删除态，不把已接收历史改写成对方取消。
+            bool expiredOnly = transfers.Any(f => String.IsNullOrEmpty(f.LocalPath) && f.SavedBefore) && !transfers.Any(f => String.IsNullOrEmpty(f.LocalPath) && !f.SavedBefore && f.Status != "本机文件已删除" && f.Status != "已拒绝");
+            FileReceiveStatus(expiredOnly ? "原邀请已失效，请让对方重新发送。" : "对方已取消发送；未完成附件不再接收。");
             if (cleanup)
                 try { DeleteIncomingPartials(peer, record); }
                 catch (Exception e) { FileReceiveStatus("对方已取消发送；断点清理未完成：" + e.Message); }
-            bool changed = false;
-            foreach (FileTransferState file in record.Transfers ?? new FileTransferState[0])
+            bool changed = false, restored = false;
+            foreach (FileTransferState file in transfers)
             {
                 if (!String.IsNullOrEmpty(file.LocalPath) || file.Status == "本机文件已删除" || file.Status == "已拒绝") continue;
+                if (file.SavedBefore) { file.Percent = 0; file.Status = "本机文件已删除"; file.BytesPerSecond = 0; file.Error = null; file.MarkCurrent(); restored = true; continue; }
                 file.Percent = 0; file.Status = "对方已取消发送"; file.BytesPerSecond = 0; changed = true;
             }
             if (changed) { record.State = "对方已取消发送"; TrySave(record); }
+            else if (restored) TrySave(record);
         }
         private void OnTransfer(ChatRecord record, int id, int percent, string status, double bytesPerSecond)
         {
@@ -407,7 +412,7 @@ public sealed class MainForm : ModernWindow
                     return;
                 }
                 ReceivedFilesDeletionResult planned=store.DeleteReceivedFiles(incoming,false);
-                if(planned.DeletedCount==0&&planned.SkippedDeletedCount==0)
+                if(planned.DeletedCount==0&&planned.SkippedDeletedCount==0&&planned.FailedCount==0)
                 {
                     using(var notice=new NoticeDialog("没有可删除的本机文件","所选消息中的附件尚未接收保存；如需处理待接收文件，请前往「传输任务」接收或拒绝。"))notice.ShowDialog(this);
                     return;
@@ -420,12 +425,19 @@ public sealed class MainForm : ModernWindow
                     using(var notice=new NoticeDialog("请先处理文件","选中的消息含有正在接收的文件，请等待完成或取消后再删除本机文件。"))notice.ShowDialog(this);
                     return;
                 }
-                ReceivedFilesDeletionResult result=store.DeleteReceivedFiles(incoming);
-                ChatForm chat;
-                if(chats.TryGetValue(peer.Id,out chat)&&!chat.IsDisposed){chat.EndSelection();foreach(ChatRecord record in incoming)chat.Delivery(record);}
-                foreach(ChatRecord record in incoming)TrackTransfer(record);
+                ReceivedFilesDeletionResult result;
+                ChatForm chat;chats.TryGetValue(peer.Id,out chat);
+                try{result=store.DeleteReceivedFiles(incoming);}
+                finally
+                {
+                    // 中途失败时已删除的文件也已落盘，聊天气泡与传输任务必须同步刷新。
+                    if(chat!=null&&!chat.IsDisposed)foreach(ChatRecord record in incoming)chat.Delivery(record);
+                    foreach(ChatRecord record in incoming)TrackTransfer(record);
+                }
+                // 有失败项时保留多选，便于解除占用后直接重试。
+                if(result.FailedCount==0&&chat!=null&&!chat.IsDisposed)chat.EndSelection();
                 FileReceiveStatus(result.Text);
-                using(var notice=new NoticeDialog("文件删除完成",result.Text))notice.ShowDialog(this);
+                using(var notice=new NoticeDialog(result.FailedCount==0?"文件删除完成":"部分文件未删除",result.Text))notice.ShowDialog(this);
             }
             catch(Exception error){using(var notice=new NoticeDialog("文件删除未完成",error.Message))notice.ShowDialog(this);}
         }

@@ -91,7 +91,14 @@ namespace FeiqLight
                     else main.FileReceiveStatus("此文件邀请已结束；未保存的附件请让对方重新发送。");
                     return;
                 }
-                if (receiving != null) { if (activeFile == item) await CancelReceiveTask(record, id); return; }
+                if (receiving != null)
+                {
+                    // 事件处理器没有上层调用者；断点清理失败必须在此收口，不能成为未处理异常。
+                    if (activeFile == item)
+                        try { await CancelReceiveTask(record, id); }
+                        catch (Exception error) { if (IsDisposed) main.FileReceiveStatus("取消接收未完成：" + error.Message); else Error("取消接收未完成", error.Message); }
+                    return;
+                }
                 await ReceiveAsync(item, false);
             };
             history.ForwardRequested += delegate(ChatRecord record) { main.Forward(record); };
@@ -259,6 +266,7 @@ namespace FeiqLight
             if(item==null){item=new ReceivedFile{Packet=record.Packet,Record=record,File=new Attachment{Id=state.Id,Name=state.Name,Size=state.Size,Modified=state.Modified,Sha256=state.Sha256,RelativePath=state.RelativePath}};files.Items.Add(item);}
             if(item.Rejected||item.CancelRequested)return;
             item.AutomaticPending=false;item.CancelRequested=true;
+            if(!main.InvokeRequired&&SynchronizationContext.Current==null)SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
             try
             {
                 if(TaskReceiving(record.Packet,fileId))
@@ -280,20 +288,22 @@ namespace FeiqLight
             ReceivedFile[] pending=files.Items.Cast<ReceivedFile>().Where(f=>f.Packet==record.Packet).ToArray();
             record=pending.Select(f=>f.Record).FirstOrDefault()??record;
             foreach(ReceivedFile item in pending){item.AutomaticPending=false;item.Rejected=true;}
+            if(!main.InvokeRequired&&SynchronizationContext.Current==null)SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
             if(receiving!=null&&activeFile!=null&&activeFile.Packet==record.Packet)
             {
                 activeFile.Rejected=true;Task finished=receivingFinished.Task;pauseRequested=false;receiving.Cancel();
                 await finished;
             }
             if(IsDisposed)return;
-            bool hasSaved=record.GetLocalFiles().Length>0||(record.Transfers??new FileTransferState[0]).Any(f=>!String.IsNullOrEmpty(f.LocalPath)||f.Status=="已保存"||f.Status=="本机文件已删除");
+            bool hasSaved=record.GetLocalFiles().Length>0||(record.Transfers??new FileTransferState[0]).Any(f=>!String.IsNullOrEmpty(f.LocalPath)||f.Status=="已保存"||f.Status=="本机文件已删除"||f.SavedBefore);
             Exception cleanupError=null;
             foreach(FileTransferState state in record.Transfers??new FileTransferState[0])
             {
                 if(!String.IsNullOrEmpty(state.LocalPath)||state.Status=="已保存"||state.Status=="本机文件已删除")continue;
                 ReceivedFile item=pending.FirstOrDefault(f=>f.File.Id==state.Id)??new ReceivedFile{Packet=record.Packet,Record=record,File=new Attachment{Id=state.Id,Name=state.Name,Size=state.Size,Modified=state.Modified,Sha256=state.Sha256,RelativePath=state.RelativePath}};
                 try{DeletePartials(item);}catch(Exception error){if(cleanupError==null)cleanupError=error;}
-                state.LocalPath=null;state.Percent=0;state.Status="已拒绝";state.BytesPerSecond=0;state.Error=null;state.MarkCurrent();
+                // 重新接收途中拒绝：此前已保存过的附件回到删除态，不抹掉接收历史。
+                state.LocalPath=null;state.Percent=0;state.Status=state.SavedBefore?"本机文件已删除":"已拒绝";state.BytesPerSecond=0;state.Error=null;state.MarkCurrent();
             }
             foreach(ReceivedFile item in pending)files.Items.Remove(item);
             if(files.Items.Count>0&&files.SelectedIndex<0)files.SelectedIndex=0;
@@ -316,6 +326,7 @@ namespace FeiqLight
                 files.Items.Add(item);
             }
             if(TaskReceiving(record.Packet,fileId))return;
+            if(state.Status=="本机文件已删除")state.SavedBefore=true;
             item.AutomaticPending = true; item.Status = "排队中"; FileState(item, null, "排队中"); main.TrySave(item.Record);
             main.ReceiveAutomatically();
         }
@@ -612,7 +623,7 @@ namespace FeiqLight
                 files.Items.Remove(item);
             }
             main.CancelIncomingOffer(peer, record, !active); history.Delivery(record);
-            fileStatus.Text = "对方已取消发送";
+            fileStatus.Text = (record.Transfers ?? new FileTransferState[0]).Any(f => f.Status == "对方已取消发送") ? "对方已取消发送" : "原邀请已失效，请让对方重新发送";
         }
         protected override void OnFormClosing(FormClosingEventArgs e) { if (e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; main.CloseChat(this); return; } if (receiving != null) receiving.Cancel(); base.OnFormClosing(e); }
         private void FileState(ReceivedFile item, int? percent, string status, string path = null, double bytesPerSecond = 0)

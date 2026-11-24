@@ -247,12 +247,18 @@ namespace FeiqLight
                 else if(!String.IsNullOrEmpty(item.File.LocalPath)&&File.Exists(item.File.LocalPath))MediaPreview.OpenFile(this,item.File.LocalPath,false);
                 else if(!item.Record.Outgoing&&!item.Ended)await RunTaskOperation(item,!main.ReceivingTask(item.Record,item.File.Id));
             }
-            catch(Exception error){using(var notice=new NoticeDialog("任务未完成",error.Message))notice.ShowDialog(this);}
+            catch(Exception error)
+            {
+                if(IsDisposed||Disposing)main.FileReceiveStatus("任务未完成："+error.Message);
+                else using(var notice=new NoticeDialog("任务未完成",error.Message))notice.ShowDialog(this);
+            }
             if(!IsDisposed){localFileSignature=null;RefreshRows();}
         }
         private async Task RunTaskOperation(Item item,bool reject)
         {
             if(taskOperationPending)return;
+            // 模态循环结束后线程可能没有同步上下文；await 之后的界面收尾必须回到 UI 线程。
+            if(!InvokeRequired&&System.Threading.SynchronizationContext.Current==null)System.Threading.SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
             taskOperationPending=true;secondary.Enabled=false;
             try
             {
@@ -264,7 +270,12 @@ namespace FeiqLight
                 }
                 else await main.CancelReceiveTask(item.Record,item.File.Id);
             }
-            catch(Exception error){using(var notice=new NoticeDialog("任务未完成",error.Message))notice.ShowDialog(this);}
+            catch(Exception error)
+            {
+                // 等待下载线程退出期间窗口可能已关闭；已释放的窗口不能再作弹窗宿主，否则未处理异常会结束进程。
+                if(IsDisposed||Disposing)main.FileReceiveStatus("任务未完成："+error.Message);
+                else using(var notice=new NoticeDialog("任务未完成",error.Message))notice.ShowDialog(this);
+            }
             finally{taskOperationPending=false;if(!IsDisposed){localFileSignature=null;RefreshRows();}}
         }
         private void ShowActions()

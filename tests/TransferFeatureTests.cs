@@ -203,6 +203,60 @@ namespace FeiqLight.Tests
                 }
             }
         }
+        private static void BatchDeleteFailureRegression()
+        {
+            var store=new LocalStore(Path.Combine(root,"batch-delete-failure"));
+            string gone=Path.Combine(store.Root,"edge","gone"),keep=Path.Combine(store.Root,"edge","keep");Directory.CreateDirectory(gone);Directory.CreateDirectory(keep);
+            Func<long,string[],ChatRecord> make=(packet,paths)=>new ChatRecord{PeerId="edge-peer",Packet=packet,Sender="peer",Text="files "+packet,Time=DateTime.Now,State="已保存",HasAttachments=true,LocalFiles=paths,Transfers=paths.Select((path,index)=>new FileTransferState{Id=index,Name=Path.GetFileName(path),LocalPath=path,Status="已保存",Percent=100}).ToArray()};
+            string a=Path.Combine(gone,"a.txt"),b=Path.Combine(keep,"b.txt"),locked=Path.Combine(keep,"占用.txt"),c=Path.Combine(keep,"c.txt"),env=Path.Combine(keep,"%OS%.txt"),single=Path.Combine(keep,"%TEMP% 单个.txt");
+            foreach(string path in new[]{a,b,locked,c,env,single})File.WriteAllText(path,"x");
+            Directory.Delete(gone,true);
+            ChatRecord missingParent=make(1,new[]{a}),mixed=make(2,new[]{b,locked,c}),named=make(3,new[]{env}),one=make(4,new[]{single});
+            ReceivedFilesDeletionResult planned=store.DeleteReceivedFiles(new[]{missingParent,mixed,named},false);
+            Check(planned.DeletedCount==4&&planned.SkippedDeletedCount==1&&planned.FailedCount==0&&File.Exists(b)&&mixed.Transfers[0].Status=="已保存","预览统计错误或提前修改文件");
+            ReceivedFilesDeletionResult result;
+            using(new FileStream(locked,FileMode.Open,FileAccess.Read,FileShare.None))result=store.DeleteReceivedFiles(new[]{missingParent,mixed,named});
+            Check(result.DeletedCount==3&&result.SkippedDeletedCount==1&&result.FailedCount==1&&result.Text.StartsWith("已删除 3 个本机文件，1 个已删除跳过。")&&result.Text.Contains("1 个删除失败")&&result.Text.Contains("占用.txt"),"占用或父目录缺失时统计错误："+result.Text);
+            Check(!File.Exists(b)&&!File.Exists(c)&&!File.Exists(env)&&File.Exists(locked),"占用文件中断了同批其余文件，或含环境变量写法的文件名未删除");
+            Check(missingParent.Transfers[0].Status=="本机文件已删除"&&missingParent.Transfers[0].LocalPath==null&&mixed.Transfers[0].Status=="本机文件已删除"&&mixed.Transfers[2].Status=="本机文件已删除"&&mixed.Transfers[1].Status=="已保存"&&mixed.Transfers[1].LocalPath==locked&&named.Transfers[0].Status=="本机文件已删除","失败项被错标或成功项未订正");
+            ChatRecord restored=new LocalStore(store.Root).History("edge-peer",10).Single(record=>record.Packet==2);
+            Check(restored.Transfers[1].LocalPath==locked&&restored.Transfers[1].Status=="已保存"&&restored.Transfers[0].Status=="本机文件已删除"&&restored.GetLocalFiles().Single()==locked,"部分失败后的落盘状态错误");
+            result=store.DeleteReceivedFiles(new[]{mixed});
+            Check(result.DeletedCount==1&&result.SkippedDeletedCount==2&&result.FailedCount==0&&!File.Exists(locked)&&mixed.Transfers[1].Status=="本机文件已删除","解除占用后重试未完成："+result.Text);
+            store.DeleteReceivedFile(one,single);Check(!File.Exists(single)&&one.Transfers[0].Status=="本机文件已删除","单个删除仍展开文件名中的环境变量");
+        }
+        private static void ExpiredReReceiveRegression()
+        {
+            Theme.Configure(false,"blue");var store=new LocalStore(Path.Combine(root,"expired-rereceive"));
+            var settings=new AppSettings{CloseToTray=false,Notifications=false,AutoReceiveFiles=false,ReceiveFolder=Path.Combine(store.Root,"received"),Conversations=new[]{new SavedConversation{Endpoint="127.0.0.1:"+FreePort(),Login="expired-peer",Nickname="失效邀请设备"}}};
+            using(var network=new LanService(settings,FreePort(),true,"expired-rereceive"))using(var main=new MainForm(network,store))
+            {
+                Peer peer=network.Peers.Single();string sha=new string('c',64);
+                Func<int,string,string,bool,FileTransferState> file=(id,name,status,before)=>new FileTransferState{Id=id,Name=name,Size=4096,Modified=1,Sha256=sha,RelativePath=name,Status=status,Percent=status=="已暂停"?30:0,SavedBefore=before};
+                // 未打开会话：暂停中的重新接收遇到撤销通知，只恢复删除态。
+                var closed=new ChatRecord{PeerId=peer.Id,Packet=201,Sender=peer.Nickname,Text="[文件] 重收.bin",Time=DateTime.Now,State="已保存",HasAttachments=true,Transfers=new[]{file(0,"重收.bin","已暂停",true),file(1,"早已删除.bin","本机文件已删除",false)}};
+                var mixed=new ChatRecord{PeerId=peer.Id,Packet=202,Sender=peer.Nickname,Text="[文件] 混合",Time=DateTime.Now,State="已接收 1 / 2",HasAttachments=true,Transfers=new[]{file(0,"重收2.bin","已暂停",true),file(1,"未接收.bin","已暂停",false)}};
+                var opened=new ChatRecord{PeerId=peer.Id,Packet=203,Sender=peer.Nickname,Text="[文件] 会话内重收.bin",Time=DateTime.Now,State="已保存",HasAttachments=true,Transfers=new[]{file(0,"会话内重收.bin","本机文件已删除",false)}};
+                foreach(ChatRecord record in new[]{closed,mixed,opened}){store.Append(record);main.TrackTransfer(record);}
+                var attachment=new Attachment{Id=0,Name="重收.bin",Size=4096,Modified=1,Sha256=sha,RelativePath="重收.bin"};
+                string partial=LanService.PartialPath(peer,201,attachment,SendBatch.Destination(settings.ReceiveFolder,attachment));File.WriteAllBytes(partial,new byte[64]);
+                main.Show();
+                main.CancelIncomingOffer(peer,closed,true);
+                Check(closed.Transfers.All(item=>item.Status=="本机文件已删除"&&item.Percent==0)&&closed.State=="已保存"&&!File.Exists(partial),"失效邀请把已接收历史改成对方取消或残留断点");
+                Check(Field<Label>(main,"status").Text.Contains("原邀请已失效"),"失效邀请缺少准确提示："+Field<Label>(main,"status").Text);
+                ChatRecord saved=new LocalStore(store.Root).History(peer.Id,10).Single(record=>record.Packet==201);
+                Check(saved.Transfers[0].Status=="本机文件已删除"&&saved.Transfers[0].SavedBefore&&saved.State=="已保存","恢复的删除态或标记未持久化");
+                main.CancelIncomingOffer(peer,mixed,true);
+                Check(mixed.Transfers[0].Status=="本机文件已删除"&&mixed.Transfers[1].Status=="对方已取消发送"&&mixed.State=="对方已取消发送"&&Field<Label>(main,"status").Text.Contains("对方已取消发送"),"同批真正未接收的附件未标记对方取消");
+                // 会话内点「重新接收」后对方撤销：先记下曾保存，再恢复删除态。
+                main.OpenChat(peer);ChatForm chat=main.ActiveChat;chat.QueueTask(opened,0);
+                Check(opened.Transfers[0].SavedBefore&&opened.Transfers[0].Status!="本机文件已删除","重新接收未登记曾保存标记");
+                chat.OfferCanceled(203);PumpFor(400);
+                Check(opened.Transfers[0].Status=="本机文件已删除"&&opened.State=="已保存"&&Field<Label>(chat,"fileStatus").Text.Contains("原邀请已失效"),"会话内重新接收失效后状态错误："+opened.Transfers[0].Status+" / "+opened.State);
+                Check(new LocalStore(store.Root).History(peer.Id,10).Single(record=>record.Packet==203).Transfers[0].Status=="本机文件已删除","会话内恢复未落盘");
+                main.ExitApplication();
+            }
+        }
         private static void TransferOperationsRegression()
         {
             foreach(bool dark in new[]{false,true})
@@ -282,10 +336,14 @@ namespace FeiqLight.Tests
         }
         [STAThread] private static int Main(string[] args)
         {
-            Console.OutputEncoding=new UTF8Encoding(false);root=Path.GetFullPath(args[0]);output=Path.GetFullPath(args[1]);Directory.CreateDirectory(root);Directory.CreateDirectory(output);
+            Console.OutputEncoding=new UTF8Encoding(false);
+            // 正式程序始终处于 Application.Run 的同步上下文中；测试没有常驻消息循环，模态弹窗结束会卸载自动安装的上下文，
+            // 使 await 之后的界面代码落到线程池。固定安装一份，保持与正式程序相同的线程模型。
+            
+            root=Path.GetFullPath(args[0]);output=Path.GetFullPath(args[1]);Directory.CreateDirectory(root);Directory.CreateDirectory(output);
             if(args.Length>2&&args[2]=="active-actions")
             {
-                Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);
+                Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);WindowsFormsSynchronizationContext.AutoInstall=false;SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
                 Run("传输任务真实停滞TCP：直接取消与活跃拒绝释放句柄、保留同批终态",ActiveTransferOperationsRegression);
                 Console.WriteLine("TOTAL "+passed+" passed, "+failed+" failed");return failed==0?0:1;
             }
@@ -367,8 +425,10 @@ namespace FeiqLight.Tests
                 var store=new LocalStore(Path.Combine(root,"archive"));var record=new ChatRecord{PeerId="test",Packet=1,Text="附件",HasAttachments=true,Transfers=new[]{new FileTransferState{Id=1,Name="one",Size=8}}};store.Append(record);
                 for(int i=2;i<302;i++)store.Append(new ChatRecord{PeerId="test",Packet=i,Text="普通文字",Time=DateTime.Now});Check(store.AttachmentHistory("test").Count==1,"旧页附件遗漏");store.DeleteRecords("test",new[]{record});Check(store.AttachmentHistory("test").Count==0,"删除消息被任务页复活");
             });
-            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);WindowsFormsSynchronizationContext.AutoInstall=false;SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
             Run("多选删除：入站文件统计、出站保护、断点保留、确认取消及重启状态",BatchDeleteRegression);
+            Run("多选删除：父目录缺失、中途占用继续其余文件并可重试、文件名含环境变量写法",BatchDeleteFailureRegression);
+            Run("重新接收遇到失效邀请：恢复本机文件已删除、不改写接收历史并持久化",ExpiredReReceiveRegression);
             Run("传输任务：默认选中、直接拒绝、暂停断点清理、右键和访客文件删除",TransferOperationsRegression);
             Run("传输任务真实停滞TCP：直接取消与活跃拒绝释放句柄、保留同批终态",ActiveTransferOperationsRegression);
             Run("传输背景边界：极小高度、原生TopIndex=-1和ItemHeight=0不崩溃",()=>{
