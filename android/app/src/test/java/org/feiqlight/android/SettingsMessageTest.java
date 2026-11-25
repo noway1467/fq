@@ -143,8 +143,25 @@ public final class SettingsMessageTest {
         File file=new File(context.getFilesDir(),"保留的文件.txt");try(OutputStream output=new FileOutputStream(file)){output.write(7);}new DraftStore(context).save(peer.id(),"保留草稿");
         LanNode.Message incoming=new LanNode.Message();incoming.number=1;incoming.text="入站";incoming.time=1;incoming.state="已收到";
         LanNode.Message outgoing=new LanNode.Message();outgoing.number=1;outgoing.text="出站";outgoing.time=2;outgoing.outgoing=true;outgoing.state="已送达";outgoing.localPaths.add(file.getPath());
-        try(ChatStore store=new ChatStore(context)) {store.message(peer,incoming,false,false);store.message(peer,outgoing,false,false);store.message(other,incoming,false,false);store.deleteMessages(peer.id(),Collections.singletonList(incoming));assertEquals("出站",store.history(peer.id()).get(0).text);assertFalse(store.message(peer,incoming,false,false));store.deleteMessages(peer.id(),Collections.singletonList(outgoing));}
+        try(ChatStore store=new ChatStore(context)) {
+            store.message(peer,incoming,false,false);store.message(peer,outgoing,false,false);store.message(other,incoming,false,false);
+            String received=ChatService.fileKey(peer.id(),1,0,false),sent=ChatService.fileKey(peer.id(),1,0,true);
+            store.transfer(received,peer.id(),1,0,"本机文件已删除");store.transfer(sent,peer.id(),1,100,"对方已校验保存");
+            store.deleteMessages(peer.id(),Collections.singletonList(incoming));assertEquals("出站",store.history(peer.id()).get(0).text);assertFalse(store.message(peer,incoming,false,false));
+            assertNull(store.transfer(received));assertEquals("对方已校验保存",store.transfer(sent).state);
+            store.transfer(received,peer.id(),1,100,"已保存");assertNull("迟到进度重新登记了已删消息",store.transfer(received));
+            store.deleteMessages(peer.id(),Collections.singletonList(outgoing));
+        }
         try(ChatStore store=new ChatStore(context)) {assertFalse(store.message(peer,incoming,false,false));assertFalse(store.message(peer,outgoing,true,false));assertTrue(store.history(peer.id()).isEmpty());assertEquals(1,store.history(other.id()).size());assertTrue(file.exists());assertEquals("保留草稿",new DraftStore(context).read(peer.id()));}
+    }
+    @Test public void clearedConversationKeepsMessageIdentitiesAcrossRestart()throws Exception {
+        Context context=RuntimeEnvironment.getApplication();LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:32425"),"clear","host","清空","");
+        LanNode.Message old=new LanNode.Message();old.number=1;old.text="要清空的正文";old.state="已收到";
+        try(ChatStore store=new ChatStore(context)){store.message(peer,old,false,false);store.remove(peer.id(),true,false);assertTrue(store.history(peer.id()).isEmpty());}
+        try(ChatStore store=new ChatStore(context)){
+            assertFalse(store.message(peer,old,false,false));store.remove(peer.id(),true,false);assertFalse(store.message(peer,old,false,false));
+            old.number=2;assertTrue(store.message(peer,old,false,false));assertEquals(1,store.history(peer.id()).size());
+        }
     }
     @Test public void sentAttachmentRecordCanBeDeletedWhileOriginalAndOfferRemain() throws Exception {
         ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();

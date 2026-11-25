@@ -529,8 +529,8 @@ namespace FeiqLight
         {
             lock(gate)
             {
-                string path=HistoryPath(peerId);
-                if(File.Exists(path))File.Delete(path);
+                // 原子改写为仅含消息身份的删除标记；失败时保留原历史与内存索引。
+                DeleteHistoryRecords(peerId,null);
                 incomingPackets.Remove(peerId);
                 deletedRecords.Remove(peerId);
                 // ACK 和退出收尾不应把刚清空的旧消息重新写回。
@@ -545,6 +545,10 @@ namespace FeiqLight
             if (selected.Any(r => r == null || r.PeerId != peerId)) throw new ArgumentException("只能删除当前会话的消息。", "records");
             HashSet<string> keys = new HashSet<string>(selected.Select(RecordKey), StringComparer.Ordinal);
             if (keys.Count == 0) return;
+            DeleteHistoryRecords(peerId,keys);
+        }
+        private void DeleteHistoryRecords(string peerId,HashSet<string> keys)
+        {
             lock (gate)
             {
                 string path = HistoryPath(peerId);
@@ -567,18 +571,18 @@ namespace FeiqLight
                             }
                             catch (ArgumentException) { }
                             catch (InvalidOperationException) { }
-                            if (item != null && item.PeerId == peerId && keys.Contains(RecordKey(item)))
+                            if (item != null && item.PeerId == peerId && (keys==null||keys.Contains(RecordKey(item))))
                             {
                                 // 留下不含正文或附件路径的消息号，重启后的重复包和旧 ACK 也不能恢复已删除消息。
                                 if (written.Add(RecordKey(item))) writer.WriteLine(json.Serialize(new ChatRecord { PeerId = peerId, Packet = item.Packet, Outgoing = item.Outgoing, Text = "", Deleted = true }));
                             }
-                            else writer.WriteLine(line);
+                            else if(keys!=null)writer.WriteLine(line);
                         }
                     }
                     File.Replace(temporary, path, null);
                     HashSet<string> deleted;
                     if (deletedRecords.TryGetValue(peerId, out deleted)) deleted.UnionWith(written);
-                    foreach (ChatRecord record in selected.Where(r => written.Contains(RecordKey(r)))) activePending.Remove(record.PeerId + "/" + record.Packet);
+                    foreach(string key in activePending.Where(p=>p.Value.PeerId==peerId&&written.Contains(RecordKey(p.Value))).Select(p=>p.Key).ToArray())activePending.Remove(key);
                 }
                 finally { if (File.Exists(temporary)) File.Delete(temporary); }
             }

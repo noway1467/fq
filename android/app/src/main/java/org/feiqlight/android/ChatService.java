@@ -226,14 +226,19 @@ public final class ChatService extends Service {
                     String key=fileKey(task.peer,task.message.number,task.file.id,false);
                     if(previous!=progressBefore.get(key)&&previous!=null&&wasStored(previous.state)) {
                         task.stored=!previous.state.equals("本机文件已删除");
+                        task.savedProgress=new ChatStore.TransferState(key,previous.percent,previous.state);
                         continue;
                     }
+                    String previousState=previous!=null?previous.state:task.savedProgress!=null?task.savedProgress.state:task.message.state;
                     if(task.stored) {
-                        if(previous!=null&&previous.state.equals("本机文件已删除"))fileProgress(task.peer,task.message.number,task.file.id,false,100,"已保存",null);
+                        if("本机文件已删除".equals(previousState)) {
+                            task.savedProgress=new ChatStore.TransferState(key,100,"已保存");
+                            fileProgress(task.peer,task.message.number,task.file.id,false,100,"已保存",null);
+                        }
                         continue;
                     }
-                    boolean storedBefore=previous==null?wasStored(task.message.state):wasStored(previous.state);
-                    if(storedBefore&&(previous==null||!previous.state.equals("本机文件已删除"))) {
+                    if(wasStored(previousState)&&!"本机文件已删除".equals(previousState)) {
+                        task.savedProgress=new ChatStore.TransferState(key,0,"本机文件已删除");
                         fileProgress(task.peer,task.message.number,task.file.id,false,0,"本机文件已删除",null);
                     }
                 }
@@ -273,7 +278,7 @@ public final class ChatService extends Service {
         NotificationManager manager=getSystemService(NotificationManager.class);
         manager.createNotificationChannel(new NotificationChannel("connection","局域网连接",NotificationManager.IMPORTANCE_LOW));
         manager.createNotificationChannel(new NotificationChannel("messages","新消息",NotificationManager.IMPORTANCE_DEFAULT));
-        io.execute(()->{ try { store.recoverPending();List<ChatStore.TransferState> saved=store.transfers();main.post(()->{for(ChatStore.TransferState item:saved)fileProgress.putIfAbsent(item.key,new FileProgress(item.percent,item.state,null));});cleanStaging(); publish(); } catch (Exception e) { fail(e); } });
+        io.execute(()->{ try { store.recoverPending();List<ChatStore.TransferState> saved=store.transfers(null,2000);main.post(()->{for(ChatStore.TransferState item:saved)fileProgress.putIfAbsent(item.key,new FileProgress(item.percent,item.state,null));});cleanStaging(); publish(); } catch (Exception e) { fail(e); } });
     }
     @Override public IBinder onBind(Intent intent) { return binder; }
     static boolean shouldRestoreConnection(Context context) {
@@ -498,7 +503,7 @@ public final class ChatService extends Service {
                 LanNode.Peer peer=store.findPeer(id);
                 if(peer!=null)for(LanNode.Message message:store.incomingAttachments(id))deleteIncomingPartials(peer,message);
             }
-            store.remove(id,clear,hide);publish();main.post(()->done.accept(true));
+            store.remove(id,clear,hide);publish();main.post(()->{if(clear){fileProgress.entrySet().removeIf(entry->entry.getKey().startsWith(id+"/"));notifyTransfers.run();}done.accept(true);});
         }catch(Exception e){fail(e);main.post(()->done.accept(false));}});
     }
     boolean online() { LanNode current=node;return current!=null && !connecting && current.networkAvailable(); }
@@ -587,12 +592,18 @@ public final class ChatService extends Service {
         for(LanNode.Message message:rows)for(int index=0;index<message.files.size();index++) {
             if(!current.getAsBoolean())return page;
             Protocol.Attachment file=message.files.get(index);Uri uri;
+            String key=fileKey(peer,message.number,file.id,message.outgoing);
+            // 仅补当前页被内存缓存淘汰的状态，数据库读取始终留在后台。
+            if(!progress.containsKey(key)) {
+                ChatStore.TransferState saved=store.transfer(key);
+                if(saved!=null)progress.put(key,new FileProgress(saved.percent,saved.state,null));
+            }
             if(message.outgoing)uri=storage.outgoingUri(message,index);
             else {
                 File local=receivedFile(peer,message.number,file);
                 uri=local.isFile()?ReceivedFileProvider.uri(this,local,file.name):storage.existingSaved(local);
             }
-            page.files.put(fileKey(peer,message.number,file.id,message.outgoing),uri);
+            page.files.put(key,uri);
         }
         return page;
     }
@@ -958,6 +969,8 @@ public final class ChatService extends Service {
         if(busy()) {
             if(activeReceive!=null&&activeReceive.peer.id().equals(peer.id())&&activeReceive.packet==packet&&activeReceive.file.id==file.id)return;
             if(waiting.size()>=1000){showError("待接收文件已达 1000 个，请先处理已有任务");return;}
+            // 排队进度也会写库；先读取旧终态，避免覆盖后丢失「曾保存」标记。
+            if(before==null)queue(()->{ChatStore.TransferState saved=store.transfer(receiveKey);if(saved!=null&&wasStored(saved.state))rememberReceivedBefore(receiveKey,true);});
             waiting.put(receivedFile(peer,packet,file).getName(),new ReceiveRequest(peer,packet,file));
             FileProgress previous=progress(peer.id(),packet,file.id,false);fileProgress(peer.id(),packet,file.id,false,previous==null?0:previous.percent,"排队中",null);return;
         }
@@ -972,6 +985,10 @@ public final class ChatService extends Service {
             });
             int[] last={0};
             try {
+            if(before==null) {
+                ChatStore.TransferState saved=io.submit(()->store.transfer(receiveKey)).get();
+                if(saved!=null&&wasStored(saved.state))rememberReceivedBefore(receiveKey,true);
+            }
             progress.accept(0,"连接中 · 点击取消");
             File dir=directory("received");
             if(!storage.exists(target)) {
@@ -1069,7 +1086,7 @@ public final class ChatService extends Service {
                     LanNode.Message stored=store.findMessage(peer,message.number,false);
                     if(stored!=null)storedMessages.add(stored);
                 }
-                for(ChatStore.TransferState stored:store.transfers())if(wasStored(stored.state))storedTransfers.add(stored.key);
+                for(ChatStore.TransferState stored:store.transfers(peer,0))if(wasStored(stored.state))storedTransfers.add(stored.key);
                 Set<String> seen=new HashSet<>();int deleted=0,skippedDeleted=0,unreceived=0;
                 for(LanNode.Message message:storedMessages)for(Protocol.Attachment file:message.files) {
                     String key=fileKey(peer,message.number,file.id,false);
@@ -1157,7 +1174,7 @@ public final class ChatService extends Service {
         LanNode.Message message=store.findMessage(peer.id(),packet,false);
         if(message==null)return;
         Set<String> stored=new HashSet<>();
-        for(ChatStore.TransferState item:store.transfers())if(wasStored(item.state))stored.add(item.key);
+        for(ChatStore.TransferState item:store.transfers(peer.id(),0))if(wasStored(item.state))stored.add(item.key);
         List<Protocol.Attachment> unfinished=new ArrayList<>();int kept=0;boolean restored=false;
         for(Protocol.Attachment file:message.files) {
             File target=receivedFile(peer,packet,file);String key=fileKey(peer.id(),packet,file.id,false);

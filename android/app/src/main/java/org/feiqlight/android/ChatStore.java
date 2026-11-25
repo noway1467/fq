@@ -58,13 +58,26 @@ final class ChatStore extends SQLiteOpenHelper {
     private static void createTransfers(SQLiteDatabase db){db.execSQL("CREATE TABLE transfer_states(task TEXT PRIMARY KEY, peer TEXT NOT NULL, packet INTEGER NOT NULL, percent INTEGER NOT NULL, state TEXT NOT NULL, time INTEGER NOT NULL)");}
     static final class TransferState {final String key,state;final int percent;TransferState(String key,int percent,String state){this.key=key;this.percent=percent;this.state=state;}}
     void transfer(String key,String peer,long packet,int percent,String state){
-        ContentValues values=new ContentValues();values.put("task",key);values.put("peer",peer);values.put("packet",packet);values.put("percent",percent);values.put("state",state);values.put("time",System.currentTimeMillis());
-        SQLiteDatabase db=getWritableDatabase();db.insertWithOnConflict("transfer_states",null,values,SQLiteDatabase.CONFLICT_REPLACE);db.execSQL("DELETE FROM transfer_states WHERE task NOT IN (SELECT task FROM transfer_states ORDER BY time DESC LIMIT 2000)");
+        // 文件终态属于历史，不能按缓存数量淘汰；迟到进度也不能重新登记已删除的消息。
+        getWritableDatabase().execSQL("INSERT OR REPLACE INTO transfer_states(task,peer,packet,percent,state,time) SELECT ?,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM deleted_messages WHERE peer=? AND packet=? AND outgoing=?)",
+            new Object[]{key,peer,packet,percent,state,System.currentTimeMillis(),peer,packet,key.endsWith("/true")?1:0});
     }
-    List<TransferState> transfers(){
-        List<TransferState> result=new ArrayList<>();try(Cursor cursor=getReadableDatabase().rawQuery("SELECT task,percent,state FROM transfer_states ORDER BY time",null)){
-            while(cursor.moveToNext()){String state=cursor.getString(2);if(state.startsWith("发送中"))state="上次退出，等待对方续传";else if(state.startsWith("接收中")||state.startsWith("连接中")||state.startsWith("保存中")||state.equals("排队中")||state.startsWith("正在校验")||state.startsWith("正在核验"))state="上次退出 · 点击续传";result.add(new TransferState(cursor.getString(0),cursor.getInt(1),state));}
-        }return result;
+    List<TransferState> transfers(){return transfers(null,0);}
+    List<TransferState> transfers(String peer,int limit){
+        String sql="SELECT task,percent,state FROM transfer_states"+(peer==null?"":" WHERE peer=?")+" ORDER BY time DESC"+(limit>0?" LIMIT "+limit:"");
+        List<TransferState> result=new ArrayList<>();try(Cursor cursor=getReadableDatabase().rawQuery(sql,peer==null?null:new String[]{peer})){
+            while(cursor.moveToNext())result.add(restoredTransfer(cursor.getString(0),cursor.getInt(1),cursor.getString(2)));
+        }java.util.Collections.reverse(result);return result;
+    }
+    TransferState transfer(String key){
+        try(Cursor cursor=getReadableDatabase().rawQuery("SELECT percent,state FROM transfer_states WHERE task=?",new String[]{key})){
+            return cursor.moveToFirst()?restoredTransfer(key,cursor.getInt(0),cursor.getString(1)):null;
+        }
+    }
+    private static TransferState restoredTransfer(String key,int percent,String state){
+        if(state.startsWith("发送中"))state="上次退出，等待对方续传";
+        else if(state.startsWith("接收中")||state.startsWith("连接中")||state.startsWith("保存中")||state.equals("排队中")||state.startsWith("正在校验")||state.startsWith("正在核验"))state="上次退出 · 点击续传";
+        return new TransferState(key,percent,state);
     }
     void peer(LanNode.Peer p) {
         ContentValues v=new ContentValues(); v.put("id",p.id()); v.put("endpoint",p.endpoint.getAddress().getHostAddress()+":"+p.endpoint.getPort());
@@ -116,7 +129,7 @@ final class ChatStore extends SQLiteOpenHelper {
             for(LanNode.Message message:selected) {
                 String[] key={peer,Long.toString(message.number),message.outgoing?"1":"0"};
                 if(db.delete("messages","peer=? AND packet=? AND outgoing=?",key)>0) {
-                    db.delete("transfer_states","peer=? AND packet=?",new String[]{peer,Long.toString(message.number)});
+                    db.delete("transfer_states","peer=? AND packet=? AND task LIKE ?",new String[]{peer,Long.toString(message.number),"%/"+message.outgoing});
                     // 删除消息号与正文删除在同一事务里，重启后的重复包不能恢复记录。
                     db.execSQL("INSERT OR IGNORE INTO deleted_messages(peer,packet,outgoing) VALUES(?,?,?)",new Object[]{peer,message.number,message.outgoing?1:0});
                 }
@@ -135,7 +148,11 @@ final class ChatStore extends SQLiteOpenHelper {
     void remove(String id,boolean clear,boolean hide) {
         SQLiteDatabase db=getWritableDatabase();db.beginTransaction();
         try {
-            if(clear) { db.delete("messages","peer=?",new String[]{id});db.delete("transfer_states","peer=?",new String[]{id});db.execSQL("UPDATE peers SET preview='',time=0 WHERE id=?",new Object[]{id}); }
+            if(clear) {
+                // 与正文清空在同一事务里留存消息身份，重启后旧包不能作为新消息重新出现。
+                db.execSQL("INSERT OR IGNORE INTO deleted_messages(peer,packet,outgoing) SELECT peer,packet,outgoing FROM messages WHERE peer=?",new Object[]{id});
+                db.delete("messages","peer=?",new String[]{id});db.delete("transfer_states","peer=?",new String[]{id});db.execSQL("UPDATE peers SET preview='',time=0 WHERE id=?",new Object[]{id});
+            }
             db.execSQL("UPDATE peers SET hidden=?,unread=0 WHERE id=?",new Object[]{hide?1:0,id});db.setTransactionSuccessful();
         } finally {db.endTransaction();}
     }
@@ -194,12 +211,17 @@ final class ChatStore extends SQLiteOpenHelper {
         final String peer;final LanNode.Message message;final Protocol.Attachment file;
         java.io.File guestFile;
         boolean stored;
+        TransferState savedProgress;
         FileTask(String peer,LanNode.Message message,Protocol.Attachment file){this.peer=peer;this.message=message;this.file=file;}
     }
     List<FileTask> fileTasks() {
         List<FileTask> rows=new ArrayList<>();
+        Map<String,TransferState> states=new HashMap<>();for(TransferState state:transfers())states.put(state.key,state);
         try(Cursor cursor=getReadableDatabase().rawQuery("SELECT "+MESSAGE_COLUMNS+",peer FROM messages WHERE files<>'' ORDER BY time DESC,id DESC",null)) {
-            while(cursor.moveToNext()){LanNode.Message message=messageAt(cursor);for(Protocol.Attachment file:message.files)rows.add(new FileTask(cursor.getString(8),message,file));}
+            while(cursor.moveToNext()){
+                LanNode.Message message=messageAt(cursor);String peer=cursor.getString(8);
+                for(Protocol.Attachment file:message.files){FileTask task=new FileTask(peer,message,file);task.savedProgress=states.get(peer+"/"+message.number+"/"+file.id+"/"+message.outgoing);rows.add(task);}
+            }
         }
         return rows;
     }

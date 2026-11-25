@@ -457,6 +457,10 @@ public final class MainActivity extends Activity implements ChatService.Observer
         chatFiles.clear();chatFiles.putAll(page.files);chatFileProgress.clear();chatFileProgress.putAll(page.progress);
         renderMessages(page.rows);
     }
+    private ChatService.FileProgress chatProgress(LanNode.Message message,Protocol.Attachment file) {
+        ChatService.FileProgress live=service==null?null:service.progress(selected,message.number,file.id,message.outgoing);
+        return live!=null?live:chatFileProgress.get(ChatService.fileKey(selected,message.number,file.id,message.outgoing));
+    }
     private boolean chatSaved(LanNode.Message message,Protocol.Attachment file) {
         String key=ChatService.fileKey(selected,message.number,file.id,message.outgoing);
         ChatService.FileProgress progress=service==null?null:service.progress(selected,message.number,file.id,message.outgoing);
@@ -603,7 +607,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
                     if(service!=sourceService||!cardPeer.equals(selected))return;
                     double bytes=0,done=0;int savedCount=0;
                     for(Protocol.Attachment file:m.files) {
-                        ChatService.FileProgress p=sourceService.progress(cardPeer,m.number,file.id,m.outgoing);
+                        ChatService.FileProgress p=chatProgress(m,file);
                         boolean saved=p!=null&&taskComplete(p.state);int percent=p==null?0:p.percent;
                         if(!m.outgoing&&sourceConversation!=null) {
                             saved=chatSaved(m,file);
@@ -676,7 +680,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         LinearLayout.LayoutParams bp=new LinearLayout.LayoutParams(width,dp(5));bp.topMargin=dp(2);bp.bottomMargin=dp(5);bubble.addView(bar,bp);
         Runnable update=()->{
             if(service!=source||source==null||!selected.equals(peer))return;
-            ChatService.FileProgress progress=source.progress(peer,message.number,file.id,message.outgoing);
+            ChatService.FileProgress progress=chatProgress(message,file);
             boolean saved=false;
             if(!message.outgoing&&conversation!=null)saved=chatSaved(message,file);
             int percent=progress!=null?progress.percent:saved?100:0;
@@ -1013,9 +1017,15 @@ public final class MainActivity extends Activity implements ChatService.Observer
             if(reloadTasksPending&&tasksDialog!=null&&tasksDialog.isShowing()){reloadTasksPending=false;loadTaskRows();}
         });
     }
+    private ChatService.FileProgress taskProgress(ChatStore.FileTask item) {
+        ChatService.FileProgress live=service==null?null:service.progress(item.peer,item.message.number,item.file.id,item.message.outgoing);
+        if(live!=null)return live;
+        ChatStore.TransferState saved=item.savedProgress;
+        return saved==null?null:new ChatService.FileProgress(saved.percent,saved.state,null);
+    }
     private String taskState(ChatStore.FileTask item) {
         if(item.guestFile!=null)return item.stored?"已保存":"本机文件已删除";
-        ChatService.FileProgress progress=service==null?null:service.progress(item.peer,item.message.number,item.file.id,item.message.outgoing);
+        ChatService.FileProgress progress=taskProgress(item);
         if(!item.message.outgoing) {
             if(progress!=null&&taskActive(progress.state))return progress.state;
             if(progress!=null&&ChatService.wasStored(progress.state))return progress.state.equals("本机文件已删除")?"本机文件已删除":"已保存";
@@ -1247,7 +1257,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
                 if(!selectedSource.isEmpty()&&!selectedSource.equals(source))continue;
                 String state=taskState(item);ChatStore.Conversation contact=conversation(item.peer);String name=item.guestFile!=null?"浏览器访客":contact==null?"已移除的设备":contact.displayName();
                 if(!(item.file.name+" "+name).toLowerCase(Locale.ROOT).contains(query)||filter==1&&!taskActive(state)||filter==2&&(taskActive(state)||taskComplete(state))||filter==3&&!taskComplete(state))continue;
-                next.add(item);if(taskComplete(state))completed++;ChatService.FileProgress p=service==null?null:service.progress(item.peer,item.message.number,item.file.id,item.message.outgoing);
+                next.add(item);if(taskComplete(state))completed++;ChatService.FileProgress p=taskProgress(item);
                 int percent=taskComplete(state)?100:state.equals("本机文件已删除")?0:p==null?0:p.percent;total+=item.file.size;done+=item.file.size*percent/100.0;
                 content.append(item.peer).append('\0').append(item.message.number).append('\0').append(item.message.outgoing).append('\0').append(item.file.id).append('\0')
                     .append(item.file.name).append('\0').append(item.file.size).append('\0').append(name).append('\0').append(time(item,now)).append('\0').append(state).append('\0').append(percent).append('\0')
@@ -1269,7 +1279,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         public View getView(int position,View old,ViewGroup parent) {
             ChatStore.FileTask item=items.get(position);LinearLayout box;
             if(old==null){box=column();box.setPadding(dp(20),dp(12),dp(20),dp(12));TextView name=text("",15,INK);name.setTypeface(null,Typeface.BOLD);name.setSingleLine();name.setEllipsize(TextUtils.TruncateAt.END);box.addView(name);TextView meta=text("",12,MUTED);meta.setSingleLine();meta.setEllipsize(TextUtils.TruncateAt.END);meta.setPadding(0,dp(5),0,dp(4));box.addView(meta);TextView status=text("",12,MUTED);status.setMaxLines(2);box.addView(status);ProgressBar bar=new ProgressBar(MainActivity.this,null,android.R.attr.progressBarStyleHorizontal);bar.setMax(100);bar.setProgressTintList(android.content.res.ColorStateList.valueOf(BLUE));bar.setProgressBackgroundTintList(android.content.res.ColorStateList.valueOf(LINE));LinearLayout.LayoutParams bp=new LinearLayout.LayoutParams(-1,dp(3));bp.topMargin=dp(8);box.addView(bar,bp);LinearLayout actions=row();LinearLayout.LayoutParams ap=new LinearLayout.LayoutParams(-1,-2);ap.topMargin=dp(8);box.addView(actions,ap);}else box=(LinearLayout)old;
-            ChatStore.Conversation contact=conversation(item.peer);String state=taskState(item);ChatService.FileProgress p=service==null?null:service.progress(item.peer,item.message.number,item.file.id,item.message.outgoing);
+            ChatStore.Conversation contact=conversation(item.peer);String state=taskState(item);ChatService.FileProgress p=taskProgress(item);
             String time=time(item,clock.getAsLong());
             ((TextView)box.getChildAt(0)).setText(item.file.name);((TextView)box.getChildAt(1)).setText((item.message.outgoing?"发送给 ":"来自 ")+(item.guestFile!=null?"浏览器访客":contact==null?"已移除的设备":contact.displayName())+" · "+size(item.file.size)+(time.isEmpty()?"":" · "+time));
             String label=taskLabel(item,state,p);
@@ -1324,7 +1334,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         } else if(!item.message.outgoing&&state.equals("本机文件已删除")) {
             fileAction(content,actions,"重新接收",()->{if(service==source)source.receive(contact.peer,item.message.number,item.file);});
         } else if(!item.message.outgoing&&!taskEnded(state)) {
-            ChatService.FileProgress progress=service.progress(item.peer,item.message.number,item.file.id,false);
+            ChatService.FileProgress progress=taskProgress(item);
             if(progress!=null&&progress.task!=null) {
                 fileAction(content,actions,"暂停并保留断点",()->{if(service==source)source.pauseFile(item.peer,item.message.number,item.file.id);});
                 fileAction(content,actions,"取消接收并清理断点",()->requestCancelFile(item));

@@ -330,7 +330,9 @@ namespace FeiqLight.Tests
                     using(FileStream locked=new FileStream(history,FileMode.Open,FileAccess.Read,FileShare.None)) ExpectFailure(()=>store.AppendIncoming(next),"未检测到历史写入失败");
                     Assert(store.AppendIncoming(next),"失败写入污染去重索引");
                     store.ClearHistory("peer");Assert(!store.AppendIncoming(incoming),"清空后的旧回调复活记录");
-                    incoming.Time=DateTime.Now.AddSeconds(1);Assert(store.AppendIncoming(incoming),"清空后索引未失效");
+                    store=new LocalStore(folder);incoming.Time=DateTime.Now.AddSeconds(1);Assert(!store.AppendIncoming(incoming),"清空后重启并重放旧消息复活历史");
+                    store.ClearHistory("peer");store=new LocalStore(folder);Assert(!store.AppendIncoming(incoming),"重复清空丢失旧删除标记");
+                    incoming.Packet=44;Assert(store.AppendIncoming(incoming),"清空后无法接收新编号消息");
                     ExpectFailure(()=>store.AppendIncoming(new ChatRecord {Outgoing=true}),"入站入口接受出站更新");
                 });
                 Run("入站去重覆盖历史显示窗口之外，且兼容坏尾行", () =>

@@ -304,6 +304,26 @@ public final class TransferFeatureTest {
             assertEquals(1,store.fileTasks().size());assertEquals(peer.id(),store.fileTasks().get(0).peer);store.deleteMessages(peer.id(),Collections.singletonList(message));assertTrue(store.fileTasks().isEmpty());
         }
     }
+    @Test public void oldDeletedFileStateSurvivesCacheEvictionAndRestart()throws Exception {
+        Context context=RuntimeEnvironment.getApplication();disableConnection(context);
+        LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:31234"),"long-file-history","host","旧文件状态","");
+        ChatStore.FileTask old=task(peer.id(),1,"已删除.txt",3);
+        try(ChatStore store=new ChatStore(context)) {
+            store.message(peer,old.message,false,false);
+            store.transfer(ChatService.fileKey(peer.id(),1,0,false),peer.id(),1,0,"本机文件已删除");
+            for(int i=2;i<=2002;i++)store.transfer(ChatService.fileKey(peer.id(),i,0,true),peer.id(),i,100,"对方已校验保存");
+            assertEquals(2002,store.transfers().size());
+        }
+        ServiceController<ChatService> controller=Robolectric.buildService(ChatService.class).create();ChatService service=controller.get();
+        Shadows.shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(context,ChatService.class),service.onBind(new Intent()));
+        try(ActivityController<MainActivity> activity=Robolectric.buildActivity(MainActivity.class).setup()) {
+            settle(service);assertTrue(((Map<?,?>)field(service,"fileProgress")).size()<=2000);
+            ChatStore.FileTask restored=fileTasks(service).get(0);assertEquals("本机文件已删除",restored.savedProgress.state);
+            assertEquals("本机文件已删除",taskState(activity.get(),restored));
+            ChatService.ChatPage page=((ExecutorService)field(service,"io")).submit(()->service.resolveChatPage(peer.id(),Collections.singletonList(old.message),new HashMap<>(),()->true)).get(5,TimeUnit.SECONDS);
+            assertEquals("本机文件已删除",page.progress.get(ChatService.fileKey(peer.id(),1,0,false)).state);
+        } finally {controller.destroy();}
+    }
     @Test public void chatToolbarOpensTasks()throws Exception {
         Context context=RuntimeEnvironment.getApplication();disableConnection(context);
         ServiceController<ChatService> serviceController=Robolectric.buildService(ChatService.class).create();ChatService service=serviceController.get();
