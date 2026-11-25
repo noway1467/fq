@@ -282,10 +282,10 @@ public final class SettingsMessageTest {
         try {
             LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:32425"),"rate","host","传输速率","");LanNode.Message message=new LanNode.Message();message.number=1;message.time=1;message.text="速率 English";message.outgoing=true;message.state="已送达";message.files=Collections.singletonList(new Protocol.Attachment(0,"长文件名 English.zip",104857600,0));service.incoming(peer,message,false);settle(service);invoke(activity,"open",new Class<?>[]{String.class},peer.id());settle(service);
             Class<?>[] signature={String.class,long.class,long.class,boolean.class,int.class,String.class,double.class,LanNode.Transfer.class};
-            invoke(service,"fileProgress",signature,peer.id(),1L,0L,true,42,"发送中",1572864.0,null);activity.transfersChanged();
+            invoke(service,"fileProgress",signature,peer.id(),1L,0L,true,42,"发送中",1572864.0,null);activity.transfersChanged();shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(250));
             View container=(View)field(activity,"messages");assertTrue(views(container).stream().anyMatch(v->v instanceof TextView&&((TextView)v).getText().toString().contains("42% · 1.5 MB/s")));
             ScrollView scroll=(ScrollView)field(activity,"scroll");int previous=scroll.getScrollY();snapshot(activity.getWindow().getDecorView(),"android-transfer-rate");
-            invoke(service,"fileProgress",signature,peer.id(),1L,0L,true,100,"已发送（非保存确认）",0.0,null);activity.transfersChanged();assertEquals(previous,scroll.getScrollY());assertFalse(views(container).stream().anyMatch(v->v instanceof TextView&&((TextView)v).getText().toString().contains("MB/s")));assertEquals(0,service.progress(peer.id(),1,0,true).bytesPerSecond,0);
+            invoke(service,"fileProgress",signature,peer.id(),1L,0L,true,100,"已发送（非保存确认）",0.0,null);activity.transfersChanged();shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(250));assertEquals(previous,scroll.getScrollY());assertFalse(views(container).stream().anyMatch(v->v instanceof TextView&&((TextView)v).getText().toString().contains("MB/s")));assertEquals(0,service.progress(peer.id(),1,0,true).bytesPerSecond,0);
         } finally {ac.pause().stop().destroy();sc.destroy();}
     }
     @Test public void contactAvatarOpensCenteredProfileAnd128PreviewWithLocalNickname() throws Exception {

@@ -23,6 +23,52 @@ import static org.robolectric.Shadows.shadowOf;
 @Config(sdk=35, qualifiers="w393dp-h852dp-xhdpi")
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 public final class UiTest {
+    @Test public void historyScrollReusesRowsAndPreparedHighlightWithoutStaleAttachments()throws Exception {
+        ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();
+        shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));
+        try(ActivityController<MainActivity> ac=Robolectric.buildActivity(MainActivity.class).setup()) {
+            MainActivity activity=ac.get();settle(service);LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:32425"),"reuse-search","host","搜索滚动","");
+            ExecutorService io=(ExecutorService)field(service,"io");ChatStore store=(ChatStore)field(service,"store");
+            io.submit(()->{for(int i=0;i<120;i++){LanNode.Message message=new LanNode.Message();message.number=i+1;message.time=i+1;message.state="已收到";message.text="搜索 中文 English 😊 "+i+"\n"+"长内容 ".repeat(80);if(i%2==0)message.files.add(new Protocol.Attachment(0,"附件 "+i+".txt",10,0));store.message(peer,message,false,false);}}).get();
+            service.active(peer.id());settle(service);invoke(activity,"open",String.class,peer.id());settle(service);invoke(activity,"showHistory",ChatStore.Conversation.class,service.conversations().get(0));settle(service);
+            android.app.Dialog dialog=(android.app.Dialog)field(activity,"historyDialog");ListView list=(ListView)descendants(dialog.getWindow().getDecorView()).stream().filter(view->view instanceof ListView).findFirst().get();
+            assertEquals(100,list.getCount());android.widget.ListAdapter adapter=list.getAdapter();View row=adapter.getView(0,null,list);TextView body=(TextView)descendants(row).stream().filter(view->view instanceof TextView&&((TextView)view).getText().toString().contains("长内容")).findFirst().get();
+            CharSequence prepared=body.getText();long start=System.nanoTime();
+            for(int i=0;i<100;i++)assertSame(row,adapter.getView(0,row,list));
+            assertSame("相同行绑定重复设置了正文或高亮",prepared,body.getText());
+            for(int i=0;i<200;i++){int index=i%100;assertSame(row,adapter.getView(index,row,list));LanNode.Message message=(LanNode.Message)adapter.getItem(index);assertTrue(body.getText().toString().contains("😊 "+(message.number-1)));long files=descendants(row).stream().filter(view->view instanceof TextView&&view.getVisibility()==View.VISIBLE&&((TextView)view).getText().toString().startsWith("附件 ")).count();assertEquals(message.files.size(),files);}
+            System.out.println("HISTORY_BIND_300_MS="+(System.nanoTime()-start)/1000000.0+" ROW_REUSED=true");
+            measure(dialog.getWindow().getDecorView(),786,1440,true);list.setSelection(40);measure(dialog.getWindow().getDecorView(),786,1440,true);assertTrue(list.getFirstVisiblePosition()>0);
+            EditText input=(EditText)descendants(dialog.getWindow().getDecorView()).stream().filter(view->"搜索聊天记录".equals(view.getContentDescription())).findFirst().get();
+            View stale=adapter.getView(0,null,list);input.setText("无匹配");stale.performClick();assertTrue("输入变更后旧结果仍能跳转",dialog.isShowing());settle(service);assertEquals(0,list.getCount());dialog.dismiss();
+        }finally{sc.destroy();}
+    }
+    @Test public void chatScrollReusesUnchangedBubblesAndNeverQueriesSafOnUi()throws Exception {
+        ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();
+        shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));
+        try(ActivityController<MainActivity> ac=Robolectric.buildActivity(MainActivity.class).setup()) {
+            MainActivity activity=ac.get();settle(service);LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:32425"),"chat-scroll","host","聊天滚动","");
+            ExecutorService io=(ExecutorService)field(service,"io");ChatStore store=(ChatStore)field(service,"store");List<LanNode.Message> rows=new ArrayList<>();
+            for(int i=0;i<100;i++){LanNode.Message message=new LanNode.Message();message.number=i+1;message.time=i*60000L+1;message.text="中文 English 😊 长消息 "+i+" https://example.com/"+i;message.state="已收到";rows.add(message);}
+            LanNode.Message attachment=rows.get(2);attachment.files.add(new Protocol.Attachment(0,"慢目录.txt",3,0));
+            FileFeaturesTest.Docs docs=FileFeaturesTest.provider(service);ReceivedStorage storage=new ReceivedStorage(service);storage.choose(android.net.Uri.parse("content://feiq.documents/tree/root"),Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+            File local=service.receivedFile(peer,attachment.number,attachment.files.get(0));java.nio.file.Files.write(local.toPath(),new byte[]{1,2,3});android.net.Uri saved=storage.save(local,"慢目录.txt",new LanNode.Transfer());attachment.state="已保存";
+            io.submit(()->{for(LanNode.Message message:rows)store.message(peer,message,false,false);}).get();service.active(peer.id());settle(service);docs.forbidMainQueries=true;
+            invoke(activity,"open",String.class,peer.id());settle(service);service.remove(activity);View root=(View)field(activity,"root");measure(root,786,1704,true);ScrollView scroll=(ScrollView)field(activity,"scroll");scroll.getViewTreeObserver().dispatchOnPreDraw();shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(300));
+            Map<?,?> views=(Map<?,?>)field(activity,"messageViews");Map<Object,Object> previous=new HashMap<>();views.forEach(previous::put);
+            rows.get(50).state="已送达";renderResolvedMessages(activity,service,rows);shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(300));
+            int reused=0;for(Map.Entry<?,?> item:views.entrySet())if(previous.get(item.getKey())==item.getValue())reused++;assertEquals("单条状态变化重建了无关气泡",99,reused);System.out.println("CHAT_ACK_REUSED="+reused+"/100");
+            int queries=docs.queries.get();scroll.scrollTo(0,180);View unchanged=(View)views.get("51:false");rows.get(50).state="新的状态";invoke(activity,"renderMessages",List.class,rows);assertSame("滚动中重排了消息",unchanged,views.get("51:false"));
+            for(int i=0;i<100;i++)activity.transfersChanged();assertEquals("滚动或进度访问了 SAF",queries,docs.queries.get());
+            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(300));measure(root,786,1704,true);scroll.getViewTreeObserver().dispatchOnPreDraw();assertNotSame(unchanged,views.get("51:false"));assertEquals("补刷抢走了阅读位置",180,scroll.getScrollY());
+            scroll.scrollTo(0,200);invoke(activity,"renderMessages",List.class,new ArrayList<>(rows));
+            LanNode.Message sent=new LanNode.Message();sent.number=101;sent.time=6000001;sent.outgoing=true;sent.text="滚动时主动发送";sent.state="等待确认";List<LanNode.Message> withSent=new ArrayList<>(rows);withSent.add(sent);
+            invoke(activity,"renderMessages",List.class,withSent);shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(300));assertTrue("停止滚动后旧快照抹掉了主动发送的新消息",views.containsKey("101:true"));
+            invoke(activity,"showHistory",ChatStore.Conversation.class,service.conversations().get(0));settle(service);int hiddenQueries=docs.queries.get();for(int i=0;i<8;i++){activity.changed();activity.transfersChanged();}settle(service);assertEquals("搜索页背后仍在扫描聊天文件",hiddenQueries,docs.queries.get());
+            ((android.app.Dialog)field(activity,"historyDialog")).dismiss();settle(service);
+            java.nio.file.Files.delete(docs.files.get(android.provider.DocumentsContract.getDocumentId(saved)).toPath());activity.changed();settle(service);assertTrue(descendants((View)field(activity,"messages")).stream().anyMatch(view->view instanceof TextView&&((TextView)view).getText().toString().contains("本机文件已删除")));
+        }finally{sc.destroy();}
+    }
     @Test public void chatHistorySearchHighlightsTextFilesAndLinksWithoutChangingDraft() throws Exception {
         ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();
         shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));
@@ -262,7 +308,7 @@ public final class UiTest {
             LanNode.Transfer task=new LanNode.Transfer();Field active=ChatService.class.getDeclaredField("transfer");active.setAccessible(true);active.set(service,task);
             progress.invoke(service,peer.id(),88L,0L,false,26,"接收中 · 点击取消",task);
             List<LanNode.Message> rows=new ArrayList<>(Arrays.asList(sent,received));invoke(activity,"renderMessages",List.class,rows);
-            View root=(View)field(activity,"root");measure(root,786,1704,true);activity.transfersChanged();
+            View root=(View)field(activity,"root");measure(root,786,1704,true);activity.transfersChanged();shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(300));
             LinearLayout messages=(LinearLayout)field(activity,"messages");List<ProgressBar> bars=new ArrayList<>();for(View v:descendants(messages))if(v instanceof ProgressBar)bars.add((ProgressBar)v);
             assertEquals(3,bars.size());assertEquals(47,bars.get(0).getProgress());assertEquals(0,bars.get(1).getProgress());assertEquals(26,bars.get(2).getProgress());
             screenshot(activity,"android-file-progress");
@@ -292,12 +338,12 @@ public final class UiTest {
             invoke(activity,"open",String.class,peer.id());settle(service);service.remove(activity);
             ReceivedFileProvider provider=new ReceivedFileProvider();android.content.pm.ProviderInfo info=new android.content.pm.ProviderInfo();info.authority=activity.getPackageName()+".received";info.grantUriPermissions=true;provider.attachInfo(activity,info);org.robolectric.shadows.ShadowContentResolver.registerProviderInternal(info.authority,provider);
             android.net.Uri uri=ReceivedFileProvider.uri(activity,image,image.getName());Bitmap decoded=MediaPreview.image(activity,uri,480);assertEquals(120,decoded.getWidth());decoded.recycle();
-            invoke(activity,"renderMessages",List.class,persisted);View root=(View)field(activity,"root");measure(root,786,1704,true);
+            renderResolvedMessages(activity,service,persisted);View root=(View)field(activity,"root");measure(root,786,1704,true);
             LinearLayout messages=(LinearLayout)field(activity,"messages");assertEquals(1,descendants(messages).stream().filter(v->v.getContentDescription()!=null&&v.getContentDescription().toString().endsWith("，媒体预览")).count());
             ImageView picture=(ImageView)descendants(messages).stream().filter(v->v instanceof ImageView).findFirst().get();for(int i=0;i<60&&picture.getDrawable()==null;i++){Thread.sleep(20);shadowOf(Looper.getMainLooper()).idle();}assertNotNull("发出的图片没有解码预览",picture.getDrawable());
             assertEquals(1,descendants(messages).stream().filter(v->v.getBackground() instanceof BubbleDrawable).count());screenshot(activity,"android-sent-image-preview");
             View card=descendants(messages).stream().filter(v->"报告.txt，文件操作".contentEquals(v.getContentDescription()==null?"":v.getContentDescription())).findFirst().get();card.performClick();android.app.Dialog dialog=org.robolectric.shadows.ShadowDialog.getLatestDialog();assertTrue(dialog.isShowing());assertTrue(descendants(dialog.getWindow().getDecorView()).stream().anyMatch(v->v instanceof Button&&((Button)v).getText().toString().equals("打开文件")));dialog.dismiss();
-            java.nio.file.Files.delete(image.toPath());invoke(activity,"renderMessages",List.class,persisted);assertEquals(0,descendants(messages).stream().filter(v->v.getContentDescription()!=null&&v.getContentDescription().toString().endsWith("，媒体预览")).count());assertTrue(descendants(messages).stream().anyMatch(v->v.getContentDescription()!=null&&v.getContentDescription().toString().contains("文件已删除或不可用")));
+            java.nio.file.Files.delete(image.toPath());renderResolvedMessages(activity,service,persisted);shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(250));assertEquals(0,descendants(messages).stream().filter(v->v.getContentDescription()!=null&&v.getContentDescription().toString().endsWith("，媒体预览")).count());assertTrue(descendants(messages).stream().anyMatch(v->v.getContentDescription()!=null&&v.getContentDescription().toString().contains("文件已删除或不可用")));
         } finally {ac.pause().stop().destroy();sc.destroy();}
     }
     @Test public void emojiPickerInsertsAtCursorAndProtectsLengthAndChangedConversation() throws Exception {
@@ -542,6 +588,11 @@ public final class UiTest {
         } finally {if(ac!=null)ac.pause().stop().destroy();sc.destroy();}
     }
     private static Object field(Object object,String name) throws Exception { Field f=object.getClass().getDeclaredField(name); f.setAccessible(true); return f.get(object); }
+    @SuppressWarnings("unchecked") private static void renderResolvedMessages(MainActivity activity,ChatService service,List<LanNode.Message> rows)throws Exception {
+        String peer=(String)field(activity,"selected");Map<String,ChatService.FileProgress> progress=new HashMap<>((Map<String,ChatService.FileProgress>)field(service,"fileProgress"));
+        ChatService.ChatPage page=((ExecutorService)field(service,"io")).submit(()->service.resolveChatPage(peer,rows,progress,()->true)).get(5,TimeUnit.SECONDS);
+        invoke(activity,"renderChatPage",ChatService.ChatPage.class,page);
+    }
     private static Object invoke(Object object,String name,Class<?> type,Object value) throws Exception { Method m=object.getClass().getDeclaredMethod(name,type); m.setAccessible(true); return m.invoke(object,value); }
     private static void settle(ChatService service) throws Exception {
         ExecutorService io=(ExecutorService)field(service,"io");

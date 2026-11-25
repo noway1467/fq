@@ -41,6 +41,17 @@ final class ReceivedStorage {
         forget(file);return null;
     }
     boolean exists(File file) { return file.isFile()||existingSaved(file)!=null; }
+    Uri outgoingUri(LanNode.Message message,int index) {
+        if(index<0||index>=message.localPaths.size())return null;
+        String origin=message.localPaths.get(index);
+        if(origin.startsWith("uri:")) {
+            Uri uri=Uri.parse(origin.substring(4));if(!"content".equals(uri.getScheme()))return null;
+            for(UriPermission permission:context.getContentResolver().getPersistedUriPermissions())if(permission.isReadPermission()&&permission.getUri().equals(uri))return uri;
+            return null;
+        }
+        File file=new File(origin);if(!file.isFile())return null;
+        try {return ReceivedFileProvider.uri(context,file,message.files.get(index).name);}catch(IllegalArgumentException error){return null;}
+    }
     private void forget(File file) {
         String key=file.getName();locations().edit().remove(key).remove(key+".tree").remove(key+".size").remove(key+".name").apply();
     }

@@ -574,9 +574,36 @@ public final class ChatService extends Service {
         String target=peer==null?"":peer; activePeer=target;
         if(!target.isEmpty()) queue(()->{ store.read(target); publish(); });
     }
-    void history(String peer,Consumer<List<LanNode.Message>> result) { queue(()->{ List<LanNode.Message> rows=store.history(peer); main.post(()->result.accept(rows)); }); }
-    void historyAround(String peer,LanNode.Message target,Consumer<List<LanNode.Message>> result) {
-        queue(()->{List<LanNode.Message> rows=store.historyAround(peer,target);main.post(()->result.accept(rows));});
+    static final class ChatPage {
+        final List<LanNode.Message> rows;
+        final Map<String,Uri> files=new HashMap<>();
+        final Map<String,FileProgress> progress;
+        ChatPage(List<LanNode.Message> rows,Map<String,FileProgress> progress){this.rows=rows;this.progress=progress;}
+    }
+    ChatPage resolveChatPage(String peer,List<LanNode.Message> rows,Map<String,FileProgress> progress,java.util.function.BooleanSupplier current) {
+        ChatPage page=new ChatPage(rows,progress);
+        for(LanNode.Message message:rows)for(int index=0;index<message.files.size();index++) {
+            if(!current.getAsBoolean())return page;
+            Protocol.Attachment file=message.files.get(index);Uri uri;
+            if(message.outgoing)uri=storage.outgoingUri(message,index);
+            else {
+                File local=receivedFile(peer,message.number,file);
+                uri=local.isFile()?ReceivedFileProvider.uri(this,local,file.name):storage.existingSaved(local);
+            }
+            page.files.put(fileKey(peer,message.number,file.id,message.outgoing),uri);
+        }
+        return page;
+    }
+    void chatPage(String peer,LanNode.Message anchor,java.util.function.BooleanSupplier current,Consumer<ChatPage> result,Consumer<String> error) {
+        Map<String,FileProgress> before=new HashMap<>(fileProgress);
+        queue(()->{
+            if(!current.getAsBoolean())return;
+            try {
+                List<LanNode.Message> rows=anchor==null?store.history(peer):store.historyAround(peer,anchor);
+                ChatPage page=resolveChatPage(peer,rows,before,current);
+                main.post(()->{if(!stopped&&current.getAsBoolean())result.accept(page);});
+            }catch(RuntimeException failure){main.post(()->{if(!stopped&&current.getAsBoolean())error.accept("读取聊天记录失败："+failure.getMessage());});}
+        });
     }
     void searchHistory(String peer,String query,int number,ChatStore.HistoryIndex index,java.util.function.BooleanSupplier current,Consumer<ChatStore.HistoryPage> result,Consumer<String> error) {
         if(stopped)return;
