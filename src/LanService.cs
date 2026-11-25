@@ -166,6 +166,7 @@ namespace FeiqLight
         public event Action<Peer, long> OfferCanceled;
         public event Action<ChatRecord> DeliveryChanged;
         public event Action<string> Error;
+        public event Action ConnectionInterrupted;
         public event Action<string> TransferNotice;
         public event Action<ChatRecord, int, int, string, double> TransferChanged;
 
@@ -263,6 +264,7 @@ namespace FeiqLight
             }
         }
         private void Report(string message) { Action<string> handler = Error; if (!disposed && handler != null) handler(message); }
+        private void ReportConnectionInterrupted() { Action handler = ConnectionInterrupted; if (!disposed && handler != null) handler(); }
         private void Changed() { Action handler = PeersChanged; if (!disposed && handler != null) handler(); }
         private byte[] WithPort(byte[] bytes)
         {
@@ -965,7 +967,21 @@ namespace FeiqLight
                     return;
                 }
                 if(Security==null||Settings.AllowLegacyProtocol)ServeFile(client);
-            } catch(IOException e) {Report("安全连接未完成："+e.Message);} catch(SocketException) {} catch(System.Security.Authentication.AuthenticationException e) {Report("TLS 握手未通过："+e.GetBaseException().Message);} catch(ObjectDisposedException) {} catch(System.ComponentModel.Win32Exception e){Report("TLS 系统凭据失败："+e.NativeErrorCode+" "+e.Message);} catch(CryptographicException e){Report("TLS 证书失败："+e.Message);}
+            }
+            catch(IOException e) {
+                // 切网、对端取消及回连抢占会关闭单条连接，不代表监听或联系人已离线。
+                // 文件中断仍由传输任务反馈；协议、身份和本地 IO 错误继续向用户报告。
+                if(e is EndOfStreamException || e.GetBaseException() is SocketException)ReportConnectionInterrupted();
+                else Report("安全连接未完成："+e.Message);
+            }
+            catch(SocketException) {ReportConnectionInterrupted();}
+            catch(System.Security.Authentication.AuthenticationException e) {
+                if(e.GetBaseException() is SocketException)ReportConnectionInterrupted();
+                else Report("TLS 握手未通过："+e.GetBaseException().Message);
+            }
+            catch(ObjectDisposedException) {}
+            catch(System.ComponentModel.Win32Exception e){Report("TLS 系统凭据失败："+e.NativeErrorCode+" "+e.Message);}
+            catch(CryptographicException e){Report("TLS 证书失败："+e.Message);}
             finally {if(!handedOff){client.Close();lock(gate)connections.Remove(client);}}
         }
         private bool AcceptReverse(TcpClient client,Stream input)
@@ -1122,7 +1138,7 @@ namespace FeiqLight
                 FileInfo current=new FileInfo(offer.Path);if(!current.Exists||current.Length!=offer.Size||current.LastWriteTimeUtc!=offer.Modified)throw new IOException("源文件已改变。");
                 SecureIdentity.WriteText(stream,"OK\n"+offer.Size+"\n"+offer.Sha256);
                 long sent=offset;TransferRate rate=new TransferRate(offset);var timing=System.Diagnostics.Stopwatch.StartNew();
-                using(FileStream file=File.OpenRead(offer.Path)) {file.Position=offset;byte[] buffer=new byte[65536];while(sent<offer.Size){int count=file.Read(buffer,0,(int)Math.Min(buffer.Length,offer.Size-sent));if(count==0)throw new EndOfStreamException();stream.Write(buffer,0,count);sent+=count;lock(gate)offer.Expires=DateTime.UtcNow.AddDays(7);if(rate.Update(sent,timing.Elapsed.TotalMilliseconds))Transfer(offer,version,(int)(sent*100.0/Math.Max(1,offer.Size)),"发送中",rate.BytesPerSecond);}}
+                using(FileStream file=File.OpenRead(offer.Path)) {file.Position=offset;byte[] buffer=new byte[65536];while(sent<offer.Size){int count=file.Read(buffer,0,(int)Math.Min(buffer.Length,offer.Size-sent));if(count==0)throw new IOException("源文件读取中断，请重新发送文件。");stream.Write(buffer,0,count);sent+=count;lock(gate)offer.Expires=DateTime.UtcNow.AddDays(7);if(rate.Update(sent,timing.Elapsed.TotalMilliseconds))Transfer(offer,version,(int)(sent*100.0/Math.Max(1,offer.Size)),"发送中",rate.BytesPerSecond);}}
                 stream.Flush();Transfer(offer,version,100,"已发送，等待校验保存");
                 if(SecureIdentity.ReadText(stream,128)=="STORED\n"+offer.Sha256){Transfer(offer,version,100,"对方已校验保存");try{SaveOffers();}catch(IOException error){Report("文件完成状态保存失败："+error.Message);}}
             }catch(IOException){Transfer(offer,version,offer.Percent,"传输中断或保存确认未送达");throw;}

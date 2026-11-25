@@ -5,7 +5,7 @@ using System.Text;
 namespace FeiqLight
 {
     // 仅允许固定事件码，不接收异常正文、身份、地址、文件名或聊天内容。
-    public enum DiagnosticEvent { Started, NetworkError, FileStatus, DeliveryChanged, Stopped }
+    public enum DiagnosticEvent { Started, NetworkError, FileStatus, DeliveryChanged, Stopped, ConnectionInterrupted }
     public sealed class Diagnostics
     {
         private static readonly object Gate = new object();

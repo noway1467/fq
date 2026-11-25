@@ -191,6 +191,7 @@ public sealed class MainForm : ModernWindow
             Theme.StyleMenu(trayMenu);
             tray.DoubleClick += delegate { Restore(); }; tray.BalloonTipClicked += delegate { Restore(); if (latestSender != null) OpenChat(latestSender); };
             network.PeersChanged += OnPeersChanged; network.MessageReceived += OnMessage; network.OfferCanceled += OnOfferCanceled; network.DeliveryChanged += OnDelivery; network.Error += OnError; network.TransferChanged += OnTransfer;
+            network.ConnectionInterrupted += OnConnectionInterrupted;
             RefreshFilters();
             ApplyWallpaper();
             shareTimer.Tick+=delegate {if(!started||!network.Peers.Any(p=>p.Online))return;try{string[] files=WindowsShare.Take(store.Root);if(files==null)return;Show();WindowState=FormWindowState.Normal;Activate();using(ForwardDialog dialog=new ForwardDialog(network.Peers.Where(p=>p.Online).ToArray(),files.Length))if(dialog.ShowDialog(this)==DialogResult.OK){OpenChat(dialog.Target);ActiveChat.QueueSharedFiles(files);}}catch(Exception e){OnError("系统分享未完成："+e.Message);}};shareTimer.Start();
@@ -253,6 +254,7 @@ public sealed class MainForm : ModernWindow
             Ui(() => { System.Threading.Interlocked.Exchange(ref peersRefreshQueued,0); RefreshPeers(); foreach (ChatForm chat in chats.Values) if (!chat.IsDisposed) chat.RefreshPeer(); });
         }
         private void OnError(string text) { diagnostics.Record(DiagnosticEvent.NetworkError); Ui(() => status.Text = text); }
+        private void OnConnectionInterrupted() { diagnostics.Record(DiagnosticEvent.ConnectionInterrupted); }
         internal bool ConfirmSecurity(string name, string code)
         {
             if(IsDisposed||Disposing||!IsHandleCreated)return false;
@@ -754,6 +756,7 @@ public sealed class MainForm : ModernWindow
             if (disposing && !IsDisposed)
             {
                 network.NetworkReset-=OnNetworkReset;foreach(ToolsGateway gateway in gateways)gateway.Dispose();gateways.Clear();
+                network.ConnectionInterrupted -= OnConnectionInterrupted;
                 shareTimer.Stop();shareTimer.Dispose();
                 if (toolsWindow != null) toolsWindow.Dispose();
                 if (transferWindow != null) transferWindow.Dispose();
