@@ -45,7 +45,6 @@ namespace FeiqLight.Tests
                 Controls(main.ActiveChat).OfType<Button>().Single(button => button.AccessibleName == "传输任务").PerformClick();
                 window = Field<TransferWindow>(main, "transferWindow");
                 Check(window.SelectedSourceId == first.Id, "聊天入口没有选中当前联系人");
-                Field<Button>(window, "searchButton").PerformClick();
                 TextBox query = Field<TextBox>(window, "query"); query.Text = "入口";
                 Field<RoundedButton[]>(window, "filters")[3].PerformClick();
                 main.OpenChat(second);
@@ -67,7 +66,7 @@ namespace FeiqLight.Tests
                     Check(query.Text == "入口" && Field<int>(window, "filter") == 3, "访客入口改变了搜索或状态");
                     window.Close(); received.PerformClick();
                     window = Field<TransferWindow>(main, "transferWindow");
-                    Check(window.SelectedSourceId == "browser-guests" && !Field<TextBox>(window, "query").Visible, "访客初次进入没有选中访客或搜索没有默认折叠");
+                    Check(window.SelectedSourceId == "browser-guests" && Field<TextBox>(window, "query").Visible, "访客初次进入没有选中访客或搜索没有常驻显示");
                     window.Close(); guest.Close();
                 }
                 main.OpenTransfers(); window = Field<TransferWindow>(main, "transferWindow");
@@ -77,7 +76,7 @@ namespace FeiqLight.Tests
         }
         private static void SourceSnapshotCheck(TransferWindow window, TransferSourceStrip strip, Action action)
         {
-            Field<Button>(window, "searchButton").Focus(); Application.DoEvents();
+            Field<TextBox>(window, "query").Focus(); Application.DoEvents();
             TransferSourceStrip.Source[] snapshot = Field<TransferSourceStrip.Source[]>(strip, "items"); int redraws = 0;
             InvalidateEventHandler observer = (sender, e) => redraws++;
             strip.Invalidated += observer;
@@ -116,8 +115,8 @@ namespace FeiqLight.Tests
                 Check(strip.Items[0].Name == "全部" && strip.Items[0].Glyph == "transfer" && strip.Items[1].Glyph == "link", "全部或访客来源未复用既有图标");
                 Check(strip.Items.Single(item => item.Id == first.Id).Name == first.DisplayName && strip.Items.Single(item => item.Id == first.Id).Avatar == first.Avatar, "来源没有复用当前联系人名称和头像");
                 Check(strip.Items.Single(item => item.Id == "removed:a").Name == "同名旧设备" && strip.Items.Single(item => item.Id == "removed:a").Avatar == null, "已不存在的联系人未保留回退名称与默认头像");
-                SourceSnapshotCheck(window, strip, () => { Field<RoundedButton[]>(window, "filters")[3].PerformClick(); Field<Button>(window, "searchButton").PerformClick(); Field<TextBox>(window, "query").Text = "没有匹配"; });
-                Field<Button>(window, "searchButton").PerformClick(); Field<RoundedButton[]>(window, "filters")[0].PerformClick();
+                SourceSnapshotCheck(window, strip, () => { Field<RoundedButton[]>(window, "filters")[3].PerformClick(); Field<TextBox>(window, "query").Text = "没有匹配"; });
+                Field<TextBox>(window, "query").Clear(); Field<RoundedButton[]>(window, "filters")[0].PerformClick();
                 first.Note = "刚改名的设备"; first.Avatar = "builtin:7"; Tick(Field<System.Windows.Forms.Timer>(window, "timer"));
                 Check(strip.Items.Single(item => item.Id == first.Id).Name == first.DisplayName && strip.Items.Single(item => item.Id == first.Id).Avatar == "builtin:7", "刷新未同步改名或头像");
                 Check(Field<ListBox>(window, "list").Items.Cast<object>().Where(item => Field<ChatRecord>(item, "Record").PeerId == first.Id).All(item => Field<string>(item, "Peer") == first.DisplayName), "来源名称与行内名称不同源");
@@ -143,7 +142,7 @@ namespace FeiqLight.Tests
                 for (int i = 0; i < peers.Length; i++) main.TrackTransfer(new ChatRecord { PeerId = peers[i], Sender = peers[i] == "filter:a" ? "甲设备" : peers[i] == "filter:b" ? "乙设备" : "浏览器访客", Packet = i + 1, Time = DateTime.Now.AddMinutes(-i), Transfers = new[] { new FileTransferState { Id = 0, Name = names[i], Size = 1024, Status = states[i], Percent = i == 0 ? 25 : states[i] == "已保存" ? 100 : 0 } } });
                 main.Show(); window.Show(); PumpFor(80);
                 ListBox list = Field<ListBox>(window, "list"); TransferSourceStrip strip = Field<TransferSourceStrip>(window, "sources");
-                window.SelectSource("filter:a"); Field<Button>(window, "searchButton").PerformClick(); Field<TextBox>(window, "query").Text = "REPORT"; Field<RoundedButton[]>(window, "filters")[1].PerformClick();
+                window.SelectSource("filter:a"); Field<TextBox>(window, "query").Text = "REPORT"; Field<RoundedButton[]>(window, "filters")[1].PerformClick();
                 Check(list.Items.Count == 1 && Field<ChatRecord>(list.Items[0], "Record").Packet == 1, "来源、状态、大小写搜索没有取交集");
                 Check(Field<Label>(window, "summary").Text == "1 个文件 · 0 个已完成 · 256 B / 1.0 KB", "汇总没有使用当前显示列表");
                 window.SelectSource("filter:b"); Check(list.Items.Count == 1 && Field<ChatRecord>(list.Items[0], "Record").Packet == 4 && Field<TextBox>(window, "query").Visible, "切换来源丢失搜索或没有切换交集");
@@ -152,34 +151,33 @@ namespace FeiqLight.Tests
                 Check(strip.Items.Count == 4, "交集筛选改变了横排来源构成");
                 window.SelectSource("browser-guests"); Field<RoundedButton[]>(window, "filters")[3].PerformClick(); Field<TextBox>(window, "query").Text = "report";
                 Check(list.Items.Count == 1 && Field<ChatRecord>(list.Items[0], "Record").PeerId == "browser-guests", "访客来源不能叠加状态和搜索");
-                Field<Button>(window, "searchButton").PerformClick(); window.SelectSource("");
+                Field<TextBox>(window, "query").Clear(); window.SelectSource("");
                 Check(list.Items.Count == 2 && Field<Label>(window, "summary").Text.StartsWith("2 个文件 · 2 个已完成"), "全部来源没有保留状态筛选或统计当前列表");
                 window.Close(); main.ExitApplication();
             }
         }
         private static void TransferSearchRegression()
         {
-            Theme.Configure(false, "blue"); var store = new LocalStore(Path.Combine(root, "search-button"));
+            Theme.Configure(false, "blue"); var store = new LocalStore(Path.Combine(root, "search-visible"));
             using (var network = new LanService(new AppSettings { CloseToTray = false, Notifications = false, ReceiveFolder = Path.Combine(store.Root, "received") }, FreePort(), true, "search-button"))
             using (var main = new MainForm(network, store))
             using (var window = new TransferWindow(main))
             {
                 main.TrackTransfer(new ChatRecord { PeerId = "search:a", Packet = 1, Sender = "搜索设备", Time = DateTime.Now, Transfers = new[] { new FileTransferState { Id = 0, Name = "visible.txt", Status = "已保存" } } });
                 main.Show(); window.Show(); PumpFor(80);
-                Button button = Field<Button>(window, "searchButton"); TextBox query = Field<TextBox>(window, "query"); ListBox list = Field<ListBox>(window, "list");
-                Check(button.Visible && button.AccessibleName == "搜索" && Field<ToolTip>(window, "tips").GetToolTip(button) == "搜索" && ((RoundedButton)button).Glyph == "search", "搜索按钮图标、提示或无障碍名称错误");
-                Check(!query.Visible && query.AccessibleName == "搜索传输任务" && Field<BufferedLayoutTable>(window, "body").RowStyles[1].Height == 0, "搜索默认没有折叠或改变原输入框无障碍名");
-                query.Text = "隐形筛选"; Check(query.TextLength == 0 && list.Items.Count == 1, "隐藏的搜索词仍可过滤列表");
-                button.PerformClick(); Check(query.Visible && query.Focused, "搜索按钮展开后没有聚焦输入框");
-                query.Text = "不存在"; Check(list.Items.Count == 0, "展开搜索没有过滤");
-                button.PerformClick(); Check(!query.Visible && query.TextLength == 0 && list.Items.Count == 1 && button.Focused, "再次点击没有收起、清空或恢复列表");
-                Check(CommandKey(query, Keys.Control | Keys.F) && query.Visible && query.Focused, "Ctrl+F 没有通过原生控件命令链展开并聚焦搜索");
+                TextBox query = Field<TextBox>(window, "query"); ListBox list = Field<ListBox>(window, "list");
+                Check(!Controls(window).OfType<Button>().Any(button => button.AccessibleName == "搜索"), "仍存在独立搜索按钮");
+                Check(query.Visible && query.AccessibleName == "搜索传输任务" && Field<BufferedLayoutTable>(window, "body").RowStyles[1].Height > 0, "搜索没有常驻显示或改变原输入框无障碍名");
+                query.Text = "不存在"; Check(list.Items.Count == 0, "常驻搜索没有过滤");
+                Check(CommandKey(query, Keys.Control | Keys.F) && query.Visible && query.Focused, "Ctrl+F 没有通过原生控件命令链聚焦搜索");
                 window.SelectSource("search:a"); Field<RoundedButton[]>(window, "filters")[3].PerformClick(); query.Text = "不存在";
-                Check(CommandKey(query, Keys.Escape) && !query.Visible && query.TextLength == 0 && list.Items.Count == 1 && window.Visible, "Esc 没有收起并清空搜索或误关闭任务窗口");
-                Check(window.SelectedSourceId == "search:a" && Field<int>(window, "filter") == 3, "收起搜索修改了来源或状态");
+                Check(CommandKey(query, Keys.Escape) && query.Visible && query.TextLength == 0 && list.Items.Count == 1 && window.Visible, "Esc 没有清空搜索或隐藏、关闭了任务窗口");
+                Check(window.SelectedSourceId == "search:a" && Field<int>(window, "filter") == 3, "清空搜索修改了来源或状态");
                 Check(CommandKey(Field<TransferSourceStrip>(window, "sources"), Keys.Control | Keys.F) && query.Focused, "焦点在来源横排时 Ctrl+F 无效");
-                query.Text = "visible"; button.Focus(); Check(CommandKey(button, Keys.Control | Keys.F) && query.Focused && query.Text == "visible", "已展开 Ctrl+F 没有重新聚焦或意外清词");
-                Check(CommandKey(button, Keys.Escape) && !query.Visible && query.TextLength == 0, "焦点在搜索按钮时 Esc 没有收起并清空");
+                query.Text = "visible"; list.Focus(); Check(CommandKey(list, Keys.Control | Keys.F) && query.Focused && query.Text == "visible", "Ctrl+F 没有重新聚焦或意外清词");
+                Check(CommandKey(list, Keys.Escape) && query.Visible && query.TextLength == 0, "焦点在列表时 Esc 没有清空或隐藏了搜索");
+                Field<RoundedButton[]>(window, "filters")[1].PerformClick();
+                Check(list.Items.Count == 0 && Field<Label>(window, "empty").Text == "当前筛选下没有传输任务", "筛选空态误报没有历史任务");
                 window.Close(); main.ExitApplication();
             }
         }
@@ -232,7 +230,7 @@ namespace FeiqLight.Tests
                 // 保持调度器处于已有接收中，只核验菜单写入了哪些任务，避免不存在的发送方影响断言。
                 typeof(MainForm).GetField("automaticReceiving", BindingFlags.Instance | BindingFlags.NonPublic).SetValue(main, true);
                 main.Show(); window.Show(); PumpFor(80); Field<System.Windows.Forms.Timer>(window, "timer").Stop();
-                window.SelectSource(first.Id); Field<RoundedButton[]>(window, "filters")[2].PerformClick(); Field<Button>(window, "searchButton").PerformClick(); Field<TextBox>(window, "query").Text = "scope";
+                window.SelectSource(first.Id); Field<RoundedButton[]>(window, "filters")[2].PerformClick(); Field<TextBox>(window, "query").Text = "scope";
                 ListBox list = Field<ListBox>(window, "list");
                 Check(list.Items.Count == 2, "批量继续夹具没有形成来源、状态和搜索交集");
                 RightClickTransfer(list, TransferIndex(list, 301, 0)); ContextMenuStrip menu = Field<ContextMenuStrip>(window, "menu");
@@ -350,7 +348,7 @@ namespace FeiqLight.Tests
                         Check(leftKey.Handled && strip.SelectedId != last, "键盘左右键没有切换来源");
                         var rightKey = new KeyEventArgs(Keys.Right); typeof(Control).GetMethod("OnKeyDown", BindingFlags.Instance | BindingFlags.NonPublic).Invoke(strip, new object[] { rightKey });
                         Check(rightKey.Handled && strip.SelectedId == last, "键盘右键没有切回下一来源");
-                        window.SelectSource(""); SaveSnapshot(window, "transfer-sources-" + theme + "-" + size.Width + "-collapsed");
+                        window.SelectSource(""); SaveSnapshot(window, "transfer-sources-" + theme + "-" + size.Width + "-empty-query");
                         AccessibleObject avatar = strip.AccessibilityObject.GetChild(1); Point click = strip.PointToClient(new Point(avatar.Bounds.Left + avatar.Bounds.Width / 2, avatar.Bounds.Top + 20));
                         StripMouse(strip, "OnMouseDown", MouseButtons.Left, click.X, click.Y);
                         Check(window.SelectedSourceId == "", "按下尚未松开就切换了来源");
@@ -358,7 +356,7 @@ namespace FeiqLight.Tests
                         Check(window.SelectedSourceId == first.Id && list.Items.Count == 1 && (strip.AccessibilityObject.GetSelected().State & AccessibleStates.Selected) != 0, "来源点按、单选状态或列表切换错误");
                         using (Graphics graphics = list.CreateGraphics()) Check(TextRenderer.MeasureText(graphics, first.DisplayName, Theme.Small).Width > list.Width, "长联系人夹具不足以覆盖行内时间被挤掉的边界");
                         Check(Field<string>(list.Items[0], "MetaSuffix").EndsWith(TransferWindow.FormatTime(recordTime, DateTime.Now)), "行内时间尾部没有保留完整往年日期");
-                        Field<Button>(window, "searchButton").PerformClick(); Field<TextBox>(window, "query").Text = "资料"; Application.DoEvents();
+                        Field<TextBox>(window, "query").Text = "资料"; Field<TextBox>(window, "query").Focus(); Application.DoEvents();
                         var body = Field<BufferedLayoutTable>(window, "body");
                         foreach (Control control in body.Controls) Check(body.ClientRectangle.Contains(control.Bounds), "来源或搜索新增区域越界：" + control.GetType().Name);
                         Control[] regions = body.Controls.Cast<Control>().Where(control => control.Visible).ToArray();
@@ -386,11 +384,11 @@ namespace FeiqLight.Tests
                                     if (capture.GetPixel(x, y).ToArgb() == Theme.Muted.ToArgb()) ink++;
                             Check(ink > 30, "长名称行右侧没有绘制大小和时间文字");
                         }
-                        Field<Button>(window, "searchButton").PerformClick();
+                        Field<TextBox>(window, "query").Clear();
                     }
-                    window.SelectSource(first.Id); Field<Button>(window, "searchButton").PerformClick(); Field<TextBox>(window, "query").Text = "资料";
+                    window.SelectSource(first.Id); Field<TextBox>(window, "query").Text = "资料";
                     Theme.Change(!dark, "green");
-                    Check(strip.BackColor.ToArgb() == Theme.Surface.ToArgb() && Field<TextBox>(window, "query").BackColor.ToArgb() == Theme.Ice.ToArgb() && Field<Button>(window, "searchButton").ForeColor.ToArgb() == Theme.Muted.ToArgb() && window.SelectedSourceId == first.Id && list.Items.Count == 1, "运行中主题切换漏了新控件或丢失筛选状态");
+                    Check(strip.BackColor.ToArgb() == Theme.Surface.ToArgb() && Field<TextBox>(window, "query").BackColor.ToArgb() == Theme.Ice.ToArgb() && window.SelectedSourceId == first.Id && list.Items.Count == 1, "运行中主题切换漏了新控件或丢失筛选状态");
                     window.Close(); main.ExitApplication();
                 }
             }
@@ -401,7 +399,7 @@ namespace FeiqLight.Tests
             Run("来源入口：会话、访客、主菜单初次与重复进入、无记录选中项", TransferSourceEntryRegression);
             Run("来源集合：最近时间、名称与ID排序、当前头像改名、无记录保留和切走移除", TransferSourceCollectionRegression);
             Run("来源筛选：来源、状态、文件名与来源名称搜索交集及当前列表汇总", TransferSourceFilterRegression);
-            Run("搜索按钮：默认折叠、展开聚焦、再次点击、Esc、Ctrl+F与收起清空", TransferSearchRegression);
+            Run("搜索常驻：移除按钮、直接筛选、Esc清空、Ctrl+F聚焦与筛选空态", TransferSearchRegression);
             Run("行内时间：三种本地格式、零时间省略、跨天仅刷新变化行", TransferTimestampRegression);
             Run("批量继续与暂停：只处理来源、状态和搜索交集中的接收", TransferBatchScopeRegression);
             Run("文件会话定位：旧历史异步读取、收发身份、已删除提示和旧回调隔离", TransferMessageLocationRegression);

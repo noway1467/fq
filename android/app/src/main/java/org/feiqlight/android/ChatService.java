@@ -202,6 +202,8 @@ public final class ChatService extends Service {
         changed();notifyTransfers.run();
     }
     void fileTasks(Consumer<List<ChatStore.FileTask>> result) {
+        // 主线程保存进度对象身份；后台慢查询回来时以期间新发布的保存/删除结果为准。
+        Map<String,FileProgress> progressBefore=new HashMap<>(fileProgress);
         queue(()->{List<ChatStore.FileTask> rows=store.fileTasks();
             for(ChatStore.FileTask task:rows)if(!task.message.outgoing)task.stored=storage.exists(receivedFile(task.peer,task.message.number,task.file));
             SharedPreferences guests=getSharedPreferences("guest_received",MODE_PRIVATE);
@@ -213,16 +215,23 @@ public final class ChatService extends Service {
                 catch(org.json.JSONException e){showError("访客接收记录损坏，已使用本机文件信息："+entry.getValue());}
                 Protocol.Attachment file=new Protocol.Attachment(0,(String)entry.getValue(),size,0);
                 LanNode.Message message=new LanNode.Message();message.number=Long.parseLong(entry.getKey().substring(0,15),16);message.outgoing=false;message.time=time;message.files=Collections.singletonList(file);message.text="[文件] "+file.name;message.state="已保存";
-                ChatStore.FileTask task=new ChatStore.FileTask("browser-guests",message,file);task.guestFile=local;rows.add(task);
+                ChatStore.FileTask task=new ChatStore.FileTask("browser-guests",message,file);task.guestFile=local;task.stored=storage.exists(local);rows.add(task);
             }
             rows.sort(Comparator.comparingLong((ChatStore.FileTask task)->task.message.time).reversed().thenComparing(Comparator.comparingLong((ChatStore.FileTask task)->task.message.number).reversed()).thenComparing(task->task.peer));
             main.post(()->{if(stopped)return;
-                for(ChatStore.FileTask task:rows)if(task.guestFile==null&&!task.message.outgoing&&!task.stored) {
+                for(ChatStore.FileTask task:rows)if(task.guestFile==null&&!task.message.outgoing) {
                     FileProgress previous=progress(task.peer,task.message.number,task.file.id,false);
+                    String key=fileKey(task.peer,task.message.number,task.file.id,false);
+                    if(previous!=progressBefore.get(key)&&previous!=null&&wasStored(previous.state)) {
+                        task.stored=!previous.state.equals("本机文件已删除");
+                        continue;
+                    }
+                    if(task.stored) {
+                        if(previous!=null&&previous.state.equals("本机文件已删除"))fileProgress(task.peer,task.message.number,task.file.id,false,100,"已保存",null);
+                        continue;
+                    }
                     boolean storedBefore=previous==null?wasStored(task.message.state):wasStored(previous.state);
                     if(storedBefore&&(previous==null||!previous.state.equals("本机文件已删除"))) {
-                        // SAF 查询期间接收可能已经完成，旧快照不能抹掉主线程的新保存状态。
-                        if(storage.exists(receivedFile(task.peer,task.message.number,task.file))){task.stored=true;continue;}
                         fileProgress(task.peer,task.message.number,task.file.id,false,0,"本机文件已删除",null);
                     }
                 }

@@ -165,6 +165,8 @@ public final class FileFeaturesTest {
     public static final class Docs extends DocumentsProvider {
         final Map<String,File> files=new LinkedHashMap<>();final Map<String,String> names=new LinkedHashMap<>(),parents=new LinkedHashMap<>();final Set<String> directories=new HashSet<>();
         int sequence,missingResponse;boolean deny,failOpen,reuse,refuseDelete,corruptRead;CountDownLatch openedGate,releaseGate,queryGate,queryRelease;String blockedQuery;
+        boolean forbidMainQueries;
+        final java.util.concurrent.atomic.AtomicInteger queries=new java.util.concurrent.atomic.AtomicInteger();
         @Override public boolean onCreate() { return true; }
         private void check() { if(deny) throw new SecurityException("授权已撤销"); }
         private String[] columns(String[] p) { return p==null?new String[]{DocumentsContract.Document.COLUMN_DOCUMENT_ID,DocumentsContract.Document.COLUMN_DISPLAY_NAME,DocumentsContract.Document.COLUMN_MIME_TYPE,DocumentsContract.Document.COLUMN_FLAGS}:p; }
@@ -177,6 +179,8 @@ public final class FileFeaturesTest {
         } c.addRow(data); }
         @Override public Cursor queryRoots(String[] p) { return new MatrixCursor(new String[]{DocumentsContract.Root.COLUMN_ROOT_ID}); }
         @Override public Cursor queryDocument(String id,String[] p)throws FileNotFoundException {
+            queries.incrementAndGet();
+            if(forbidMainQueries&&Looper.myLooper()==Looper.getMainLooper())throw new AssertionError("SAF 查询阻塞了主线程");
             check();
             if(id.equals(blockedQuery)){queryGate.countDown();try{if(!queryRelease.await(5,TimeUnit.SECONDS))throw new FileNotFoundException("查询超时");}catch(InterruptedException e){Thread.currentThread().interrupt();throw new FileNotFoundException("已取消查询");}}
             MatrixCursor cursor=new MatrixCursor(columns(p));

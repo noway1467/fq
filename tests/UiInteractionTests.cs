@@ -124,7 +124,7 @@ namespace FeiqLight.Tests
                 }
             });
             Run("设置移除启动提示，开关取值与禁用状态保留",()=>{
-                foreach(bool available in new[]{false,true}) using(SettingsDialog dialog=new SettingsDialog(new AppSettings(),Path.Combine(root,"settings"),24790,available,true)) {
+                foreach(bool available in new[]{false,true}) using(SettingsDialog dialog=new SettingsDialog(new AppSettings { ReceiveFolder=Path.Combine(root,"settings-received") },Path.Combine(root,"settings"),24790,available,true)) {
                     dialog.Show(); Pump(30);
                     Check(!All(dialog).OfType<Label>().Any(c=>c.Text.Contains("无需管理员权限")||c.Text.Contains("系统禁用的启动项")||c.Text.Contains("当前运行环境无法配置系统启动项")),"仍显示启动提示");
                     ToggleSwitch startup=All(dialog).OfType<ToggleSwitch>().Single(c=>c.AccessibleName=="开机自启动"); Check(startup.Enabled==available,"启动开关可用状态改变");
@@ -149,7 +149,12 @@ namespace FeiqLight.Tests
                             }
                             search.Input.Font=Theme.Body;
                         }
-                        search.Height=58;search.Input.Text="666";Render(form,"search-text-"+dark);
+                        search.Height=58;search.Input.Text="666";search.Input.Focus();Pump(220);Render(form,"search-text-"+dark);
+                        using(Bitmap image=Snapshot(search)) {
+                            Color top=image.GetPixel(image.Width/2,0),bottom=image.GetPixel(image.Width/2,image.Height-1),left=image.GetPixel(0,image.Height/2),right=image.GetPixel(image.Width-1,image.Height/2);
+                            Check(Math.Abs(top.R-bottom.R)+Math.Abs(top.G-bottom.G)+Math.Abs(top.B-bottom.B)<=6,"聚焦搜索框上下描边不等粗或被裁切："+top+" / "+bottom);
+                            Check(Math.Abs(left.R-right.R)+Math.Abs(left.G-right.G)+Math.Abs(left.B-right.B)<=6,"聚焦搜索框左右描边不等粗或被裁切："+left+" / "+right);
+                        }
                         Event(search.Input,"OnKeyDown",new KeyEventArgs(Keys.Escape));Check(search.Input.TextLength==0,"Escape 清除搜索失效");form.Close();
                     }
                 }

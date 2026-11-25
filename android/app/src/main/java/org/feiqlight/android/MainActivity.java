@@ -154,8 +154,8 @@ public final class MainActivity extends Activity implements ChatService.Observer
     }
     // 熄屏期间对端可能已切网离开，亮屏回到页面时立即复核头像在线光晕。
     @Override protected void onStart() { super.onStart(); visible=true; if(SystemBars.isDark(this)!=DARK)rerenderPreservingState(); if(service!=null) { service.observe(this); service.active(selected); service.verifyPresence(); changed(); } restoreConnection(); }
-    @Override protected void onResume() { super.onResume();resumed=true;restoreConnection(); }
-    @Override protected void onPause() { resumed=false;super.onPause(); }
+    @Override protected void onResume() { super.onResume();resumed=true;restoreConnection();if(taskAdapter!=null){taskAdapter.times.clear();taskAdapter.scheduleDayRefresh();loadTaskRows();} }
+    @Override protected void onPause() { resumed=false;if(taskAdapter!=null)taskAdapter.stop();super.onPause(); }
     @Override public void onWindowFocusChanged(boolean hasFocus) { super.onWindowFocusChanged(hasFocus); if(hasFocus) SystemBars.appearance(getWindow(),DARK); }
     @Override protected void onStop() { pendingMessageLocation=null;scrollPositionVersion++;historyAppliedVersion=++historyRequestVersion; closeHistory(); finishSelection(); saveDraft(); visible=false; if(service!=null) { service.remove(this); service.active(""); } super.onStop(); }
     @Override protected void onDestroy() { if(tasksDialog!=null)tasksDialog.dismiss();avatarLoader.shutdownNow();avatarImageRequest=null;if(avatarSelection!=null&&avatarSelection.dialog!=null)avatarSelection.dialog.dismiss();if(media!=null) media.close(); if(backgroundBitmap!=null){backgroundBitmap.recycle();backgroundBitmap=null;} if(service!=null){service.remove(this);if(service.securityConfirmation==securityPrompt)service.securityConfirmation=null;} if(bound) unbindService(connection); if(Build.VERSION.SDK_INT>=33&&backCallback!=null) getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(backCallback); super.onDestroy(); }
@@ -388,6 +388,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
     @Override public void changed() {
         acceptSystemShare();
         loadTaskRows();
+        if(tasksDialog!=null&&tasksDialog.isShowing())return;
         if(root==null || rendering) return; rendering=true;
         try {
             if(selected.isEmpty()) {
@@ -415,7 +416,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
                     LanNode.Message anchor=archiveAnchor;
                     returnToLatest.setVisibility(anchor==null?View.GONE:View.VISIBLE);
                     java.util.function.Consumer<List<LanNode.Message>> loaded=rows->{
-                        if(!visible||isDestroyed()||isFinishing()||service!=source||!selected.equals(request)||messages!=target||anchor!=archiveAnchor||version<historyAppliedVersion)return;
+                        if(!visible||isDestroyed()||isFinishing()||tasksDialog!=null&&tasksDialog.isShowing()||service!=source||!selected.equals(request)||messages!=target||anchor!=archiveAnchor||version<historyAppliedVersion)return;
                         historyAppliedVersion=version;
                         if(anchor!=null && rows.isEmpty()) {
                             archiveAnchor=null;pendingMessageLocation=null;error("这条消息已删除");changed();return;
@@ -572,7 +573,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
     }
     private static boolean continues(LanNode.Message previous,LanNode.Message next) { long gap=next.time-previous.time; return previous.outgoing==next.outgoing&&gap>-60000&&gap<300000; }
     @Override public void transfersChanged() {
-        if(taskAdapter!=null&&tasksDialog!=null&&tasksDialog.isShowing())taskAdapter.refresh();
+        if(taskAdapter!=null&&tasksDialog!=null&&tasksDialog.isShowing()){taskAdapter.requestRefresh();return;}
         // 进度只更新当前卡片，不重新查询历史/创建全部气泡，也不改变用户的阅读位置。
         if(!visible||service==null||!selected.equals(progressPeer))return;
         for(Runnable update:new ArrayList<>(fileProgressViews))update.run();
@@ -877,22 +878,15 @@ public final class MainActivity extends Activity implements ChatService.Observer
     private void showTasks() { showTasks(""); }
     private void showTasks(String sourceKey) {
         if(tasksDialog!=null){tasksDialog.dismiss();return;}
-        Dialog dialog=new Dialog(this) {
-            @android.annotation.SuppressLint("GestureBackNavigation")
-            @Override public void onBackPressed() {
-                if(tasksDialog==this&&taskAdapter!=null&&taskAdapter.input.getVisibility()==View.VISIBLE)taskAdapter.setSearchExpanded(false);
-                else super.onBackPressed();
-            }
-        };dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);tasksDialog=dialog;
-        LinearLayout page=column();page.setBackgroundColor(SURFACE);
+        Dialog dialog=new Dialog(this);dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);tasksDialog=dialog;
+        LinearLayout page=column();page.setBackgroundColor(SURFACE);page.setFocusableInTouchMode(true);
         LinearLayout header=row();header.setPadding(dp(8),dp(6),dp(12),dp(6));
         IconButton back=new IconButton("back","返回",MUTED);header.addView(back,new LinearLayout.LayoutParams(dp(48),dp(48)));back.setOnClickListener(v->dialog.dismiss());
         TextView caption=text("传输任务",20,INK);caption.setTypeface(null,Typeface.BOLD);caption.setSingleLine();caption.setEllipsize(TextUtils.TruncateAt.END);header.addView(caption,weight());page.addView(header);
-        IconButton searchButton=new IconButton("search","搜索",MUTED);searchButton.setTooltipText("搜索");searchButton.setFocusableInTouchMode(true);header.addView(searchButton,new LinearLayout.LayoutParams(dp(48),dp(48)));
         IconButton queueMenu=new IconButton("more","传输任务操作",MUTED);header.addView(queueMenu,new LinearLayout.LayoutParams(dp(48),dp(48)));queueMenu.setOnClickListener(v->{
             if(service==null)return;ChatService source=service;LinearLayout options=column();Dialog menu=sheet("传输任务操作",options,null,null);
             fileAction(options,menu,"继续当前列表中的接收",this::continueCurrentReceives);
-            fileAction(options,menu,"暂停当前列表中的接收",()->{if(service==source&&taskAdapter!=null)source.pauseReceives(new ArrayList<>(taskAdapter.items));});
+            fileAction(options,menu,"暂停当前列表中的接收",()->{if(service==source&&taskAdapter!=null){taskAdapter.refresh();source.pauseReceives(new ArrayList<>(taskAdapter.items));}});
             int queued=source.queuedTransfers();
             if(queued>0)fileAction(options,menu,"取消排队发送任务",()->confirm("取消排队发送任务？","取消尚未开始的 "+queued+" 项发送任务？正在传输和已保存的文件不受影响。","取消排队",()->{if(service==source)source.cancelQueuedTransfers();}));
         });
@@ -903,28 +897,20 @@ public final class MainActivity extends Activity implements ChatService.Observer
                 super.onMeasure(width,View.MeasureSpec.makeMeasureSpec(cap,View.MeasureSpec.AT_MOST));
             }
         };controlScroll.addView(controls);page.addView(controlScroll,new LinearLayout.LayoutParams(-1,-2));
-        EditText input=new EditText(this) {
-            @Override public boolean onKeyPreIme(int keyCode,KeyEvent event) {
-                if(keyCode==KeyEvent.KEYCODE_BACK&&tasksDialog==dialog&&getVisibility()==View.VISIBLE) {
-                    if(event.getAction()==KeyEvent.ACTION_UP&&!event.isCanceled())taskAdapter.setSearchExpanded(false);
-                    return true;
-                }
-                return super.onKeyPreIme(keyCode,event);
-            }
-        };configureInput(input);input.setSingleLine();input.setTextSize(15);input.setTextColor(INK);input.setHintTextColor(MUTED);input.setHint("搜索文件或设备");input.setPadding(dp(14),dp(8),dp(14),dp(8));input.setBackground(shape(PALE,CONTROL_RADIUS));input.setMinHeight(dp(46));input.setVisibility(View.GONE);
+        EditText input=new EditText(this);configureInput(input);input.setSingleLine();input.setTextSize(15);input.setTextColor(INK);input.setHintTextColor(MUTED);input.setHint("搜索文件或设备");input.setPadding(dp(14),dp(8),dp(14),dp(8));input.setBackground(shape(PALE,CONTROL_RADIUS));input.setMinHeight(dp(46));
         LinearLayout.LayoutParams ip=new LinearLayout.LayoutParams(-1,-2);ip.setMargins(dp(16),dp(4),dp(16),dp(8));controls.addView(input,ip);
         TextView count=text("正在读取传输记录…",12,MUTED);count.setPadding(dp(20),dp(8),dp(20),dp(10));
-        TaskAdapter tasks=new TaskAdapter(count,input,searchButton,dialog,sourceKey);taskAdapter=tasks;controls.addView(tasks.sourceBar);
-        searchButton.setOnClickListener(v->tasks.setSearchExpanded(input.getVisibility()!=View.VISIBLE));
+        TaskAdapter tasks=new TaskAdapter(count,input,dialog,sourceKey);taskAdapter=tasks;controls.addView(tasks.sourceBar,0);
         LinearLayout filters=row();filters.setPadding(dp(12),0,dp(12),0);String[] names={"全部","进行中","待处理","已完成"};List<Button> picks=new ArrayList<>();
         for(int i=0;i<names.length;i++){final int index=i;Button pick=button(names[i],false);pick.setMinWidth(0);pick.setMinimumWidth(0);pick.setMinHeight(dp(44));pick.setSingleLine();pick.setEllipsize(TextUtils.TruncateAt.END);pick.setPadding(0,dp(8),0,dp(8));filters.addView(pick,new LinearLayout.LayoutParams(0,-2,1));picks.add(pick);pick.setOnClickListener(v->{tasks.filter=index;for(int j=0;j<picks.size();j++){picks.get(j).setTextColor(j==index?BLUE:MUTED);picks.get(j).setBackground(shape(j==index?BUBBLE:SURFACE,CONTROL_RADIUS));}tasks.refresh();});}
         controls.addView(filters);controls.addView(count);picks.get(0).performClick();
         FrameLayout area=new FrameLayout(this);ListView rows=new ListView(this);rows.setDivider(null);rows.setAdapter(tasks);rows.setContentDescription("传输任务列表");area.addView(rows,new FrameLayout.LayoutParams(-1,-1));
-        TextView emptyTasks=text("暂无传输任务\n收到或发送的文件会显示在这里",15,MUTED);emptyTasks.setGravity(Gravity.CENTER);emptyTasks.setLineSpacing(dp(8),1);area.addView(emptyTasks,new FrameLayout.LayoutParams(-1,-1));rows.setEmptyView(emptyTasks);page.addView(area,new LinearLayout.LayoutParams(-1,0,1));
+        TextView emptyTasks=text("暂无传输任务\n收到或发送的文件会显示在这里",15,MUTED);tasks.empty=emptyTasks;emptyTasks.setGravity(Gravity.CENTER);emptyTasks.setLineSpacing(dp(8),1);area.addView(emptyTasks,new FrameLayout.LayoutParams(-1,-1));rows.setEmptyView(emptyTasks);page.addView(area,new LinearLayout.LayoutParams(-1,0,1));
+        rows.setOnScrollListener(new AbsListView.OnScrollListener(){public void onScroll(AbsListView view,int first,int visible,int total){}public void onScrollStateChanged(AbsListView view,int state){tasks.scrolling=state!=SCROLL_STATE_IDLE;if(!tasks.scrolling)tasks.refresh();}});
         rows.setOnItemClickListener((parent,view,position,id)->taskActions(tasks.items.get(position)));
-        input.addTextChangedListener(new TextWatcher(){public void beforeTextChanged(CharSequence s,int start,int n,int after){}public void onTextChanged(CharSequence s,int start,int before,int n){tasks.refresh();}public void afterTextChanged(Editable e){}});
-        dialog.setContentView(page);dialog.setOnDismissListener(d->{tasks.stop();if(selectionOwner==input)finishSelection();if(tasksDialog==dialog){tasksDialog=null;taskAdapter=null;loadingTasks=false;reloadTasksPending=false;}});dialog.show();tasks.scheduleDayRefresh();
-        Window window=dialog.getWindow();window.setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(SURFACE));window.setLayout(-1,-1);window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);SystemBars.apply(window,SURFACE,DARK);
+        input.addTextChangedListener(new TextWatcher(){public void beforeTextChanged(CharSequence s,int start,int n,int after){}public void onTextChanged(CharSequence s,int start,int before,int n){tasks.requestSearch();}public void afterTextChanged(Editable e){}});
+        dialog.setContentView(page);page.requestFocus();dialog.setOnDismissListener(d->{tasks.stop();if(selectionOwner==input)finishSelection();if(tasksDialog==dialog){tasksDialog=null;taskAdapter=null;loadingTasks=false;reloadTasksPending=false;if(visible&&!isDestroyed())changed();}});dialog.show();tasks.scheduleDayRefresh();
+        Window window=dialog.getWindow();window.setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(SURFACE));window.setLayout(-1,-1);window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE|WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);SystemBars.apply(window,SURFACE,DARK);
         page.setOnApplyWindowInsetsListener((v,insets)->{if(Build.VERSION.SDK_INT>=30){Insets pad=insets.getInsets(WindowInsets.Type.systemBars()|WindowInsets.Type.displayCutout()|WindowInsets.Type.ime());v.setPadding(pad.left,pad.top,pad.right,pad.bottom);}else v.setPadding(insets.getSystemWindowInsetLeft(),insets.getSystemWindowInsetTop(),insets.getSystemWindowInsetRight(),insets.getSystemWindowInsetBottom());return insets;});page.requestApplyInsets();loadTaskRows();
     }
     private void loadTaskRows() {
@@ -935,18 +921,18 @@ public final class MainActivity extends Activity implements ChatService.Observer
             if(taskAdapter!=expected)return;
             loadingTasks=false;
             if(isDestroyed())return;
-            if(source==service){expected.all=rows;expected.refresh();}
+            if(source==service){expected.all=rows;expected.times.clear();if(!expected.scrolling&&resumed)expected.refresh();expected.scheduleStorageRefresh();}
             if(reloadTasksPending&&tasksDialog!=null&&tasksDialog.isShowing()){reloadTasksPending=false;loadTaskRows();}
         });
     }
     private String taskState(ChatStore.FileTask item) {
-        if(item.guestFile!=null)return receivedStorage.exists(item.guestFile)?"已保存":"本机文件已删除";
+        if(item.guestFile!=null)return item.stored?"已保存":"本机文件已删除";
         ChatService.FileProgress progress=service==null?null:service.progress(item.peer,item.message.number,item.file.id,item.message.outgoing);
         if(!item.message.outgoing) {
-            boolean available=service==null?item.stored:receivedStorage.exists(service.receivedFile(item.peer,item.message.number,item.file));
             if(progress!=null&&taskActive(progress.state))return progress.state;
-            if(available)return "已保存";
-            if(item.stored||ChatService.wasStored(item.message.state)||progress!=null&&ChatService.wasStored(progress.state))return "本机文件已删除";
+            if(progress!=null&&ChatService.wasStored(progress.state))return progress.state.equals("本机文件已删除")?"本机文件已删除":"已保存";
+            if(item.stored)return "已保存";
+            if(ChatService.wasStored(item.message.state))return "本机文件已删除";
         }
         if(progress!=null)return progress.state;
         if(item.message.state!=null&&(item.message.state.equals("对方已取消发送")||item.message.state.equals("已拒绝")||item.message.state.equals("已取消发送")))return item.message.state;
@@ -979,10 +965,10 @@ public final class MainActivity extends Activity implements ChatService.Observer
         if(item.message.outgoing&&service!=null&&service.canCancelOutgoing(item.peer,item.message.number))actions.add("取消发送");
         return actions;
     }
-    private void taskButton(LinearLayout row,String label,Runnable action) {
-        Button button=button(label,false);button.setTextSize(14);button.setTextColor(label.equals("拒绝")||label.startsWith("取消")?0xffd24e54:BLUE);
+    private Button taskButton(LinearLayout row) {
+        Button button=button("",false);button.setTextSize(14);
         button.setPadding(dp(12),dp(6),dp(12),dp(6));button.setMinWidth(0);button.setMinimumWidth(0);button.setFocusable(false);button.setFocusableInTouchMode(false);
-        LinearLayout.LayoutParams spacing=new LinearLayout.LayoutParams(-2,-2);spacing.rightMargin=dp(8);row.addView(button,spacing);button.setOnClickListener(v->action.run());
+        LinearLayout.LayoutParams spacing=new LinearLayout.LayoutParams(-2,-2);spacing.rightMargin=dp(8);row.addView(button,spacing);return button;
     }
     private void requestCancelFile(ChatStore.FileTask item) {
         ChatService source=service;if(source==null)return;
@@ -999,6 +985,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
     private void continueCurrentReceives() {
         ChatService source=service;
         if(source==null||taskAdapter==null)return;
+        taskAdapter.refresh();
         for(ChatStore.FileTask item:new ArrayList<>(taskAdapter.items)) {
             ChatStore.Conversation contact=conversation(item.peer);
             String state=taskState(item);
@@ -1029,21 +1016,26 @@ public final class MainActivity extends Activity implements ChatService.Observer
         List<ChatStore.FileTask> all=new ArrayList<>(),items=new ArrayList<>();final TextView count;final EditText input;int filter;
         final LinearLayout sourceBar=row(),sourceItems=row();
         final HorizontalScrollView sourceScroll=new HorizontalScrollView(MainActivity.this);
-        final IconButton searchButton;
         final Dialog dialog;
+        TextView empty;
+        boolean scrolling;
+        private boolean refreshScheduled;
+        final Map<Long,String> times=new HashMap<>();
         private String selectedSource,sourceSignature,contentSignature,summaryText;
-        private android.window.OnBackInvokedCallback searchBackCallback;
         // 行签名、绘制与午夜刷新共用时钟；回归可注入时间而不修改系统时钟。
         private java.util.function.LongSupplier clock=System::currentTimeMillis;
         private final Handler clockHandler=new Handler(Looper.getMainLooper());
         private final Runnable dayRefresh;
-        TaskAdapter(TextView count,EditText input,IconButton searchButton,Dialog dialog,String sourceKey) {
+        private final Runnable deferredRefresh;
+        private final Runnable storageRefresh;
+        TaskAdapter(TextView count,EditText input,Dialog dialog,String sourceKey) {
             this.count=count;
             this.input=input;
-            this.searchButton=searchButton;
             this.dialog=dialog;
             selectedSource=sourceKey;
-            dayRefresh=()->{if(taskAdapter==this&&dialog.isShowing()&&!isDestroyed()){refresh();scheduleDayRefresh();}};
+            deferredRefresh=()->{refreshScheduled=false;if(resumed&&taskAdapter==this&&dialog.isShowing()&&!scrolling)refresh();};
+            storageRefresh=()->{if(resumed&&taskAdapter==this&&dialog.isShowing()){if(scrolling)scheduleStorageRefresh();else loadTaskRows();}};
+            dayRefresh=()->{if(resumed&&taskAdapter==this&&dialog.isShowing()&&!isDestroyed()){times.clear();if(!scrolling)refresh();scheduleDayRefresh();}};
             sourceBar.setPadding(dp(12),0,dp(12),0);
             sourceItems.setGravity(Gravity.TOP);
             sourceItems.setPadding(0,dp(4),0,dp(4));
@@ -1054,30 +1046,20 @@ public final class MainActivity extends Activity implements ChatService.Observer
             sourceScroll.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob)->{if(r-l!=or-ol)showSelectedSource();});
             sourceItems.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob)->{if(r-l!=or-ol)showSelectedSource();});
         }
-        void setSearchExpanded(boolean expanded) {
-            boolean wasExpanded=input.getVisibility()==View.VISIBLE;
-            InputMethodManager keyboard=getSystemService(InputMethodManager.class);
-            if(expanded) {
-                input.setVisibility(View.VISIBLE);
-                input.requestFocus();
-                if(!wasExpanded&&Build.VERSION.SDK_INT>=33) {
-                    searchBackCallback=()->setSearchExpanded(false);
-                    // 搜索展开时先收起整个搜索区，也覆盖键盘通常优先处理的返回手势。
-                    dialog.getWindow().getOnBackInvokedDispatcher().registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_OVERLAY,searchBackCallback);
-                }
-                input.post(()->{if(taskAdapter==this&&dialog.isShowing()&&input.getVisibility()==View.VISIBLE&&keyboard!=null)keyboard.showSoftInput(input,InputMethodManager.SHOW_IMPLICIT);});
-            } else {
-                if(searchBackCallback!=null&&Build.VERSION.SDK_INT>=33) {
-                    dialog.getWindow().getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(searchBackCallback);
-                    searchBackCallback=null;
-                }
-                if(keyboard!=null)keyboard.hideSoftInputFromWindow(input.getWindowToken(),0);
-                if(selectionOwner==input)finishSelection();
-                input.setText("");
-                input.clearFocus();
-                input.setVisibility(View.GONE);
-                searchButton.requestFocus();
-            }
+        void requestSearch() {
+            clockHandler.removeCallbacks(deferredRefresh);
+            refreshScheduled=true;
+            clockHandler.postDelayed(deferredRefresh,120);
+        }
+        void requestRefresh() {
+            if(resumed&&!scrolling&&!refreshScheduled){refreshScheduled=true;clockHandler.postDelayed(deferredRefresh,200);}
+        }
+        void scheduleStorageRefresh() {
+            clockHandler.removeCallbacks(storageRefresh);
+            if(resumed&&dialog.isShowing())clockHandler.postDelayed(storageRefresh,3000);
+        }
+        private String time(ChatStore.FileTask item,long now) {
+            return times.computeIfAbsent(item.message.time,value->taskTime(value,now));
         }
         void scheduleDayRefresh() {
             clockHandler.removeCallbacks(dayRefresh);
@@ -1092,11 +1074,10 @@ public final class MainActivity extends Activity implements ChatService.Observer
             clockHandler.postDelayed(dayRefresh,Math.max(1,midnight.getTimeInMillis()-now));
         }
         void stop() {
+            refreshScheduled=false;
             clockHandler.removeCallbacks(dayRefresh);
-            if(searchBackCallback!=null&&Build.VERSION.SDK_INT>=33) {
-                dialog.getWindow().getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(searchBackCallback);
-                searchBackCallback=null;
-            }
+            clockHandler.removeCallbacks(deferredRefresh);
+            clockHandler.removeCallbacks(storageRefresh);
         }
         private void showSelectedSource() {
             if(sourceScroll.getWidth()==0)return;
@@ -1168,9 +1149,11 @@ public final class MainActivity extends Activity implements ChatService.Observer
             return new TaskSource(key,contact==null?"已移除的设备":contact.displayName(),contact==null?null:Protocol.normalizeAvatar(contact.peer.avatar),time);
         }
         void refresh() {
+            refreshScheduled=false;
+            clockHandler.removeCallbacks(deferredRefresh);
             refreshSources();
             long now=clock.getAsLong();
-            String query=input.getVisibility()==View.VISIBLE?input.getText().toString().trim().toLowerCase(Locale.ROOT):"";List<ChatStore.FileTask> next=new ArrayList<>();int completed=0;double total=0,done=0;
+            String query=input.getText().toString().trim().toLowerCase(Locale.ROOT);List<ChatStore.FileTask> next=new ArrayList<>();int completed=0;double total=0,done=0;
             StringBuilder content=new StringBuilder();
             for(ChatStore.FileTask item:all){String source=item.guestFile!=null?"guest":"peer:"+item.peer;
                 if(!selectedSource.isEmpty()&&!selectedSource.equals(source))continue;
@@ -1179,7 +1162,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
                 next.add(item);if(taskComplete(state))completed++;ChatService.FileProgress p=service==null?null:service.progress(item.peer,item.message.number,item.file.id,item.message.outgoing);
                 int percent=taskComplete(state)?100:state.equals("本机文件已删除")?0:p==null?0:p.percent;total+=item.file.size;done+=item.file.size*percent/100.0;
                 content.append(item.peer).append('\0').append(item.message.number).append('\0').append(item.message.outgoing).append('\0').append(item.file.id).append('\0')
-                    .append(item.file.name).append('\0').append(item.file.size).append('\0').append(name).append('\0').append(taskTime(item.message.time,now)).append('\0').append(state).append('\0').append(percent).append('\0')
+                    .append(item.file.name).append('\0').append(item.file.size).append('\0').append(name).append('\0').append(time(item,now)).append('\0').append(state).append('\0').append(percent).append('\0')
                     .append(taskLabel(item,state,p)).append('\0').append(item.guestFile==null?"":item.guestFile.getAbsolutePath()).append('\0')
                     .append(taskQuickActions(item,state,p,contact)).append('\0');
             }
@@ -1187,6 +1170,8 @@ public final class MainActivity extends Activity implements ChatService.Observer
             String summary=next.size()+" 个文件 · "+completed+" 个已完成"+(total>0?" · "+size((long)done)+" / "+size((long)total):"")+(queued>0?"\n另有 "+queued+" 项文件操作排队中":"");
             boolean rowsChanged=!signature.equals(contentSignature),summaryChanged=!summary.equals(summaryText);
             items=next;
+            String emptyText=!query.isEmpty()?"没有匹配的文件或设备":!selectedSource.isEmpty()||filter!=0?"当前筛选下没有传输任务":"暂无传输任务\n收到或发送的文件会显示在这里";
+            if(empty!=null&&!emptyText.contentEquals(empty.getText()))empty.setText(emptyText);
             if(!rowsChanged&&!summaryChanged)return;
             contentSignature=signature;summaryText=summary;
             if(summaryChanged&&!summary.contentEquals(count.getText()))count.setText(summary);
@@ -1197,12 +1182,19 @@ public final class MainActivity extends Activity implements ChatService.Observer
             ChatStore.FileTask item=items.get(position);LinearLayout box;
             if(old==null){box=column();box.setPadding(dp(20),dp(12),dp(20),dp(12));TextView name=text("",15,INK);name.setTypeface(null,Typeface.BOLD);name.setSingleLine();name.setEllipsize(TextUtils.TruncateAt.END);box.addView(name);TextView meta=text("",12,MUTED);meta.setSingleLine();meta.setEllipsize(TextUtils.TruncateAt.END);meta.setPadding(0,dp(5),0,dp(4));box.addView(meta);TextView status=text("",12,MUTED);status.setMaxLines(2);box.addView(status);ProgressBar bar=new ProgressBar(MainActivity.this,null,android.R.attr.progressBarStyleHorizontal);bar.setMax(100);bar.setProgressTintList(android.content.res.ColorStateList.valueOf(BLUE));bar.setProgressBackgroundTintList(android.content.res.ColorStateList.valueOf(LINE));LinearLayout.LayoutParams bp=new LinearLayout.LayoutParams(-1,dp(3));bp.topMargin=dp(8);box.addView(bar,bp);LinearLayout actions=row();LinearLayout.LayoutParams ap=new LinearLayout.LayoutParams(-1,-2);ap.topMargin=dp(8);box.addView(actions,ap);}else box=(LinearLayout)old;
             ChatStore.Conversation contact=conversation(item.peer);String state=taskState(item);ChatService.FileProgress p=service==null?null:service.progress(item.peer,item.message.number,item.file.id,item.message.outgoing);
-            String time=taskTime(item.message.time,clock.getAsLong());
+            String time=time(item,clock.getAsLong());
             ((TextView)box.getChildAt(0)).setText(item.file.name);((TextView)box.getChildAt(1)).setText((item.message.outgoing?"发送给 ":"来自 ")+(item.guestFile!=null?"浏览器访客":contact==null?"已移除的设备":contact.displayName())+" · "+size(item.file.size)+(time.isEmpty()?"":" · "+time));
             String label=taskLabel(item,state,p);
             TextView status=(TextView)box.getChildAt(2);status.setText(label);status.setTextColor(taskComplete(state)?ONLINE:taskActive(state)?BLUE:MUTED);ProgressBar bar=(ProgressBar)box.getChildAt(3);bar.setProgress(taskComplete(state)?100:state.equals("本机文件已删除")?0:p==null?0:p.percent);bar.setVisibility(taskEnded(state)?View.GONE:View.VISIBLE);
-            LinearLayout actions=(LinearLayout)box.getChildAt(4);actions.removeAllViews();ChatService source=service;
-            for(String action:taskQuickActions(item,state,p,contact))taskButton(actions,action,()->{
+            LinearLayout actions=(LinearLayout)box.getChildAt(4);ChatService source=service;
+            List<String> labels=taskQuickActions(item,state,p,contact);
+            while(actions.getChildCount()>labels.size())actions.removeViewAt(actions.getChildCount()-1);
+            for(int index=0;index<labels.size();index++) {
+                String action=labels.get(index);
+                Button button=index<actions.getChildCount()?(Button)actions.getChildAt(index):taskButton(actions);
+                if(!action.contentEquals(button.getText()))button.setText(action);
+                button.setTextColor(action.equals("拒绝")||action.startsWith("取消")?0xffd24e54:BLUE);
+                button.setOnClickListener(v->{
                 if(service!=source)return;
                 switch(action) {
                     case "暂停":case "暂停排队":source.pauseFile(item.peer,item.message.number,item.file.id);break;
@@ -1212,7 +1204,8 @@ public final class MainActivity extends Activity implements ChatService.Observer
                     case "打开":Uri uri=taskUri(item);if(uri==null)error("本机文件已删除");else openFile(uri,item.file.name,false);break;
                     case "取消发送":requestCancelOutgoingTask(item);break;
                 }
-            });
+                });
+            }
             actions.setVisibility(actions.getChildCount()==0?View.GONE:View.VISIBLE);box.setContentDescription(item.file.name+"，"+label);return box;
         }
     }

@@ -3,6 +3,7 @@ package org.feiqlight.android;
 import android.app.Dialog;
 import android.content.*;
 import android.graphics.*;
+import android.os.Looper;
 import android.view.*;
 import android.widget.*;
 import org.feiqlight.android.core.*;
@@ -237,7 +238,7 @@ public final class TransferFeatureTest {
                 try(ActivityController<MainActivity> activityController=Robolectric.buildActivity(MainActivity.class).setup()) {
                     MainActivity activity=activityController.get();settle(service);File local=guestFile(context,SharedFiles.random(32),"中文 English guest.txt",new byte[]{1,2,3},900);android.net.Uri saved=storage.save(local,"中文 English guest.txt",new LanNode.Transfer());
                     ChatStore.FileTask item=fileTasks(service).stream().filter(row->local.equals(row.guestFile)).findFirst().get();assertEquals("已保存",taskState(activity,item));
-                    Files.delete(docs.files.get(android.provider.DocumentsContract.getDocumentId(saved)).toPath());assertEquals("本机文件已删除",taskState(activity,item));assertNull(storage.saved(local));assertFalse(storage.exists(local));
+                    Files.delete(docs.files.get(android.provider.DocumentsContract.getDocumentId(saved)).toPath());item=fileTasks(service).stream().filter(row->local.equals(row.guestFile)).findFirst().get();assertEquals("本机文件已删除",taskState(activity,item));assertNull(storage.saved(local));assertFalse(storage.exists(local));
                     taskActions(activity,item);Dialog dialog=ShadowDialog.getLatestDialog();View decor=dialog.getWindow().getDecorView();
                     for(String label:new String[]{"打开文件","打开方式…","分享文件","删除本机文件"})assertNull(label,findButton(decor,label));assertNotNull(findButton(decor,"复制文件名"));
                     measure(decor,786,1500);preview(decor,"guest-deleted-actions-"+(dark?"dark":"light")+".png",(Integer)field(activity,"SURFACE"));dialog.dismiss();
@@ -268,7 +269,9 @@ public final class TransferFeatureTest {
                     ((ExecutorService)field(field(activity,"media"),"worker")).submit(()->{}).get(5,TimeUnit.SECONDS);settle(service);
                     View root=(View)field(activity,"root");assertNotNull(findDescription(root,image.name+"，媒体预览"));StringBuilder before=new StringBuilder();dialogText(root,before);assertTrue(before.toString().contains("已保存 2 / 2"));
                     ChatStore.FileTask item=fileTasks(service).stream().filter(row->row.message.number==message.number&&row.file.id==0).findFirst().get();assertEquals("已保存",taskState(activity,item));
-                    Files.delete(docs.files.get(android.provider.DocumentsContract.getDocumentId(imageUri)).toPath());assertEquals("本机文件已删除",taskState(activity,item));activity.changed();settle(service);
+                    docs.deny=true;fileTasks(service);assertEquals("本机文件已删除",service.progress(peer.id(),message.number,image.id,false).state);assertEquals(imageUri,storage.saved(imageFile));
+                    docs.deny=false;item=fileTasks(service).stream().filter(row->row.message.number==message.number&&row.file.id==0).findFirst().get();assertEquals("授权恢复后应订正旧删除态","已保存",taskState(activity,item));assertEquals("已保存",service.progress(peer.id(),message.number,image.id,false).state);
+                    Files.delete(docs.files.get(android.provider.DocumentsContract.getDocumentId(imageUri)).toPath());item=fileTasks(service).stream().filter(row->row.message.number==message.number&&row.file.id==0).findFirst().get();assertEquals("本机文件已删除",taskState(activity,item));activity.changed();settle(service);
                     assertNull(findDescription(root,image.name+"，媒体预览"));StringBuilder after=new StringBuilder();dialogText(root,after);assertTrue(after.toString(),after.toString().contains("0% · 本机文件已删除"));assertTrue(after.toString().contains("已保存 1 / 2"));
                     java.lang.reflect.Method actions=MainActivity.class.getDeclaredMethod("fileActions",LanNode.Peer.class,long.class,Protocol.Attachment.class);actions.setAccessible(true);actions.invoke(activity,peer,message.number,image);Dialog dialog=ShadowDialog.getLatestDialog();View menu=dialog.getWindow().getDecorView();
                     assertNotNull(findButton(menu,"接收文件"));for(String label:new String[]{"打开文件","分享文件","删除本机文件","另存为…","保存到设置目录 / 重试","保存到相册"})assertNull(label,findButton(menu,label));dialog.dismiss();
@@ -341,13 +344,13 @@ public final class TransferFeatureTest {
                 count.addTextChangedListener(new android.text.TextWatcher(){public void beforeTextChanged(CharSequence s,int start,int n,int after){}public void onTextChanged(CharSequence s,int start,int before,int n){textChanges[0]++;}public void afterTextChanged(android.text.Editable value){}});
                 for(int i=0;i<5;i++){refresh(adapter);activity.transfersChanged();}assertEquals(0,changes.count);assertEquals(0,textChanges[0]);
                 ChatStore.FileTask copy=task("test",1,"中文 English.bin",10485760);all.set(0,copy);refresh(adapter);assertEquals(0,changes.count);assertSame("等值刷新仍应保留新的操作数据",copy,adapter.getItem(0));
-                progress.put(key,new ChatService.FileProgress(35,"接收中",1048576,null));activity.transfersChanged();assertEquals(1,changes.count);assertTrue(count.getText().toString().contains("3.5 MB"));assertEquals(1,textChanges[0]);
+                progress.put(key,new ChatService.FileProgress(35,"接收中",1048576,null));progressRefresh(activity);assertEquals(1,changes.count);assertTrue(count.getText().toString().contains("3.5 MB"));assertEquals(1,textChanges[0]);
                 ListView parent=find(dialog.getWindow().getDecorView(),ListView.class);LinearLayout view=(LinearLayout)adapter.getView(0,null,parent);assertEquals(35,((ProgressBar)view.getChildAt(3)).getProgress());assertTrue(((TextView)view.getChildAt(2)).getText().toString().contains("1.0 MB/s"));
-                progress.put(key,new ChatService.FileProgress(35,"接收中",1048577,null));activity.transfersChanged();assertEquals("显示速度与剩余时间相同应跳过刷新",1,changes.count);
-                progress.put(key,new ChatService.FileProgress(35,"已暂停",0,null));activity.transfersChanged();assertEquals(2,changes.count);assertEquals("已暂停",((TextView)((LinearLayout)adapter.getView(0,view,parent)).getChildAt(2)).getText().toString());
-                findDescription(dialog.getWindow().getDecorView(),"搜索").performClick();EditText input=(EditText)field(adapter,"input");input.setText("waiting");assertEquals(1,adapter.getCount());int notifications=changes.count,summaryChanges=textChanges[0];
-                progress.put(key,new ChatService.FileProgress(60,"接收中",2097152,null));activity.transfersChanged();assertEquals("筛选外任务变化不应重绑当前列表",notifications,changes.count);assertEquals(summaryChanges,textChanges[0]);
-                input.setText(" WAITING ");assertEquals("相同搜索结果不应重复刷新",notifications,changes.count);
+                progress.put(key,new ChatService.FileProgress(35,"接收中",1048577,null));progressRefresh(activity);assertEquals("显示速度与剩余时间相同应跳过刷新",1,changes.count);
+                progress.put(key,new ChatService.FileProgress(35,"已暂停",0,null));progressRefresh(activity);assertEquals(2,changes.count);assertEquals("已暂停",((TextView)((LinearLayout)adapter.getView(0,view,parent)).getChildAt(2)).getText().toString());
+                EditText input=(EditText)field(adapter,"input");input.setText("waiting");Shadows.shadowOf(Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(150));assertEquals(1,adapter.getCount());int notifications=changes.count,summaryChanges=textChanges[0];
+                progress.put(key,new ChatService.FileProgress(60,"接收中",2097152,null));progressRefresh(activity);assertEquals("筛选外任务变化不应重绑当前列表",notifications,changes.count);assertEquals(summaryChanges,textChanges[0]);
+                input.setText(" WAITING ");Shadows.shadowOf(Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(150));assertEquals("相同搜索结果不应重复刷新",notifications,changes.count);
                 all.clear();refresh(adapter);assertEquals(0,adapter.getCount());notifications=changes.count;refresh(adapter);activity.transfersChanged();assertEquals("空列表不应反复刷新",notifications,changes.count);
             }finally{dialog.dismiss();}
         }finally{serviceController.destroy();}
@@ -362,9 +365,9 @@ public final class TransferFeatureTest {
             try {
                 BaseAdapter adapter=(BaseAdapter)field(activity,"taskAdapter");Changes changes=new Changes();adapter.registerDataSetObserver(changes);TextView count=(TextView)field(adapter,"count");
                 ArrayDeque<Object> queue=(ArrayDeque<Object>)field(service,"queuedTransfers");Class<?> type=Class.forName(ChatService.class.getName()+"$QueuedTransfer");java.lang.reflect.Constructor<?> constructor=type.getDeclaredConstructor(Runnable.class,Runnable.class);constructor.setAccessible(true);
-                queue.add(constructor.newInstance((Runnable)()->{},(Runnable)()->{}));activity.transfersChanged();assertTrue(count.getText().toString().contains("另有 1 项"));assertEquals(0,changes.count);
-                CharSequence summary=count.getText();activity.transfersChanged();assertSame("等值摘要不应重复设置文本",summary,count.getText());assertEquals(0,changes.count);
-                queue.clear();activity.transfersChanged();assertFalse(count.getText().toString().contains("排队中"));assertEquals(0,changes.count);
+                queue.add(constructor.newInstance((Runnable)()->{},(Runnable)()->{}));progressRefresh(activity);assertTrue(count.getText().toString().contains("另有 1 项"));assertEquals(0,changes.count);
+                CharSequence summary=count.getText();progressRefresh(activity);assertSame("等值摘要不应重复设置文本",summary,count.getText());assertEquals(0,changes.count);
+                queue.clear();progressRefresh(activity);assertFalse(count.getText().toString().contains("排队中"));assertEquals(0,changes.count);
                 queue.add(constructor.newInstance((Runnable)()->{},(Runnable)()->{}));
                 findDescription(dialog.getWindow().getDecorView(),"传输任务操作").performClick();View menu=ShadowDialog.getLatestDialog().getWindow().getDecorView();
                 assertNotNull(findButton(menu,"继续当前列表中的接收"));assertNotNull(findButton(menu,"暂停当前列表中的接收"));assertNotNull(findButton(menu,"取消排队发送任务"));
@@ -421,22 +424,22 @@ public final class TransferFeatureTest {
                 LinearLayout row=taskRow(activity,saved);Button receive=findButton(row,"接收");assertNotNull(receive);assertNotNull(findButton(row,"拒绝"));assertFalse(receive.isFocusable());
                 ListView list=find(((Dialog)field(activity,"tasksDialog")).getWindow().getDecorView(),ListView.class);BaseAdapter adapter=(BaseAdapter)field(activity,"taskAdapter");
                 assertTrue(list.performItemClick(row,taskIndex(adapter,saved),0));assertNotNull(findButton(ShadowDialog.getLatestDialog().getWindow().getDecorView(),"接收文件"));assertNotNull(findButton(ShadowDialog.getLatestDialog().getWindow().getDecorView(),"拒绝这批文件"));ShadowDialog.getLatestDialog().dismiss();
-                receive.performClick();waitUntil(service,()->savedLocal.isFile()&&!service.busy());assertArrayEquals(Files.readAllBytes(original.toPath()),Files.readAllBytes(savedLocal.toPath()));
+                receive.performClick();waitUntil(service,()->savedLocal.isFile()&&!service.busy()&&"已保存".equals(service.progress(peer.id(),saved.message.number,saved.file.id,false).state));assertArrayEquals(Files.readAllBytes(original.toPath()),Files.readAllBytes(savedLocal.toPath()));
                 findButton(taskRow(activity,saved),"打开").performClick();Intent opened=Shadows.shadowOf(activity).getNextStartedActivity();assertNotNull(opened);assertEquals(Intent.ACTION_VIEW,opened.getAction());assertNotNull(opened.getData());assertTrue((opened.getFlags()&Intent.FLAG_GRANT_READ_URI_PERMISSION)!=0);
-                findButton(taskRow(activity,deleted),"接收").performClick();waitUntil(service,()->deletedLocal.isFile()&&!service.busy());
+                findButton(taskRow(activity,deleted),"接收").performClick();waitUntil(service,()->deletedLocal.isFile()&&!service.busy()&&"已保存".equals(service.progress(peer.id(),deleted.message.number,deleted.file.id,false).state));
                 taskActions(activity,deleted);View menu=ShadowDialog.getLatestDialog().getWindow().getDecorView();
                 for(String label:new String[]{"打开文件","打开方式…","分享文件","查看保存位置","删除本机文件","查看所在会话","复制文件名"})assertNotNull(label,findButton(menu,label));assertNull(findButton(menu,"文件与保存位置"));
                 findButton(menu,"删除本机文件").performClick();findButton(ShadowDialog.getLatestDialog().getWindow().getDecorView(),"删除文件").performClick();transferDone(service);assertFalse(deletedLocal.exists());assertTrue(deletedOriginal.isFile());
-                taskActions(activity,deleted);menu=ShadowDialog.getLatestDialog().getWindow().getDecorView();assertNotNull(findButton(menu,"重新接收"));assertNull(findButton(menu,"删除本机文件"));findButton(menu,"重新接收").performClick();waitUntil(service,()->deletedLocal.isFile()&&!service.busy());
+                taskActions(activity,deleted);menu=ShadowDialog.getLatestDialog().getWindow().getDecorView();assertNotNull(findButton(menu,"重新接收"));assertNull(findButton(menu,"删除本机文件"));findButton(menu,"重新接收").performClick();waitUntil(service,()->deletedLocal.isFile()&&!service.busy()&&"已保存".equals(service.progress(peer.id(),deleted.message.number,deleted.file.id,false).state));
                 taskActions(activity,deleted);findButton(ShadowDialog.getLatestDialog().getWindow().getDecorView(),"删除本机文件").performClick();findButton(ShadowDialog.getLatestDialog().getWindow().getDecorView(),"删除文件").performClick();transferDone(service);
                 for(boolean dark:new boolean[]{false,true}) {
                     ((Dialog)field(activity,"tasksDialog")).dismiss();settle(service);context.getSharedPreferences("settings",0).edit().putBoolean("dark_mode",dark).commit();invokeNoArgs(activity,"rerenderPreservingState");showTasks(activity);settle(service);
                     View view=((Dialog)field(activity,"tasksDialog")).getWindow().getDecorView();measure(view,786,1500);preview(view,"transfers-direct-actions-"+(dark?"dark":"light")+".png",(Integer)field(activity,"SURFACE"));
                 }
                 throttle.set(true);findButton(taskRow(activity,slow),"接收").performClick();waitUntil(service,()->part.length()>0&&service.busy());
-                invokeOpen(activity,peer.id());settle(service);invokeMessageSelection(activity,slow.message);((Button)field(activity,"deleteSelectedFiles")).performClick();findButton(ShadowDialog.getLatestDialog().getWindow().getDecorView(),"删除文件").performClick();
+                ((Dialog)field(activity,"tasksDialog")).dismiss();settle(service);invokeOpen(activity,peer.id());settle(service);invokeMessageSelection(activity,slow.message);((Button)field(activity,"deleteSelectedFiles")).performClick();findButton(ShadowDialog.getLatestDialog().getWindow().getDecorView(),"删除文件").performClick();
                 Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(100));assertEquals("请先完成或取消正在接收的文件，再批量删除文件",org.robolectric.shadows.ShadowToast.getTextOfLatestToast());assertEquals(true,field(activity,"selectingMessages"));assertTrue(savedLocal.isFile());
-                invokeNoArgs(activity,"endMessageSelection");row=taskRow(activity,slow);assertNotNull(findButton(row,"暂停"));assertNotNull(findButton(row,"取消"));findButton(row,"暂停").performClick();waitUntil(service,()->!service.busy()&&"已暂停".equals(service.progress(peer.id(),slow.message.number,slow.file.id,false).state));assertTrue("暂停必须保留断点",part.length()>0);
+                invokeNoArgs(activity,"endMessageSelection");showTasks(activity);settle(service);row=taskRow(activity,slow);assertNotNull(findButton(row,"暂停"));assertNotNull(findButton(row,"取消"));findButton(row,"暂停").performClick();waitUntil(service,()->!service.busy()&&"已暂停".equals(service.progress(peer.id(),slow.message.number,slow.file.id,false).state));assertTrue("暂停必须保留断点",part.length()>0);
                 taskActions(activity,slow);assertNotNull(findButton(ShadowDialog.getLatestDialog().getWindow().getDecorView(),"继续接收"));findButton(ShadowDialog.getLatestDialog().getWindow().getDecorView(),"取消接收并清理断点").performClick();findButton(ShadowDialog.getLatestDialog().getWindow().getDecorView(),"取消接收").performClick();settle(service);assertFalse(part.exists());
                 assertNotNull(findButton(taskRow(activity,slow),"继续接收"));findButton(taskRow(activity,slow),"继续接收").performClick();waitUntil(service,()->part.length()>0&&service.busy());
                 findButton(taskRow(activity,slow),"取消").performClick();findButton(ShadowDialog.getLatestDialog().getWindow().getDecorView(),"取消接收").performClick();
@@ -506,11 +509,37 @@ public final class TransferFeatureTest {
             Protocol.Attachment completed=new Protocol.Attachment(0,"刚保存.txt",1,1),slow=new Protocol.Attachment(1,"慢查询.txt",1,1);message.files=Arrays.asList(completed,slow);
             File received=service.receivedFile(peer,message.number,completed),external=service.receivedFile(peer,message.number,slow);Files.write(external.toPath(),new byte[]{9});android.net.Uri saved=storage.save(external,slow.name,new LanNode.Transfer());
             ChatStore store=(ChatStore)field(service,"store");((ExecutorService)field(service,"io")).submit(()->store.message(peer,message,false,false)).get(5,TimeUnit.SECONDS);
-            docs.blockedQuery=android.provider.DocumentsContract.getDocumentId(saved);docs.queryGate=new CountDownLatch(1);docs.queryRelease=release;java.util.concurrent.atomic.AtomicReference<List<ChatStore.FileTask>> result=new java.util.concurrent.atomic.AtomicReference<>();service.fileTasks(result::set);assertTrue(docs.queryGate.await(5,TimeUnit.SECONDS));
+            docs.forbidMainQueries=true;docs.blockedQuery=android.provider.DocumentsContract.getDocumentId(saved);docs.queryGate=new CountDownLatch(1);docs.queryRelease=release;java.util.concurrent.atomic.AtomicReference<List<ChatStore.FileTask>> result=new java.util.concurrent.atomic.AtomicReference<>();service.fileTasks(result::set);assertTrue(docs.queryGate.await(5,TimeUnit.SECONDS));
             // 第一项已查出不存在，第二项仍在等待 SAF；这时真实接收完成回调先更新文件和进度。
             Files.write(received.toPath(),new byte[]{1});java.lang.reflect.Method progress=ChatService.class.getDeclaredMethod("fileProgress",String.class,long.class,long.class,boolean.class,int.class,String.class,LanNode.Transfer.class);progress.setAccessible(true);progress.invoke(service,peer.id(),message.number,completed.id,false,100,"已保存",null);
             release.countDown();settle(service);assertNotNull(result.get());assertEquals("较旧的查询结果抹掉了新保存状态","已保存",service.progress(peer.id(),message.number,completed.id,false).state);assertTrue(result.get().stream().filter(item->item.file.id==0).findFirst().get().stored);assertTrue(received.isFile());
         }finally{release.countDown();controller.destroy();}
+    }
+    @SuppressWarnings("unchecked")
+    @Test public void taskSearchAndScrollUseSnapshotsReuseButtonsAndPauseRefresh()throws Exception {
+        Context context=RuntimeEnvironment.getApplication();disableConnection(context);
+        ServiceController<ChatService> controller=Robolectric.buildService(ChatService.class).create();ChatService service=controller.get();
+        Shadows.shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(context,ChatService.class),service.onBind(new Intent()));
+        try(ActivityController<MainActivity> activityController=Robolectric.buildActivity(MainActivity.class).setup()) {
+            MainActivity activity=activityController.get();settle(service);FileFeaturesTest.Docs docs=documents(context);ReceivedStorage storage=new ReceivedStorage(context);
+            storage.choose(documentTree(),Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+            File guest=guestFile(context,SharedFiles.random(32),"慢目录中的文件.txt",new byte[]{1,2,3},100);
+            android.net.Uri document=storage.save(guest,"慢目录中的文件.txt",new LanNode.Transfer());docs.forbidMainQueries=true;
+            showTasks(activity);settle(service);BaseAdapter adapter=(BaseAdapter)field(activity,"taskAdapter");Dialog dialog=(Dialog)field(activity,"tasksDialog");
+            ListView list=find(dialog.getWindow().getDecorView(),ListView.class);int queries=docs.queries.get();LinearLayout row=(LinearLayout)adapter.getView(0,null,list);Button open=findButton(row,"打开");assertNotNull(open);
+            for(int i=0;i<100;i++){row=(LinearLayout)adapter.getView(0,row,list);refresh(adapter);assertSame("滚动重复绑定重建了按钮",open,findButton(row,"打开"));}
+            EditText input=(EditText)field(adapter,"input");input.setText("慢");input.setText("慢目录");Shadows.shadowOf(Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(150));assertEquals(1,adapter.getCount());assertEquals("搜索和滚动重复访问了文档提供方",queries,docs.queries.get());
+            ChatStore.FileTask active=task("test",2,"慢目录 active.bin",100);List<ChatStore.FileTask> all=(List<ChatStore.FileTask>)field(adapter,"all");all.add(active);refresh(adapter);
+            Changes changes=new Changes();adapter.registerDataSetObserver(changes);Map<String,ChatService.FileProgress> progress=(Map<String,ChatService.FileProgress>)field(service,"fileProgress");
+            java.lang.reflect.Field listenerField=AbsListView.class.getDeclaredField("mOnScrollListener");listenerField.setAccessible(true);AbsListView.OnScrollListener listener=(AbsListView.OnScrollListener)listenerField.get(list);
+            listener.onScrollStateChanged(list,AbsListView.OnScrollListener.SCROLL_STATE_FLING);
+            for(int i=1;i<=5;i++){progress.put(ChatService.fileKey(active.peer,2,0,false),new ChatService.FileProgress(i*10,"接收中",null));progressRefresh(activity);}
+            assertEquals("滚动中进度更新重绑了列表",0,changes.count);listener.onScrollStateChanged(list,AbsListView.OnScrollListener.SCROLL_STATE_IDLE);assertEquals(1,changes.count);
+            Files.delete(docs.files.get(android.provider.DocumentsContract.getDocumentId(document)).toPath());
+            invokeNoArgs(activity,"loadTaskRows");settle(service);assertEquals("本机文件已删除",taskState(activity,(ChatStore.FileTask)adapter.getItem(0)));
+            activityController.pause();android.os.Handler handler=(android.os.Handler)field(adapter,"clockHandler");assertFalse(handler.hasCallbacks((Runnable)field(adapter,"storageRefresh")));assertFalse(handler.hasCallbacks((Runnable)field(adapter,"deferredRefresh")));
+            activityController.resume();settle(service);assertTrue(handler.hasCallbacks((Runnable)field(adapter,"storageRefresh")));dialog.dismiss();Shadows.shadowOf(Looper.getMainLooper()).idle();assertFalse(handler.hasCallbacks((Runnable)field(adapter,"storageRefresh")));
+        }finally{controller.destroy();}
     }
     @Test public void concurrentTaskReloadCoalescesAndKeepsLatestRows()throws Exception {
         Context context=RuntimeEnvironment.getApplication();disableConnection(context);
@@ -551,7 +580,7 @@ public final class TransferFeatureTest {
                     java.lang.reflect.Field all=adapter.getClass().getDeclaredField("all");all.setAccessible(true);all.set(adapter,rows);java.lang.reflect.Method refresh=adapter.getClass().getDeclaredMethod("refresh");refresh.setAccessible(true);refresh.invoke(adapter);
                     View view=dialog.getWindow().getDecorView();view.measure(View.MeasureSpec.makeMeasureSpec(786,View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(1500,View.MeasureSpec.EXACTLY));view.layout(0,0,786,1500);
                     File output=new File(System.getProperty("feiq.previewDir"));assertTrue(output.isDirectory()||output.mkdirs());Bitmap bitmap=Bitmap.createBitmap(786,1500,Bitmap.Config.ARGB_8888);view.draw(new Canvas(bitmap));try(OutputStream stream=new FileOutputStream(new File(output,"transfers-"+(dark?"dark":"light")+".png"))){bitmap.compress(Bitmap.CompressFormat.PNG,100,stream);}bitmap.recycle();
-                    EditText input=find(view,EditText.class);assertNotNull(input);assertEquals(View.GONE,input.getVisibility());findDescription(view,"搜索").performClick();assertEquals(View.VISIBLE,input.getVisibility());input.setText("不存在");assertEquals(0,((BaseAdapter)adapter).getCount());dialog.dismiss();
+                    EditText input=find(view,EditText.class);assertNotNull(input);assertEquals(View.VISIBLE,input.getVisibility());assertNull(findDescription(view,"搜索"));input.setText("不存在");Shadows.shadowOf(Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(150));assertEquals(0,((BaseAdapter)adapter).getCount());dialog.dismiss();
                 }
             }
         }finally{serviceController.destroy();}
@@ -624,6 +653,7 @@ public final class TransferFeatureTest {
     private static String dialogText(Dialog dialog){StringBuilder text=new StringBuilder();dialogText(dialog.getWindow().getDecorView(),text);return text.toString();}
     private static void dialogText(View view,StringBuilder text) {if(view instanceof TextView&&!(view instanceof Button))text.append(((TextView)view).getText()).append('\n');if(view instanceof ViewGroup)for(int i=0;i<((ViewGroup)view).getChildCount();i++)dialogText(((ViewGroup)view).getChildAt(i),text);}
     private static void refresh(Object adapter)throws Exception {java.lang.reflect.Method refresh=adapter.getClass().getDeclaredMethod("refresh");refresh.setAccessible(true);refresh.invoke(adapter);}
+    private static void progressRefresh(MainActivity activity){activity.transfersChanged();Shadows.shadowOf(Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(200));}
     private static void showTasks(MainActivity activity)throws Exception {java.lang.reflect.Method show=MainActivity.class.getDeclaredMethod("showTasks");show.setAccessible(true);show.invoke(activity);}
     private static ChatStore.FileTask task(String peer,long packet,String name,long size){LanNode.Message message=new LanNode.Message();message.number=packet;message.text=name;message.state="已收到";Protocol.Attachment file=new Protocol.Attachment(0,name,size,1);message.files.add(file);return new ChatStore.FileTask(peer,message,file);}
     private static void settle(ChatService service)throws Exception {

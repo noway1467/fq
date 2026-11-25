@@ -576,7 +576,7 @@ namespace FeiqLight.Tests
                         Check(list.DrawMode==DrawMode.OwnerDrawFixed,"破坏原生OwnerDrawFixed模式");Check(!(bool)typeof(Control).GetMethod("GetStyle",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(list,new object[]{ControlStyles.UserPaint}),"错误开启UserPaint");
                         int bottom=list.GetItemRectangle(0).Bottom;Check(bottom<list.ClientSize.Height,"测试窗口没有尾部空白");
                         using(Bitmap image=EraseBackground(list)){Check(image.GetPixel(2,2).ToArgb()==Color.Magenta.ToArgb(),"背景擦除清空了自绘条目区域");Check(image.GetPixel(2,bottom+1).ToArgb()==list.BackColor.ToArgb(),"尾部空白未使用当前主题背景");}
-                        Field<Button>(window,"searchButton").PerformClick();Controls(window).OfType<TextBox>().Single().Text="不存在";Check(list.Items.Count==0,"空列表测试过滤失败");
+                        Controls(window).OfType<TextBox>().Single().Text="不存在";Check(list.Items.Count==0,"空列表测试过滤失败");
                         using(Bitmap image=EraseBackground(list)){Check(image.GetPixel(2,2).ToArgb()==list.BackColor.ToArgb()&&image.GetPixel(2,image.Height-2).ToArgb()==list.BackColor.ToArgb(),"空列表未填充整个客户区");}
                         window.Close();main.ExitApplication();
                     }
@@ -689,7 +689,7 @@ namespace FeiqLight.Tests
                         main.Show();for(int i=0;i<6;i++)main.TrackTransfer(new ChatRecord{PeerId="device:"+i,Packet=i,Sender="我的设备 "+i,Time=DateTime.Now.AddMinutes(-i),Outgoing=i%2==0,Transfers=new[]{new FileTransferState{Id=1,Name=i==0?"很长的中文文件名称与 English-2026-Project-delivery-资料整理.zip":"项目资料 "+i+".pdf",Size=134217728,Percent=i*15,Status=i==0?"接收中":i==1?"已保存":i==2?"已暂停":"接收失败 · 点击续传",BytesPerSecond=i==0?10485760:0}}});
                         window.Show();Application.DoEvents();Thread.Sleep(600);Application.DoEvents();ListBox list=Controls(window).OfType<ListBox>().Single();Check(list.Items.Count==6,"任务未聚合");list.SelectedIndex=0;
                         foreach(int width in new[]{860,620}){window.ClientSize=new Size(width,560);Application.DoEvents();using(var image=new Bitmap(window.Width,window.Height)){window.DrawToBitmap(image,new Rectangle(Point.Empty,window.Size));image.Save(Path.Combine(output,"transfers-"+(dark?"dark":"light")+"-"+width+".png"));}}
-                        Field<Button>(window,"searchButton").PerformClick();TextBox input=Controls(window).OfType<TextBox>().Single();input.Text="不存在的文件";Application.DoEvents();Check(list.Items.Count==0,"搜索未过滤");Check(Controls(window).OfType<Label>().Any(l=>l.Visible&&l.Text.Contains("没有匹配")),"空状态未显示");window.Close();main.ExitApplication();
+                        TextBox input=Controls(window).OfType<TextBox>().Single();input.Text="不存在的文件";Application.DoEvents();Check(list.Items.Count==0,"搜索未过滤");Check(Controls(window).OfType<Label>().Any(l=>l.Visible&&l.Text.Contains("没有匹配")),"空状态未显示");window.Close();main.ExitApplication();
                     }
                 }
             });

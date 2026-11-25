@@ -58,11 +58,17 @@ public final class TaskSourceTest {
         BaseAdapter adapter()throws Exception {return (BaseAdapter)field(activity,"taskAdapter");}
         LinearLayout sources()throws Exception {return (LinearLayout)field(adapter(),"sourceItems");}
         EditText input()throws Exception {return (EditText)field(adapter(),"input");}
-        void rows(ChatStore.FileTask... rows)throws Exception {setField(adapter(),"all",new ArrayList<>(Arrays.asList(rows)));refresh(adapter());}
+        void rows(ChatStore.FileTask... rows)throws Exception {
+            // 排空上一操作的真实数据库刷新，再注入仅用于筛选/布局的内存夹具。
+            settle(service);
+            for(ChatStore.FileTask row:rows)if(!row.message.outgoing)row.stored=new ReceivedStorage(service).exists(row.guestFile!=null?row.guestFile:service.receivedFile(row.peer,row.message.number,row.file));
+            setField(adapter(),"all",new ArrayList<>(Arrays.asList(rows)));
+            ((android.os.Handler)field(adapter(),"clockHandler")).removeCallbacks((Runnable)field(adapter(),"storageRefresh"));refresh(adapter());
+        }
         void pick(String key)throws Exception {View pick=sources().findViewWithTag("task-source:"+key);assertNotNull("来源缺失："+key,pick);assertTrue(pick.performClick());}
         void search(String text)throws Exception {
-            if(input().getVisibility()!=View.VISIBLE)assertTrue(findDescription(dialog().getWindow().getDecorView(),"搜索").performClick());
-            input().setText(text);
+            assertEquals(View.VISIBLE,input().getVisibility());input().requestFocus();input().setText(text);
+            Shadows.shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(150));
         }
         View menu()throws Exception {assertTrue(findDescription(dialog().getWindow().getDecorView(),"传输任务操作").performClick());return ShadowDialog.getLatestDialog().getWindow().getDecorView();}
         void state(ChatStore.FileTask item,int percent,String state,LanNode.Transfer task)throws Exception {progress(service).put(ChatService.fileKey(item.peer,item.message.number,item.file.id,item.message.outgoing),new ChatService.FileProgress(percent,state,task));}
@@ -79,14 +85,14 @@ public final class TaskSourceTest {
             LanNode.Peer peer=peer("a","没有文件记录的联系人");f.contacts(peer);
             invoke(f.activity,"open",new Class<?>[]{String.class},peer.id());settle(f.service);
             View transfer=findDescription((View)field(f.activity,"toolbar"),"传输任务");assertNotNull(transfer);assertTrue(transfer.performClick());settle(f.service);
-            assertEquals("peer:"+peer.id(),field(f.adapter(),"selectedSource"));assertEquals(Arrays.asList("全部",peer.name),sourceNames(f.sources()));assertEquals(0,f.adapter().getCount());assertEquals(View.GONE,f.input().getVisibility());
+            assertEquals("peer:"+peer.id(),field(f.adapter(),"selectedSource"));assertEquals(Arrays.asList("全部",peer.name),sourceNames(f.sources()));assertEquals(0,f.adapter().getCount());assertEquals(View.VISIBLE,f.input().getVisibility());
             View selected=f.sources().getChildAt(1);assertTrue(selected.isSelected());assertEquals(peer.name+"，已选中",selected.getContentDescription());
             f.pick("");assertEquals(Collections.singletonList("全部"),sourceNames(f.sources()));f.dialog().dismiss();
             f.show();assertEquals("",field(f.adapter(),"selectedSource"));assertEquals(Collections.singletonList("全部"),sourceNames(f.sources()));
             invoke(f.activity,"showTasks",new Class<?>[0]);settle(f.service);assertNull(field(f.activity,"tasksDialog"));assertNull(field(f.activity,"taskAdapter"));
             invoke(f.activity,"showMenu",new Class<?>[]{View.class},field(f.activity,"root"));
             Button tasks=findButton(ShadowDialog.getLatestDialog().getWindow().getDecorView(),"传输任务");assertNotNull(tasks);assertTrue(tasks.performClick());settle(f.service);
-            assertEquals("",field(f.adapter(),"selectedSource"));assertEquals(View.GONE,f.input().getVisibility());
+            assertEquals("",field(f.adapter(),"selectedSource"));assertEquals(View.VISIBLE,f.input().getVisibility());
         }
     }
 
@@ -124,9 +130,9 @@ public final class TaskSourceTest {
         try(Fixture f=new Fixture()) {
             LanNode.Peer a=peer("a","原名称"),b=peer("b","另一设备");a.avatar="builtin:1";f.contacts(a,b);f.show();
             ChatStore.FileTask first=file(a.id(),1,"first.bin",500),second=file(b.id(),2,"second.bin",300);f.rows(first,second);View stable=f.sources().getChildAt(1);
-            for(int i=0;i<5;i++)f.activity.transfersChanged();assertSame(stable,f.sources().getChildAt(1));
+            for(int i=0;i<5;i++)f.activity.transfersChanged();Shadows.shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(200));assertSame(stable,f.sources().getChildAt(1));
             first.message.time=600;refresh(f.adapter());assertSame("时间改变但顺序不变时无需重建来源",stable,f.sources().getChildAt(1));
-            ChatStore.Conversation contact=f.service.conversations().stream().filter(item->item.peer.id().equals(a.id())).findFirst().orElseThrow();contact.note="当前备注名";contact.peer.avatar="builtin:2";f.activity.transfersChanged();
+            ChatStore.Conversation contact=f.service.conversations().stream().filter(item->item.peer.id().equals(a.id())).findFirst().orElseThrow();contact.note="当前备注名";contact.peer.avatar="builtin:2";f.activity.transfersChanged();Shadows.shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(200));
             assertNotSame(stable,f.sources().getChildAt(1));assertEquals("当前备注名",sourceNames(f.sources()).get(1));assertTrue(((TextView)f.taskRow(0).getChildAt(1)).getText().toString().contains("当前备注名"));
             AvatarDrawable avatar=(AvatarDrawable)((ViewGroup)((ViewGroup)f.sources().getChildAt(1)).getChildAt(0)).getChildAt(0).getBackground();assertEquals("builtin:2",avatar.avatarValue());
             second.message.time=700;refresh(f.adapter());assertEquals("另一设备",sourceNames(f.sources()).get(1));
@@ -142,20 +148,21 @@ public final class TaskSourceTest {
             findButton(f.dialog().getWindow().getDecorView(),"待处理").performClick();assertEquals(Collections.singletonList("common-pending.txt"),fileNames(f.adapter()));
             f.pick("peer:"+b.id());assertEquals(View.VISIBLE,f.input().getVisibility());assertEquals(" COMMON ",f.input().getText().toString());assertEquals(Collections.singletonList("common-other.txt"),fileNames(f.adapter()));
             f.pick("peer:"+a.id());findButton(f.dialog().getWindow().getDecorView(),"已完成").performClick();assertEquals(Collections.singletonList("common-saved.txt"),fileNames(f.adapter()));assertTrue(((TextView)field(f.adapter(),"count")).getText().toString().startsWith("1 个文件 · 1 个已完成"));
-            findButton(f.dialog().getWindow().getDecorView(),"全部").performClick();f.pick("");f.input().setText("设备 Alpha");assertEquals(4,f.adapter().getCount());assertFalse(fileNames(f.adapter()).contains("common-other.txt"));
+            findButton(f.dialog().getWindow().getDecorView(),"全部").performClick();f.pick("");f.search("设备 Alpha");assertEquals(4,f.adapter().getCount());assertFalse(fileNames(f.adapter()).contains("common-other.txt"));
         }
     }
 
-    @Test public void searchButtonClearsOnCollapseAndBothBackPathsKeepPageOpenFirst()throws Exception {
+    @Test public void searchStaysVisibleDebouncesAndBackClosesPageWithoutForcedKeyboard()throws Exception {
         try(Fixture f=new Fixture()) {
             f.show();f.rows(file("unknown",1,"needle.txt",100),file("unknown",2,"other.txt",100));
-            EditText input=f.input();View button=findDescription(f.dialog().getWindow().getDecorView(),"搜索");assertNotNull(button);assertEquals("搜索",button.getTooltipText());assertEquals("搜索文件或设备",input.getHint());assertNull("保留输入框原有无障碍名称",input.getContentDescription());assertEquals(View.GONE,input.getVisibility());
-            assertTrue(button.performClick());Shadows.shadowOf(Looper.getMainLooper()).idle();assertEquals(View.VISIBLE,input.getVisibility());assertTrue(input.hasFocus());assertTrue(Shadows.shadowOf(f.activity.getSystemService(InputMethodManager.class)).isSoftInputVisible());input.setText("needle");assertEquals(1,f.adapter().getCount());
-            assertTrue(button.performClick());assertEquals(View.GONE,input.getVisibility());assertEquals("",input.getText().toString());assertEquals(2,f.adapter().getCount());assertFalse(Shadows.shadowOf(f.activity.getSystemService(InputMethodManager.class)).isSoftInputVisible());
-            f.search("needle");f.activity.onBackPressed();assertTrue(f.dialog().isShowing());assertEquals(View.GONE,input.getVisibility());assertEquals("",input.getText().toString());assertEquals(2,f.adapter().getCount());
-            f.search("needle");android.window.OnBackInvokedCallback back=(android.window.OnBackInvokedCallback)field(f.adapter(),"searchBackCallback");assertNotNull(back);back.onBackInvoked();assertTrue(f.dialog().isShowing());assertEquals(View.GONE,input.getVisibility());assertNull(field(f.adapter(),"searchBackCallback"));
-            f.search("needle");assertTrue(input.onKeyPreIme(KeyEvent.KEYCODE_BACK,new KeyEvent(KeyEvent.ACTION_DOWN,KeyEvent.KEYCODE_BACK)));assertTrue(input.onKeyPreIme(KeyEvent.KEYCODE_BACK,new KeyEvent(KeyEvent.ACTION_UP,KeyEvent.KEYCODE_BACK)));assertTrue(f.dialog().isShowing());assertEquals(View.GONE,input.getVisibility());assertEquals(2,f.adapter().getCount());
-            input.setText("needle");assertEquals("隐藏搜索框不能继续过滤",2,f.adapter().getCount());input.setText("");f.activity.onBackPressed();Shadows.shadowOf(Looper.getMainLooper()).idle();assertNull(field(f.activity,"tasksDialog"));assertNull(field(f.activity,"taskAdapter"));assertFalse(f.activity.isFinishing());
+            EditText input=f.input();assertNull(findDescription(f.dialog().getWindow().getDecorView(),"搜索"));assertEquals("搜索文件或设备",input.getHint());assertEquals(View.VISIBLE,input.getVisibility());
+            assertFalse(input.hasFocus());assertFalse(Shadows.shadowOf(f.activity.getSystemService(InputMethodManager.class)).isSoftInputVisible());
+            Changes changes=new Changes();f.adapter().registerDataSetObserver(changes);
+            input.setText("n");input.setText("ne");input.setText("needle");assertEquals(0,changes.count);
+            Shadows.shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(150));assertEquals(1,changes.count);assertEquals(1,f.adapter().getCount());
+            f.search("无匹配");assertEquals("没有匹配的文件或设备",((TextView)field(f.adapter(),"empty")).getText());
+            f.search("");findButton(f.dialog().getWindow().getDecorView(),"已完成").performClick();assertEquals("当前筛选下没有传输任务",((TextView)field(f.adapter(),"empty")).getText());
+            input.setText("needle");BaseAdapter adapter=f.adapter();f.activity.onBackPressed();Shadows.shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(250));assertNull(field(f.activity,"tasksDialog"));assertNull(field(f.activity,"taskAdapter"));assertFalse(f.activity.isFinishing());assertFalse(((android.os.Handler)field(adapter,"clockHandler")).hasCallbacks((Runnable)field(adapter,"deferredRefresh")));
         }
     }
 

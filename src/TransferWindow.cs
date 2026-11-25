@@ -81,11 +81,9 @@ namespace FeiqLight
         private readonly RoundedButton[] filters;
         private readonly TextBox query;
         private readonly SearchBox search;
-        private readonly Button searchButton;
         private readonly BufferedLayoutTable body;
         private readonly TransferSourceStrip sources = new TransferSourceStrip { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 4) };
         private string selectedSourceId = "";
-        private bool searchExpanded;
         internal Func<DateTime> LocalNow = () => DateTime.Now;
         internal string SelectedSourceId { get { return selectedSourceId; } }
         private int filter;
@@ -104,15 +102,12 @@ namespace FeiqLight
             this.main = main; Text = "传输任务"; ClientSize = new Size(860, 640); MinimumSize = new Size(620, 440); UseSecondaryChrome();
             body = new BufferedLayoutTable { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 6, Padding = new Padding(24, 12, 24, 16), Margin = Padding.Empty };
             body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            foreach (int height in new[] { 80, 0, 42, 32, -1, 56 }) body.RowStyles.Add(new RowStyle(height < 0 ? SizeType.Percent : SizeType.Absolute, height < 0 ? 100 : height));
+            foreach (int height in new[] { 80, 52, 42, 32, -1, 56 }) body.RowStyles.Add(new RowStyle(height < 0 ? SizeType.Percent : SizeType.Absolute, height < 0 ? 100 : height));
             Surface.Controls.Add(body);
-            var sourceHeader = new BufferedLayoutTable { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty };
-            sourceHeader.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); sourceHeader.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 48)); sourceHeader.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            sources.SourceSelected += SelectSource; sourceHeader.Controls.Add(sources, 0, 0);
-            searchButton = Theme.IconButton("search", "搜索", delegate { SetSearchExpanded(!searchExpanded); }, false); searchButton.Dock = DockStyle.Top; searchButton.Margin = new Padding(8, 6, 0, 0); searchButton.AccessibleDescription = "展开搜索"; tips.SetToolTip(searchButton, "搜索"); sourceHeader.Controls.Add(searchButton, 1, 0); body.Controls.Add(sourceHeader, 0, 0);
-            search = new SearchBox { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 8), Placeholder = "搜索文件或设备", Visible = false };
+            sources.SourceSelected += SelectSource; body.Controls.Add(sources, 0, 0);
+            search = new SearchBox { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 8), Placeholder = "搜索文件或设备" };
             query = search.Input; query.AccessibleName = "搜索传输任务";
-            query.TextChanged += delegate { if (!searchExpanded && query.TextLength > 0) { query.Clear(); return; } RefreshRows(); }; body.Controls.Add(search, 0, 1);
+            query.TextChanged += delegate { RefreshRows(); }; body.Controls.Add(search, 0, 1);
             string[] labels = { "全部", "进行中", "待处理", "已完成" }; filters = new RoundedButton[labels.Length];
             for (int i = 0; i < labels.Length; i++) {
                 int selected = i; filters[i] = (RoundedButton)Theme.Button(labels[i], delegate { filter = selected; UpdateTabs(); RefreshRows(); }, false);
@@ -156,23 +151,10 @@ namespace FeiqLight
             RefreshRows();
             sources.EnsureSelectedVisible();
         }
-        private void SetSearchExpanded(bool expanded)
-        {
-            if (searchExpanded != expanded)
-            {
-                searchExpanded = expanded;
-                if (!expanded) query.Clear();
-                search.Visible = expanded;
-                LayoutSections();
-                searchButton.AccessibleDescription = expanded ? "收起搜索" : "展开搜索";
-            }
-            if (expanded) query.Focus();
-            else searchButton.Focus();
-        }
         protected override bool ProcessCmdKey(ref Message message, Keys keyData)
         {
-            if (keyData == (Keys.Control | Keys.F)) { SetSearchExpanded(true); return true; }
-            if (keyData == Keys.Escape && searchExpanded) { SetSearchExpanded(false); return true; }
+            if (keyData == (Keys.Control | Keys.F)) { query.Focus(); return true; }
+            if (keyData == Keys.Escape && query.TextLength > 0) { query.Clear(); return true; }
             return base.ProcessCmdKey(ref message, keyData);
         }
         internal static string FormatTime(DateTime time, DateTime now)
@@ -189,10 +171,12 @@ namespace FeiqLight
             if(body==null||!body.IsHandleCreated)return;
             float scale;using(Graphics graphics=list.CreateGraphics())scale=Math.Max(DeviceDpi,graphics.DpiX)/96F;
             int sourceHeight=(int)Math.Round(76*scale);
-            bool compact=Surface.ClientSize.Height-sourceHeight-(searchExpanded?46:0)-42-32-56-28<list.ItemHeight;
+            int searchHeight=(int)Math.Round(44*scale)+search.Margin.Vertical;
+            bool compact=Surface.ClientSize.Height-sourceHeight-searchHeight-42-32-56-28<list.ItemHeight;
             // 最小高度优先保留一整行；收紧固定区间距，底栏仍保留四列与原操作。
-            var padding=new Padding(24,compact?6:12,24,compact?6:16);
-            int[] heights={sourceHeight,searchExpanded?(compact?38:46):0,compact?34:42,compact?24:32,-1,compact?44:56};
+            var padding=new Padding(24,compact?2:12,24,compact?2:16);
+            if(compact)searchHeight=Math.Max(query.PreferredHeight+(int)Math.Round(12*scale),(int)Math.Round(36*scale))+search.Margin.Vertical;
+            int[] heights={sourceHeight,searchHeight,compact?30:42,compact?20:32,-1,compact?44:56};
             body.SuspendLayout();
             if(body.Padding!=padding)body.Padding=padding;
             for(int i=0;i<heights.Length;i++)if(heights[i]>=0&&body.RowStyles[i].Height!=heights[i])body.RowStyles[i].Height=heights[i];
@@ -242,7 +226,7 @@ namespace FeiqLight
             }
             if(list.Items.Count>0&&list.SelectedIndex<0)list.SelectedIndex=0;
             bool emptyVisible = rows.Length == 0;
-            string emptyText = String.IsNullOrEmpty(query.Text) ? "暂无传输任务\n收到或发送的文件会显示在这里" : "没有匹配的文件或设备";
+            string emptyText = query.Text.Trim().Length > 0 ? "没有匹配的文件或设备" : selectedSourceId.Length > 0 || filter != 0 ? "当前筛选下没有传输任务" : "暂无传输任务\n收到或发送的文件会显示在这里";
             if (empty.Visible != emptyVisible) empty.Visible = emptyVisible;
             if (empty.Text != emptyText) empty.Text = emptyText;
             double total=rows.Sum(i=>(double)i.File.Size),done=rows.Sum(i=>i.File.Size*(i.Complete?1:Math.Max(0,Math.Min(100,i.File.Percent))/100.0));

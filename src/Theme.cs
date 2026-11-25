@@ -731,12 +731,14 @@ namespace FeiqLight
         {
             e.Graphics.Clear(BackColor); if (Width < 4 || Height < 4) return; e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
             float scale = e.Graphics.DpiX / 96F;
-            using (GraphicsPath path = Theme.RoundedF(new RectangleF(.5F, .5F, Width - 1, Height - 1), Math.Min(Theme.ControlRadius * scale, Math.Min(Width, Height) / 2F)))
+            double f = focus.Value;
+            float stroke = 1F + (1.5F * scale - 1F) * (float)f;
+            // 描边居中绘制；按实际线宽内缩，防止高 DPI 聚焦时底边和右边被裁成细线。
+            float inset = stroke / 2F;
+            using (GraphicsPath path = Theme.RoundedF(new RectangleF(inset, inset, Width - 1 - stroke, Height - 1 - stroke), Math.Min(Theme.ControlRadius * scale, Math.Min(Width - 1 - stroke, Height - 1 - stroke) / 2F)))
             {
                 using (SolidBrush b = new SolidBrush(Input.BackColor)) e.Graphics.FillPath(b, path);
-                double f = focus.Value;
-                if (f < 1) using (Pen idle = new Pen(Theme.Line, 1F)) e.Graphics.DrawPath(idle, path);
-                if (f > 0) using (Pen pen = new Pen(Color.FromArgb((int)(255 * f), Theme.Blue), 1.5F * scale)) e.Graphics.DrawPath(pen, path);
+                using (Pen pen = new Pen(Theme.Blend(Theme.Blue, Theme.Line, (float)f), stroke)) e.Graphics.DrawPath(pen, path);
             }
         }
         public string Placeholder { set { if (!Input.IsHandleCreated) Input.CreateControl(); SendMessage(Input.Handle, 0x1501, new IntPtr(1), value); } }
