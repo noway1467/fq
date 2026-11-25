@@ -257,7 +257,7 @@ public final class SettingsMessageTest {
                     deleteFiles.performClick();click(ShadowDialog.getLatestDialog(),"删除文件");
                     ((ExecutorService)field(service,"transferWorker")).submit(()->{}).get(5,TimeUnit.SECONDS);settle(service);
                     assertFalse(local.exists());assertTrue(original.isFile());assertTrue(partial.isFile());assertEquals(4,((List<?>)field(activity,"messageRows")).size());assertFalse((Boolean)field(activity,"selectingMessages"));
-                    assertEquals("已删除 1 个本机文件，1 个已删除跳过（另有 1 个未接收附件未处理）",ShadowToast.getTextOfLatestToast());
+                    assertEquals("已删除 1 个本机文件，1 个已删除跳过。（另有 1 个未接收附件未处理）",ShadowToast.getTextOfLatestToast());
                     assertEquals("本机文件已删除",service.progress(peer.id(),received.number,file.id,false).state);
                     assertEquals("本机文件已删除",service.progress(peer.id(),deleted.number,file.id,false).state);
                     ChatStore store=(ChatStore)field(service,"store");assertNotNull(store.findMessage(peer.id(),outgoing.number,true));assertEquals(1,store.findMessage(peer.id(),pending.number,false).files.size());assertEquals(4,store.history(peer.id()).size());

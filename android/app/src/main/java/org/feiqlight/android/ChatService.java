@@ -584,8 +584,19 @@ public final class ChatService extends Service {
     static final class ChatPage {
         final List<LanNode.Message> rows;
         final Map<String,Uri> files=new HashMap<>();
+        final Map<String,int[]> media=new HashMap<>();
         final Map<String,FileProgress> progress;
         ChatPage(List<LanNode.Message> rows,Map<String,FileProgress> progress){this.rows=rows;this.progress=progress;}
+    }
+    private final Map<String,int[]> mediaSizes=new LinkedHashMap<String,int[]>(64,.75f,true) {
+        @Override protected boolean removeEldestEntry(Map.Entry<String,int[]> entry){return size()>512;}
+    };
+    private int[] mediaSize(Uri uri) {
+        String key=uri.toString();
+        synchronized(mediaSizes){int[] cached=mediaSizes.get(key);if(cached!=null)return cached;}
+        int[] size=MediaPreview.bounds(this,uri);
+        if(size!=null)synchronized(mediaSizes){mediaSizes.put(key,size);}
+        return size;
     }
     ChatPage resolveChatPage(String peer,List<LanNode.Message> rows,Map<String,FileProgress> progress,java.util.function.BooleanSupplier current) {
         ChatPage page=new ChatPage(rows,progress);
@@ -604,6 +615,10 @@ public final class ChatService extends Service {
                 uri=local.isFile()?ReceivedFileProvider.uri(this,local,file.name):storage.existingSaved(local);
             }
             page.files.put(key,uri);
+            // 尺寸随后台快照准备好，绑定和解码完成时均不读 SAF，也不改变气泡高度。
+            if(uri!=null&&MediaPreview.supported(file.name)&&!MediaPreview.video(file.name)) {
+                int[] size=mediaSize(uri);if(size!=null)page.media.put(key,size);
+            }
         }
         return page;
     }

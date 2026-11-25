@@ -533,8 +533,22 @@ public final class FileFeaturesTest {
         android.graphics.Bitmap source=android.graphics.Bitmap.createBitmap(1600,1200,android.graphics.Bitmap.Config.ARGB_8888);
         try(OutputStream output=new FileOutputStream(file)){assertTrue(source.compress(android.graphics.Bitmap.CompressFormat.PNG,100,output));}source.recycle();
         android.graphics.Bitmap image=MediaPreview.image(c,Uri.fromFile(file),480);assertTrue(image.getWidth()<=480&&image.getHeight()<=480);image.recycle();
-        Files.write(file.toPath(),new byte[]{1,2,3});fails(()->MediaPreview.image(c,Uri.fromFile(file),480));
+        assertArrayEquals(new int[]{1600,1200},MediaPreview.bounds(c,Uri.fromFile(file)));
+        Files.write(file.toPath(),new byte[]{1,2,3});fails(()->MediaPreview.image(c,Uri.fromFile(file),480));assertNull(MediaPreview.bounds(c,Uri.fromFile(file)));
         assertTrue(MediaPreview.supported("图片.png"));assertTrue(MediaPreview.video("视频.mp4"));assertFalse(MediaPreview.supported("程序.exe"));
+    }
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    @Test public void jpegOrientationKeepsDimensionsAndMirroredPixelsConsistent()throws Exception {
+        Context c=RuntimeEnvironment.getApplication();File file=File.createTempFile("orientation-",".jpg",c.getCacheDir());
+        android.graphics.Bitmap source=android.graphics.Bitmap.createBitmap(120,60,android.graphics.Bitmap.Config.ARGB_8888);
+        android.graphics.Canvas canvas=new android.graphics.Canvas(source);canvas.drawColor(android.graphics.Color.BLUE);android.graphics.Paint paint=new android.graphics.Paint();paint.setColor(android.graphics.Color.RED);canvas.drawRect(0,0,60,60,paint);
+        try(OutputStream output=new FileOutputStream(file)){assertTrue(source.compress(android.graphics.Bitmap.CompressFormat.JPEG,100,output));}source.recycle();
+        for(int orientation:new int[]{1,2,5,6,7,8}) {
+            android.media.ExifInterface exif=new android.media.ExifInterface(file);exif.setAttribute(android.media.ExifInterface.TAG_ORIENTATION,Integer.toString(orientation));exif.saveAttributes();
+            int[] expected=orientation>=5?new int[]{60,120}:new int[]{120,60};assertArrayEquals(expected,MediaPreview.bounds(c,Uri.fromFile(file)));
+            android.graphics.Bitmap decoded=MediaPreview.image(c,Uri.fromFile(file),480);
+            try {assertEquals(expected[0],decoded.getWidth());assertEquals(expected[1],decoded.getHeight());int color=decoded.getPixel(decoded.getWidth()/4,decoded.getHeight()/4);boolean red=android.graphics.Color.red(color)>android.graphics.Color.blue(color);assertEquals("EXIF 旋转/镜像方向错误："+orientation,orientation==1||orientation==5||orientation==6,red);} finally {decoded.recycle();}
+        }
     }
     private static void touch(MediaPreview.ZoomImage image,int action,int[] ids,float... xy) {
         MotionEvent.PointerProperties[] props=new MotionEvent.PointerProperties[ids.length]; MotionEvent.PointerCoords[] coords=new MotionEvent.PointerCoords[ids.length];

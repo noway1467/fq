@@ -58,7 +58,7 @@ public final class NetworkStatusTest {
                     Method switchNetwork=LanNode.class.getDeclaredMethod("switchNetwork",Object.class);switchNetwork.setAccessible(true);switchNetwork.invoke(node,new Object[]{null});settle(service);
                     assertFalse(service.online());assertTrue(service.canDisconnect());assertTrue(ChatService.shouldRestoreConnection(service));
                     assertTrue(((TextView)field(activity,"subtitle")).getText().toString().contains("等待 Wi-Fi"));
-                    assertEquals("刷新",((Button)field(activity,"connect")).getText().toString());
+                    assertEquals("重试",((Button)field(activity,"connect")).getText().toString());
                     Notification notification=shadowOf(service.getSystemService(NotificationManager.class)).getNotification(1);
                     assertTrue(notification.extras.getString(Notification.EXTRA_TEXT).contains("等待 Wi-Fi"));
                 }
@@ -71,7 +71,7 @@ public final class NetworkStatusTest {
                     try(OutputStream stream=new FileOutputStream(output)){assertTrue(bitmap.compress(Bitmap.CompressFormat.PNG,100,stream));}finally{bitmap.recycle();}
                 }
             }
-            ((Button)field(activity,"connect")).performClick();settle(service);
+            Method pull=MainActivity.class.getDeclaredMethod("pullRefresh");pull.setAccessible(true);assertEquals(true,pull.invoke(activity));settle(service);
             assertTrue("等待网络时刷新必须触发已有节点恢复",service.online());assertSame(node,field(service,"node"));
             assertFalse(service.status().contains("等待"));assertEquals(View.GONE,((View)field(activity,"connectionBar")).getVisibility());
             ConnectivityManager.NetworkCallback old=(ConnectivityManager.NetworkCallback)field(service,"callback");

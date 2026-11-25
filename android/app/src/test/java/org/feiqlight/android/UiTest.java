@@ -309,8 +309,9 @@ public final class UiTest {
             progress.invoke(service,peer.id(),88L,0L,false,26,"接收中 · 点击取消",task);
             List<LanNode.Message> rows=new ArrayList<>(Arrays.asList(sent,received));invoke(activity,"renderMessages",List.class,rows);
             View root=(View)field(activity,"root");measure(root,786,1704,true);activity.transfersChanged();shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(300));
-            LinearLayout messages=(LinearLayout)field(activity,"messages");List<ProgressBar> bars=new ArrayList<>();for(View v:descendants(messages))if(v instanceof ProgressBar)bars.add((ProgressBar)v);
+            LinearLayout messages=(LinearLayout)field(activity,"messages");List<FileBadge> bars=new ArrayList<>();for(View v:descendants(messages))if(v instanceof FileBadge)bars.add((FileBadge)v);
             assertEquals(3,bars.size());assertEquals(47,bars.get(0).getProgress());assertEquals(0,bars.get(1).getProgress());assertEquals(26,bars.get(2).getProgress());
+            assertEquals(FileBadge.SENDING,bars.get(0).mode());assertEquals("ZIP",bars.get(0).extension());assertEquals(FileBadge.FILE,bars.get(1).mode());assertEquals("PDF",bars.get(1).extension());assertEquals(FileBadge.RECEIVING,bars.get(2).mode());
             screenshot(activity,"android-file-progress");
             List<View> bubbles=new ArrayList<>();for(View v:descendants(messages))if(v.getBackground() instanceof BubbleDrawable)bubbles.add(v);
             float density=activity.getResources().getDisplayMetrics().density;
@@ -344,6 +345,40 @@ public final class UiTest {
             assertEquals(1,descendants(messages).stream().filter(v->v.getBackground() instanceof BubbleDrawable).count());screenshot(activity,"android-sent-image-preview");
             View card=descendants(messages).stream().filter(v->"报告.txt，文件操作".contentEquals(v.getContentDescription()==null?"":v.getContentDescription())).findFirst().get();card.performClick();android.app.Dialog dialog=org.robolectric.shadows.ShadowDialog.getLatestDialog();assertTrue(dialog.isShowing());assertTrue(descendants(dialog.getWindow().getDecorView()).stream().anyMatch(v->v instanceof Button&&((Button)v).getText().toString().equals("打开文件")));dialog.dismiss();
             java.nio.file.Files.delete(image.toPath());renderResolvedMessages(activity,service,persisted);shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(250));assertEquals(0,descendants(messages).stream().filter(v->v.getContentDescription()!=null&&v.getContentDescription().toString().endsWith("，媒体预览")).count());assertTrue(descendants(messages).stream().anyMatch(v->v.getContentDescription()!=null&&v.getContentDescription().toString().contains("文件已删除或不可用")));
+        } finally {ac.pause().stop().destroy();sc.destroy();}
+    }
+    @Test public void mediaBubblesKeepAspectRatioOverlayMenuAndStableDecodedLayout() throws Exception {
+        ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();
+        shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));
+        ActivityController<MainActivity> ac=Robolectric.buildActivity(MainActivity.class).create().start().resume().visible();MainActivity activity=ac.get();
+        try {
+            settle(service);LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:32425"),"media-polish","test","图片比例与中文 English 文件名","");
+            ReceivedFileProvider provider=new ReceivedFileProvider();android.content.pm.ProviderInfo info=new android.content.pm.ProviderInfo();info.authority=activity.getPackageName()+".received";info.grantUriPermissions=true;provider.attachInfo(activity,info);org.robolectric.shadows.ShadowContentResolver.registerProviderInternal(info.authority,provider);
+            File folder=new File(service.getFilesDir(),"offers/"+UUID.randomUUID());assertTrue(folder.mkdirs());List<LanNode.Message> rows=new ArrayList<>();
+            int[][] dimensions={{240,480},{600,240},{20,20}};
+            for(int i=0;i<dimensions.length;i++) {
+                Bitmap image=Bitmap.createBitmap(dimensions[i][0],dimensions[i][1],Bitmap.Config.ARGB_8888);Canvas canvas=new Canvas(image);canvas.drawColor(0xffd5c9af);Paint paint=new Paint();paint.setColor(0xff456b64);canvas.drawRect(0,image.getHeight()/2f,image.getWidth(),image.getHeight(),paint);paint.setColor(0xffe7b966);canvas.drawCircle(image.getWidth()*.65f,image.getHeight()*.3f,image.getWidth()*.12f,paint);
+                File file=new File(folder,"图片 中文 English "+i+".png");try(OutputStream out=new FileOutputStream(file)){assertTrue(image.compress(Bitmap.CompressFormat.PNG,100,out));}finally{image.recycle();}
+                LanNode.Message message=new LanNode.Message();message.number=900+i;message.outgoing=true;message.time=System.currentTimeMillis()+i;message.state="已送达";message.text="";message.files.add(new Protocol.Attachment(0,file.getName(),file.length(),0));message.localPaths.add(file.getPath());rows.add(message);service.incoming(peer,message,false);
+            }
+            settle(service);
+            for(boolean dark:new boolean[]{false,true}) {
+                service.getSharedPreferences("settings",0).edit().putBoolean("dark_mode",dark).commit();invoke(activity,"open",String.class,"");invoke(activity,"open",String.class,peer.id());settle(service);service.remove(activity);
+                renderResolvedMessages(activity,service,rows);View root=(View)field(activity,"root");measure(root,786,1704,true);
+                List<View> frames=new ArrayList<>();for(View view:descendants((View)field(activity,"messages")))if(view.getContentDescription()!=null&&view.getContentDescription().toString().endsWith("，媒体预览"))frames.add(view);
+                assertEquals(3,frames.size());float density=activity.getResources().getDisplayMetrics().density;
+                assertEquals(.5,(double)frames.get(0).getWidth()/frames.get(0).getHeight(),.01);assertEquals(2.5,(double)frames.get(1).getWidth()/frames.get(1).getHeight(),.03);
+                for(View frame:frames) {
+                    View bubble=(View)frame.getParent();assertTrue("图片外仍有独立说明/时间留白",bubble.getHeight()-frame.getHeight()<=8*density);
+                    TextView stamp=(TextView)descendants(frame).stream().filter(v->"消息操作：复制、转发、删除、多选".contentEquals(v.getContentDescription()==null?"":v.getContentDescription())).findFirst().get();assertSame(frame,stamp.getParent());assertTrue(stamp.getHeight()>=36*density);assertTrue(stamp.getBottom()<=frame.getHeight());
+                }
+                ScrollView scroll=(ScrollView)field(activity,"scroll");scroll.getViewTreeObserver().dispatchOnPreDraw();scroll.scrollTo(0,100);int before=scroll.getScrollY(),height=frames.get(0).getHeight();
+                ((ExecutorService)field(field(activity,"media"),"worker")).submit(()->{}).get(5,TimeUnit.SECONDS);shadowOf(Looper.getMainLooper()).idle();measure(root,786,1704,true);
+                assertNotNull(((ImageView)((ViewGroup)frames.get(0)).getChildAt(0)).getDrawable());assertEquals(height,frames.get(0).getHeight());assertEquals("缩略图完成抢走阅读位置",before,scroll.getScrollY());
+                scroll.scrollTo(0,0);snapshotView(root,"android-media-polish-"+(dark?"dark":"light"));
+                View stamp=descendants(frames.get(0)).stream().filter(v->"消息操作：复制、转发、删除、多选".contentEquals(v.getContentDescription()==null?"":v.getContentDescription())).findFirst().get();assertTrue(stamp.performClick());android.app.Dialog menu=org.robolectric.shadows.ShadowDialog.getLatestDialog();assertTrue(menu.isShowing());menu.dismiss();
+                ((View)frames.get(1)).performLongClick();menu=org.robolectric.shadows.ShadowDialog.getLatestDialog();assertTrue(menu.isShowing());assertTrue(descendants(menu.getWindow().getDecorView()).stream().anyMatch(v->v instanceof Button&&((Button)v).getText().toString().equals("打开文件")));menu.dismiss();
+            }
         } finally {ac.pause().stop().destroy();sc.destroy();}
     }
     @Test public void emojiPickerInsertsAtCursorAndProtectsLengthAndChangedConversation() throws Exception {

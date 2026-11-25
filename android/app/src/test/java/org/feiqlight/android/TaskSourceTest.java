@@ -90,10 +90,39 @@ public final class TaskSourceTest {
             f.pick("");assertEquals(Collections.singletonList("全部"),sourceNames(f.sources()));f.dialog().dismiss();
             f.show();assertEquals("",field(f.adapter(),"selectedSource"));assertEquals(Collections.singletonList("全部"),sourceNames(f.sources()));
             invoke(f.activity,"showTasks",new Class<?>[0]);settle(f.service);assertNull(field(f.activity,"tasksDialog"));assertNull(field(f.activity,"taskAdapter"));
+            invoke(f.activity,"open",new Class<?>[]{String.class},"");settle(f.service);
             invoke(f.activity,"showMenu",new Class<?>[]{View.class},field(f.activity,"root"));
-            Button tasks=findButton(ShadowDialog.getLatestDialog().getWindow().getDecorView(),"传输任务");assertNotNull(tasks);assertTrue(tasks.performClick());settle(f.service);
+            View menu=ShadowDialog.getLatestDialog().getWindow().getDecorView();assertNull(findButton(menu,"传输任务"));assertNull(findButton(menu,"刷新"));ShadowDialog.getLatestDialog().dismiss();
+            ViewGroup toolbar=(ViewGroup)field(f.activity,"toolbar");View tasks=findDescription(toolbar,"传输任务");assertNotNull(tasks);
+            assertEquals(2,toolbar.indexOfChild(tasks));assertEquals(Math.round(48*f.activity.getResources().getDisplayMetrics().density),tasks.getLayoutParams().width);
+            assertTrue(tasks.performClick());settle(f.service);
             assertEquals("",field(f.adapter(),"selectedSource"));assertEquals(View.VISIBLE,f.input().getVisibility());
         }
+    }
+
+    @Test public void pullRefreshOnlyHandlesDownwardGestureAtTopAndKeepsDisconnectedIntent()throws Exception {
+        try(Fixture f=new Fixture()) {
+            View list=(View)field(f.activity,"list");assertTrue(list.getParent() instanceof PullRefreshLayout);
+            PullRefreshLayout pull=(PullRefreshLayout)list.getParent();
+            java.util.concurrent.atomic.AtomicInteger refreshes=new java.util.concurrent.atomic.AtomicInteger();
+            AtomicBoolean top=new AtomicBoolean(true);pull.setTarget(top::get);pull.setOnRefresh(()->{refreshes.incrementAndGet();return false;});
+            pull.layout(0,0,786,1000);
+            drag(pull,0,0,3,4,false);assertEquals(0,refreshes.get());
+            drag(pull,0,0,400,50,false);assertEquals(0,refreshes.get());
+            top.set(false);drag(pull,0,0,0,pull.triggerDistance()*4,false);assertEquals(0,refreshes.get());
+            top.set(true);drag(pull,0,0,0,pull.triggerDistance()*4,true);assertEquals(0,refreshes.get());
+            drag(pull,0,0,0,pull.triggerDistance()*4,false);assertEquals(1,refreshes.get());
+            assertEquals(false,invoke(f.activity,"pullRefresh",new Class<?>[0]));assertFalse(f.service.connectionActive());
+            assertTrue(ShadowToast.getTextOfLatestToast().contains("连接"));
+            assertNotNull(findButton((View)field(f.activity,"root"),"连接"));
+        }
+    }
+    private static void drag(PullRefreshLayout pull,float x,float y,float dx,float dy,boolean cancel) {
+        long start=SystemClock.uptimeMillis();
+        int[] actions={MotionEvent.ACTION_DOWN,MotionEvent.ACTION_MOVE,MotionEvent.ACTION_MOVE,cancel?MotionEvent.ACTION_CANCEL:MotionEvent.ACTION_UP};
+        float[] fractions={0,.1f,1,1};
+        for(int i=0;i<actions.length;i++){MotionEvent event=MotionEvent.obtain(start,start+i*30,actions[i],x+dx*fractions[i],y+dy*fractions[i],0);pull.dispatchTouchEvent(event);event.recycle();}
+        Shadows.shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(250));
     }
 
     @Test public void guestPanelChoosesGuestAndGuestActionsHaveNoConversationLink()throws Exception {

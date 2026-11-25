@@ -75,6 +75,42 @@ namespace FeiqLight.Tests
             root = Path.GetFullPath(args[0]); output = Path.GetFullPath(args[1]); Directory.CreateDirectory(root); Directory.CreateDirectory(output);
             Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);
             Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
+            Run("图片气泡：比例、贴边、状态标签、文件命中与异步阅读位置", () => {
+                string folder=Path.Combine(root,"media-layout");Directory.CreateDirectory(folder);
+                string portrait=Path.Combine(folder,"竖图 中文 English.png"),landscape=Path.Combine(folder,"横图.png"),small=Path.Combine(folder,"小图.png");
+                string[] paths={portrait,landscape,small};Size[] sizes={new Size(240,480),new Size(600,240),new Size(20,20)};
+                for(int n=0;n<paths.Length;n++)using(Bitmap image=new Bitmap(sizes[n].Width,sizes[n].Height))using(Graphics g=Graphics.FromImage(image)) {
+                    g.Clear(Color.FromArgb(213,201,175));using(SolidBrush b=new SolidBrush(Color.FromArgb(69,107,100)))g.FillRectangle(b,0,image.Height/2,image.Width,image.Height/2);
+                    using(SolidBrush b=new SolidBrush(Color.FromArgb(231,185,102)))g.FillEllipse(b,image.Width*.53F,image.Height*.18F,image.Width*.24F,image.Width*.24F);image.Save(paths[n],ImageFormat.Png);
+                }
+                foreach(bool dark in new[]{false,true})using(Form host=new Form {ClientSize=new Size(760,860)})using(BubbleHistory history=new BubbleHistory {Dock=DockStyle.Fill}) {
+                    Theme.Change(dark,"blue");host.Controls.Add(history);host.Show();Application.DoEvents();history.SetAvatars("media-peer",null,"media-self",null);
+                    List<ChatRecord> rows=new List<ChatRecord>();for(int n=0;n<paths.Length;n++)rows.Add(new ChatRecord {Packet=n+1,Outgoing=n!=1,Time=DateTime.Now,State=n==1?"已保存":"已送达",Transfers=new[]{new FileTransferState {Id=0,Name=Path.GetFileName(paths[n]),LocalPath=paths[n],Size=new FileInfo(paths[n]).Length,Status=n==1?"已保存":"等待对方接收"}}});
+                    history.SetRecords(rows);history.Refresh();
+                    var previews=(Dictionary<string,Bitmap>)Field(history,"previews");DateTime limit=DateTime.UtcNow.AddSeconds(10);
+                    while(previews.Count<3&&DateTime.UtcNow<limit){Application.DoEvents();System.Threading.Thread.Sleep(10);history.Refresh();}
+                    Check(previews.Count==3&&previews.Values.All(b=>b!=null),"系统缩略图未就绪");history.ScrollToLatest();Application.DoEvents();history.Refresh();
+                    var areas=(List<Rectangle>)Field(history,"bounds");var media=(List<Tuple<Rectangle,string>>)Field(history,"mediaHits");
+                    foreach(var hit in media) {
+                        int index=Array.IndexOf(paths,hit.Item2);if(index<2)Check(Math.Abs((double)hit.Item1.Width/hit.Item1.Height-(index==0?.5:2.5))<.035,"照片宽高比改变");
+                        Check(areas[index].Height-hit.Item1.Height<=12,"单图片仍保留说明/时间空行");
+                    }
+                    var files=(List<Tuple<Rectangle,ChatRecord,int>>)Field(history,"fileHits");Check(files.Count==media.Count,"图片丢失文件命中区");
+                    var stamps=(List<Tuple<Rectangle,ChatRecord>>)Field(history,"stampHits");foreach(var stamp in stamps){var file=files.Single(f=>f.Item2==stamp.Item2);Check(file.Item1.Contains(stamp.Item1),"时间标签未叠在图片内");}
+                    using(Bitmap image=Render(host))image.Save(Path.Combine(output,"windows-media-polish-"+(dark?"dark":"light")+".png"),ImageFormat.Png);
+                    // 加载新照片时，读旧消息的位置不能因上方图片的高度改变而跳走。
+                    for(int n=0;n<30;n++)rows.Add(new ChatRecord {Packet=100+n,Text="旧消息阅读位置 "+n,Time=DateTime.Now,State="已收到"});
+                    history.SetRecords(rows);history.AutoScrollPosition=new Point(0,400);history.Refresh();
+                    MethodInfo top=typeof(BubbleHistory).GetMethod("TopAnchor",BindingFlags.Instance|BindingFlags.NonPublic);var before=(Tuple<ChatRecord,int>)top.Invoke(history,null);
+                    string extra=Path.Combine(folder,"异步.png");using(Bitmap image=new Bitmap(180,480))image.Save(extra,ImageFormat.Png);
+                    rows[0].Transfers[0].LocalPath=extra;history.Delivery(rows[0]);history.Refresh();
+                    typeof(BubbleHistory).GetMethod("LoadPreview",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(history,new object[]{extra});limit=DateTime.UtcNow.AddSeconds(10);
+                    while(!previews.ContainsKey(extra)&&DateTime.UtcNow<limit){Application.DoEvents();System.Threading.Thread.Sleep(10);history.Refresh();}
+                    Check(previews.ContainsKey(extra)&&previews[extra]!=null,"异步缩略图没有完成");
+                    var after=(Tuple<ChatRecord,int>)top.Invoke(history,null);Check(before.Item1==after.Item1&&Math.Abs(before.Item2-after.Item2)<=1,"异步图片重排丢失阅读锚点："+before.Item1.Packet+"/"+before.Item2+" → "+after.Item1.Packet+"/"+after.Item2);host.Close();
+                }
+                Theme.Change(false,"blue");
+            });
             Run("旧版协议：新装和缺字段配置默认开启，手动关闭后重启保持", () => {
                 LocalStore store = new LocalStore(Path.Combine(root, "settings"));
                 Check(store.LoadSettings().AllowLegacyProtocol, "新装未默认开启兼容");

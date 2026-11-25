@@ -14,7 +14,7 @@ namespace FeiqLight
     // 同向、五分钟内的连续消息合为一组：组内圆角收窄，只有最后一条带尾角；跨天插入日期胶囊。
     public sealed class BubbleHistory : SmoothScrollView
     {
-        private sealed class Measure { internal string Key, ContentKey; internal MessageLayout Layout; internal Size TextSize; internal int TextMax, ContentWidth, Width, Height; }
+        private sealed class Measure { internal string Key, ContentKey; internal MessageLayout Layout; internal Size TextSize; internal Size[] Media; internal bool Solo; internal int TextMax, ContentWidth, Width, Height; }
         private sealed class Item { internal string DateLabel; internal Rectangle DateBounds; internal bool First, Last; internal Measure M; }
         private readonly List<ChatRecord> records = new List<ChatRecord>();
         private readonly List<Rectangle> bounds = new List<Rectangle>();
@@ -88,7 +88,12 @@ namespace FeiqLight
             System.Threading.Tasks.Task.Run(()=>MediaPreview.Thumbnail(path)).ContinueWith(task=>{
                 Bitmap bitmap=task.Status==System.Threading.Tasks.TaskStatus.RanToCompletion?task.Result:null;
                 if(IsDisposed||!IsHandleCreated) {if(bitmap!=null)bitmap.Dispose();return;}
-                try {BeginInvoke((MethodInvoker)delegate{pending.Remove(path);if(IsDisposed){if(bitmap!=null)bitmap.Dispose();return;}previews[path]=bitmap;Invalidate();});}
+                try {BeginInvoke((MethodInvoker)delegate{
+                    pending.Remove(path);if(IsDisposed){if(bitmap!=null)bitmap.Dispose();return;}previews[path]=bitmap;
+                    // 缩略图就绪后按比例重排，仍保留正在阅读的消息和相对位置。
+                    bool bottom=AtBottom(Dp(55));Tuple<ChatRecord,int> anchor=bottom?null:TopAnchor();
+                    Arrange();if(bottom)JumpTo(AutoScrollMinSize.Height);else Restore(anchor);Invalidate();
+                });}
                 catch(InvalidOperationException){if(bitmap!=null)bitmap.Dispose();}
             });
         }
@@ -330,7 +335,6 @@ namespace FeiqLight
         private int PadBottom { get { return Dp(7); } }
         private int AvatarSize { get { return Dp(54); } }
         private int FileRow { get { return Dp(52); } }
-        private int MediaHeight { get { return Dp(172); } }
         private int Caption { get { return Dp(20); } }
         private int stampHeight, stampDpi;
         private int StampHeight { get { if (stampDpi != DeviceDpi || stampHeight == 0) { stampDpi = DeviceDpi; stampHeight = TextRenderer.MeasureText("08:00", Theme.Small, Size.Empty, Tight).Height; } return stampHeight; } }
@@ -382,29 +386,42 @@ namespace FeiqLight
             string display = DisplayText(r);
             bool cards = r.Transfers != null && r.Transfers.Length > 0;
             string[] media = cards ? new string[0] : r.GetLocalFiles().Where(MediaPreview.Supported).ToArray();
+            string[] paths=cards?r.Transfers.Select(f=>CardMedia(f)?f.LocalPath:null).ToArray():media;
             int stamp = StampWidth(r);
-            string contentKey = display + "\u0001" + Font.Name + Font.Size + Font.Style + Font.Unit + "\u0001" + highlightText + "\u0001" + r.State + "\u0001" + stamp + "\u0001" + (cards ? String.Join("|", r.Transfers.Select(f => CardMedia(f) ? "m" : "f")) : "-") + "\u0001" + media.Length + "\u0001" + DeviceDpi;
+            string contentKey = display + "\u0001" + Font.Name + Font.Size + Font.Style + Font.Unit + "\u0001" + highlightText + "\u0001" + r.State + "\u0001" + stamp + "\u0001" + String.Join("|",paths.Select(p=>{Bitmap image;return p==null?"f":p+(previews.TryGetValue(p,out image)&&image!=null?image.Size.ToString():"pending");})) + "\u0001" + DeviceDpi;
             string key = contentKey + "\u0001" + maxBubble;
             Measure m; if (measures.TryGetValue(r, out m) && m.Key == key) return m;
             MessageLayout previous = m != null && m.ContentKey == contentKey ? m.Layout : null;
             m = new Measure { Key = key, ContentKey = contentKey, TextMax = Math.Max(Dp(40), maxBubble - PadX * 2) };
+            m.Solo=display.Length==0&&paths.Length==1&&paths[0]!=null;
+            int inset=m.Solo?Dp(3):PadX;
+            m.Media=paths.Select(p=>p==null?Size.Empty:MediaSize(p,maxBubble-inset*2,m.Solo)).ToArray();
             if (display.Length > 0)
             {
                 m.Layout = previous == null ? new MessageLayout(display, Font, m.TextMax, highlightText) : previous.Reflow(m.TextMax);
                 m.TextSize = new Size(m.Layout.Width, m.Layout.Height);
             }
             int content = Math.Max(m.TextSize.Width, stamp);
-            if (cards) content = Math.Max(content, r.Transfers.Any(CardMedia) ? Dp(288) : Dp(240));
-            if (media.Length > 0) content = Math.Max(content, Dp(288));
+            if(cards&&r.Transfers.Any(f=>!CardMedia(f)))content=Math.Max(content,Dp(240));
+            foreach(Size size in m.Media)content=Math.Max(content,size.Width);
+            if(m.Solo){m.ContentWidth=m.Media[0].Width;m.Width=m.ContentWidth+inset*2;m.Height=m.Media[0].Height+inset*2;return m;}
             m.ContentWidth = Math.Min(Math.Max(content, Dp(24)), m.TextMax);
             int height = PadTop + m.TextSize.Height;
-            if (cards) height += (display.Length > 0 ? Dp(6) : Dp(1)) + r.Transfers.Sum(f => CardMedia(f) ? MediaHeight + Caption + Dp(4) : FileRow) + Dp(4) * (r.Transfers.Length - 1);
+            if (cards) height += (display.Length > 0 ? Dp(6) : Dp(1)) + m.Media.Sum(size => size.IsEmpty ? FileRow : size.Height + Caption + Dp(4)) + Dp(4) * (r.Transfers.Length - 1);
             if(cards&&r.Transfers.Length>1)height+=Dp(20);
-            if (media.Length > 0) height += (display.Length > 0 ? Dp(6) : Dp(1)) + media.Length * MediaHeight + Dp(6) * (media.Length - 1);
+            if (media.Length > 0) height += (display.Length > 0 ? Dp(6) : Dp(1)) + m.Media.Sum(size=>size.Height) + Dp(6) * (media.Length - 1);
             // 时间独占底部一行，短数字、单行链接也能清楚区分正文与状态。
             height += Dp(4) + StampHeight;
             m.Height = height + PadBottom; m.Width = m.ContentWidth + PadX * 2;
             return m;
+        }
+        private Size MediaSize(string path,int available,bool solo)
+        {
+            Bitmap bitmap;int width=1600,height=900;
+            if(!MediaPreview.Video(path)&&previews.TryGetValue(path,out bitmap)&&bitmap!=null){width=bitmap.Width;height=bitmap.Height;}
+            int maxWidth=Math.Min(Dp(solo?288:260),available),maxHeight=Dp(solo?320:240);
+            double scale=Math.Min(DpiScale,Math.Min((double)maxWidth/width,(double)maxHeight/height));
+            return new Size(Math.Max(Math.Min(Dp(solo?148:120),maxWidth),(int)Math.Round(width*scale)),Math.Max(Dp(solo?100:76),(int)Math.Round(height*scale)));
         }
         private Size PillSize(string text, Font font) { Size size = TextRenderer.MeasureText(text, font, Size.Empty, Tight); return new Size(size.Width + Dp(20), size.Height + Dp(8)); }
         private void Arrange(bool resizing = false)
@@ -555,9 +572,9 @@ namespace FeiqLight
                 using (SolidBrush b = new SolidBrush(outgoing ? Theme.Outgoing : Theme.Surface)) g.FillPath(b, path);
                 if (checkedMessage) using (Pen border = new Pen(Theme.Blue, Dp(2))) g.DrawPath(border, path);
             }
-            Point origin = new Point(r.X + PadX, r.Y + PadTop);
+            Point origin = new Point(r.X + (m.Solo?Dp(3):PadX), r.Y + (m.Solo?Dp(3):PadTop));
             if (m.Layout != null) m.Layout.Draw(g, origin, Font, linkHits, textSelectedHere ? textSelectionAnchor : -1, textSelectedHere ? textSelectionActive : -1);
-            int y = origin.Y + m.TextSize.Height + (m.TextSize.Height > 0 ? Dp(6) : Dp(1));
+            int y = origin.Y + m.TextSize.Height + (m.Solo?0:m.TextSize.Height > 0 ? Dp(6) : Dp(1));
             Color meta = outgoing ? Theme.OutgoingMeta : Theme.Muted, back = outgoing ? Theme.Outgoing : Theme.Surface;
             if(record.Transfers!=null&&record.Transfers.Length>1){
                 double total=record.Transfers.Sum(f=>(double)Math.Max(1,f.Size)),done=record.Transfers.Sum(f=>Math.Max(1,f.Size)*Math.Max(0,Math.Min(100,f.Percent))/100.0);
@@ -565,21 +582,26 @@ namespace FeiqLight
                 TextRenderer.DrawText(g,"总进度 "+(int)(done*100/total)+"% · 已保存 "+saved+" / "+record.Transfers.Length,Theme.Small,new Rectangle(origin.X,y,m.ContentWidth,Dp(20)),meta,Tight|TextFormatFlags.EndEllipsis);y+=Dp(20);
             }
             if (record.Transfers != null && record.Transfers.Length > 0)
-                foreach (FileTransferState file in record.Transfers)
+                for(int fileIndex=0;fileIndex<record.Transfers.Length;fileIndex++)
                 {
-                    Rectangle area = new Rectangle(origin.X, y, m.ContentWidth, CardMedia(file) ? MediaHeight + Caption + Dp(4) : FileRow);
-                    if (CardMedia(file)) DrawMediaCard(g, area, record, file, meta);
+                    FileTransferState file=record.Transfers[fileIndex];Size size=m.Media[fileIndex];
+                    Rectangle area = new Rectangle(origin.X, y, size.IsEmpty?m.ContentWidth:size.Width, size.IsEmpty?FileRow:size.Height+(m.Solo?0:Caption+Dp(4)));
+                    if (CardMedia(file)) DrawMediaCard(g, area, record, file, meta,m.Solo,item);
                     else DrawFileCard(g, area, record, file, meta, back);
                     fileHits.Add(Tuple.Create(area, record, file.Id)); y = area.Bottom + Dp(4);
                 }
             else
             {
                 string[] media = record.GetLocalFiles().Where(MediaPreview.Supported).ToArray();
-                foreach (string path in media) { Rectangle preview = new Rectangle(origin.X, y, m.ContentWidth, MediaHeight); DrawPreview(g, preview, path, null); y = preview.Bottom + Dp(6); }
+                for(int mediaIndex=0;mediaIndex<media.Length;mediaIndex++){Rectangle preview=new Rectangle(new Point(origin.X,y),m.Media[mediaIndex]);DrawPreview(g,preview,media[mediaIndex],null,m.Solo?item:null,outgoing);y=preview.Bottom+Dp(6);}
             }
             int stampWidth = Math.Min(StampWidth(record), m.ContentWidth), stampHeight = StampHeight;
             Rectangle stamp = new Rectangle(r.Right - PadX - stampWidth, r.Bottom - PadBottom - stampHeight, stampWidth, stampHeight);
-            DrawStamp(g, stamp, record, meta);
+            if(m.Solo) {
+                stampWidth=Math.Min(stampWidth,m.ContentWidth-Dp(26));stamp=new Rectangle(r.Right-Dp(16)-stampWidth,r.Bottom-Dp(11)-stampHeight,stampWidth,stampHeight);
+                using(GraphicsPath pill=Theme.RoundedF(Rectangle.Inflate(stamp,Dp(7),Dp(2)),Dp(10)))using(SolidBrush shade=new SolidBrush(Color.FromArgb(115,Color.Black)))g.FillPath(shade,pill);
+            }
+            DrawStamp(g, stamp, record, m.Solo?Color.White:meta,m.Solo);
             stampHits.Add(Tuple.Create(stamp, record));
             if (outgoing && Failed(record))
             {
@@ -587,9 +609,10 @@ namespace FeiqLight
                 Theme.Glyph(g, "error", badge, Theme.Danger); retryHits.Add(Tuple.Create(Rectangle.Inflate(badge, Dp(3), Dp(3)), i));
             }
         }
-        private void DrawStamp(Graphics g, Rectangle stamp, ChatRecord record, Color meta)
+        private void DrawStamp(Graphics g, Rectangle stamp, ChatRecord record, Color meta,bool onScrim=false)
         {
             string glyph = StatusGlyph(record), time = StampTime(record);
+            Color dangerColor=onScrim?Color.FromArgb(255,110,110):Theme.Danger;
             string label = StatusLabel(record);
             if (label.Length > 0)
             {
@@ -603,8 +626,8 @@ namespace FeiqLight
                 {
                     if (prefixWidth > 0) TextRenderer.DrawText(g, time, Theme.Small, new Rectangle(stamp.X, stamp.Y, timeWidth, stamp.Height), meta, Tight | TextFormatFlags.VerticalCenter);
                     int dot = Dp(6), left = stamp.X + prefixWidth;
-                    using (SolidBrush danger = new SolidBrush(Theme.Danger)) g.FillEllipse(danger, left, stamp.Y + (stamp.Height - dot) / 2, dot, dot);
-                    TextRenderer.DrawText(g, label, Theme.Small, new Rectangle(left + Dp(10), stamp.Y, Math.Max(0, stamp.Right - left - Dp(10)), stamp.Height), Theme.Danger, Tight | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+                    using (SolidBrush danger = new SolidBrush(dangerColor)) g.FillEllipse(danger, left, stamp.Y + (stamp.Height - dot) / 2, dot, dot);
+                    TextRenderer.DrawText(g, label, Theme.Small, new Rectangle(left + Dp(10), stamp.Y, Math.Max(0, stamp.Right - left - Dp(10)), stamp.Height), dangerColor, Tight | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
                 }
                 finally { g.Restore(clip); }
                 return;
@@ -613,8 +636,8 @@ namespace FeiqLight
             TextRenderer.DrawText(g, time, Theme.Small, new Rectangle(stamp.X, stamp.Y, textWidth, stamp.Height), meta, Tight | TextFormatFlags.VerticalCenter);
             if (glyph.Length == 0) return;
             Rectangle icon = new Rectangle(stamp.Right - iconSize, stamp.Y + (stamp.Height - iconSize) / 2, iconSize, iconSize);
-            if (glyph == "error") Theme.Glyph(g, "error", icon, Theme.Danger);
-            else Theme.Glyph(g, glyph, icon, glyph == "check" ? (Theme.Dark ? Theme.Blend(Color.White, Theme.Blue, .55F) : Theme.Blue) : meta);
+            if (glyph == "error") Theme.Glyph(g, "error", icon, dangerColor);
+            else Theme.Glyph(g, glyph, icon, glyph == "check"&&!onScrim ? (Theme.Dark ? Theme.Blend(Color.White, Theme.Blue, .55F) : Theme.Blue) : meta);
         }
         private static bool Active(FileTransferState file) { string status = file.DisplayStatus() ?? ""; return status.Contains("中") && !status.Contains("中断") && file.Percent < 100; }
         private static bool Receivable(ChatRecord record, FileTransferState file) { string status = file.DisplayStatus() ?? ""; return !record.Outgoing && String.IsNullOrEmpty(file.LocalPath) && (status.StartsWith("待接收") || status.Contains("重试") || status.Contains("续传") || status.Contains("点击接收")); }
@@ -650,22 +673,22 @@ namespace FeiqLight
             string label = active ? file.Percent + "% · " + Theme.SizeText((long)file.BytesPerSecond) + "/s" : Theme.SizeText(file.Size) + " · " + file.DisplayStatus();
             TextRenderer.DrawText(g, label, Theme.Small, new Rectangle(left, area.Y + Dp(28), width, Dp(18)), meta, TextFormatFlags.EndEllipsis | Tight | TextFormatFlags.VerticalCenter);
         }
-        private void DrawMediaCard(Graphics g, Rectangle area, ChatRecord record, FileTransferState file, Color meta)
+        private void DrawMediaCard(Graphics g, Rectangle area, ChatRecord record, FileTransferState file, Color meta,bool solo,Item item)
         {
-            Rectangle preview = new Rectangle(area.X, area.Y, area.Width, MediaHeight);
-            DrawPreview(g, preview, file.LocalPath, Active(file) ? file : null);
+            Rectangle preview = new Rectangle(area.X, area.Y, area.Width, area.Height-(solo?0:Caption+Dp(4)));
+            DrawPreview(g, preview, file.LocalPath, Active(file) ? file : null,solo?item:null,record.Outgoing);
             bool active = Active(file);
-            string label = active ? file.Percent + "% · " + Theme.SizeText((long)file.BytesPerSecond) + "/s" : Theme.SizeText(file.Size) + " · " + file.DisplayStatus();
+            string label = active ? file.Percent + "% · " + Theme.SizeText((long)file.BytesPerSecond) + "/s · "+file.DisplayStatus() : Theme.SizeText(file.Size) + " · " + file.DisplayStatus();
             Size labelSize = TextRenderer.MeasureText(label, Theme.Small, Size.Empty, Tight);
-            int labelWidth = Math.Min(labelSize.Width, active ? area.Width : area.Width / 2);
-            Rectangle caption = new Rectangle(area.X, preview.Bottom + Dp(4), area.Width, Caption);
-            TextRenderer.DrawText(g, file.Name, Theme.Small, new Rectangle(caption.X, caption.Y, Math.Max(1, caption.Width - labelWidth - Dp(8)), caption.Height), Theme.Ink, TextFormatFlags.EndEllipsis | Tight | TextFormatFlags.VerticalCenter);
-            TextRenderer.DrawText(g, label, Theme.Small, new Rectangle(caption.Right - labelWidth, caption.Y, labelWidth, caption.Height), meta, TextFormatFlags.EndEllipsis | Tight | TextFormatFlags.VerticalCenter | TextFormatFlags.Right);
+            Rectangle pill=new Rectangle(preview.X+Dp(6),preview.Y+Dp(6),Math.Min(labelSize.Width+Dp(14),preview.Width-Dp(12)),labelSize.Height+Dp(4));
+            using(GraphicsPath shape=Theme.RoundedF(pill,Dp(10)))using(SolidBrush shade=new SolidBrush(Color.FromArgb(115,Color.Black)))g.FillPath(shade,shape);
+            TextRenderer.DrawText(g,label,Theme.Small,Rectangle.Inflate(pill,-Dp(7),0),Color.White,TextFormatFlags.EndEllipsis|Tight|TextFormatFlags.VerticalCenter);
+            if(!solo)TextRenderer.DrawText(g,file.Name,Theme.Small,new Rectangle(area.X,preview.Bottom+Dp(4),area.Width,Caption),meta,TextFormatFlags.EndEllipsis|Tight|TextFormatFlags.VerticalCenter);
         }
         // 预览按“铺满裁切”显示并圆角；系统缩略图异步生成，未就绪时显示占位而不阻塞绘制。
-        private void DrawPreview(Graphics g, Rectangle preview, string path, FileTransferState progress)
+        private void DrawPreview(Graphics g, Rectangle preview, string path, FileTransferState progress,Item solo,bool outgoing)
         {
-            using (GraphicsPath shape = Theme.RoundedF(preview, Dp(10)))
+            using (GraphicsPath shape = solo==null?Theme.RoundedF(preview, Dp(10)):BubbleShape(preview,Dp(12),Dp(solo.First?12:4),Dp(4),0,outgoing))
             {
                 using (SolidBrush background = new SolidBrush(Theme.Blend(Theme.Ink, Theme.Surface, Theme.Dark ? .12F : .06F))) g.FillPath(background, shape);
                 Bitmap bitmap;
@@ -682,6 +705,7 @@ namespace FeiqLight
                     int icon = Dp(34); Theme.Glyph(g, MediaPreview.Video(path) ? "play" : "image", new Rectangle(preview.X + (preview.Width - icon) / 2, preview.Y + (preview.Height - icon) / 2 - Dp(8), icon, icon), Theme.Muted);
                     TextRenderer.DrawText(g, previews.ContainsKey(path) ? "预览不可用" : "正在生成预览", Theme.Small, new Rectangle(preview.X, preview.Y + preview.Height / 2 + Dp(16), preview.Width, Dp(18)), Theme.Muted, TextFormatFlags.HorizontalCenter | Tight);
                 }
+                using(Pen rim=new Pen(Color.FromArgb(Theme.Dark?36:20,Theme.Dark?Color.White:Color.Black),Math.Max(1,DpiScale)))g.DrawPath(rim,shape);
             }
             int button = Dp(46); Rectangle center = new Rectangle(preview.X + (preview.Width - button) / 2, preview.Y + (preview.Height - button) / 2, button, button);
             if (progress != null)
@@ -911,6 +935,10 @@ namespace FeiqLight
             Cursor = hand ? Cursors.Hand : textHover ? Cursors.IBeam : Cursors.Default;
             var stamp = stampHits.FirstOrDefault(h => h.Item1.Contains(e.Location));
             string tip = stamp == null ? null : stamp.Item2.Time.ToString("yyyy-MM-dd HH:mm:ss") + (String.IsNullOrEmpty(stamp.Item2.State) ? "" : " · " + StateDescription(stamp.Item2));
+            var media=mediaHits.FirstOrDefault(h=>h.Item1.Contains(e.Location));
+            if(media!=null)tip=Path.GetFileName(media.Item2)+(tip==null?"":"\n"+tip);
+            var fileHit=fileHits.FirstOrDefault(h=>h.Item1.Contains(e.Location));
+            if(fileHit!=null&&media!=null){FileTransferState file=fileHit.Item2.Transfers.FirstOrDefault(f=>f.Id==fileHit.Item3);if(file!=null)tip=(tip??file.Name)+"\n"+Theme.SizeText(file.Size)+" · "+file.DisplayStatus();}
             if (tip != tipText) { tipText = tip; tips.SetToolTip(this, tip); }
             if(e.Button==MouseButtons.Left&&dragFilePath!=null&&!fileDragStarted&&MovedPastDragThreshold(e.Location)) {
                 DataObject data=FileDragData(dragFilePath);fileDragStarted=true;pressedAction=null;Capture=false;
