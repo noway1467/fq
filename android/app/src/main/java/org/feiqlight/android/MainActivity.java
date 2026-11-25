@@ -817,13 +817,13 @@ public final class MainActivity extends Activity implements ChatService.Observer
         }
         if(service==null){error("连接服务尚未就绪，请稍后重试");return;}
         ChatService source=service;String peer=selected;int generation=editorGeneration;
-        confirm("删除选中的本机文件？","将删除所选消息中已保存的本机接收文件，聊天记录保留，此前已删除的文件自动跳过。此操作无法撤销。","删除文件",()->{
+        confirm("删除选中的本机文件？","将删除所选消息中已保存的本机接收文件；聊天记录保留，正在接收或处理的文件及已删除文件自动跳过。此操作无法撤销。","删除文件",()->{
             if(service!=source||!peer.equals(selected)||generation!=editorGeneration)return;
             source.deleteReceivedFiles(peer,selectedRows,result->{
                 if(isDestroyed()||isFinishing()||service!=source||!peer.equals(selected)||generation!=editorGeneration)return;
-                endMessageSelection();changed();
-                if(result.deleted==0&&result.skippedDeleted==0)error("所选消息没有已保存的本机文件（未接收附件请在传输任务中处理）");
-                else error("已删除 "+result.deleted+" 个本机文件，"+result.skippedDeleted+" 个已删除跳过"+(result.unreceived>0?"（另有 "+result.unreceived+" 个未接收附件未处理）":""));
+                if(result.skippedBusy==0)endMessageSelection();changed();
+                if(result.deleted==0&&result.skippedDeleted==0&&result.skippedBusy==0)error("所选消息没有已保存的本机文件（未接收附件请在传输任务中处理）");
+                else error("已删除 "+result.deleted+" 个本机文件，"+result.skippedDeleted+" 个已删除跳过。"+(result.skippedBusy>0?result.skippedBusy+" 个正在接收或处理的文件已跳过。":"")+(result.unreceived>0?"（另有 "+result.unreceived+" 个未接收附件未处理）":""));
             });
         });
     }

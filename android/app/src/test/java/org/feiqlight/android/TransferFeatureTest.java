@@ -431,14 +431,21 @@ public final class TransferFeatureTest {
                 for(String label:new String[]{"打开文件","打开方式…","分享文件","查看保存位置","删除本机文件","查看所在会话","复制文件名"})assertNotNull(label,findButton(menu,label));assertNull(findButton(menu,"文件与保存位置"));
                 findButton(menu,"删除本机文件").performClick();findButton(ShadowDialog.getLatestDialog().getWindow().getDecorView(),"删除文件").performClick();transferDone(service);assertFalse(deletedLocal.exists());assertTrue(deletedOriginal.isFile());
                 taskActions(activity,deleted);menu=ShadowDialog.getLatestDialog().getWindow().getDecorView();assertNotNull(findButton(menu,"重新接收"));assertNull(findButton(menu,"删除本机文件"));findButton(menu,"重新接收").performClick();waitUntil(service,()->deletedLocal.isFile()&&!service.busy()&&"已保存".equals(service.progress(peer.id(),deleted.message.number,deleted.file.id,false).state));
-                taskActions(activity,deleted);findButton(ShadowDialog.getLatestDialog().getWindow().getDecorView(),"删除本机文件").performClick();findButton(ShadowDialog.getLatestDialog().getWindow().getDecorView(),"删除文件").performClick();transferDone(service);
                 for(boolean dark:new boolean[]{false,true}) {
                     ((Dialog)field(activity,"tasksDialog")).dismiss();settle(service);context.getSharedPreferences("settings",0).edit().putBoolean("dark_mode",dark).commit();invokeNoArgs(activity,"rerenderPreservingState");showTasks(activity);settle(service);
                     View view=((Dialog)field(activity,"tasksDialog")).getWindow().getDecorView();measure(view,786,1500);preview(view,"transfers-direct-actions-"+(dark?"dark":"light")+".png",(Integer)field(activity,"SURFACE"));
                 }
                 throttle.set(true);findButton(taskRow(activity,slow),"接收").performClick();waitUntil(service,()->part.length()>0&&service.busy());
+                LanNode.Transfer running=(LanNode.Transfer)field(service,"transfer");
+                service.deleteReceivedFile(peer,saved.message.number,saved.file);settle(service);
+                assertFalse("接收另一个文件时未能单独删除已保存文件",savedLocal.exists());assertTrue(original.isFile());assertSame(running,field(service,"transfer"));assertFalse(running.isCancelled());
+                List<ChatService.BatchFileDeleteResult> deletion=new ArrayList<>();
+                service.deleteReceivedFiles(peer.id(),Arrays.asList(deleted.message,slow.message),deletion::add);settle(service);
+                assertEquals(1,deletion.size());assertEquals(1,deletion.get(0).deleted);assertEquals(1,deletion.get(0).skippedBusy);assertFalse(deletedLocal.exists());assertTrue(part.isFile());assertSame(running,field(service,"transfer"));
+                File guest=new File(savedLocal.getParentFile(),"a".repeat(64));Files.write(guest.toPath(),new byte[]{1,2});context.getSharedPreferences("guest_received",0).edit().putString(guest.getName(),"访客文件.txt").commit();
+                service.deleteGuestFile(guest);settle(service);assertFalse("传输期间访客文件未删除",guest.exists());assertTrue(context.getSharedPreferences("guest_received",0).contains(guest.getName()));assertSame(running,field(service,"transfer"));
                 ((Dialog)field(activity,"tasksDialog")).dismiss();settle(service);invokeOpen(activity,peer.id());settle(service);invokeMessageSelection(activity,slow.message);((Button)field(activity,"deleteSelectedFiles")).performClick();findButton(ShadowDialog.getLatestDialog().getWindow().getDecorView(),"删除文件").performClick();
-                Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(100));assertEquals("请先完成或取消正在接收的文件，再批量删除文件",org.robolectric.shadows.ShadowToast.getTextOfLatestToast());assertEquals(true,field(activity,"selectingMessages"));assertTrue(savedLocal.isFile());
+                settle(service);assertTrue(org.robolectric.shadows.ShadowToast.getTextOfLatestToast().contains("1 个正在接收或处理的文件已跳过"));assertEquals(true,field(activity,"selectingMessages"));assertFalse(savedLocal.isFile());assertFalse(running.isCancelled());
                 invokeNoArgs(activity,"endMessageSelection");showTasks(activity);settle(service);row=taskRow(activity,slow);assertNotNull(findButton(row,"暂停"));assertNotNull(findButton(row,"取消"));findButton(row,"暂停").performClick();waitUntil(service,()->!service.busy()&&"已暂停".equals(service.progress(peer.id(),slow.message.number,slow.file.id,false).state));assertTrue("暂停必须保留断点",part.length()>0);
                 taskActions(activity,slow);assertNotNull(findButton(ShadowDialog.getLatestDialog().getWindow().getDecorView(),"继续接收"));findButton(ShadowDialog.getLatestDialog().getWindow().getDecorView(),"取消接收并清理断点").performClick();findButton(ShadowDialog.getLatestDialog().getWindow().getDecorView(),"取消接收").performClick();settle(service);assertFalse(part.exists());
                 assertNotNull(findButton(taskRow(activity,slow),"继续接收"));findButton(taskRow(activity,slow),"继续接收").performClick();waitUntil(service,()->part.length()>0&&service.busy());
@@ -454,7 +461,7 @@ public final class TransferFeatureTest {
                 taskActions(activity,slow);menu=ShadowDialog.getLatestDialog().getWindow().getDecorView();assertNotNull(findButton(menu,"暂停并保留断点"));assertNotNull(findButton(menu,"取消接收并清理断点"));assertNotNull(findButton(menu,"拒绝这批文件"));assertNull(findButton(menu,"文件与保存位置"));findButton(menu,"拒绝这批文件").performClick();
                 assertTrue(dialogText(ShadowDialog.getLatestDialog()).contains("将拒绝该消息中未接收的文件并清理断点；已保存的文件保留。"));findButton(ShadowDialog.getLatestDialog().getWindow().getDecorView(),"拒绝这批文件").performClick();
                 waitUntil(service,()->!service.busy()&&!part.exists()&&"已拒绝".equals(service.progress(peer.id(),slow.message.number,slow.file.id,false).state));
-                LanNode.Message stored=((ChatStore)field(service,"store")).findMessage(peer.id(),slow.message.number,false);assertEquals("已拒绝",stored.state);assertEquals(2,stored.files.size());assertEquals("本机文件已删除",service.progress(peer.id(),deleted.message.number,deleted.file.id,false).state);assertTrue(savedLocal.isFile());assertFalse(deletedLocal.exists());assertTrue(original.isFile());assertTrue(deletedOriginal.isFile());assertTrue(slowOriginal.isFile());
+                LanNode.Message stored=((ChatStore)field(service,"store")).findMessage(peer.id(),slow.message.number,false);assertEquals("已拒绝",stored.state);assertEquals(2,stored.files.size());assertEquals("本机文件已删除",service.progress(peer.id(),deleted.message.number,deleted.file.id,false).state);assertFalse(savedLocal.isFile());assertFalse(deletedLocal.exists());assertTrue(original.isFile());assertTrue(deletedOriginal.isFile());assertTrue(slowOriginal.isFile());
                 LanNode.Message rejected=sender.sendMessage(target,"直接拒收",Collections.singletonList(original));waitUntil(service,()->((ChatStore)uncheckedField(service,"store")).findMessage(peer.id(),rejected.number,false)!=null);ChatStore.FileTask pending=fileTasks(service).stream().filter(item->item.message.number==rejected.number).findFirst().orElseThrow();
                 findButton(taskRow(activity,pending),"拒绝").performClick();findButton(ShadowDialog.getLatestDialog().getWindow().getDecorView(),"拒绝这批文件").performClick();settle(service);assertEquals("已拒绝",service.progress(peer.id(),pending.message.number,pending.file.id,false).state);assertFalse(service.receivedFile(peer,pending.message.number,pending.file).exists());
                 LanNode.Message outbound=receiver.sendMessage(peer,"取消发送",Collections.singletonList(original));waitUntil(service,()->((ChatStore)uncheckedField(service,"store")).findMessage(peer.id(),outbound.number,true)!=null);ChatStore.FileTask outgoing=fileTasks(service).stream().filter(item->item.message.number==outbound.number&&item.message.outgoing).findFirst().orElseThrow();
@@ -500,6 +507,32 @@ public final class TransferFeatureTest {
                 assertEquals(1,result.size());assertEquals(0,result.get(0).deleted);assertEquals(2,result.get(0).skippedDeleted);
             }
         }finally{controller.destroy();}
+    }
+    @Test public void deletionReservesOnlyItsFileAndSurvivesServiceRestart()throws Exception {
+        Context context=RuntimeEnvironment.getApplication();disableConnection(context);
+        ServiceController<ChatService> controller=Robolectric.buildService(ChatService.class).create();ChatService service=controller.get();
+        CountDownLatch blocked=new CountDownLatch(1),release=new CountDownLatch(1);
+        try {
+            settle(service);LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:31234"),"delete-race","host","删除与接收互斥","");
+            ChatStore.FileTask item=task(peer.id(),98,"删除中的中文 English.txt",3);service.incoming(peer,item.message,false);settle(service);
+            File local=service.receivedFile(peer,item.message.number,item.file);Files.write(local.toPath(),new byte[]{1,2,3});
+            ExecutorService io=(ExecutorService)field(service,"io");
+            io.submit(()->{blocked.countDown();try{release.await(5,TimeUnit.SECONDS);}catch(InterruptedException e){Thread.currentThread().interrupt();}});assertTrue(blocked.await(5,TimeUnit.SECONDS));
+            service.deleteReceivedFile(peer,item.message.number,item.file);
+            service.receive(peer,item.message.number,item.file);
+            Shadows.shadowOf(Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(100));
+            assertTrue("I/O 队列释放前不应删除文件",local.isFile());
+            assertFalse("重新接收越过了同一文件的删除保护",service.busy());assertNull(field(service,"activeReceive"));assertEquals("重新接收改动了待接收队列",1,((Map<?,?>)field(service,"waiting")).size());
+            service.deleteReceivedFile(peer,item.message.number,item.file);
+            release.countDown();io.submit(()->{}).get(5,TimeUnit.SECONDS);
+            assertFalse(local.exists());
+            assertEquals("本机文件已删除",((ChatStore)field(service,"store")).transfers().stream().filter(row->row.key.equals(ChatService.fileKey(peer.id(),98,0,false))).findFirst().orElseThrow().state);
+            // 销毁发生在主线程完成回调之前，磁盘删除态仍必须保留。
+            controller.destroy();io.awaitTermination(5,TimeUnit.SECONDS);
+            ServiceController<ChatService> restarted=Robolectric.buildService(ChatService.class).create();
+            try {settle(restarted.get());assertEquals("本机文件已删除",restarted.get().progress(peer.id(),98,0,false).state);assertFalse(local.exists());}
+            finally {restarted.destroy();}
+        } finally {release.countDown();if(!(Boolean)field(service,"stopped"))controller.destroy();}
     }
     @Test public void taskSnapshotKeepsNewSave()throws Exception {
         Context context=RuntimeEnvironment.getApplication();disableConnection(context);ServiceController<ChatService> controller=Robolectric.buildService(ChatService.class).create();ChatService service=controller.get();CountDownLatch release=new CountDownLatch(1);

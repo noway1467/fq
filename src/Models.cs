@@ -346,13 +346,14 @@ namespace FeiqLight
     }
     internal sealed class ReceivedFilesDeletionResult
     {
-        internal int DeletedCount, SkippedDeletedCount, UnreceivedCount, FailedCount;
+        internal int DeletedCount, SkippedDeletedCount, UnreceivedCount, FailedCount, SkippedBusyCount;
         internal string FirstError;
         internal string Text
         {
             get
             {
                 string text = "已删除 " + DeletedCount + " 个本机文件，" + SkippedDeletedCount + " 个已删除跳过。";
+                if (SkippedBusyCount > 0) text += SkippedBusyCount + " 个正在接收或处理的文件已跳过。";
                 if (FailedCount > 0) text += FailedCount + " 个删除失败，文件与记录已保留：" + FirstError;
                 return UnreceivedCount == 0 ? text : text + "（另有 " + UnreceivedCount + " 个未接收附件未处理）";
             }
@@ -597,16 +598,21 @@ namespace FeiqLight
             if((record.Transfers==null||record.Transfers.Length==0)&&record.LocalFiles.Length==0){record.HasAttachments=true;record.State="本机文件已删除";}
             Append(record);
         }
-        internal ReceivedFilesDeletionResult DeleteReceivedFiles(IEnumerable<ChatRecord> selected, bool apply = true)
+        internal ReceivedFilesDeletionResult DeleteReceivedFiles(IEnumerable<ChatRecord> selected, bool apply = true, Func<ChatRecord,FileTransferState,bool> inUse = null)
         {
             var result=new ReceivedFilesDeletionResult();
             var handledPaths=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var handledRecords=new HashSet<string>(StringComparer.Ordinal);
+            ChatRecord[] records=selected.Where(r=>r.HasReceivedAttachments).ToArray();
+            var busyFiles=new HashSet<FileTransferState>(records.SelectMany(record=>(record.Transfers??new FileTransferState[0]).Where(file=>inUse!=null&&inUse(record,file))));
+            // 同一路径可能出现在多条历史里；必须先保护所有活跃文件，再逐条删除。
+            var busyPaths=new HashSet<string>(busyFiles.Where(file=>!String.IsNullOrEmpty(file.LocalPath)).Select(file=>Path.GetFullPath(file.LocalPath)),StringComparer.OrdinalIgnoreCase);
             lock(gate)
             {
-                foreach(ChatRecord record in selected.Where(r=>r.HasReceivedAttachments))
+                foreach(ChatRecord record in records)
                 {
                     if(!handledRecords.Add(record.PeerId+"/"+record.Packet))continue;
+                    result.SkippedBusyCount+=(record.Transfers??new FileTransferState[0]).Where(busyFiles.Contains).Select(file=>file.Id).Distinct().Count();
                     // 保留删除前的附件快照；单文件删除会同步改写同路径附件，不能据改写后的状态重复计数。
                     var files=(record.Transfers??new FileTransferState[0]).Select(f=>Tuple.Create(f,f.LocalPath,f.Status)).ToArray();
                     string[] paths=record.GetLocalFiles().Concat(files.Select(f=>f.Item2).Where(p=>!String.IsNullOrEmpty(p))).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
@@ -620,6 +626,7 @@ namespace FeiqLight
                             if(!Path.IsPathRooted(path))throw new IOException("已登记的接收文件路径无效，未删除该文件。");
                             fullPath=Path.GetFullPath(path);
                             if(!recordPaths.Add(fullPath))continue;
+                            if(busyPaths.Contains(fullPath))continue;
                             if(Directory.Exists(fullPath))throw new IOException("不能通过附件入口删除文件夹。");
                             exists=File.Exists(fullPath);
                             if(apply)DeleteReceivedFile(record,fullPath);
@@ -633,7 +640,7 @@ namespace FeiqLight
                         if(handledPaths.Add(fullPath)) {if(exists)result.DeletedCount++;else result.SkippedDeletedCount++;}
                     }
                     bool corrected=false;
-                    foreach(var entry in files.Where(f=>String.IsNullOrEmpty(f.Item2)).GroupBy(f=>f.Item1.Id).Select(g=>g.First()))
+                    foreach(var entry in files.Where(f=>String.IsNullOrEmpty(f.Item2)&&!busyFiles.Contains(f.Item1)).GroupBy(f=>f.Item1.Id).Select(g=>g.First()))
                     {
                         FileTransferState file=entry.Item1;
                         if(entry.Item3=="已保存"||entry.Item3=="本机文件已删除")

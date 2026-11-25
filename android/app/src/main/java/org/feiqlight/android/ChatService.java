@@ -30,6 +30,8 @@ public final class ChatService extends Service {
     private final AtomicBoolean refreshQueued=new AtomicBoolean(),refreshAgain=new AtomicBoolean(),publishQueued=new AtomicBoolean();
     private final ExecutorService transferWorker=Executors.newSingleThreadExecutor();
     private final AtomicBoolean busy=new AtomicBoolean();
+    // 接收、转发读取与本机删除只互斥同一文件；删除不占用整个传输通道。
+    private final Set<File> receivedFileOperations=ConcurrentHashMap.newKeySet();
     private static final class QueuedTransfer {
         final Runnable start,cleanup;
         QueuedTransfer(Runnable start,Runnable cleanup){this.start=start;this.cleanup=cleanup;}
@@ -473,7 +475,7 @@ public final class ChatService extends Service {
     }
     private void drainReceives() {
         if(stopped||disconnecting||!online()||busy()||waiting.isEmpty()) return;
-        ReceiveRequest next=waiting.values().stream().filter(r->{FileProgress p=progress(r.peer.id(),r.packet,r.file.id,false);return storage.automatic()||p!=null&&p.state.equals("排队中");}).findFirst().orElse(null);
+        ReceiveRequest next=waiting.values().stream().filter(r->{if(receivedFileOperations.contains(receivedFile(r.peer,r.packet,r.file)))return false;FileProgress p=progress(r.peer.id(),r.packet,r.file.id,false);return storage.automatic()||p!=null&&p.state.equals("排队中");}).findFirst().orElse(null);
         if(next!=null)receive(next.peer,next.packet,next.file);
     }
     void observe(Observer o) { observers.add(o); o.changed(); }
@@ -685,6 +687,15 @@ public final class ChatService extends Service {
             return;
         }
         AtomicBoolean success=new AtomicBoolean();
+        Set<File> reading=new HashSet<>();
+        if(!message.outgoing)for(Protocol.Attachment file:message.files) {
+            File local=receivedFile(source,message.number,file);
+            if(reading.contains(local))continue;
+            if(!receivedFileOperations.add(local)) {
+                receivedFileOperations.removeAll(reading);showError("此文件正在接收或处理，请稍后转发");done.accept(false);return;
+            }
+            reading.add(local);
+        }
         transferJob(task->{
             List<File> files=new ArrayList<>();
             try {
@@ -720,7 +731,7 @@ public final class ChatService extends Service {
                     if(cleanupFailure!=null)throw cleanupFailure;
                 }
             }
-        },()->main.post(()->done.accept(success.get())));
+        },()->{receivedFileOperations.removeAll(reading);main.post(()->done.accept(success.get()));});
     }
     private synchronized void sendContent(LanNode.Peer peer,String text,List<File> files) throws IOException {
         LanNode current=requireNode();
@@ -936,6 +947,12 @@ public final class ChatService extends Service {
         } catch(Exception e) { throw new IllegalStateException(e); }
     }
     void receive(LanNode.Peer peer,long packet,Protocol.Attachment file) {
+        File target=receivedFile(peer,packet,file);
+        if(receivedFileOperations.contains(target)) {
+            ReceiveRequest current=activeReceive;
+            if(current==null||!current.peer.id().equals(peer.id())||current.packet!=packet||current.file.id!=file.id)showError("此文件正在处理，请完成后再接收");
+            return;
+        }
         String receiveKey=fileKey(peer.id(),packet,file.id,false);FileProgress before=progress(peer.id(),packet,file.id,false);
         if(before!=null&&wasStored(before.state))rememberReceivedBefore(receiveKey,true);
         if(busy()) {
@@ -944,7 +961,8 @@ public final class ChatService extends Service {
             waiting.put(receivedFile(peer,packet,file).getName(),new ReceiveRequest(peer,packet,file));
             FileProgress previous=progress(peer.id(),packet,file.id,false);fileProgress(peer.id(),packet,file.id,false,previous==null?0:previous.percent,"排队中",null);return;
         }
-        File target=receivedFile(peer,packet,file); waiting.remove(target.getName());
+        if(!receivedFileOperations.add(target)){showError("此文件正在处理，请完成后再接收");return;}
+        waiting.remove(target.getName());
         ReceiveRequest request=new ReceiveRequest(peer,packet,file);activeReceive=request;
         transferJob(task->{
             request.task=task;if(request.offerCanceled||request.rejected)task.close();
@@ -983,6 +1001,8 @@ public final class ChatService extends Service {
             }
         },()->{
             if(activeReceive==request)activeReceive=null;
+            // 排在保存进度回调之后释放，避免迟到的「已保存」覆盖随后删除的状态。
+            main.post(()->receivedFileOperations.remove(target));
             if(request.offerCanceled||request.rejected)queue(()->{
                 try {
                     boolean saved=storage.exists(target),wasBefore=receivedBefore.contains(receiveKey);
@@ -1003,46 +1023,62 @@ public final class ChatService extends Service {
         // 已有关联消息的任务不再占据输入框上方；复制等无消息任务仍保留公共提示。
         transferStatus=""; changed();
     }
+    private boolean reserveDeletion(File local) {
+        ReceiveRequest pending=waiting.get(local.getName());
+        FileProgress progress=pending==null?null:progress(pending.peer.id(),pending.packet,pending.file.id,false);
+        return (progress==null||!progress.state.equals("排队中"))&&receivedFileOperations.add(local);
+    }
     void deleteReceivedFile(LanNode.Peer peer,long packet,Protocol.Attachment file) {
+        if(stopped||disconnecting){showError("文件服务已停止，请重新连接");return;}
         File local=receivedFile(peer,packet,file);
-        transferJob(task->{
-            checkTransfer(task);storage.delete(local);
-            main.post(()->{if(!stopped){waiting.remove(local.getName());fileProgress(peer.id(),packet,file.id,false,0,"本机文件已删除",null);changed();}});
-        },()->{},"文件已删除，消息记录保留","已取消删除");
+        if(!reserveDeletion(local)){showError("此文件正在接收或处理，请完成后再删除");return;}
+        queue(()->{
+            try {
+                if(stopped||disconnecting)return;
+                storage.delete(local);
+                store.transfer(fileKey(peer.id(),packet,file.id,false),peer.id(),packet,0,"本机文件已删除");
+                main.post(()->{if(!stopped){waiting.remove(local.getName());fileProgress(peer.id(),packet,file.id,false,0,"本机文件已删除",null);if(!busy())transferStatus="文件已删除，消息记录保留";changed();}});
+            } catch(IOException e){fail(e);}
+            finally {main.post(()->{receivedFileOperations.remove(local);drainReceives();});}
+        });
     }
     static final class BatchFileDeleteResult {
-        final int deleted, skippedDeleted, unreceived;
-        BatchFileDeleteResult(int deleted,int skippedDeleted,int unreceived) {
-            this.deleted=deleted;this.skippedDeleted=skippedDeleted;this.unreceived=unreceived;
+        final int deleted, skippedDeleted, unreceived, skippedBusy;
+        BatchFileDeleteResult(int deleted,int skippedDeleted,int unreceived,int skippedBusy) {
+            this.deleted=deleted;this.skippedDeleted=skippedDeleted;this.unreceived=unreceived;this.skippedBusy=skippedBusy;
         }
     }
     void deleteReceivedFiles(String peer,List<LanNode.Message> messages,Consumer<BatchFileDeleteResult> done) {
+        if(stopped||disconnecting){showError("文件服务已停止，请重新连接");return;}
         List<LanNode.Message> selected=new ArrayList<>();
         for(LanNode.Message message:messages)if(!message.outgoing&&!message.files.isEmpty())selected.add(message.copy());
-        ReceiveRequest active=activeReceive;
-        if(active!=null&&active.peer.id().equals(peer)&&selected.stream().anyMatch(message->message.number==active.packet&&message.files.stream().anyMatch(file->file.id==active.file.id))) {
-            showError("请先完成或取消正在接收的文件，再批量删除文件");return;
+        Set<File> reserved=new HashSet<>(),skipped=new HashSet<>();
+        for(LanNode.Message message:selected)for(Protocol.Attachment file:message.files) {
+            File local=receivedFile(peer,message.number,file);
+            if(reserved.contains(local)||skipped.contains(local))continue;
+            if(reserveDeletion(local))reserved.add(local);else skipped.add(local);
         }
         Map<String,FileProgress> progressSnapshot=new HashMap<>(fileProgress);
-        transferJob(task->{
-            List<LanNode.Message> storedMessages=new ArrayList<>();Set<String> storedTransfers=new HashSet<>();
-            // 数据库仍只由 I/O 队列访问；删除使用持久化附件，避免旧页面快照操作失效的邀请。
-            io.submit(()->{
+        queue(()->{
+            List<ChatStore.FileTask> removed=new ArrayList<>();BatchFileDeleteResult result=null;
+            try {
+                if(stopped||disconnecting)return;
+                List<LanNode.Message> storedMessages=new ArrayList<>();Set<String> storedTransfers=new HashSet<>();
+                // 删除与历史更新在同一 I/O 队列，接收仍在 transferWorker 独立运行。
                 for(LanNode.Message message:selected) {
                     LanNode.Message stored=store.findMessage(peer,message.number,false);
                     if(stored!=null)storedMessages.add(stored);
                 }
                 for(ChatStore.TransferState stored:store.transfers())if(wasStored(stored.state))storedTransfers.add(stored.key);
-            }).get();
-            Set<String> seen=new HashSet<>();List<ChatStore.FileTask> removed=new ArrayList<>();
-            int deleted=0,skippedDeleted=0,unreceived=0;BatchFileDeleteResult result=null;
-            try {
+                Set<String> seen=new HashSet<>();int deleted=0,skippedDeleted=0,unreceived=0;
                 for(LanNode.Message message:storedMessages)for(Protocol.Attachment file:message.files) {
                     String key=fileKey(peer,message.number,file.id,false);
                     if(!seen.add(key))continue;
-                    checkTransfer(task);File target=receivedFile(peer,message.number,file);
+                    File target=receivedFile(peer,message.number,file);
+                    if(!reserved.contains(target))continue;
+                    if(stopped||disconnecting)return;
                     if(storage.exists(target)) {
-                        checkTransfer(task);storage.delete(target);deleted++;
+                        storage.delete(target);deleted++;
                     } else {
                         if(storage.saved(target)!=null)throw new IOException("保存目录授权已失效，文件未删除，请重新授权后重试");
                         FileProgress previous=progressSnapshot.get(key);
@@ -1052,27 +1088,38 @@ public final class ChatService extends Service {
                         skippedDeleted++;
                     }
                     removed.add(new ChatStore.FileTask(peer,message,file));
+                    store.transfer(key,peer,message.number,0,"本机文件已删除");
                 }
-                checkTransfer(task);result=new BatchFileDeleteResult(deleted,skippedDeleted,unreceived);
-            } finally {
+                result=new BatchFileDeleteResult(deleted,skippedDeleted,unreceived,skipped.size());
+            } catch(IOException e){fail(e);}
+            finally {
                 BatchFileDeleteResult completed=result;
                 main.post(()->{
-                    if(stopped)return;
-                    for(ChatStore.FileTask item:removed) {
-                        waiting.remove(receivedFile(peer,item.message.number,item.file).getName());
-                        fileProgress(peer,item.message.number,item.file.id,false,0,"本机文件已删除",null);
+                    try {
+                        if(stopped)return;
+                        for(ChatStore.FileTask item:removed){waiting.remove(receivedFile(peer,item.message.number,item.file).getName());fileProgress(peer,item.message.number,item.file.id,false,0,"本机文件已删除",null);}
+                        changed();notifyTransfers.run();
+                        if(completed!=null)done.accept(completed);
+                    } finally {
+                        receivedFileOperations.removeAll(reserved);
+                        drainReceives();
                     }
-                    changed();notifyTransfers.run();
-                    if(completed!=null&&!task.isCancelled())done.accept(completed);
                 });
             }
-        },()->{},"","已取消删除");
+        });
     }
     void deleteGuestFile(File guestFile) {
-        transferJob(task->{
-            checkTransfer(task);storage.delete(guestFile);
-            main.post(()->{if(!stopped){changed();notifyTransfers.run();}});
-        },()->{},"文件已删除，接收记录保留","已取消删除");
+        if(stopped||disconnecting){showError("文件服务已停止，请重新连接");return;}
+        if(!reserveDeletion(guestFile)){showError("此文件正在处理，请完成后再删除");return;}
+        queue(()->{
+            try {
+                if(stopped||disconnecting)return;
+                if(!getSharedPreferences("guest_received",MODE_PRIVATE).contains(guestFile.getName()))throw new IOException("文件尚未完成保存，请完成后再删除");
+                storage.delete(guestFile);
+                main.post(()->{if(!stopped){if(!busy())transferStatus="文件已删除，接收记录保留";changed();notifyTransfers.run();}});
+            } catch(IOException e){fail(e);}
+            finally {main.post(()->receivedFileOperations.remove(guestFile));}
+        });
     }
     void reject(LanNode.Peer peer,long packet) {
         waiting.values().removeIf(r->r.peer.id().equals(peer.id())&&r.packet==packet);
@@ -1181,9 +1228,12 @@ public final class ChatService extends Service {
             SharedPreferences guests=getSharedPreferences("guest_received",MODE_PRIVATE);
             try {
                 for(File file:storage.receivedFiles()) {
-                    checkTransfer(task);if(!storage.exists(file))continue;
-                    long length=storage.bytes(file);checkTransfer(task);storage.delete(file);deleted.add(file);bytes+=length;
-                    if(file.getName().matches("[a-f0-9]{64}")&&guests.contains(file.getName()))guestFiles++;
+                    checkTransfer(task);if(!receivedFileOperations.add(file))continue;
+                    try {
+                        if(!storage.exists(file))continue;
+                        long length=storage.bytes(file);checkTransfer(task);storage.delete(file);deleted.add(file);bytes+=length;
+                        if(file.getName().matches("[a-f0-9]{64}")&&guests.contains(file.getName()))guestFiles++;
+                    } finally {receivedFileOperations.remove(file);}
                 }
                 checkTransfer(task);result=new Usage(deleted.size(),bytes,guestFiles);
             } finally {

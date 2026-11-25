@@ -187,18 +187,21 @@ namespace FeiqLight.Tests
                     SaveSnapshot(main,"batch-selection-"+(dark?"dark":"light")+"-720");
                     history.ContextMenuStrip.Show(history,new Point(20,40));Application.DoEvents();Check(history.ContextMenuStrip.Items.OfType<ToolStripMenuItem>().Single(item=>item.Text=="删除所选本机文件").Enabled,"多选右键缺少删除文件操作");SaveMenu(history.ContextMenuStrip,"batch-menu-"+(dark?"dark":"light"));history.ContextMenuStrip.Close();
                     FinishDialogs(()=>deleteFiles.PerformClick(),"删除选中的本机文件？","取消");Check(File.Exists(saved)&&incoming.Transfers[1].LocalPath==missing&&incoming.Transfers[3].Status=="已保存"&&history.SelectionMode,"确认取消后删除、订正了文件或退出多选");
-                    string feedback=FinishDialogs(()=>deleteFiles.PerformClick(),"删除选中的本机文件？","删除文件",null,()=>Check(File.Exists(saved)&&File.Exists(original)&&incoming.Transfers[1].LocalPath==missing,"确认之前已经修改文件"));
+                    string feedback=FinishDialogs(()=>deleteFiles.PerformClick(),"删除选中的本机文件？","删除文件",null,()=>{
+                        Check(File.Exists(saved)&&File.Exists(original)&&incoming.Transfers[1].LocalPath==missing,"确认之前已经修改文件");
+                        pending.Status="接收中";
+                    });
                     string result="已删除 1 个本机文件，3 个已删除跳过。";
-                    Check(feedback!=null&&feedback.StartsWith("文件删除完成\n")&&feedback.Contains(result)&&feedback.Contains("1 个未接收附件未处理"),"删除统计错误："+feedback);
-                    Check(Field<Label>(main,"status").Text.Contains(result)&&!history.SelectionMode,"结果没有同步状态栏或退出多选");
-                    Check(!File.Exists(saved)&&File.ReadAllText(original)=="sender original"&&File.Exists(partial)&&pending.Status=="已暂停","批量删除误删发送原文件、断点或待接收状态");
+                    Check(feedback!=null&&feedback.StartsWith("文件删除完成\n")&&feedback.Contains(result)&&feedback.Contains("1 个正在接收或处理的文件已跳过"),"删除统计错误："+feedback);
+                    Check(Field<Label>(main,"status").Text.Contains(result)&&history.SelectionMode&&feedback.Contains("1 个正在接收或处理的文件已跳过"),"活跃附件没有逐项跳过并保留多选");
+                    Check(!File.Exists(saved)&&File.ReadAllText(original)=="sender original"&&File.Exists(partial)&&pending.Status=="接收中","批量删除误删发送原文件、断点或活跃接收状态");
                     ChatRecord[] restored=new LocalStore(store.Root).History(peer.Id,10).ToArray();Check(restored.Length==3&&restored.Single(record=>record.Packet==11).Text=="保留整条消息","文件删除同时删除了聊天记录");
                     Check(restored.Where(record=>!record.Outgoing).SelectMany(record=>record.Transfers).Where(file=>file.Id!=4).All(file=>file.LocalPath==null&&file.Status=="本机文件已删除"&&file.Percent==0),"重启丢失文件删除或失效路径订正");
                     var unreceived=new ChatRecord{PeerId=peer.Id,Packet=21,Text="尚未接收",Time=DateTime.Now,HasAttachments=true,Transfers=new[]{new FileTransferState{Id=0,Name="未保存.bin",Status="已暂停",Percent=30}}};
                     main.TrySave(unreceived);history.SetRecords(new[]{unreceived});history.SelectAllMessages();feedback=FinishDialogs(()=>deleteFiles.PerformClick(),null,null);
                     Check(feedback!=null&&feedback.Contains("没有可删除的本机文件")&&feedback.Contains("传输任务")&&history.SelectionMode&&unreceived.Transfers[0].Status=="已暂停","未接收附件没有正确提示或被改写");
                     unreceived.Transfers[0].Status="接收中";feedback=FinishDialogs(()=>deleteFiles.PerformClick(),null,null);
-                    Check(feedback!=null&&feedback.Contains("请先处理文件")&&feedback.Contains("正在接收")&&history.SelectionMode,"活跃接收没有阻断文件删除并保留多选");
+                    Check(feedback!=null&&feedback.Contains("没有可删除")&&feedback.Contains("1 个正在接收或处理的文件已跳过")&&history.SelectionMode,"仅有活跃文件时没有说明跳过并保留多选");
                     main.ExitApplication();
                 }
             }
@@ -224,6 +227,10 @@ namespace FeiqLight.Tests
             result=store.DeleteReceivedFiles(new[]{mixed});
             Check(result.DeletedCount==1&&result.SkippedDeletedCount==2&&result.FailedCount==0&&!File.Exists(locked)&&mixed.Transfers[1].Status=="本机文件已删除","解除占用后重试未完成："+result.Text);
             store.DeleteReceivedFile(one,single);Check(!File.Exists(single)&&one.Transfers[0].Status=="本机文件已删除","单个删除仍展开文件名中的环境变量");
+            string saving=Path.Combine(keep,"保存中.txt"),other=Path.Combine(keep,"另一份.txt");File.WriteAllText(saving,"active");File.WriteAllText(other,"ready");
+            ChatRecord active=make(5,new[]{saving,other}),aliasRecord=make(6,new[]{Path.Combine(keep,"..","keep","保存中.txt")});active.Transfers[0].Status="保存中";
+            result=store.DeleteReceivedFiles(new[]{aliasRecord,active},true,(record,file)=>file.Status=="保存中");
+            Check(result.DeletedCount==1&&result.SkippedBusyCount==1&&File.ReadAllText(saving)=="active"&&!File.Exists(other)&&active.Transfers[0].Status=="保存中"&&aliasRecord.Transfers[0].LocalPath!=null,"100%保存中或同路径旧记录未受到保护");
         }
         private static void ExpiredReReceiveRegression()
         {
@@ -314,6 +321,11 @@ namespace FeiqLight.Tests
                             Func<FileTransferState,string> partPath=file=>{var attachment=new Attachment{Id=file.Id,Name=file.Name,Size=file.Size,Modified=file.Modified,Sha256=file.Sha256,RelativePath=file.RelativePath};return LanService.PartialPath(peer,record.Packet,attachment,SendBatch.Destination(settings.ReceiveFolder,attachment));};
                             string activePart=partPath(active),pausedPart=partPath(paused);File.WriteAllBytes(pausedPart,new byte[128]);
                             main.Show();main.OpenChat(peer);Console.WriteLine("DETAIL 活跃接收排队");main.TransferAction(record,0,false);Pump(()=>main.ReceivingTask(record,0)&&File.Exists(activePart)&&new FileInfo(activePart).Length>0,"真实接收未形成非空活跃断点");Console.WriteLine("DETAIL 活跃断点已形成");
+                            string disposable=Path.Combine(store.Root,"传输期间删除 中文 English.txt");File.WriteAllText(disposable,"delete independently");
+                            var completed=new ChatRecord{PeerId=peer.Id,Packet=202,Text="独立已保存消息",Time=DateTime.Now,HasAttachments=true,LocalFiles=new[]{disposable},Transfers=new[]{new FileTransferState{Id=0,Name=Path.GetFileName(disposable),LocalPath=disposable,Status="已保存",Percent=100}}};main.TrySave(completed);
+                            FinishDialogs(()=>main.DeleteTransferFile(completed,disposable),"删除这个文件？","删除文件");
+                            Check(!File.Exists(disposable)&&main.ReceivingTask(record,0)&&File.Exists(activePart)&&File.Exists(saved),"删除独立文件中断了正在接收的文件");
+                            Check(new LocalStore(store.Root).History(peer.Id,20).Single(item=>item.Packet==202).Transfers[0].Status=="本机文件已删除","传输期间删除未持久化");
                             window.Show();PumpFor(50);ListBox list=Field<ListBox>(window,"list");list.SelectedIndex=TransferIndex(list,201,0);Check(Field<Button>(window,"secondary").Text=="取消接收"&&Field<Button>(window,"action").Text=="暂停接收","活跃接收主次操作文案错误");
                             Console.WriteLine("DETAIL 传输窗口已选中活跃任务");if(reject)
                             {
