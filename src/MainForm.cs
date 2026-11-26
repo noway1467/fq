@@ -24,6 +24,7 @@ public sealed class MainForm : ModernWindow
         private const int MinimumWindowWidth = 720, MinimumWindowHeight = 520;
         private readonly TextBox search;
         private readonly Label status = Theme.Label("连接中", Theme.Small, Theme.Muted);
+        private readonly RoundedButton refresh;
         private readonly ChatHost chatHost = new ChatHost { Dock = DockStyle.Fill, BackColor = Theme.Wallpaper };
         private readonly NotifyIcon tray;
         private readonly TabStrip tabs = new TabStrip { Dock = DockStyle.Fill, Padding = new Padding(14, 0, 8, 0), Margin = Padding.Empty };
@@ -181,7 +182,7 @@ public sealed class MainForm : ModernWindow
                 using(SolidBrush dot = new SolidBrush(started ? Theme.Online : Theme.Muted)) e.Graphics.FillEllipse(dot, 0, (connectionDot.Height - diameter) / 2, diameter, diameter);
             }; footer.Controls.Add(connectionDot);
             status.TextChanged += delegate { connectionDot.Invalidate(); };
-            RoundedButton refresh = (RoundedButton)Theme.IconButton("refresh", "刷新", delegate { RefreshNetwork(); }, false); refresh.PlainHover = true; refresh.Dock = DockStyle.Right; refresh.Size = new Size(40, 40); refresh.Margin = Padding.Empty; footer.Controls.Add(refresh);
+            refresh = (RoundedButton)Theme.IconButton("refresh", "刷新", delegate { RefreshNetwork(); }, false); refresh.PlainHover = true; refresh.Dock = DockStyle.Right; refresh.Size = new Size(40, 40); refresh.Margin = Padding.Empty; footer.Controls.Add(refresh);
             RoundedButton settings = (RoundedButton)Theme.IconButton("settings", "设置", delegate { OpenSettings(); }, false); settings.PlainHover = true; settings.Dock = DockStyle.Right; settings.Size = new Size(40, 40); settings.Margin = new Padding(0, 0, 4, 0); footer.Controls.Add(settings);
             sidebar.Controls.Add(footer, 0, 3);
             chatHost.Hint = "选择联系人开始聊天";
@@ -587,16 +588,21 @@ public sealed class MainForm : ModernWindow
                 }catch(Exception e){using(NoticeDialog notice=new NoticeDialog("操作未完成",e.Message))notice.ShowDialog(this);}
             }
         }
-        private void RefreshNetwork() { if (started) try { network.Revalidate(); } catch (Exception e) { status.Text = e.Message; } }
-        private void RefreshNetworkAsync()
+        private async void RefreshNetwork()
         {
-            if (!started) return;
-            System.Threading.Tasks.Task.Run(delegate { network.Revalidate(); }).ContinueWith(task => {
-                if (!task.IsFaulted || IsDisposed || !IsHandleCreated) return;
-                Exception error = task.Exception != null && task.Exception.InnerException != null ? task.Exception.InnerException : task.Exception;
-                try { BeginInvoke((MethodInvoker)delegate { if (!IsDisposed && error != null) status.Text = error.Message; }); }
-                catch (InvalidOperationException) { }
-            });
+            if (!started || exiting || !refresh.Enabled) return;
+            // 网卡扫描和探测可能等待系统网络；所有入口共用一次后台操作，连点不排队。
+            refresh.Enabled = false; status.Text = "正在刷新";
+            try
+            {
+                await System.Threading.Tasks.Task.Run(() => network.Revalidate());
+                if (IsDisposed || Disposing || exiting) return;
+                RefreshPeers();
+                // 联系人快照未变时也结束刷新提示，但保留期间出现的实际错误。
+                if (status.Text == "正在刷新") status.Text = network.Peers.Count(p => !p.Hidden && p.Online) + " 人在线 · " + contacts.Items.Count + " 个会话";
+            }
+            catch (Exception e) { if (!IsDisposed && !Disposing && !exiting) status.Text = "刷新失败：" + e.Message; }
+            finally { if (!IsDisposed && !Disposing) refresh.Enabled = true; }
         }
         private void AddPeer()
         {
@@ -649,7 +655,7 @@ public sealed class MainForm : ModernWindow
                 if (appearanceChanged) ApplyWallpaper();
                 if (appearanceChanged || avatarChanged) foreach (ChatForm chat in chats.Values) chat.ApplyAppearance();
                 RefreshFilters();
-                RefreshNetworkAsync();
+                RefreshNetwork();
                 ReceiveAutomatically();
             }
             catch (Exception e) { status.Text = "设置保存失败：" + e.Message; }

@@ -1147,7 +1147,12 @@ namespace FeiqLight
         }
         private void ServeSecure(TcpClient client)
         {
-            using(SslStream stream=Security.Server(client,true)) {
+            SslStream stream;
+            try { stream=Security.Server(client,true); }
+            // SslStream 在握手中收到 EOF 时可抛出没有内部 SocketException 的 IOException。
+            // 仅在握手的网络 IO 阶段归类为中断；后续身份校验和协议错误仍正常报告。
+            catch(IOException) { ReportConnectionInterrupted(); return; }
+            using(stream) {
                 client.ReceiveTimeout=45000;stream.ReadTimeout=45000;
                 Packet identity=AuthenticateSecureServer(stream);
                 if(identity==null)return;

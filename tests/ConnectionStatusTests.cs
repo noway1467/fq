@@ -12,6 +12,7 @@ using System.Net.Sockets;
 using System.Reflection;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace FeiqLight.Tests
@@ -121,6 +122,56 @@ namespace FeiqLight.Tests
             SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
             root = Path.GetFullPath(args[0]); previews = Path.GetFullPath(args[1]);
             Directory.CreateDirectory(root); Directory.CreateDirectory(previews);
+            Run("TLS 握手中断流不残留安全连接错误", () => {
+                using (Pair pair = new Pair("handshake-eof"))
+                {
+                    using (TcpClient raw = new TcpClient())
+                    {
+                        raw.Connect(IPAddress.Loopback, pair.Receiver.Port);
+                        raw.GetStream().Write(new byte[] { 70, 81, 50, 10 }, 0, 4);
+                        Pump(() => !pair.Idle(), "握手请求没有被接受");
+                        raw.Client.Shutdown(SocketShutdown.Send);
+                        Pump(pair.Idle, "握手中断的连接没有释放");
+                    }
+                    Check(pair.Errors.IsEmpty && pair.Status.Text == "1 人在线 · 1 个会话", "握手 EOF 仍覆盖状态：" + pair.Status.Text);
+                    Check(new Diagnostics(pair.Store.Root, () => true).Read().Contains("ConnectionInterrupted"), "握手中断未记录诊断");
+                    Render(pair, "handshake-eof");
+                }
+            });
+            Run("慢刷新不阻塞界面，连续点击和菜单入口共用一次请求", () => {
+                using (Pair pair = new Pair("refresh-responsive"))
+                using (var held = new ManualResetEventSlim())
+                using (var release = new ManualResetEventSlim())
+                {
+                    // 用回环发送锁模拟系统网络阻塞，不扫描宿主网卡或等待真实设备。
+                    Task blocker = Task.Run(() => { lock (Field(pair.Receiver, "sendGate")) { held.Set(); release.Wait(4000); } });
+                    Check(held.Wait(2000), "测试发送锁没有就绪");
+                    var button = (Button)Field(pair.Main, "refresh");
+                    MethodInfo refresh = typeof(MainForm).GetMethod("RefreshNetwork", BindingFlags.Instance | BindingFlags.NonPublic);
+                    TimeSpan before = (TimeSpan)Field(pair.Receiver, "verifyFrom");
+                    try
+                    {
+                        pair.Status.Text = "安全连接未完成：旧提示";
+                        Stopwatch elapsed = Stopwatch.StartNew(); button.PerformClick(); elapsed.Stop();
+                        Check(elapsed.ElapsedMilliseconds < 500, "刷新阻塞界面 " + elapsed.ElapsedMilliseconds + "ms");
+                        Pump(() => (TimeSpan)Field(pair.Receiver, "verifyFrom") > before, "后台刷新未启动");
+                        TimeSpan first = (TimeSpan)Field(pair.Receiver, "verifyFrom");
+                        for (int i = 0; i < 30; i++) { button.PerformClick(); refresh.Invoke(pair.Main, null); }
+                        bool responded = false; pair.Main.BeginInvoke((MethodInvoker)(() => responded = true));
+                        Pump(() => responded, "刷新期间 UI 消息无法处理");
+                        Check(!button.Enabled && (TimeSpan)Field(pair.Receiver, "verifyFrom") == first, "重复点击排入了新的刷新");
+                        Console.WriteLine("METRIC 刷新点击返回 " + elapsed.ElapsedMilliseconds + "ms；30 次连续调用未新增刷新；UI 回调已执行");
+                        Render(pair, "refresh-pending");
+                    }
+                    finally { release.Set(); Check(blocker.Wait(2000), "测试发送锁未释放"); }
+                    Pump(() => button.Enabled, "刷新完成后按钮未恢复");
+                    Check(pair.Status.Text == "1 人在线 · 1 个会话", "刷新结束仍残留错误：" + pair.Status.Text);
+                    Render(pair, "refresh-complete");
+                    // 完成后允许下一次刷新，避免节流把入口永久锁死。
+                    before = (TimeSpan)Field(pair.Receiver, "verifyFrom"); button.PerformClick();
+                    Pump(() => button.Enabled && (TimeSpan)Field(pair.Receiver, "verifyFrom") > before, "完成后不能再次刷新");
+                }
+            });
             foreach (bool reset in new[] { false, true })
             {
                 string name = reset ? "reset-dark" : "eof-light";
