@@ -464,14 +464,14 @@ namespace FeiqLight
                 chatMenu.Items.Add("浏览共享文件…", null, delegate { main.OpenShared(peer); });
                 chatMenu.Items.Add("控制 Android 手机…", null, delegate { main.OpenPhone(peer); });
                 chatMenu.Items.Add(new ToolStripSeparator());
-                chatMenu.Items.Add("管理会话…",null,delegate { main.ShowConversationMenu(peer); });
+                chatMenu.Items.Add("管理会话…",null,delegate { main.ShowConversationMenu(peer, true); });
                 ToolStripMenuItem font = new ToolStripMenuItem("字号");
                 foreach (int size in Enumerable.Range(9, 10)) { int value = size; font.DropDownItems.Add(new ToolStripMenuItem(size.ToString(), null, delegate { main.SetChatFontSize(value); }) { Tag = size }); }
                 ToolStripDropDownMenu sizes = (ToolStripDropDownMenu)font.DropDown; sizes.ShowImageMargin = false; sizes.ShowCheckMargin = true; sizes.MinimumSize = new Size((int)(112 * DeviceDpi / 96F), 0);
                 Action updateSize = delegate { foreach (ToolStripMenuItem item in font.DropDownItems) item.Checked = (int)item.Tag == network.Settings.ChatFontSize; };
                 chatMenu.Opening += delegate { updateSize(); }; font.DropDownOpening += delegate { updateSize(); };
                 chatMenu.Items.Add(font);
-                chatMenu.Items.Add("外观设置…",null,delegate {main.OpenSettings();});
+                chatMenu.Items.Add("外观设置…",null,delegate {main.OpenSettings(SettingsPage.Appearance);});
                 chatMenu.Items.Add(new ToolStripSeparator());
                 chatMenu.Items.Add("关闭会话", null, delegate { main.CloseChat(this); });
             }

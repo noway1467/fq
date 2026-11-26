@@ -1709,12 +1709,14 @@ public final class MainActivity extends Activity implements ChatService.Observer
     }
     private void settings() {
         SharedPreferences prefs=getSharedPreferences("settings",MODE_PRIVATE); LinearLayout box=column();
-        settingHeading(box,"个人资料与连接");
+        settingHeading(box,"个人资料");
         String normalizedAvatar=Protocol.normalizeAvatar(prefs.getString("avatar","default"));final String[] avatarValue={normalizedAvatar==null?"default":normalizedAvatar};
         String self="device:"+prefs.getString("device_id","");LinearLayout avatarRow=row();TextView portrait=text("",18,INK);portrait.setContentDescription("个人头像");bindAvatar(portrait,self,"个人头像",false,avatarValue[0]);avatarRow.addView(portrait,new LinearLayout.LayoutParams(dp(64),dp(64)));
         Button changeAvatar=button("更换头像",false);LinearLayout.LayoutParams avatarButton=weight();avatarButton.leftMargin=dp(12);avatarRow.addView(changeAvatar,avatarButton);box.addView(avatarRow,settingSpacing(0,10));
         changeAvatar.setOnClickListener(v->showAvatarPicker(avatarValue[0],value->{avatarValue[0]=value;bindAvatar(portrait,self,"个人头像",false,value);}));
-        EditText name=formField(box,"昵称",prefs.getString("name",Build.MODEL)), group=formField(box,"部门",prefs.getString("group","我的局域网")), port=formField(box,"端口",String.format(Locale.ROOT,"%d",prefs.getInt("port",2425)));
+        EditText name=formField(box,"昵称",prefs.getString("name",Build.MODEL)), group=formField(box,"部门",prefs.getString("group","我的局域网"));
+        settingHeading(box,"连接");
+        EditText port=formField(box,"端口",String.format(Locale.ROOT,"%d",prefs.getInt("port",2425)));
         port.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
         Switch autoConnect=settingSwitch("打开应用时自动恢复连接",prefs.getBoolean("auto_connect",true)); box.addView(autoConnect,settingSpacing(6,0));
         Switch legacy=settingSwitch("允许旧版明文协议",ChatService.allowLegacy(prefs));box.addView(legacy,new LinearLayout.LayoutParams(-1,-2));box.addView(text("兼容旧设备明文；已配对设备与共享远控始终加密",12,MUTED));
@@ -1737,11 +1739,12 @@ public final class MainActivity extends Activity implements ChatService.Observer
         for(int i=0;i<keys.length;i++){RadioButton choice=new RadioButton(this);choice.setId(View.generateViewId());choice.setTag(keys[i]);choice.setText(names[i]);choice.setTextSize(15);choice.setTextColor(INK);choice.setButtonTintList(new android.content.res.ColorStateList(new int[][]{new int[]{android.R.attr.state_checked},new int[]{}},new int[]{BLUE,MUTED}));choice.setMinHeight(dp(48));choice.setButtonDrawable(null);choice.setGravity(Gravity.CENTER);choice.setPadding(dp(4),0,dp(4),0);accent.addView(choice,choiceSpacing(i,keys.length));if(keys[i].equals(selectedAccent))accent.check(choice.getId());}
         accent.setOnCheckedChangeListener((groupView,checked)->{for(int i=0;i<groupView.getChildCount();i++){View choice=groupView.getChildAt(i);choice.setBackground(shape(choice.getId()==checked?BUBBLE:SURFACE,CONTROL_RADIUS));}});
         for(int i=0;i<accent.getChildCount();i++){View choice=accent.getChildAt(i);choice.setBackground(shape(choice.getId()==accent.getCheckedRadioButtonId()?BUBBLE:SURFACE,CONTROL_RADIUS));}
+        TextView colorHeading=text("主题颜色",14,INK);box.addView(colorHeading,settingSpacing(12,0));
         box.addView(accent,settingSpacing(8,20));
         LinearLayout preview=column();preview.setPadding(dp(14),dp(12),dp(14),dp(12));
         TextView sampleIn=text("今天也保持联系",messageSize(),INK),sampleOut=text("消息与输入字号预览",messageSize(),INK);
         sampleIn.setPadding(dp(12),dp(8),dp(12),dp(8));sampleOut.setPadding(dp(12),dp(8),dp(12),dp(8));
-        LinearLayout.LayoutParams inParams=new LinearLayout.LayoutParams(-2,-2),outParams=new LinearLayout.LayoutParams(-2,-2);outParams.gravity=Gravity.END;outParams.topMargin=dp(8);preview.addView(sampleIn,inParams);preview.addView(sampleOut,outParams);box.addView(preview,settingSpacing(0,16));
+        LinearLayout.LayoutParams inParams=new LinearLayout.LayoutParams(-2,-2),outParams=new LinearLayout.LayoutParams(-2,-2);outParams.gravity=Gravity.END;outParams.topMargin=dp(8);preview.addView(sampleIn,inParams);preview.addView(sampleOut,outParams);box.addView(preview,box.indexOfChild(follow),settingSpacing(0,16));
         // 预览与 applyTheme 同表取色：底色为聊天背景，收到/发出样例分别取表面色与发出气泡色。
         Runnable updatePreview=()->{View selectedColor=accent.findViewById(accent.getCheckedRadioButtonId());int[] p=palette(selectedColor==null?"blue":selectedColor.getTag().toString(),dark.isChecked());preview.setBackground(shape(wall(p),CONTROL_RADIUS));sampleIn.setBackground(shape(p[1],CONTROL_RADIUS));sampleOut.setBackground(shape(blend(p[0],p[1],dark.isChecked()?.42f:.15f),CONTROL_RADIUS));sampleIn.setTextColor(p[2]);sampleOut.setTextColor(p[2]);};
         dark.setOnCheckedChangeListener((buttonView,checked)->updatePreview.run());
@@ -1765,6 +1768,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         Button clear=button("清理已接收文件",false); Button clearOffers=button("清理发送缓存",false);
         LinearLayout.LayoutParams clrP=weight();clrP.rightMargin=dp(8);clearRow.addView(clear,clrP);clearRow.addView(clearOffers,weight());box.addView(clearRow,settingSpacing(6,8));
         clear.setOnClickListener(v->clearReceivedFiles());
+        box.addView(text("仅清理飞Q接收的文件，包含以前保存目录中的文件；其他文件保留。",12,MUTED),settingSpacing(0,8));
         clearOffers.setOnClickListener(v->confirm("清理发送缓存","撤销尚未接收的文件邀请并删除暂存副本？原文件不受影响。","清理",()->{
             if(service==null) { error("连接服务尚未就绪，请稍后重试"); return; }
             service.clearOffers(result->error(result.files==0?"没有可清理的发送缓存":"已撤销未接收的文件邀请，删除 "+result.files+" 个暂存副本，释放 "+size(result.bytes)));
@@ -1844,18 +1848,22 @@ public final class MainActivity extends Activity implements ChatService.Observer
     }
     private RadioGroup settingChoices(int count) {
         return new RadioGroup(this) {
+            private int columns,cellHeight;
             @Override protected void onMeasure(int width,int height) {
-                // 按可用宽度和实际字体缩放决定排列，不能靠缩小触摸区或裁字塞满一行。
+                // 小屏用网格保留阅读顺序；大字号再减少列数，不压缩触摸区。
                 float scale=getResources().getConfiguration().fontScale;
-                boolean vertical=View.MeasureSpec.getSize(width)<dp(count*76*Math.max(1,scale)+(count-1)*10);
-                int orientation=vertical?LinearLayout.VERTICAL:LinearLayout.HORIZONTAL;
-                if(getOrientation()!=orientation)setOrientation(orientation);
+                int available=View.MeasureSpec.getSize(width),gap=dp(10);
+                columns=Math.max(1,Math.min(3,(available+gap)/(dp(88*Math.max(1,scale))+gap)));
+                int cellWidth=Math.max(1,(available-gap*(columns-1))/columns);cellHeight=dp(48);
                 for(int i=0;i<getChildCount();i++){
-                    View child=getChildAt(i);RadioGroup.LayoutParams p=(RadioGroup.LayoutParams)child.getLayoutParams();
-                    int w=vertical?-1:0,bottom=vertical&&i<count-1?dp(10):0,left=!vertical&&i>0?dp(5):0,right=!vertical&&i<count-1?dp(5):0;float weight=vertical?0:1;
-                    if(p.width!=w||p.weight!=weight||p.leftMargin!=left||p.rightMargin!=right||p.bottomMargin!=bottom){p.width=w;p.weight=weight;p.setMargins(left,0,right,bottom);child.setLayoutParams(p);}
+                    View child=getChildAt(i);child.measure(View.MeasureSpec.makeMeasureSpec(cellWidth,View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(0,View.MeasureSpec.UNSPECIFIED));cellHeight=Math.max(cellHeight,child.getMeasuredHeight());
                 }
-                super.onMeasure(width,height);
+                for(int i=0;i<getChildCount();i++)getChildAt(i).measure(View.MeasureSpec.makeMeasureSpec(cellWidth,View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(cellHeight,View.MeasureSpec.EXACTLY));
+                int rows=(getChildCount()+columns-1)/columns;setMeasuredDimension(available,rows*cellHeight+Math.max(0,rows-1)*gap);
+            }
+            @Override protected void onLayout(boolean changed,int left,int top,int right,int bottom) {
+                int gap=dp(10);
+                for(int i=0;i<getChildCount();i++){View child=getChildAt(i);int x=(i%columns)*(child.getMeasuredWidth()+gap),y=(i/columns)*(cellHeight+gap);child.layout(x,y,x+child.getMeasuredWidth(),y+cellHeight);}
             }
         };
     }
@@ -2006,7 +2014,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
             else if(label.contains("Windows")){c.drawRoundRect(3,4,21,17,2,2,paint);c.drawLine(12,17,12,21,paint);c.drawLine(8,21,16,21,paint);}
             else if(label.contains("刷新")||label.contains("重试")) { c.drawArc(4,4,20,20,40,285,false,paint);p.moveTo(15,3);p.lineTo(20,4);p.lineTo(19,9);c.drawPath(p,paint); }
             else if(label.contains("备注")){p.moveTo(4,17);p.lineTo(16,5);p.lineTo(20,9);p.lineTo(8,21);p.lineTo(3,22);p.close();c.drawPath(p,paint);}
-            else if(label.contains("置顶")){p.moveTo(8,3);p.lineTo(17,3);p.lineTo(15,10);p.lineTo(20,14);p.lineTo(5,14);p.lineTo(10,10);p.close();c.drawPath(p,paint);c.drawLine(12,14,12,22,paint);}
+            else if(label.contains("置顶")){p.moveTo(9,3.5f);p.lineTo(15,3.5f);p.lineTo(14.2f,9.6f);p.lineTo(17.5f,13.6f);p.lineTo(6.5f,13.6f);p.lineTo(9.8f,9.6f);p.close();c.drawPath(p,paint);c.drawLine(12,13.6f,12,20.5f,paint);}
             else if(label.contains("设置")) { c.drawCircle(12,12,7,paint);c.drawCircle(12,12,3,paint);for(int i=0;i<8;i++){double a=i*Math.PI/4;c.drawLine(12+(float)Math.cos(a)*8,12+(float)Math.sin(a)*8,12+(float)Math.cos(a)*10,12+(float)Math.sin(a)*10,paint);} }
             else if(label.contains("添加")) { c.drawLine(12,4,12,20,paint);c.drawLine(4,12,20,12,paint); }
             else if(label.contains("连接")||label.equals("断开")) { c.drawArc(4,4,20,20,-50,280,false,paint);c.drawLine(12,2,12,12,paint); }
@@ -2198,7 +2206,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
             TextView avatar=text("",21,Color.WHITE); avatar.setGravity(Gravity.CENTER);
             bindAvatar(avatar,c.peer.id(),c.displayName(),c.peer.online,c.peer.avatar); row.addView(avatar,new LinearLayout.LayoutParams(dp(68),dp(68)));
             LinearLayout center=column(); LinearLayout.LayoutParams cp=weight(); cp.leftMargin=dp(8); row.addView(center,cp);
-            TextView name=text((c.pinned?"↑ ":"")+c.displayName(),16,INK); name.setTypeface(null,Typeface.BOLD); name.setSingleLine();
+            TextView name=text(c.displayName(),16,INK); name.setTypeface(null,Typeface.BOLD); name.setSingleLine();
             // 中间省略保留末尾编号，短名称时编号紧跟昵称，不挤到消息时间旁。
             name.setEllipsize(c.duplicateName?TextUtils.TruncateAt.MIDDLE:TextUtils.TruncateAt.END);name.setContentDescription(c.displayName());
             if(c.duplicateName) {SpannableString caption=new SpannableString(name.getText());int start=caption.length()-c.nameSuffix().length();caption.setSpan(new android.text.style.ForegroundColorSpan(MUTED),start,caption.length(),Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);caption.setSpan(new android.text.style.RelativeSizeSpan(.8f),start,caption.length(),Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);name.setText(caption);}
@@ -2207,6 +2215,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
             LinearLayout right=column(); right.setGravity(Gravity.END); LinearLayout.LayoutParams rp=new LinearLayout.LayoutParams(-2,-2); rp.leftMargin=dp(8); row.addView(right,rp);
             TextView time=text(c.time==0?"":new SimpleDateFormat("HH:mm",Locale.CHINA).format(new Date(c.time)),11,MUTED); right.addView(time);
             if(c.unread>0) { TextView badge=text(c.unread>99?"99+":Integer.toString(c.unread),11,Color.WHITE); badge.setGravity(Gravity.CENTER); badge.setBackground(shape(BLUE,14)); LinearLayout.LayoutParams b=new LinearLayout.LayoutParams(dp(28),dp(23)); b.topMargin=dp(7); right.addView(badge,b); }
+            else if(c.pinned) { ImageView pin=new ImageView(MainActivity.this);pin.setImageDrawable(new MenuIcon("置顶会话",MUTED));pin.setContentDescription("已置顶");LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(dp(17),dp(17));p.topMargin=dp(9);right.addView(pin,p); }
             return row;
         }
     }

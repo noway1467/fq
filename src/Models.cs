@@ -138,7 +138,7 @@ namespace FeiqLight
             string probe = Path.Combine(path, ".feiq-write-" + Guid.NewGuid().ToString("N") + ".tmp");
             using (FileStream stream = new FileStream(probe, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1, FileOptions.DeleteOnClose)) { }
         }
-        private static bool LinkedDirectory(string directory)
+        internal static bool LinkedDirectory(string directory)
         {
             for (string current = directory; current != null; current = Path.GetDirectoryName(current))
                 if (Directory.Exists(current) && (File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0) return true;
@@ -359,6 +359,14 @@ namespace FeiqLight
             }
         }
     }
+    internal sealed class ReceivedFileRegistration
+    {
+        public string Path { get; set; }
+        public string PeerId { get; set; }
+        public long Packet { get; set; }
+        public long Length { get; set; }
+        public long WriteUtcTicks { get; set; }
+    }
     public sealed class Attachment
     {
         public int Id;
@@ -383,6 +391,7 @@ namespace FeiqLight
         private readonly Dictionary<string, DateTime> clearedThrough = new Dictionary<string, DateTime>();
         private readonly Dictionary<string, HashSet<long>> incomingPackets = new Dictionary<string, HashSet<long>>();
         private readonly Dictionary<string, HashSet<string>> deletedRecords = new Dictionary<string, HashSet<string>>();
+        private Dictionary<string, ReceivedFileRegistration> receivedFiles;
         private volatile bool preserveUnreadableSettings;
         public string Warning { get; private set; }
         public LocalStore(string root) { Root = Path.GetFullPath(root); Directory.CreateDirectory(Root); }
@@ -497,6 +506,7 @@ namespace FeiqLight
                 if (DeletedKeys(record.PeerId).Contains(RecordKey(record))) return;
                 DateTime cutoff;
                 if(clearedThrough.TryGetValue(record.PeerId,out cutoff)&&record.Time<=cutoff)return;
+                RegisterReceivedFiles(record);
                 byte[] bytes = new UTF8Encoding(false).GetBytes(json.Serialize(record) + "\n");
                 using (FileStream stream = new FileStream(HistoryPath(record.PeerId), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read))
                 {
@@ -553,6 +563,8 @@ namespace FeiqLight
             {
                 string path = HistoryPath(peerId);
                 if (!File.Exists(path)) return;
+                // 清空消息仍保留接收文件登记，换目录或重启后也能从设置清理。
+                foreach (ChatRecord record in ReadReceivedHistory(path).Where(r => keys == null || keys.Contains(RecordKey(r)))) RegisterReceivedFiles(record);
                 // 历史文件名含 64 位摘要；追加临时后缀会让原本可用的资料目录超过 Windows 路径上限。
                 string temporary = Path.Combine(Root, "history-delete-" + Guid.NewGuid().ToString("N") + ".tmp");
                 HashSet<string> written = new HashSet<string>();
@@ -589,20 +601,25 @@ namespace FeiqLight
         }
         internal void DeleteReceivedFile(ChatRecord record,string path)
         {
-            if(record.Outgoing||String.IsNullOrEmpty(path)||!Path.IsPathRooted(path))throw new IOException("只能删除这条消息中已接收的本机文件。");
-            // 登记路径是真实文件名，不能像接收目录设置那样展开 %OS% 之类的环境变量。
-            string fullPath=Path.GetFullPath(path);
-            string[] registered=record.GetLocalFiles().Concat((record.Transfers??new FileTransferState[0]).Select(f=>f.LocalPath).Where(p=>!String.IsNullOrEmpty(p))).ToArray();
-            if(!registered.Any(p=>Path.IsPathRooted(p)&&String.Equals(Path.GetFullPath(p),fullPath,StringComparison.OrdinalIgnoreCase)))throw new IOException("只能删除这条消息中已接收的本机文件。");
-            if(Directory.Exists(fullPath))throw new IOException("不能通过附件入口删除文件夹。");
-            // 父目录或磁盘已不存在时文件必然已不在，按已删除订正记录。
-            try{File.Delete(fullPath);}catch(DirectoryNotFoundException){}catch(DriveNotFoundException){}
-            record.LocalFiles=registered.Where(p=>!Path.IsPathRooted(p)||!String.Equals(Path.GetFullPath(p),fullPath,StringComparison.OrdinalIgnoreCase)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-            foreach(FileTransferState file in record.Transfers??new FileTransferState[0])if(!String.IsNullOrEmpty(file.LocalPath)&&String.Equals(Path.GetFullPath(file.LocalPath),fullPath,StringComparison.OrdinalIgnoreCase)){file.LocalPath=null;file.Status="本机文件已删除";file.Percent=0;file.BytesPerSecond=0;file.Error=null;file.MarkCurrent();}
-            if((record.Transfers==null||record.Transfers.Length==0)&&record.LocalFiles.Length==0){record.HasAttachments=true;record.State="本机文件已删除";}
-            Append(record);
+            lock (gate)
+            {
+                if(record.Outgoing||String.IsNullOrEmpty(path)||!Path.IsPathRooted(path))throw new IOException("只能删除这条消息中已接收的本机文件。");
+                // 登记路径是真实文件名，不能像接收目录设置那样展开 %OS% 之类的环境变量。
+                string fullPath=Path.GetFullPath(path);
+                string[] registered=record.GetLocalFiles().Concat((record.Transfers??new FileTransferState[0]).Select(f=>f.LocalPath).Where(p=>!String.IsNullOrEmpty(p))).ToArray();
+                if(!registered.Any(p=>Path.IsPathRooted(p)&&String.Equals(Path.GetFullPath(p),fullPath,StringComparison.OrdinalIgnoreCase)))throw new IOException("只能删除这条消息中已接收的本机文件。");
+                if(Directory.Exists(fullPath))throw new IOException("不能通过附件入口删除文件夹。");
+                LoadReceivedFiles();
+                // 父目录或磁盘已不存在时文件必然已不在，按已删除订正记录。
+                try{File.Delete(fullPath);}catch(DirectoryNotFoundException){}catch(DriveNotFoundException){}
+                if (receivedFiles.Remove(fullPath)) SaveReceivedFiles();
+                record.LocalFiles=registered.Where(p=>!Path.IsPathRooted(p)||!String.Equals(Path.GetFullPath(p),fullPath,StringComparison.OrdinalIgnoreCase)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+                foreach(FileTransferState file in record.Transfers??new FileTransferState[0])if(!String.IsNullOrEmpty(file.LocalPath)&&String.Equals(Path.GetFullPath(file.LocalPath),fullPath,StringComparison.OrdinalIgnoreCase)){file.LocalPath=null;file.Status="本机文件已删除";file.Percent=0;file.BytesPerSecond=0;file.Error=null;file.MarkCurrent();}
+                if((record.Transfers==null||record.Transfers.Length==0)&&record.LocalFiles.Length==0){record.HasAttachments=true;record.State="本机文件已删除";}
+                if (!record.Deleted) Append(record);
+            }
         }
-        internal ReceivedFilesDeletionResult DeleteReceivedFiles(IEnumerable<ChatRecord> selected, bool apply = true, Func<ChatRecord,FileTransferState,bool> inUse = null)
+        internal ReceivedFilesDeletionResult DeleteReceivedFiles(IEnumerable<ChatRecord> selected, bool apply = true, Func<ChatRecord,FileTransferState,bool> inUse = null, bool registeredOnly = false)
         {
             var result=new ReceivedFilesDeletionResult();
             var handledPaths=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -633,6 +650,7 @@ namespace FeiqLight
                             if(busyPaths.Contains(fullPath))continue;
                             if(Directory.Exists(fullPath))throw new IOException("不能通过附件入口删除文件夹。");
                             exists=File.Exists(fullPath);
+                            if (registeredOnly && exists) ValidateReceivedFile(fullPath);
                             if(apply)DeleteReceivedFile(record,fullPath);
                         }
                         catch(Exception error)
@@ -660,10 +678,95 @@ namespace FeiqLight
                         if(record.State=="已保存"||record.State=="本机文件已删除"){result.SkippedDeletedCount+=count;if(apply){record.LocalFiles=new string[0];record.State="本机文件已删除";corrected=true;}}
                         else result.UnreceivedCount+=count;
                     }
-                    if(corrected)Append(record);
+                    if(corrected && !record.Deleted)Append(record);
                 }
             }
             return result;
+        }
+        private void LoadReceivedFiles()
+        {
+            if (receivedFiles != null) return;
+            string path = Path.Combine(Root, "received-files.json");
+            var loaded = new Dictionary<string, ReceivedFileRegistration>(StringComparer.OrdinalIgnoreCase);
+            if (File.Exists(path))
+            {
+                ReceivedFileRegistration[] entries;
+                try { entries = json.Deserialize<ReceivedFileRegistration[]>(File.ReadAllText(path, Encoding.UTF8)); }
+                catch (Exception error) {
+                    if (!(error is ArgumentException || error is InvalidOperationException)) throw;
+                    throw new IOException("接收文件登记无法读取，原记录已保留，未清理文件。", error);
+                }
+                if (entries == null) throw new IOException("接收文件登记为空或损坏，未清理文件。");
+                foreach (ReceivedFileRegistration entry in entries)
+                {
+                    if (entry == null || String.IsNullOrEmpty(entry.Path) || !Path.IsPathRooted(entry.Path) || String.IsNullOrEmpty(entry.PeerId))
+                        throw new IOException("接收文件登记无效，原记录已保留，未清理文件。");
+                    loaded[Path.GetFullPath(entry.Path)] = entry;
+                }
+            }
+            receivedFiles = loaded;
+        }
+        private void SaveReceivedFiles()
+        {
+            SecureIdentity.AtomicBytes(Path.Combine(Root, "received-files.json"), Encoding.UTF8.GetBytes(json.Serialize(receivedFiles.Values.ToArray())));
+        }
+        private void RegisterReceivedFiles(ChatRecord record)
+        {
+            if (record.Outgoing || record.Deleted || !record.HasReceivedAttachments) return;
+            string[] paths = record.GetLocalFiles().Concat((record.Transfers ?? new FileTransferState[0]).Where(f => f.Status == "已保存" && !String.IsNullOrEmpty(f.LocalPath)).Select(f => f.LocalPath)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            if (paths.Length == 0) return;
+            LoadReceivedFiles(); bool changed = false;
+            foreach (string path in paths)
+            {
+                if (!Path.IsPathRooted(path)) continue;
+                string fullPath = Path.GetFullPath(path);
+                if (receivedFiles.ContainsKey(fullPath) || !File.Exists(fullPath)) continue;
+                var info = new FileInfo(fullPath);
+                FileTransferState transfer = (record.Transfers ?? new FileTransferState[0]).FirstOrDefault(f => String.Equals(f.LocalPath, path, StringComparison.OrdinalIgnoreCase));
+                // 升级导入旧记录时，长度已不符的同名文件不能认作原接收文件。
+                if (transfer != null && transfer.Size != info.Length) continue;
+                receivedFiles.Add(fullPath, new ReceivedFileRegistration { Path = fullPath, PeerId = record.PeerId, Packet = record.Packet, Length = info.Length, WriteUtcTicks = info.LastWriteTimeUtc.Ticks });
+                changed = true;
+            }
+            if (changed) SaveReceivedFiles();
+        }
+        private List<ChatRecord> ReadReceivedHistory(string path)
+        {
+            var latest = new Dictionary<string, ChatRecord>();
+            foreach (string line in File.ReadLines(path, Encoding.UTF8))
+            {
+                ChatRecord record;
+                try { record = json.Deserialize<ChatRecord>(line); }
+                catch (ArgumentException) { continue; }
+                catch (InvalidOperationException) { continue; }
+                if (record == null || record.Outgoing || String.IsNullOrEmpty(record.PeerId) || !String.Equals(HistoryPath(record.PeerId), path, StringComparison.OrdinalIgnoreCase)) continue;
+                latest[record.PeerId + "/" + record.Packet] = record;
+            }
+            return latest.Values.Where(r => !r.Deleted && r.HasReceivedAttachments).ToList();
+        }
+        internal ChatRecord[] ReceivedFileRecords()
+        {
+            lock (gate)
+            {
+                LoadReceivedFiles();
+                // 只读取本程序的历史登记；绝不扫描默认或自定义接收目录。
+                var records = Directory.EnumerateFiles(Root, "history-*.jsonl").SelectMany(ReadReceivedHistory).ToList();
+                foreach (ChatRecord record in records) RegisterReceivedFiles(record);
+                var known = new HashSet<string>(records.Select(r => r.PeerId + "/" + r.Packet));
+                foreach (var group in receivedFiles.Values.GroupBy(f => f.PeerId + "/" + f.Packet).Where(g => !known.Contains(g.Key)))
+                    records.Add(new ChatRecord { PeerId = group.First().PeerId, Packet = group.First().Packet, Deleted = true, HasAttachments = true, State = "已保存", LocalFiles = group.Select(f => f.Path).ToArray() });
+                return records.ToArray();
+            }
+        }
+        private void ValidateReceivedFile(string path)
+        {
+            LoadReceivedFiles(); ReceivedFileRegistration entry;
+            if (!receivedFiles.TryGetValue(path, out entry)) throw new IOException("未找到可靠的接收文件登记，已保留。");
+            if (ReceiveStorage.LinkedDirectory(Path.GetDirectoryName(path)) || (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+                throw new IOException("保存路径已变为链接，已保留。");
+            var info = new FileInfo(path);
+            if (info.Length != entry.Length || info.LastWriteTimeUtc.Ticks != entry.WriteUtcTicks)
+                throw new IOException("文件在接收后已被修改或替换，已保留。");
         }
         private static string RecordKey(ChatRecord record) { return record.Outgoing + ":" + record.Packet; }
         private HashSet<string> DeletedKeys(string peerId)

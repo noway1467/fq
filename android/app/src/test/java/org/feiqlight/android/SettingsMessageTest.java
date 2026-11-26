@@ -35,6 +35,46 @@ public final class SettingsMessageTest {
         }
         throw new IOException("未找到同时空闲的TCP/UDP测试端口");
     }
+    @Test public void settingsOrderGridAndPinnedGlyphMatchDesktop() throws Exception {
+        Context context=RuntimeEnvironment.getApplication();context.getSharedPreferences("settings",0).edit().putBoolean("auto_connect",false).putBoolean("connection_enabled",false).commit();
+        for(boolean dark:new boolean[]{false,true}) {
+            context.getSharedPreferences("settings",0).edit().putBoolean("dark_mode",dark).putBoolean("follow_system_theme",false).commit();
+            ServiceController<ChatService> service=Robolectric.buildService(ChatService.class).create();
+            shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(context,ChatService.class),service.get().onBind(new Intent()));
+            try(ActivityController<MainActivity> controller=Robolectric.buildActivity(MainActivity.class).setup()) {
+                MainActivity activity=controller.get();invoke(activity,"settings",new Class<?>[0]);Dialog dialog=ShadowDialog.getLatestDialog();
+                try {
+                    View decor=dialog.getWindow().getDecorView();LinearLayout general=decor.findViewWithTag("settings-page:0");
+                    assertTrue(general.indexOfChild(general.findViewWithTag("section:个人资料"))<general.indexOfChild(general.findViewWithTag("section:连接")));
+                    click(dialog,"外观");LinearLayout appearance=decor.findViewWithTag("settings-page:1");
+                    TextView sample=(TextView)views(appearance).stream().filter(v->v instanceof TextView&&"今天也保持联系".contentEquals(((TextView)v).getText())).findFirst().orElseThrow();
+                    View follow=views(appearance).stream().filter(v->"跟随系统切换".contentEquals(v.getContentDescription()==null?"":v.getContentDescription())).findFirst().orElseThrow();
+                    assertTrue(appearance.indexOfChild((View)sample.getParent())<appearance.indexOfChild(follow));
+                    for(int width:new int[]{720,560}) {
+                        appearance.measure(View.MeasureSpec.makeMeasureSpec(width,View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(0,View.MeasureSpec.UNSPECIFIED));appearance.layout(0,0,width,appearance.getMeasuredHeight());
+                        for(View view:views(appearance))if(view instanceof RadioGroup) {
+                            RadioGroup grid=(RadioGroup)view;assertEquals(6,grid.getChildCount());assertEquals(grid.getChildAt(0).getTop(),grid.getChildAt(1).getTop());
+                            for(int i=0;i<6;i++){View item=grid.getChildAt(i);assertTrue(item.getLeft()>=0&&item.getRight()<=width);assertTrue(item.getHeight()>=96);}
+                            ((RadioButton)grid.getChildAt(4)).performClick();assertEquals(grid.getChildAt(4).getId(),grid.getCheckedRadioButtonId());
+                        }
+                    }
+                    snapshot(decor,"settings-order-"+(dark?"dark":"light"));
+                    ScrollView scroller=(ScrollView)views(decor).stream().filter(v->v instanceof ScrollView).findFirst().orElseThrow();
+                    scroller.scrollTo(0,follow.getTop());snapshot(decor,"settings-grid-"+(dark?"dark":"light"));
+                    click(dialog,"文件");snapshot(decor,"settings-files-"+(dark?"dark":"light"));
+                } finally {dialog.dismiss();}
+                BaseAdapter adapter=(BaseAdapter)field(activity,"adapter");
+                @SuppressWarnings("unchecked") List<ChatStore.Conversation> items=(List<ChatStore.Conversation>)field(adapter,"items");items.clear();
+                ChatStore.Conversation contact=new ChatStore.Conversation();contact.peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:2425"),"pinned","host","中文 English 长昵称","");contact.pinned=true;contact.preview="已置顶的会话";items.add(contact);
+                View row=adapter.getView(0,null,new ListView(activity));
+                row.setBackgroundColor((Integer)field(activity,"SURFACE"));
+                assertTrue(views(row).stream().anyMatch(v->v instanceof ImageView&&"已置顶".contentEquals(v.getContentDescription()==null?"":v.getContentDescription())));
+                assertFalse(views(row).stream().anyMatch(v->v instanceof TextView&&((TextView)v).getText().toString().startsWith("↑ ")));
+                snapshot(row,"pinned-row-"+(dark?"dark":"light"));
+                contact.unread=3;row=adapter.getView(0,null,new ListView(activity));assertFalse(views(row).stream().anyMatch(v->"已置顶".contentEquals(v.getContentDescription()==null?"":v.getContentDescription())));
+            } finally {service.destroy();}
+        }
+    }
     @Test public void archiveRetainsOlderRowsAcrossRestartAndPagesEqualTimesWithoutDuplicates() throws Exception {
         Context context=RuntimeEnvironment.getApplication();
         LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:2425"),"archive","host","历史","");

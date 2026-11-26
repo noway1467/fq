@@ -233,7 +233,7 @@ namespace FeiqLight.Tests
                     Assert(banner.FormBorderStyle == FormBorderStyle.None && !banner.ShowInTaskbar, "仍有多余标题栏");
                     var flags = (CreateParams)typeof(RemoteBanner).GetProperty("CreateParams", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic).GetValue(banner, null);
                     Assert((flags.ExStyle & 0x08000000) != 0, "浮条可能抢焦点");
-                    var row = (TableLayoutPanel)banner.Controls[0]; ((Button)row.GetControlFromPosition(2, 0)).PerformClick(); Assert(disconnected, "断开未执行"); banner.Close();
+                    Descendants(banner).OfType<Button>().Single(button => button.AccessibleName == "断开远控").PerformClick(); Assert(disconnected, "断开未执行"); banner.Close();
                 }
             });
             run("始终允许只信任已配对设备，本机停止和清除仍生效", () => {

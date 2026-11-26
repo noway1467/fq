@@ -585,6 +585,7 @@ namespace FeiqLight
         }
         protected override void Dispose(bool disposing) { if(disposing && preview.Image != null) { preview.Image.Dispose(); preview.Image = null; } base.Dispose(disposing); }
     }
+    public enum SettingsPage { General, Appearance, Files, Diagnostics }
     public sealed class SettingsDialog : ModernWindow
     {
         private readonly string[] tabNames={"通用","外观","文件","诊断"};
@@ -629,7 +630,7 @@ namespace FeiqLight
         private Button image, save;
         private Action refreshPattern;
         public AppSettings Value { get; private set; }
-        public SettingsDialog(AppSettings current, string dataPath, int port, bool startupAvailable = false, bool startupEnabled = false)
+        public SettingsDialog(AppSettings current, string dataPath, int port, bool startupAvailable = false, bool startupEnabled = false, SettingsPage initialPage = SettingsPage.General, Func<IWin32Window, System.Threading.Tasks.Task> cleanReceived = null)
         {
             Text = "设置"; ClientSize = new Size(720, 720); ResizeWindow = false; MinimumSize = new Size(560, 500); StartPosition = FormStartPosition.CenterParent;
             Panel footer = new Panel { Dock = DockStyle.Bottom, Height = 72, Padding = new Padding(24, 12, 24, 16), BackColor = Theme.Surface, AccessibleName = "设置操作栏" };
@@ -665,6 +666,16 @@ namespace FeiqLight
                     if (dialog.ShowDialog(this) == DialogResult.OK) folder.Text = dialog.SelectedPath;
             }, false); browse.SetBounds(386, 434, 96, 40); DialogLayout.StyleSecondary(browse); body.Controls.Add(browse);
             Button reset = Theme.Button("恢复默认目录", delegate { folder.Text = AppSettings.DefaultReceiveFolder; }, false); reset.SetBounds(26, 486, 146, 36); DialogLayout.StyleSecondary(reset); body.Controls.Add(reset);
+            Button clearReceived = Theme.Button("清理已接收文件", null, false);
+            clearReceived.AccessibleName = "清理已接收文件"; clearReceived.Enabled = cleanReceived != null;
+            clearReceived.SetBounds(26, 540, 180, 40); DialogLayout.StyleSecondary(clearReceived); body.Controls.Add(clearReceived);
+            clearReceived.Click += async delegate {
+                clearReceived.Enabled = false;
+                try { await cleanReceived(this); }
+                finally { if (!IsDisposed) clearReceived.Enabled = true; }
+            };
+            Label cleanHint = Theme.Label("仅清理飞Q登记的接收文件（含以前目录）；保留其他文件。", Theme.Small, Theme.Muted);
+            cleanHint.Top = 541; cleanHint.Height = 54; cleanHint.AutoSize = false; body.Controls.Add(cleanHint);
             Label info = Theme.Label("端口 " + port + " · 资料目录 " + dataPath, Theme.Small, Theme.Muted); info.SetBounds(26, 532, 458, 40); info.AutoEllipsis = true; body.Controls.Add(info);
             ToggleSwitch dark=new ToggleSwitch { Text="夜间模式",AccessibleName="夜间模式",Checked=current.DarkMode,BackColor=Theme.Surface }; dark.SetBounds(26,590,458,42);body.Controls.Add(dark);
             ToggleSwitch follow=new ToggleSwitch { Text="跟随系统主题",AccessibleName="跟随系统切换",Checked=current.FollowSystemTheme,BackColor=Theme.Surface };follow.Top=290;body.Controls.Add(follow);
@@ -780,12 +791,12 @@ namespace FeiqLight
                     viewLog.Dock = clearLog.Dock = DockStyle.Fill;
                     viewLog.Margin = new Padding(0, 0, 6, 0); clearLog.Margin = new Padding(6, 0, 0, 0); logActions.Controls.Add(viewLog, 0, 0); logActions.Controls.Add(clearLog, 1, 0); layout.Controls.Add(logActions); continue;
                 }
-                string section = field == fields[0] ? "个人资料" : field == close ? "消息与窗口" : field == auto ? "文件接收" : field == autoDrop ? "文件发送" : field == dark ? "聊天外观" : field == diagnostics ? "故障诊断" : field == info ? "本机信息" : null;
+                string section = field == fields[0] ? "个人资料" : field == close ? "消息与窗口" : field == auto ? "文件接收" : field == clearReceived ? "存储管理" : field == autoDrop ? "文件发送" : field == dark ? "聊天外观" : field == diagnostics ? "故障诊断" : field == info ? "本机信息" : null;
                 if (section != null) {
                     if(layout.Controls.Count>0) { Panel divider=new Panel { Height=1, BackColor=Theme.Line, Margin=new Padding(0,10,0,10) };layout.Controls.Add(divider); }
                     Label heading = Theme.Label(section, Theme.Section, Theme.Ink); heading.Height = 24; heading.Margin = new Padding(0, 0, 0, 4); layout.Controls.Add(heading);
                 }
-                if(field is Label && field != info) field.Height=20;
+                if(field is Label && field != info && field != cleanHint) field.Height=20;
                 if(field is ToggleSwitch) field.Height=((ToggleSwitch)field).PreferredHeightFor(458);
                 field.Margin = new Padding(0, 0, 0, field is Label ? 4 : 6); layout.Controls.Add(field);
             }
@@ -807,13 +818,13 @@ namespace FeiqLight
                         field.Width = width;
                         ToggleSwitch toggle = field as ToggleSwitch;
                         if(toggle != null) field.Height = toggle.PreferredHeightFor(width);
-                        else if(field == info)
+                        else if(field == info || field == cleanHint)
                             field.Height = TextRenderer.MeasureText(field.Text, field.Font, new Size(width, Int32.MaxValue), TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl | TextFormatFlags.NoPrefix).Height + 4;
                     }
                     layout.ResumeLayout(true);
                 }
             };
-            body.SizeChanged += delegate { fit(); }; fit();SelectTab(0);
+            body.SizeChanged += delegate { fit(); }; fit();SelectTab((int)initialPage);
             Theme.ThemeScrollbars(body);
         }
         private void SelectBackground(string pattern)

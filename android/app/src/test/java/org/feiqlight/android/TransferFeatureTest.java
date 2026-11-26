@@ -160,6 +160,38 @@ public final class TransferFeatureTest {
         try {ChatStore.FileTask task=fileTasks(restarted.get()).get(0);assertEquals("访客.txt",context.getSharedPreferences("guest_received",0).getString(id,""));assertEquals(bytes.length,task.file.size);assertEquals(time,task.message.time);}
         finally{restarted.destroy();}
     }
+    @Test public void cleanupAfterDirectoryChangesAndRestartKeepsUnregisteredFiles()throws Exception {
+        Context context=RuntimeEnvironment.getApplication();disableConnection(context);
+        FileFeaturesTest.Docs docs=documents(context);ReceivedStorage storage=new ReceivedStorage(context);
+        String a=docs.createDocument("root",android.provider.DocumentsContract.Document.MIME_TYPE_DIR,"目录 A");
+        String b=docs.createDocument("root",android.provider.DocumentsContract.Document.MIME_TYPE_DIR,"目录 B");
+        android.net.Uri treeA=android.provider.DocumentsContract.buildTreeDocumentUri("feiq.documents",a),treeB=android.provider.DocumentsContract.buildTreeDocumentUri("feiq.documents",b);
+        String unrelatedA=docs.createDocument(a,"text/plain","用户原件.txt"),unrelatedB=docs.createDocument(b,"text/plain","用户原件.txt");
+        Files.write(docs.files.get(unrelatedA).toPath(),new byte[]{8});Files.write(docs.files.get(unrelatedB).toPath(),new byte[]{9});
+        int flags=Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_WRITE_URI_PERMISSION;
+        ServiceController<ChatService> first=Robolectric.buildService(ChatService.class).create();
+        File localA,localB;android.net.Uri savedA,savedB;
+        try {
+            ChatService service=first.get();settle(service);
+            localA=guestFile(context,"a".repeat(64),"来自 A.txt",new byte[]{1,2},100);
+            storage.choose(treeA,flags);savedA=storage.save(localA,"来自 A.txt",new LanNode.Transfer());
+            localB=guestFile(context,"b".repeat(64),"来自 B.txt",new byte[]{3,4,5},200);
+            storage.choose(treeB,flags);savedB=storage.save(localB,"来自 B.txt",new LanNode.Transfer());
+            assertEquals(treeA,storage.savedTree(localA));assertEquals(treeB,storage.savedTree(localB));assertEquals(treeB,storage.tree());
+            assertEquals(a,docs.parents.get(android.provider.DocumentsContract.getDocumentId(savedA)));assertEquals(b,docs.parents.get(android.provider.DocumentsContract.getDocumentId(savedB)));
+        }finally{first.destroy();assertTrue(((ExecutorService)field(first.get(),"io")).awaitTermination(5,TimeUnit.SECONDS));}
+        ServiceController<ChatService> restarted=Robolectric.buildService(ChatService.class).create();
+        try {
+            ChatService service=restarted.get();settle(service);ReceivedStorage restored=new ReceivedStorage(service);
+            assertEquals(treeB,restored.tree());assertEquals(savedA,restored.existingSaved(localA));assertEquals(savedB,restored.existingSaved(localB));
+            assertEquals(2,service.receivedUsage().files);assertEquals(5,service.receivedUsage().bytes);
+            List<ChatService.Usage> results=new ArrayList<>();service.clearFiles(results::add);transferDone(service);
+            assertEquals(1,results.size());assertEquals(2,results.get(0).files);assertEquals(5,results.get(0).bytes);
+            assertFalse(restored.exists(localA));assertFalse(restored.exists(localB));assertEquals(treeB,restored.tree());
+            assertArrayEquals(new byte[]{8},Files.readAllBytes(docs.files.get(unrelatedA).toPath()));assertArrayEquals(new byte[]{9},Files.readAllBytes(docs.files.get(unrelatedB).toPath()));
+            assertEquals(2,docs.files.size());assertTrue(docs.directories.contains(a)&&docs.directories.contains(b));
+        }finally{restarted.destroy();}
+    }
     @Test public void guestTaskStableOrder()throws Exception {
         Context context=RuntimeEnvironment.getApplication();disableConnection(context);String low="1".repeat(64),high="2".repeat(64),legacy="3".repeat(64);File directory=new File(context.getFilesDir(),"received");assertTrue(directory.isDirectory()||directory.mkdirs());
         Files.write(new File(directory,low).toPath(),new byte[1]);Files.write(new File(directory,high).toPath(),new byte[2]);File old=new File(directory,legacy);Files.write(old.toPath(),new byte[5]);assertTrue(old.setLastModified(500));

@@ -434,6 +434,41 @@ public sealed class MainForm : ModernWindow
             }
             catch(Exception error){using(var notice=new NoticeDialog("文件删除未完成",error.Message))notice.ShowDialog(this);}
         }
+        internal async System.Threading.Tasks.Task CleanReceivedFiles(IWin32Window owner)
+        {
+            try
+            {
+                ChatRecord[] records = await System.Threading.Tasks.Task.Run(() => store.ReceivedFileRecords());
+                if (IsDisposed || owner is Control && ((Control)owner).IsDisposed) return;
+                for (int i = 0; i < records.Length; i++) {
+                    ChatRecord current;
+                    if (transferRecords.TryGetValue(TransferKey(records[i]), out current)) records[i] = current;
+                }
+                ReceivedFilesDeletionResult planned = store.DeleteReceivedFiles(records, false, ReceivingAttachment, true);
+                if (planned.DeletedCount == 0 && planned.FailedCount == 0) {
+                    using (var notice = new NoticeDialog("没有可清理的已接收文件", planned.SkippedBusyCount > 0 ? planned.Text : "已登记的接收文件均已移走或删除；其他文件未处理。")) notice.ShowDialog(owner);
+                    return;
+                }
+                string detail = "将清理 " + planned.DeletedCount + " 个已登记的接收文件，包含当前及以前保存目录中的文件。\n聊天与传输记录保留，正在接收的文件自动跳过；修改过的文件与其他文件保留。此操作无法撤销。";
+                if (records.Any(r => r.PeerId == "browser-guests" && r.GetLocalFiles().Length > 0)) detail += "\n来自临时浏览器传输的文件清理后无法重新接收。";
+                using (var confirm = new ConfirmDialog("清理已接收文件？", detail, "清理文件", true))
+                    if (confirm.ShowDialog(owner) != DialogResult.OK) return;
+                ReceivedFilesDeletionResult result;
+                try { result = store.DeleteReceivedFiles(records, true, ReceivingAttachment, true); }
+                finally {
+                    foreach (ChatRecord record in records.Where(r => !r.Deleted)) {
+                        TrackTransfer(record); ChatForm chat;
+                        if (chats.TryGetValue(record.PeerId, out chat) && !chat.IsDisposed) chat.Delivery(record);
+                    }
+                    transferArchiveRevision++;
+                }
+                FileReceiveStatus(result.Text);
+                using (var notice = new NoticeDialog(result.FailedCount == 0 ? "接收文件清理完成" : "部分文件已保留", result.Text)) notice.ShowDialog(owner);
+            }
+            catch (Exception error) {
+                if (!IsDisposed) using (var notice = new NoticeDialog("接收文件清理未完成", error.Message)) notice.ShowDialog(owner);
+            }
+        }
         internal void Forward(ChatRecord original)
         {
             try
@@ -506,12 +541,19 @@ public sealed class MainForm : ModernWindow
         }
         internal void ShowConversationMenu(Peer peer)
         {
+            ShowConversationMenu(peer, false);
+        }
+        internal void ShowConversationMenu(Peer peer, bool managementOnly)
+        {
             if(conversationMenu==null)conversationMenu=Theme.Menu();
             foreach(ToolStripItem item in conversationMenu.Items.Cast<ToolStripItem>().ToArray())item.Dispose();
             conversationMenu.Items.Clear();
-            conversationMenu.Items.Add("浏览共享文件…",null,delegate { OpenShared(peer); });
-            conversationMenu.Items.Add("控制 Android 手机…",null,delegate { OpenPhone(peer); });
-            if(network.Security!=null&&peer.Fingerprint!=null)conversationMenu.Items.Add("撤销设备信任…",null,delegate {using(ConfirmDialog confirm=new ConfirmDialog("撤销设备信任？","下次连接将重新核对配对码，并撤销该设备未完成的文件邀请。","撤销",true))if(confirm.ShowDialog(this)==DialogResult.OK){try{network.ForgetSecurity(peer);if(toolsWindow==null||toolsWindow.IsDisposed)new ToolsPairings(store.Root).ForgetFingerprint(peer.Fingerprint);OnNetworkReset();}catch(Exception error){OnError(error.Message);}}});
+            if (!managementOnly) {
+                conversationMenu.Items.Add("浏览共享文件…",null,delegate { OpenShared(peer); });
+                conversationMenu.Items.Add("控制 Android 手机…",null,delegate { OpenPhone(peer); });
+                if(network.Security!=null&&peer.Fingerprint!=null)conversationMenu.Items.Add("撤销设备信任…",null,delegate {using(ConfirmDialog confirm=new ConfirmDialog("撤销设备信任？","下次连接将重新核对配对码，并撤销该设备未完成的文件邀请。","撤销",true))if(confirm.ShowDialog(this)==DialogResult.OK){try{network.ForgetSecurity(peer);if(toolsWindow==null||toolsWindow.IsDisposed)new ToolsPairings(store.Root).ForgetFingerprint(peer.Fingerprint);OnNetworkReset();}catch(Exception error){OnError(error.Message);}}});
+                conversationMenu.Items.Add(new ToolStripSeparator());
+            }
             conversationMenu.Items.Add("设置备注…",null,delegate { EditConversation(peer); });
             conversationMenu.Items.Add(peer.Pinned?"取消置顶":"置顶会话",null,delegate {
                 bool old=peer.Pinned;peer.Pinned=!old;if(!RememberPeerAddresses())peer.Pinned=old;fingerprint=null;RefreshPeers();
@@ -566,7 +608,7 @@ public sealed class MainForm : ModernWindow
             try {store.SaveSettings(network.Settings);foreach(ChatForm chat in chats.Values)chat.ApplyAppearance();}
             catch(Exception e){network.Settings.ChatFontSize=old;status.Text="字号保存失败："+e.Message;}
         }
-        internal void OpenSettings()
+        internal void OpenSettings(SettingsPage page = SettingsPage.General)
         {
             bool enabled = false, startupAvailable = startup != null;
             try { enabled = startup != null && startup.IsEnabled; }
@@ -574,7 +616,7 @@ public sealed class MainForm : ModernWindow
             bool restoreFront = Visible && WindowState != FormWindowState.Minimized;
             AppSettings previous = network.Settings;
             AppSettings next = null;
-            using (SettingsDialog dialog = new SettingsDialog(previous, store.Root, network.Port, startupAvailable, enabled))
+            using (SettingsDialog dialog = new SettingsDialog(previous, store.Root, network.Port, startupAvailable, enabled, page, CleanReceivedFiles))
             {
                 if (dialog.ShowDialog(this) != DialogResult.OK)
                 {
