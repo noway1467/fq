@@ -230,7 +230,7 @@ namespace FeiqLight.Tests
                 using (RemoteBanner banner = new RemoteBanner("192.168.100.123", () => disconnected = true))
                 {
                     banner.Show(); Application.DoEvents();
-                    Assert(banner.FormBorderStyle == FormBorderStyle.None && !banner.ShowInTaskbar, "仍有多余标题栏");
+                    Assert(banner.FormBorderStyle == FormBorderStyle.None && banner.ShowInTaskbar, "浮条标题栏或任务栏入口错误");
                     var flags = (CreateParams)typeof(RemoteBanner).GetProperty("CreateParams", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic).GetValue(banner, null);
                     Assert((flags.ExStyle & 0x08000000) != 0, "浮条可能抢焦点");
                     Descendants(banner).OfType<Button>().Single(button => button.AccessibleName == "断开远控").PerformClick(); Assert(disconnected, "断开未执行"); banner.Close();
@@ -260,7 +260,7 @@ namespace FeiqLight.Tests
                     string cookie=Login(service,"remote");Assert(service.RemoteActive,"隐藏面板后无法连接");
                     typeof(ToolsWindow).GetMethod("UpdateState",members).Invoke(window,null);Application.DoEvents();
                     Form banner=(Form)typeof(ToolsWindow).GetField("banner",members).GetValue(window);Assert(banner!=null,"没有远控浮条");banner.Close();
-                    Assert(!banner.IsDisposed&&!banner.Visible&&service.RemoteActive,"关闭浮条断开了控制");
+                    Assert(!banner.IsDisposed&&banner.WindowState==FormWindowState.Minimized&&service.RemoteActive,"关闭浮条断开了控制");
                     window.Show();Descendants(window.Surface).OfType<Button>().Single(b=>b.Text=="立即停止远控").PerformClick();
                     Assert(!service.RemoteEnabled&&!service.RemoteActive,"手动停止未生效");Assert(Request(service.Port,"/api/screen",cookie).Code==401,"手动停止后旧会话仍能操作");
                 }

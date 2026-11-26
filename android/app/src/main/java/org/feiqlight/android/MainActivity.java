@@ -2203,6 +2203,8 @@ public final class MainActivity extends Activity implements ChatService.Observer
         @Override public long getItemId(int p) { return p; }
         @Override public View getView(int position,View convert,ViewGroup parent) {
             ChatStore.Conversation c=items.get(position); LinearLayout row=row(); row.setPadding(dp(10),dp(5),dp(16),dp(5)); row.setMinimumHeight(dp(82));
+            // 禁止按文字基线预先测量加权中栏，先给右侧完整时间留出宽度。
+            row.setBaselineAligned(false);
             TextView avatar=text("",21,Color.WHITE); avatar.setGravity(Gravity.CENTER);
             bindAvatar(avatar,c.peer.id(),c.displayName(),c.peer.online,c.peer.avatar); row.addView(avatar,new LinearLayout.LayoutParams(dp(68),dp(68)));
             LinearLayout center=column(); LinearLayout.LayoutParams cp=weight(); cp.leftMargin=dp(8); row.addView(center,cp);
@@ -2210,12 +2212,12 @@ public final class MainActivity extends Activity implements ChatService.Observer
             // 中间省略保留末尾编号，短名称时编号紧跟昵称，不挤到消息时间旁。
             name.setEllipsize(c.duplicateName?TextUtils.TruncateAt.MIDDLE:TextUtils.TruncateAt.END);name.setContentDescription(c.displayName());
             if(c.duplicateName) {SpannableString caption=new SpannableString(name.getText());int start=caption.length()-c.nameSuffix().length();caption.setSpan(new android.text.style.ForegroundColorSpan(MUTED),start,caption.length(),Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);caption.setSpan(new android.text.style.RelativeSizeSpan(.8f),start,caption.length(),Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);name.setText(caption);}
+            if(c.pinned) {MenuIcon pin=new MenuIcon("置顶会话",MUTED);pin.setBounds(0,0,dp(17),dp(17));name.setCompoundDrawables(pin,null,null,null);name.setCompoundDrawablePadding(dp(4));name.setContentDescription("已置顶，"+c.displayName());}
             center.addView(name);
             TextView preview=text(c.preview.isEmpty()?(c.peer.online?"在线 · ":"离线 · ")+c.peer.endpoint.getAddress().getHostAddress():MessageText.normalizeLineBreaks(c.preview).replace('\n',' '),14,MUTED); preview.setSingleLine(); preview.setEllipsize(TextUtils.TruncateAt.END); preview.setPadding(0,dp(5),0,0); center.addView(preview);
             LinearLayout right=column(); right.setGravity(Gravity.END); LinearLayout.LayoutParams rp=new LinearLayout.LayoutParams(-2,-2); rp.leftMargin=dp(8); row.addView(right,rp);
-            TextView time=text(c.time==0?"":new SimpleDateFormat("HH:mm",Locale.CHINA).format(new Date(c.time)),11,MUTED); right.addView(time);
+            TextView time=text(c.time==0?"":new SimpleDateFormat("HH:mm",Locale.CHINA).format(new Date(c.time)),11,MUTED); time.setSingleLine(); right.addView(time);
             if(c.unread>0) { TextView badge=text(c.unread>99?"99+":Integer.toString(c.unread),11,Color.WHITE); badge.setGravity(Gravity.CENTER); badge.setBackground(shape(BLUE,14)); LinearLayout.LayoutParams b=new LinearLayout.LayoutParams(dp(28),dp(23)); b.topMargin=dp(7); right.addView(badge,b); }
-            else if(c.pinned) { ImageView pin=new ImageView(MainActivity.this);pin.setImageDrawable(new MenuIcon("置顶会话",MUTED));pin.setContentDescription("已置顶");LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(dp(17),dp(17));p.topMargin=dp(9);right.addView(pin,p); }
             return row;
         }
     }

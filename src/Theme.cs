@@ -166,10 +166,10 @@ namespace FeiqLight
             RoundedButton button = (RoundedButton)Button(label, click, primary); button.Glyph = icon; button.AccessibleName = label; button.Size = new Size(40, 40); button.BackColor = primary ? Blue : Surface; button.ForeColor = primary ? Color.White : Muted; button.Radius = primary ? 20 : ControlRadius; return button;
         }
         private static readonly ModernMenuRenderer menuRenderer = new ModernMenuRenderer();
-        public static ContextMenuStrip Menu()
+        public static ContextMenuStrip Menu(int minimumWidth = 200)
         {
             ContextMenuStrip menu=new ContextMenuStrip { Renderer = menuRenderer, ForeColor=Ink, Font = Body, ShowImageMargin = true, Padding = new Padding(6), BackColor = Theme.Surface, DropShadowEnabled=true };
-            menu.Opening+=delegate { StyleMenu(menu); }; PrepareDropDown(menu); return menu;
+            menu.Opening+=delegate { StyleMenu(menu, minimumWidth); }; PrepareDropDown(menu); return menu;
         }
         // 弹层淡入并请求 Windows 11 圆角；旧系统忽略圆角属性，仍保留阴影与描边。
         internal static void PrepareDropDown(ToolStripDropDown menu)
@@ -186,7 +186,7 @@ namespace FeiqLight
             menu.Closed+=delegate{menu.Opacity=1;};
         }
         // Opening 时统一配色与尺寸；托盘菜单在 Opening 之前就按当前尺寸定位，需在创建后先调用一次。
-        internal static void StyleMenu(ToolStripDropDown menu)
+        internal static void StyleMenu(ToolStripDropDown menu, int minimumWidth = 200)
         {
             menu.BackColor=Surface; menu.ForeColor=Ink; menu.Font=Body;
             // 与渲染器同取实际绘制 DPI：未启用每监视器 DPI 时 DeviceDpi 恒为 96，125% 下会比绘制的图标栏和文字窄一截。
@@ -205,8 +205,8 @@ namespace FeiqLight
                 content=Math.Max(content,need);
             }
             // 原生下拉菜单只按共享文字区求宽且会把 Padding 改回 (图标栏,2,1,2)，自设的项宽不会撑开窗口。
-            // 宽度写回 MinimumSize，窗口与菜单项同宽；顶层菜单至少 200，子菜单沿用调用方给的最小宽度。
-            int width=Math.Max(Math.Max(menu.MinimumSize.Width,menu.OwnerItem==null?(int)(200*scale):0),Math.Max(content,menu.GetPreferredSize(Size.Empty).Width));
+            // 宽度写回 MinimumSize；短托盘菜单可指定紧凑下限，仍按文字宽度防止裁切。
+            int width=Math.Max(Math.Max(menu.MinimumSize.Width,menu.OwnerItem==null?(int)(minimumWidth*scale):0),Math.Max(content,menu.GetPreferredSize(Size.Empty).Width));
             menu.MinimumSize=new Size(width,0);
             // 菜单项从 x=0 开始（图标栏占用的左 Padding 在布局时扣除），只需让出右侧 1 像素边距。
             foreach(ToolStripItem item in menu.Items) {

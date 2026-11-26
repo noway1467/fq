@@ -338,21 +338,15 @@ namespace FeiqLight
     }
     internal sealed class RemoteBanner : Form
     {
-        private readonly NotifyIcon minimized;
-        private readonly ContextMenuStrip trayMenu;
         private readonly ToolTip tips = new ToolTip();
         [DllImport("user32.dll")] private static extern bool ReleaseCapture();
         [DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr window, int message, IntPtr wparam, IntPtr lparam);
         protected override bool ShowWithoutActivation { get { return true; } }
-        protected override CreateParams CreateParams { get { CreateParams value = base.CreateParams; value.ExStyle |= 0x08000000 | 0x00000080; return value; } }
+        protected override CreateParams CreateParams { get { CreateParams value = base.CreateParams; value.ExStyle = (value.ExStyle & ~0x00000080) | 0x08000000 | 0x00040000; value.Style |= 0x00020000 | 0x00080000; return value; } }
         internal RemoteBanner(string address, Action disconnect)
         {
-            Text = "飞Q远程控制"; Icon = Theme.AppIcon; FormBorderStyle = FormBorderStyle.None; TopMost = true; ShowInTaskbar = false; AutoScaleMode = AutoScaleMode.Dpi;
+            Text = "飞Q远程控制"; Icon = Theme.AppIcon; FormBorderStyle = FormBorderStyle.None; TopMost = true; ShowInTaskbar = true; AutoScaleMode = AutoScaleMode.Dpi;
             ClientSize = new Size(310, 68); StartPosition = FormStartPosition.Manual; BackColor = Theme.Surface; Padding = new Padding(14, 10, 10, 10); DoubleBuffered = true;
-            trayMenu = Theme.Menu(); trayMenu.Items.Add("显示远控浮条", null, delegate { RestoreBanner(); });
-            trayMenu.Items.Add("断开远控", null, delegate { disconnect(); });
-            minimized = new NotifyIcon { Icon = Theme.TrayIcon, Text = "飞Q远控中 · 双击恢复浮条", ContextMenuStrip = trayMenu };
-            minimized.DoubleClick += delegate { RestoreBanner(); };
             TableLayoutPanel row = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, RowCount = 1, Margin = Padding.Empty };
             row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 20)); row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 44)); row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 44)); row.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             Panel dot = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty }; dot.Paint += delegate(object sender, PaintEventArgs e) { e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias; using (Brush brush = new SolidBrush(Theme.Online)) e.Graphics.FillEllipse(brush, 0, (dot.Height - 8) / 2, 8, 8); }; row.Controls.Add(dot, 0, 0);
@@ -362,18 +356,19 @@ namespace FeiqLight
                 label.Dock = DockStyle.Fill; label.Margin = Padding.Empty; label.AutoEllipsis = true; label.MouseDown += delegate(object sender, MouseEventArgs e) { if (e.Button == MouseButtons.Left) { ReleaseCapture(); SendMessage(Handle, 0xa1, new IntPtr(2), IntPtr.Zero); } }; info.Controls.Add(label);
             }
             row.Controls.Add(info, 1, 0);
-            Button minimize = Theme.IconButton("min", "最小化到托盘", delegate { MinimizeBanner(); }, false);
+            Button minimize = Theme.IconButton("min", "最小化到任务栏", delegate { MinimizeBanner(); }, false);
             minimize.Dock = DockStyle.Fill; minimize.Margin = new Padding(2, 6, 4, 6); row.Controls.Add(minimize, 2, 0);
-            tips.SetToolTip(minimize, "收起浮条，远控继续；双击托盘图标恢复");
+            tips.SetToolTip(minimize, "最小化到任务栏，远控继续；点击任务栏恢复");
             Button stop = Theme.IconButton("power", "断开远控", delegate { disconnect(); }, false); stop.ForeColor = Theme.Danger;
             stop.Dock = DockStyle.Fill; stop.Margin = new Padding(2, 6, 4, 6); row.Controls.Add(stop, 3, 0); Controls.Add(row);
             tips.SetToolTip(stop, "断开远控（Ctrl+Alt+F12）");
         }
-        private void MinimizeBanner() { minimized.Visible = true; Hide(); }
-        internal void RestoreBanner() { minimized.Visible = false; Show(); }
+        private void MinimizeBanner() { WindowState = FormWindowState.Minimized; }
+        internal void RestoreBanner() { Show(); WindowState = FormWindowState.Normal; }
+        protected override void OnResize(EventArgs e) { base.OnResize(e); TopMost = WindowState != FormWindowState.Minimized; }
         protected override void OnPaint(PaintEventArgs e) { base.OnPaint(e); using (Pen border = new Pen(Theme.Line)) e.Graphics.DrawRectangle(border, 0, 0, Width - 1, Height - 1); }
         protected override void OnFormClosing(FormClosingEventArgs e) { base.OnFormClosing(e); if (e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; MinimizeBanner(); } }
-        protected override void Dispose(bool disposing) { if (disposing) { minimized.Dispose(); trayMenu.Dispose(); tips.Dispose(); } base.Dispose(disposing); }
+        protected override void Dispose(bool disposing) { if (disposing) tips.Dispose(); base.Dispose(disposing); }
         protected override void WndProc(ref Message message) { if (message.Msg == 0x21) { message.Result = new IntPtr(3); return; } base.WndProc(ref message); }
     }
 }

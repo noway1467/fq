@@ -63,15 +63,34 @@ public final class SettingsMessageTest {
                     scroller.scrollTo(0,follow.getTop());snapshot(decor,"settings-grid-"+(dark?"dark":"light"));
                     click(dialog,"文件");snapshot(decor,"settings-files-"+(dark?"dark":"light"));
                 } finally {dialog.dismiss();}
-                BaseAdapter adapter=(BaseAdapter)field(activity,"adapter");
+            } finally {service.destroy();}
+        }
+    }
+    @Test public void conversationRowKeepsFullTimeAndPinBeforeName() throws Exception {
+        Context context=RuntimeEnvironment.getApplication();
+        context.getSharedPreferences("settings",0).edit().putBoolean("auto_connect",false).putBoolean("connection_enabled",false).commit();
+        for(boolean dark:new boolean[]{false,true}) {
+            context.getSharedPreferences("settings",0).edit().putBoolean("dark_mode",dark).putBoolean("follow_system_theme",false).commit();
+            ServiceController<ChatService> service=Robolectric.buildService(ChatService.class).create();
+            shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(context,ChatService.class),service.get().onBind(new Intent()));
+            try(ActivityController<MainActivity> controller=Robolectric.buildActivity(MainActivity.class).setup()) {
+                MainActivity activity=controller.get();BaseAdapter adapter=(BaseAdapter)field(activity,"adapter");
                 @SuppressWarnings("unchecked") List<ChatStore.Conversation> items=(List<ChatStore.Conversation>)field(adapter,"items");items.clear();
-                ChatStore.Conversation contact=new ChatStore.Conversation();contact.peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:2425"),"pinned","host","中文 English 长昵称","");contact.pinned=true;contact.preview="已置顶的会话";items.add(contact);
-                View row=adapter.getView(0,null,new ListView(activity));
-                row.setBackgroundColor((Integer)field(activity,"SURFACE"));
-                assertTrue(views(row).stream().anyMatch(v->v instanceof ImageView&&"已置顶".contentEquals(v.getContentDescription()==null?"":v.getContentDescription())));
-                assertFalse(views(row).stream().anyMatch(v->v instanceof TextView&&((TextView)v).getText().toString().startsWith("↑ ")));
-                snapshot(row,"pinned-row-"+(dark?"dark":"light"));
-                contact.unread=3;row=adapter.getView(0,null,new ListView(activity));assertFalse(views(row).stream().anyMatch(v->"已置顶".contentEquals(v.getContentDescription()==null?"":v.getContentDescription())));
+                ChatStore.Conversation contact=new ChatStore.Conversation();contact.peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:2425"),"pinned","host","PC 中文 English 很长的联系人名称","");contact.time=System.currentTimeMillis();items.add(contact);
+                for(String preview:new String[]{"[文件] 飞Q-android-0.8.14.apk 很长的文件名 Very long file name.zip",""})
+                for(boolean pinned:new boolean[]{false,true}) for(int unread:new int[]{0,3,100}) for(int width:new int[]{560,720}) {
+                    contact.preview=preview;contact.pinned=pinned;contact.unread=unread;
+                    LinearLayout row=(LinearLayout)adapter.getView(0,null,new ListView(activity));row.setBackgroundColor((Integer)field(activity,"SURFACE"));
+                    row.measure(View.MeasureSpec.makeMeasureSpec(width,View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(0,View.MeasureSpec.UNSPECIFIED));row.layout(0,0,width,row.getMeasuredHeight());
+                    LinearLayout center=(LinearLayout)row.getChildAt(1),right=(LinearLayout)row.getChildAt(2);
+                    TextView name=(TextView)center.getChildAt(0),time=(TextView)right.getChildAt(0);
+                    assertEquals(pinned,name.getCompoundDrawables()[0]!=null);
+                    assertTrue("时间被挤出行外",right.getRight()<=width-row.getPaddingRight());assertTrue(center.getRight()<=right.getLeft());
+                    assertEquals(1,time.getLineCount());assertEquals(0,time.getLayout().getEllipsisCount(0));
+                    assertTrue("时间宽度不足",time.getWidth()>=Math.ceil(time.getPaint().measureText(time.getText().toString())));
+                    assertEquals(unread>0?2:1,right.getChildCount());
+                    if(pinned&&unread==3&&width==720&&!preview.isEmpty()) snapshot(row,"pinned-row-"+(dark?"dark":"light"));
+                }
             } finally {service.destroy();}
         }
     }

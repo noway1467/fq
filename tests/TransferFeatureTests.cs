@@ -353,10 +353,10 @@ namespace FeiqLight.Tests
             // 使 await 之后的界面代码落到线程池。固定安装一份，保持与正式程序相同的线程模型。
             
             root=Path.GetFullPath(args[0]);output=Path.GetFullPath(args[1]);Directory.CreateDirectory(root);Directory.CreateDirectory(output);
-            if(args.Length>2&&args[2]=="settings-cleanup")
+            if(args.Length>2&&(args[2]=="settings-cleanup"||args[2]=="ui-corrections"))
             {
                 Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);WindowsFormsSynchronizationContext.AutoInstall=false;SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
-                SettingsCleanupRegressions();
+                SettingsCleanupRegressions(args[2]=="ui-corrections");
                 Console.WriteLine("TOTAL "+passed+" passed, "+failed+" failed");return failed==0?0:1;
             }
             if(args.Length>2&&(args[2]=="sources"||args[2]=="source-layout"||args[2]=="source-location"))

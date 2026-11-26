@@ -16,8 +16,9 @@ namespace FeiqLight.Tests
             var record = new ChatRecord { PeerId = peer, Packet = packet, Time = DateTime.Now, Text = "[文件] " + Path.GetFileName(path), State = "已保存", Outgoing = outgoing, HasAttachments = true, LocalFiles = new[] { path }, Transfers = new[] { new FileTransferState { Id = 0, Name = Path.GetFileName(path), Size = new FileInfo(path).Length, LocalPath = path, Status = "已保存", Percent = 100 } } };
             store.Append(record); return record;
         }
-        private static void SettingsCleanupRegressions()
+        private static void SettingsCleanupRegressions(bool layoutOnly = false)
         {
+            if (!layoutOnly) {
             Run("清理跨保存目录、重启及清空聊天后登记，保留未登记文件和发送原件", () => {
                 var store = new LocalStore(Path.Combine(root, "cleanup-directories"));
                 string folderA = Path.Combine(store.Root, "旧目录"), folderB = Path.Combine(store.Root, "新目录");
@@ -71,24 +72,45 @@ namespace FeiqLight.Tests
                 bool rejected = false; try { new LocalStore(store.Root).ReceivedFileRecords(); } catch (IOException) { rejected = true; }
                 Check(rejected && File.ReadAllText(index) == "broken index", "损坏登记被悄悄覆盖");
             });
+            }
             foreach (bool dark in new[] { false, true })
             {
                 string theme = dark ? "dark" : "light"; Theme.Configure(dark, "blue");
-                Run("远控浮条 " + theme + "：渲染、最小化继续会话、托盘恢复及断开", () => {
+                Run("远控浮条 " + theme + "：渲染、最小化继续会话、任务栏恢复及断开", () => {
                     int disconnected = 0;
                     using (var banner = new RemoteBanner("192.168.0.103", () => disconnected++))
                     {
                         banner.Show(); PumpFor(40);
                         foreach (Button button in Controls(banner).OfType<Button>()) Check(button.Parent.ClientRectangle.Contains(button.Bounds), "浮条按钮越界");
                         SaveSnapshot(banner, "remote-banner-" + theme);
-                        Controls(banner).OfType<Button>().Single(b => b.AccessibleName == "最小化到托盘").PerformClick(); PumpFor(20);
-                        Check(!banner.Visible && Field<NotifyIcon>(banner, "minimized").Visible && disconnected == 0, "收起错误断开或没有恢复入口");
-                        banner.RestoreBanner(); Check(banner.Visible && !Field<NotifyIcon>(banner, "minimized").Visible, "托盘未恢复浮条");
+                        var flags = (CreateParams)typeof(RemoteBanner).GetProperty("CreateParams", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(banner, null);
+                        Check(banner.ShowInTaskbar && (flags.ExStyle & 0x00040000) != 0 && (flags.ExStyle & 0x80) == 0 && (flags.ExStyle & 0x08000000) != 0, "任务栏或不抢焦点标志错误");
+                        Controls(banner).OfType<Button>().Single(b => b.AccessibleName == "最小化到任务栏").PerformClick(); PumpFor(20);
+                        Check(banner.WindowState == FormWindowState.Minimized && !banner.TopMost && disconnected == 0, "最小化错误断开或仍然置顶");
+                        // SC_RESTORE 是任务栏恢复窗口使用的系统命令。
+                        Message restore = Message.Create(banner.Handle, 0x112, new IntPtr(0xf120), IntPtr.Zero);
+                        typeof(RemoteBanner).GetMethod("WndProc", BindingFlags.Instance | BindingFlags.NonPublic).Invoke(banner, new object[] { restore }); PumpFor(20);
+                        Check(banner.Visible && banner.WindowState == FormWindowState.Normal && banner.TopMost, "任务栏未恢复浮条");
                         Controls(banner).OfType<Button>().Single(b => b.AccessibleName == "断开远控").PerformClick(); Check(disconnected == 1, "断开按钮无效");
-                        banner.Close(); Check(!banner.Visible && disconnected == 1, "关闭浮条改变了连接");
+                        banner.Close(); Check(banner.WindowState == FormWindowState.Minimized && disconnected == 1, "关闭浮条改变了连接");
                     }
                     using (var banner = new RemoteBanner("很长的设备地址 / Long remote address 192.168.100.100", () => { })) { banner.Show(); PumpFor(20); SaveSnapshot(banner, "remote-banner-long-" + theme); }
                 });
+                Run("托盘菜单 " + theme + "：紧凑宽度、反复打开及完整文字", () => {
+                    var store = new LocalStore(Path.Combine(root, "compact-menu-" + theme));
+                    using (var network = new LanService(new AppSettings { CloseToTray = false }, FreePort(), true, "compact-menu"))
+                    using (var main = new MainForm(network, store)) {
+                        var menu = Field<NotifyIcon>(main, "tray").ContextMenuStrip;
+                        float scale; using (var g = Graphics.FromHwnd(IntPtr.Zero)) scale = g.DpiX / 96F;
+                        for (int i = 0; i < 3; i++) {
+                            menu.Show(new Point(100, 100)); PumpFor(20);
+                            Check(menu.Width >= 120 * scale && menu.Width <= 150 * scale, "托盘菜单过宽：" + menu.Width);
+                            foreach (ToolStripMenuItem item in menu.Items) Check(Theme.MenuTextLeft(menu, scale) + TextRenderer.MeasureText(item.Text, item.Font).Width + Theme.MenuTrailing(item, scale) <= menu.Width, "菜单文字被截断");
+                            if (i == 0) SaveMenu(menu, "compact-tray-" + theme); menu.Close();
+                        }
+                    }
+                });
+                if (layoutOnly) continue;
                 Run("设置与聊天菜单 " + theme + "：外观直达、纯会话管理、文件清理确认及空态", () => {
                     var store = new LocalStore(Path.Combine(root, "cleanup-ui-" + theme));
                     var settings = new AppSettings { CloseToTray = false, Notifications = false, AutoReceiveFiles = false, DarkMode = dark, ReceiveFolder = Path.Combine(store.Root, "Custom 中文 English"), Conversations = new[] { new SavedConversation { Endpoint = "127.0.0.1:" + FreePort(), Login = "ui-peer", Nickname = "中文 English 很长的联系人名称" } } };
