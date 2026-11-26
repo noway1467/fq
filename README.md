@@ -2,7 +2,7 @@
 
 [![GitHub Release](https://img.shields.io/github/v/release/noway1467/fq?label=release&color=blue)](https://github.com/noway1467/fq/releases/latest)
 
-轻量级 Windows 与 Android 局域网聊天及文件传输工具，支持电脑与手机、手机与手机、电脑与电脑自由互通，无需注册账号或服务器。
+轻量级 Windows 与 Android 局域网聊天及文件传输工具，支持电脑与手机自由互通，无需注册账号或服务器。
 
 ![飞Q 双端界面预览（经典浅色）](docs/preview.png)
 
@@ -10,30 +10,25 @@
 
 ## 主要功能
 
-- **即时聊天**：自动发现同局域网设备（也支持通过 `IPv4:端口` 手动添加）；支持文字、彩色表情与图片（Windows 粘贴剪贴板图片、Android 输入法图片），超长文本自动转 TXT 附件发送。
-- **消息与记录**：支持送达确认、失败重发、转发、全文查看与复制、多选删除消息或批量删除本机接收文件、草稿保留、置顶与备注。聊天记录每页 100 条，第 1 页显示最近的记录。可点页码或输入页号直接跳页，也可搜索全部已保存的正文和文件名，点击结果定位原消息。
-- **传文件与文件夹**：支持 **Windows ↔ Android、Android ↔ Android、Windows ↔ Windows** 互传文件与文件夹（保留目录结构，单批最多 1000 个）；支持断点续传（邀请保留 7 天）、SHA-256 校验与同名自动重命名。
-- **传输任务**：统一查看各会话文件；顶部横排头像列出有收发记录的联系人与浏览器访客（按最近时间排序，可左右滑动或滚动），点按切换「全部」或某个来源，从聊天进入默认选中当前联系人；搜索框直接显示，可按文件名或设备搜索，筛选进行中、待处理与已完成；每行显示收发对象、大小与时间，以及速度、预计剩余时间与保存位置，可直接接收、暂停、取消接收、拒绝、打开或删除本机文件、重新接收、取消发送并定位到所在会话消息。批量继续/暂停只作用于当前显示的列表。Android 普通文件发送可排队。
-- **安卓存储**：发送前检查预计暂存空间；每次接收只保存一份正式文件（未选目录时保存在应用内接收区，选择保存文件夹后经 SHA-256 校验直接落盘到所选目录，不占双份空间）。
-- **临时浏览器传输**：从菜单选择文件并开启15分钟链接，对方无需安装飞Q；可复制链接或在本机浏览器显示二维码。单独开启接收后，访客本次最多上传100个文件、合计10 GiB；访客连接使用HTTP明文，仅用于可信局域网的非敏感资料。
-- **系统分享与附件**：支持 Windows 拖拽收发和右键“发送到飞Q”、Android 系统分享；支持自动/手动接收，支持取消未完成发送，删消息保留文件，已接收附件可单独删除本机文件。
-- **接收文件清理**：双端「设置 → 文件」可清理已接收文件，覆盖更换保存目录前后的已登记文件，保留目录中其他文件与聊天记录。
-- **共享文件夹**：Windows 与 Android 均可共享最多20个本地目录，凭6位连接码只读浏览、播放音视频与断点下载。
-- **远程控制**：凭 6 位连接码与本机确认操作对方屏幕（支持 Android 控 Windows 桌面、Windows / Android 控 Android 手机），断线后尝试恢复配对会话，支持缩放、多屏切换（Windows）与“始终允许此设备”。
-- **安全与网络**：新版默认 TLS 1.2 并核对配对码，适配热点、USB 共享及单向 VPN 局域网；默认兼容旧版 IPMSG 明文，可在设置中关闭。
-- **个性外观**：双端统一浅色/深色（可跟随系统）、6 套主题配色、8 组快捷预设、聊天背景与字号调节，支持 24 枚内置或本地图片头像。
+- **即时聊天**：自动发现同局域网设备（支持 `IPv4:端口` 手动添加），支持文字、彩色表情、图片与超长文本自动转 TXT 发送。
+- **消息与记录**：支持送达确认、失败重发、转发、多选删消息或批量删本机文件、置顶备注、分页跳页与全文/文件名搜索定位。
+- **传文件与文件夹**：双端任意互传文件与文件夹（保留目录结构，单批最多 1000 个），支持断点续传（7 天）、SHA-256 校验与同名自动重命名。
+- **传输任务**：按来源头像横排、状态和关键词筛选收发记录，查看速度与剩余时间，支持暂停/续传、拒收、取消、打开/删本机文件与定位原消息。
+- **临时浏览器传输**：生成 15 分钟局域网链接和二维码，对方无需安装即可下载；开启接收后访客单次最多上传 100 个文件、合计 10 GiB（HTTP 明文，仅限可信局域网）。
+- **系统集成与清理**：支持 Windows 拖拽/右键“发送到飞Q”与 Android 系统分享；安卓接收仅落盘单份正式文件，双端「设置 → 文件」可清理已登记的接收文件。
+- **共享文件夹**：双端均可共享最多 20 个本地目录，凭 6 位连接码只读浏览、播放音视频与断点下载。
+- **远程控制**：凭 6 位连接码和本机确认控制对方屏幕（支持控 Windows 桌面与 Android 手机），支持断线恢复、缩放、多屏切换与信任设备。
+- **安全与网络**：新版默认 TLS 1.2 并核对配对码，适配热点、USB 共享与单向 VPN；默认兼容旧版 IPMSG 明文，可在设置关闭。
+- **个性外观**：双端统一浅色/深色（可跟随系统）、6 套配色、8 组预设、聊天背景、字号与 24 枚内置/本地头像。
 
 ## 使用
 
-1. 从 [GitHub Releases](https://github.com/noway1467/fq/releases) 下载对应版本（Windows 需 .NET Framework 4.8，Android 需 8.0 及以上）。
-2. Windows 运行 EXE，Android 安装 APK 后点击“连接”；更新时直接覆盖安装即可，原有设置与聊天记录会保留。
-3. 将设备接入同一 Wi-Fi、以太网、手机热点或 USB 共享网络，选择对方即可聊天或互传文件；首次与新版设备连接时在两端核对配对码一致后信任，共享文件夹与远程控制可从菜单打开。
-4. 安卓开着 VPN 时若提示「广播受限」，点首页右上角「＋」输入对方的局域网 IPv4。若仍无法连接，请检查 VPN 是否允许访问局域网。
-5. 安卓首页顶栏可直接打开「传输任务」；在会话列表顶部下拉可刷新联系人，已断开时先点击「连接」。
+1. 从 [GitHub Releases](https://github.com/noway1467/fq/releases) 下载对应包（Windows 需 .NET Framework 4.8，Android 需 8.0 及以上），更新直接覆盖安装即可保留配置与记录。
+2. 接入同一 Wi-Fi、以太网、热点或 USB 共享，Windows 运行 EXE、Android 点“连接”；首次连接新版设备在两端核对配对码后信任。
+3. 安卓开启 VPN 提示「广播受限」时，点右上角「＋」输入对方局域网 IPv4；顶栏可直达「传输任务」，会话列表下拉可刷新联系人。
 
 ## 开发
 
-Windows 使用 .NET Framework 4.8，Android 使用 JDK 17、Android SDK 36。用 PowerShell 7 执行 `./build.ps1 -Test`、`./build-android.ps1 -Test`；加密与恢复回归执行 `./tests/secure-upgrade.ps1`，双端加密互通执行 `./tests/android-interop.ps1 -Secure -LargeFiles`。
+Windows 使用 .NET Framework 4.8，Android 使用 JDK 17 与 Android SDK 36；PowerShell 7 执行 `./build.ps1 -Test`、`./build-android.ps1 -Test`，安全与互通回归见 `./tests/secure-upgrade.ps1`、`./tests/android-interop.ps1 -Secure -LargeFiles`。
 
-表情与头像素材来自 [Twemoji](https://github.com/jdecked/twemoji)，按 [CC BY 4.0](docs/Twemoji-LICENSE-GRAPHICS.txt) 使用。
-临时传输二维码使用 [Project Nayuki QR Code generator](https://www.nayuki.io/page/qr-code-generator-library)，按MIT许可证内置，许可声明保留在网页资源中。
+表情与头像素材来自 [Twemoji](https://github.com/jdecked/twemoji)（[CC BY 4.0](docs/Twemoji-LICENSE-GRAPHICS.txt)）；二维码使用内置 [Project Nayuki QR Code generator](https://www.nayuki.io/page/qr-code-generator-library)（MIT）。
