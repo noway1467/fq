@@ -185,7 +185,7 @@ public final class UiTest {
             TextView sampleOut=(TextView)descendants(panel).stream().filter(v->v instanceof TextView&&"消息与输入字号预览".contentEquals(((TextView)v).getText())).findFirst().get();
             assertEquals((int)(Integer)field(activity,"OUTGOING"),((android.graphics.drawable.GradientDrawable)sampleOut.getBackground()).getColor().getDefaultColor());
             assertEquals((int)(Integer)field(activity,"WALL"),((android.graphics.drawable.GradientDrawable)((View)sampleOut.getParent()).getBackground()).getColor().getDefaultColor());
-            clickDialogButton("文件");press.accept("清理已接收文件");
+            clickDialogButton("文件");press.accept("清理已接收文件");settle(service);
             android.app.Dialog confirm=org.robolectric.shadows.ShadowDialog.getLatestDialog();assertNotSame(dialog,confirm);assertTrue(confirm.isShowing());
             String body=descendants(confirm.getWindow().getDecorView()).stream().filter(v->v instanceof TextView&&!(v instanceof Button)).map(v->((TextView)v).getText().toString()).reduce("",(a,b)->a+"\n"+b);dialogScreenshot(confirm,"android-clear-received-confirm");
             clickDialogButton("清理");assertFalse(confirm.isShowing());((ExecutorService)field(service,"transferWorker")).submit(()->{}).get(5,TimeUnit.SECONDS);settle(service);
@@ -194,7 +194,7 @@ public final class UiTest {
             assertNotNull("确认清理后没有任何结果提示",toast);assertTrue(toast,toast.contains("已清理 2 个已接收文件")&&toast.contains("2.1 KB"));
             assertTrue(body,body.contains("本机已接收的 2 个文件")&&body.contains("2.1 KB")&&body.contains("删除后文件不再保留"));assertFalse(body.contains("另存"));
             assertEquals("结果已用提示说明，不应残留含糊的“文件任务已完成”","",service.transferStatus());
-            press.accept("清理已接收文件");assertSame("没有可清理文件时不应再弹确认",confirm,org.robolectric.shadows.ShadowDialog.getLatestDialog());
+            press.accept("清理已接收文件");settle(service);assertSame("没有可清理文件时不应再弹确认",confirm,org.robolectric.shadows.ShadowDialog.getLatestDialog());
             assertEquals("没有可清理的已接收文件",org.robolectric.shadows.ShadowToast.getTextOfLatestToast());
             press.accept("清理发送缓存");clickDialogButton("清理");((ExecutorService)field(service,"transferWorker")).submit(()->{}).get(5,TimeUnit.SECONDS);settle(service);
             assertFalse(staged.exists());assertTrue(org.robolectric.shadows.ShadowToast.getTextOfLatestToast(),org.robolectric.shadows.ShadowToast.getTextOfLatestToast().contains("删除 1 个暂存副本"));

@@ -441,21 +441,31 @@ public sealed class MainForm : ModernWindow
             {
                 ChatRecord[] records = await System.Threading.Tasks.Task.Run(() => store.ReceivedFileRecords());
                 if (IsDisposed || owner is Control && ((Control)owner).IsDisposed) return;
-                for (int i = 0; i < records.Length; i++) {
-                    ChatRecord current;
-                    if (transferRecords.TryGetValue(TransferKey(records[i]), out current)) records[i] = current;
-                }
-                ReceivedFilesDeletionResult planned = store.DeleteReceivedFiles(records, false, ReceivingAttachment, true);
-                if (planned.DeletedCount == 0 && planned.FailedCount == 0) {
-                    using (var notice = new NoticeDialog("没有可清理的已接收文件", planned.SkippedBusyCount > 0 ? planned.Text : "已登记的接收文件均已移走或删除；其他文件未处理。")) notice.ShowDialog(owner);
+                Action useCurrentRecords = delegate {
+                    for (int index = 0; index < records.Length; index++) {
+                        ChatRecord current;
+                        if (!records[index].Deleted && transferRecords.TryGetValue(TransferKey(records[index]), out current)) records[index] = current;
+                    }
+                };
+                useCurrentRecords();
+                var reviewedPaths = new Dictionary<string,bool>(StringComparer.OrdinalIgnoreCase);
+                ReceivedFilesDeletionResult planned = store.DeleteReceivedFiles(records, false, ReceivingAttachment, true, reviewedPaths);
+                if (reviewedPaths.Count == 0) {
+                    string reason = planned.FailedCount > 0 || planned.SkippedBusyCount > 0 ? planned.Text : "没有需要删除的文件或需要更新的保存路径。";
+                    using (var notice = new NoticeDialog("没有可清理的已接收文件", reason)) notice.ShowDialog(owner);
                     return;
                 }
-                string detail = "将清理 " + planned.DeletedCount + " 个已登记的接收文件，包含当前及以前保存目录中的文件。\n聊天与传输记录保留，正在接收的文件自动跳过；修改过的文件与其他文件保留。此操作无法撤销。";
-                if (records.Any(r => r.PeerId == "browser-guests" && r.GetLocalFiles().Length > 0)) detail += "\n来自临时浏览器传输的文件清理后无法重新接收。";
-                using (var confirm = new ConfirmDialog("清理已接收文件？", detail, "清理文件", true))
+                int missing = reviewedPaths.Count - planned.DeletedCount;
+                string detail = planned.DeletedCount > 0 ? "将删除 " + planned.DeletedCount + " 个已登记的接收文件，包含当前及以前保存目录中的文件。此操作无法撤销。" : "本次不删除磁盘上的文件。";
+                if (missing > 0) detail += "\n有 " + missing + " 个文件已移走或删除，将更新其保存记录。";
+                detail += "\n聊天记录保留，正在接收、已修改和新收到的文件不删除。";
+                if (planned.FailedCount > 0) detail += "\n无法清理：" + planned.FirstError;
+                if (records.Any(r => r.PeerId == "browser-guests" && r.GetLocalFiles().Any(path => reviewedPaths.ContainsKey(path) && reviewedPaths[path]))) detail += "\n来自临时浏览器传输的文件清理后无法重新接收。";
+                using (var confirm = new ConfirmDialog("清理已接收文件？", detail, planned.DeletedCount > 0 ? "清理文件" : "更新记录", planned.DeletedCount > 0))
                     if (confirm.ShowDialog(owner) != DialogResult.OK) return;
                 ReceivedFilesDeletionResult result;
-                try { result = store.DeleteReceivedFiles(records, true, ReceivingAttachment, true); }
+                useCurrentRecords();
+                try { result = store.DeleteReceivedFiles(records, true, ReceivingAttachment, true, reviewedPaths); }
                 finally {
                     foreach (ChatRecord record in records.Where(r => !r.Deleted)) {
                         TrackTransfer(record); ChatForm chat;
@@ -463,6 +473,8 @@ public sealed class MainForm : ModernWindow
                     }
                     transferArchiveRevision++;
                 }
+                result.FailedCount += planned.FailedCount;
+                if (result.FirstError == null) result.FirstError = planned.FirstError;
                 FileReceiveStatus(result.Text);
                 using (var notice = new NoticeDialog(result.FailedCount == 0 ? "接收文件清理完成" : "部分文件已保留", result.Text)) notice.ShowDialog(owner);
             }
@@ -538,7 +550,7 @@ public sealed class MainForm : ModernWindow
             contacts.EmptyText = searching ? "没有找到联系人" : filter == 1 ? "没有未读消息" : filter == 2 ? "当前没有在线联系人" : "暂无会话";
             contacts.EmptyHint = searching ? "换个昵称、备注或消息关键词试试" : "同一局域网内启动飞Q的设备会自动出现";
             contacts.SetItems(rows); foreach(ChatForm chat in chats.Values)if(!chat.IsDisposed)chat.RefreshPeer();
-            if (started&&persisted) status.Text = all.Count(p => p.Online) + " 人在线 · " + rows.Count() + " 个会话";
+            if (started && persisted && refresh.Enabled) status.Text = all.Count(p => p.Online) + " 人在线 · " + contacts.Items.Count + " 个会话";
         }
         internal void ShowConversationMenu(Peer peer)
         {

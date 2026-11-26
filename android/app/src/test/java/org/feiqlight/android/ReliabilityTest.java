@@ -514,7 +514,7 @@ public final class ReliabilityTest {
         try {
             settle(s);File file=new File(s.getFilesDir(),"received/keep-after-cancel");Files.write(file.toPath(),new byte[]{1,2,3});
             block((ExecutorService)field(s,"transferWorker"),blocked,release);assertTrue(blocked.await(5,TimeUnit.SECONDS));
-            s.clearFiles(result->fail("已取消的清理不应回报结果"));assertTrue(s.busy());s.cancelTransfer();release.countDown();transferDone(s);
+            s.clearFiles(s.receivedUsage(),result->fail("已取消的清理不应回报结果"));assertTrue(s.busy());s.cancelTransfer();release.countDown();transferDone(s);
             assertTrue("已经取消的排队清理仍删除了文件",file.isFile());assertArrayEquals(new byte[]{1,2,3},Files.readAllBytes(file.toPath()));assertTrue(s.transferStatus(),s.transferStatus().contains("取消"));
         }finally{release.countDown();sc.destroy();}
     }
@@ -530,14 +530,14 @@ public final class ReliabilityTest {
             String unrelated=docs.createDocument("root","text/plain","用户文件.txt");Files.write(docs.files.get(unrelated).toPath(),new byte[]{9});String stale="f".repeat(64);
             docs.parents.put("missing","root");
             s.getSharedPreferences("received_locations",0).edit().putString(stale,"content://feiq.documents/tree/root/document/missing").putString(stale+".tree","content://feiq.documents/tree/root").putLong(stale+".size",99).commit();
-            ChatService.Usage before=s.receivedUsage();assertEquals("旧版双份数据不能重复计数",2,before.files);assertEquals(17,before.bytes);assertEquals(0,before.guestFiles);assertFalse(s.getSharedPreferences("received_locations",0).contains(stale));
-            List<ChatService.Usage> results=new ArrayList<>();s.clearFiles(results::add);transferDone(s);
+            ChatService.ReceivedReview before=s.receivedUsage();assertEquals("旧版双份数据不能重复计数",2,before.files);assertEquals(17,before.bytes);assertEquals(0,before.guestFiles);assertFalse(s.getSharedPreferences("received_locations",0).contains(stale));
+            List<ChatService.Usage> results=new ArrayList<>();s.clearFiles(before,results::add);transferDone(s);
             assertEquals(1,results.size());assertEquals(2,results.get(0).files);assertEquals(17,results.get(0).bytes);assertEquals(0,results.get(0).guestFiles);
             assertFalse(exported.exists());assertFalse(internal.exists());assertTrue("清理必须保留断点残片",partial.exists());assertTrue("清理不应删除子目录",nested.isDirectory());assertArrayEquals(new byte[]{8},Files.readAllBytes(nestedFile.toPath()));
             assertNull(storage.saved(exported));assertFalse(docs.files.containsKey(android.provider.DocumentsContract.getDocumentId(saved)));assertArrayEquals(new byte[]{9},Files.readAllBytes(docs.files.get(unrelated).toPath()));
             for(Protocol.Attachment file:message.files)assertEquals("本机文件已删除",s.progress(peer.id(),message.number,file.id,false).state);assertEquals(2,io(s).submit(()->store(s).history(peer.id()).get(0).files.size()).get(5,TimeUnit.SECONDS).intValue());
             assertEquals("",s.transferStatus());assertTrue(errors.toString(),errors.isEmpty());
-            s.clearFiles(results::add);transferDone(s);assertEquals(2,results.size());assertEquals(0,results.get(1).files);assertEquals(0,s.receivedUsage().files);
+            s.clearFiles(s.receivedUsage(),results::add);transferDone(s);assertEquals(2,results.size());assertEquals(0,results.get(1).files);assertEquals(0,s.receivedUsage().files);
         }finally{sc.destroy();}
     }
     @Test public void duplicateRejectedInvitationDoesNotReturnToReceiveQueue()throws Exception {

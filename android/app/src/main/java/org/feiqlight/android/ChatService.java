@@ -1240,29 +1240,42 @@ public final class ChatService extends Service {
         if(progress!=null)progress.accept(total);
     }
     /** 当前登记且真实存在的接收文件；旧版双份数据按一个文件统计，字节数包含两份。 */
-    static final class Usage {
+    static class Usage {
         final int files, guestFiles; final long bytes;
         Usage(int files,long bytes,int guestFiles) { this.files=files; this.bytes=bytes; this.guestFiles=guestFiles; }
     }
-    Usage receivedUsage() throws IOException {
-        int count=0,guestFiles=0;long bytes=0;
+    static final class ReceivedReview extends Usage {
+        final Map<File,Uri> locations;
+        ReceivedReview(Map<File,Uri> locations,long bytes,int guests) {
+            super(locations.size(),bytes,guests);this.locations=Collections.unmodifiableMap(locations);
+        }
+    }
+    ReceivedReview receivedUsage() throws IOException {
+        Map<File,Uri> locations=new LinkedHashMap<>();int guestFiles=0;long bytes=0;
         SharedPreferences guests=getSharedPreferences("guest_received",MODE_PRIVATE);
         for(File file:storage.receivedFiles())if(storage.exists(file)) {
-            count++;bytes+=storage.bytes(file);
+            bytes+=storage.bytes(file);locations.put(file,storage.saved(file));
             if(file.getName().matches("[a-f0-9]{64}")&&guests.contains(file.getName()))guestFiles++;
         }
-        return new Usage(count,bytes,guestFiles);
+        return new ReceivedReview(locations,bytes,guestFiles);
     }
-    void clearFiles(Consumer<Usage> done) {
+    void reviewReceivedFiles(Consumer<ReceivedReview> done,Consumer<String> error) {
+        queue(()->{
+            try { ReceivedReview review=receivedUsage();main.post(()->done.accept(review)); }
+            catch(IOException|RuntimeException failure){main.post(()->error.accept("无法统计已接收文件："+failure.getMessage()));}
+        });
+    }
+    void clearFiles(ReceivedReview review,Consumer<Usage> done) {
         if(busy()) { showError("请先完成或取消文件任务"); return; }
         transferJob(task->{
             Set<File> deleted=new HashSet<>();int guestFiles=0;long bytes=0;Usage result=null;
             SharedPreferences guests=getSharedPreferences("guest_received",MODE_PRIVATE);
             try {
-                for(File file:storage.receivedFiles()) {
+                for(Map.Entry<File,Uri> entry:review.locations.entrySet()) {
+                    File file=entry.getKey();
                     checkTransfer(task);if(!receivedFileOperations.add(file))continue;
                     try {
-                        if(!storage.exists(file))continue;
+                        if(!Objects.equals(entry.getValue(),storage.saved(file))||!storage.exists(file))continue;
                         long length=storage.bytes(file);checkTransfer(task);storage.delete(file);deleted.add(file);bytes+=length;
                         if(file.getName().matches("[a-f0-9]{64}")&&guests.contains(file.getName()))guestFiles++;
                     } finally {receivedFileOperations.remove(file);}

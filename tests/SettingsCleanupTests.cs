@@ -19,6 +19,40 @@ namespace FeiqLight.Tests
         private static void SettingsCleanupRegressions(bool layoutOnly = false)
         {
             if (!layoutOnly) {
+            Run("清理只处理确认前列出的文件，同一条消息后来收完的附件保留", () => {
+                var store = new LocalStore(Path.Combine(root, "cleanup-confirm-range"));
+                using (var network = new LanService(new AppSettings(), FreePort(), true, "cleanup-range"))
+                using (var main = new MainForm(network, store)) {
+                    main.Show();
+                    string first = Path.Combine(store.Root, "原附件.txt"), later = Path.Combine(store.Root, "后来收到.txt");
+                    var record = SavedFile(store, 1, first); main.TrackTransfer(record);
+                    Task cleanup = null;
+                    string result = FinishDialogs(() => cleanup = main.CleanReceivedFiles(main), "清理已接收文件？", "清理文件", () => cleanup.IsCompleted, () => {
+                        File.WriteAllText(later, "后来收到"); record.LocalFiles = new[] { first, later };
+                        record.Transfers = record.Transfers.Concat(new[] { new FileTransferState { Id = 1, Name = "后来收到.txt", LocalPath = later, Size = new FileInfo(later).Length, Status = "已保存" } }).ToArray();
+                        main.TrySave(record);
+                    });
+                    var stored = new LocalStore(store.Root).IncomingAttachments(record.PeerId).Single();
+                    Check(!File.Exists(first) && File.Exists(later) && stored.Transfers[1].LocalPath == later && result.Contains("已删除 1 个"), "清理越过确认范围：" + result);
+                }
+            });
+            Run("仅剩已移走文件时可订正旧状态，确认期间重新出现的同名文件保留", () => {
+                var store = new LocalStore(Path.Combine(root, "cleanup-missing-only"));
+                using (var network = new LanService(new AppSettings(), FreePort(), true, "cleanup-missing"))
+                using (var main = new MainForm(network, store)) {
+                    main.Show();
+                    string missing = Path.Combine(store.Root, "已移走.txt"), returned = Path.Combine(store.Root, "同名.txt");
+                    var first = SavedFile(store, 1, missing); SavedFile(store, 2, returned);
+                    DateTime stamp = File.GetLastWriteTimeUtc(returned); byte[] bytes = File.ReadAllBytes(returned);
+                    File.Delete(missing); File.Delete(returned);
+                    Task cleanup = null;
+                    FinishDialogs(() => cleanup = main.CleanReceivedFiles(main), "清理已接收文件？", "更新记录", () => cleanup.IsCompleted, () => {
+                        File.WriteAllBytes(returned, bytes); File.SetLastWriteTimeUtc(returned, stamp);
+                    });
+                    var stored = new LocalStore(store.Root).IncomingAttachments(first.PeerId);
+                    Check(stored.Single(r => r.Packet == 1).Transfers[0].Status == "本机文件已删除" && stored.Single(r => r.Packet == 2).Transfers[0].LocalPath == returned && File.Exists(returned), "缺失状态未落盘或误删了后来出现的文件");
+                }
+            });
             Run("清理跨保存目录、重启及清空聊天后登记，保留未登记文件和发送原件", () => {
                 var store = new LocalStore(Path.Combine(root, "cleanup-directories"));
                 string folderA = Path.Combine(store.Root, "旧目录"), folderB = Path.Combine(store.Root, "新目录");
@@ -134,7 +168,7 @@ namespace FeiqLight.Tests
                         using (var dialog = new SettingsDialog(settings, store.Root, network.Port, false, false, SettingsPage.Files, main.CleanReceivedFiles)) {
                             dialog.Show(main); PumpFor(25); SaveSnapshot(dialog, "settings-files-" + theme);
                             var clear = Controls(dialog).OfType<Button>().Single(b => b.Text == "清理已接收文件");
-                            string text = FinishDialogs(() => clear.PerformClick(), "清理已接收文件？", "清理文件", () => clear.Enabled);
+                            string text = FinishDialogs(() => clear.PerformClick(), "清理已接收文件？", "清理文件", () => clear.Enabled, () => SaveSnapshot(Application.OpenForms.OfType<ConfirmDialog>().Single(), "cleanup-confirm-" + theme));
                             Check(!File.Exists(path) && text.Contains("已删除 1 个"), "清理入口未实际完成：" + text);
                             text = FinishDialogs(() => clear.PerformClick(), null, null, () => clear.Enabled);
                             Check(text.Contains("没有可清理"), "空态提示不正确");

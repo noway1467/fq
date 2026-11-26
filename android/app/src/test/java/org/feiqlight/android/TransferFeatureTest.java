@@ -154,7 +154,7 @@ public final class TransferFeatureTest {
         try {
             ChatService service=first.get();settle(service);android.net.Uri saved=storage.existingSaved(local);assertFalse(local.exists());assertNotNull(saved);assertArrayEquals(bytes,Files.readAllBytes(docs.files.get(android.provider.DocumentsContract.getDocumentId(saved)).toPath()));
             ChatStore.FileTask task=fileTasks(service).get(0);assertEquals(bytes.length,task.file.size);assertEquals(time,task.message.time);assertEquals("访客.txt",task.file.name);assertEquals(1,service.receivedUsage().guestFiles);
-            List<ChatService.Usage> results=new ArrayList<>();service.clearFiles(results::add);transferDone(service);assertEquals(1,results.size());assertEquals(1,results.get(0).files);assertFalse(storage.exists(local));assertTrue(docs.files.isEmpty());assertEquals("访客.txt",context.getSharedPreferences("guest_received",0).getString(id,""));
+            List<ChatService.Usage> results=new ArrayList<>();service.clearFiles(service.receivedUsage(),results::add);transferDone(service);assertEquals(1,results.size());assertEquals(1,results.get(0).files);assertFalse(storage.exists(local));assertTrue(docs.files.isEmpty());assertEquals("访客.txt",context.getSharedPreferences("guest_received",0).getString(id,""));
         }finally{first.destroy();assertTrue(((ExecutorService)field(first.get(),"io")).awaitTermination(5,TimeUnit.SECONDS));}
         ServiceController<ChatService> restarted=Robolectric.buildService(ChatService.class).create();
         try {ChatStore.FileTask task=fileTasks(restarted.get()).get(0);assertEquals("访客.txt",context.getSharedPreferences("guest_received",0).getString(id,""));assertEquals(bytes.length,task.file.size);assertEquals(time,task.message.time);}
@@ -185,7 +185,7 @@ public final class TransferFeatureTest {
             ChatService service=restarted.get();settle(service);ReceivedStorage restored=new ReceivedStorage(service);
             assertEquals(treeB,restored.tree());assertEquals(savedA,restored.existingSaved(localA));assertEquals(savedB,restored.existingSaved(localB));
             assertEquals(2,service.receivedUsage().files);assertEquals(5,service.receivedUsage().bytes);
-            List<ChatService.Usage> results=new ArrayList<>();service.clearFiles(results::add);transferDone(service);
+            List<ChatService.Usage> results=new ArrayList<>();service.clearFiles(service.receivedUsage(),results::add);transferDone(service);
             assertEquals(1,results.size());assertEquals(2,results.get(0).files);assertEquals(5,results.get(0).bytes);
             assertFalse(restored.exists(localA));assertFalse(restored.exists(localB));assertEquals(treeB,restored.tree());
             assertArrayEquals(new byte[]{8},Files.readAllBytes(docs.files.get(unrelatedA).toPath()));assertArrayEquals(new byte[]{9},Files.readAllBytes(docs.files.get(unrelatedB).toPath()));
@@ -253,10 +253,14 @@ public final class TransferFeatureTest {
             MainActivity activity=activityController.get();settle(service);File unsaved=guestFile(context,"6".repeat(64),"内部.txt",new byte[4],600),exported=guestFile(context,"7".repeat(64),"目录.txt",new byte[5],700);File chat=new File(unsaved.getParentFile(),"chat.bin");Files.write(chat.toPath(),new byte[2]);
             FileFeaturesTest.Docs docs=documents(context);ReceivedStorage storage=new ReceivedStorage(context);storage.choose(documentTree(),Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_WRITE_URI_PERMISSION);storage.save(exported,"目录.txt",new LanNode.Transfer());String unrelated=docs.createDocument("root","text/plain","用户文件.txt");Files.write(docs.files.get(unrelated).toPath(),new byte[]{9});
             ChatService.Usage usage=service.receivedUsage();assertEquals(3,usage.files);assertEquals(11,usage.bytes);assertEquals(2,usage.guestFiles);assertEquals(0,new ChatService.Usage(1,2,0).guestFiles);
-            java.lang.reflect.Method clear=MainActivity.class.getDeclaredMethod("clearReceivedFiles");clear.setAccessible(true);clear.invoke(activity);Dialog confirm=ShadowDialog.getLatestDialog();String text=dialogText(confirm);
+            java.lang.reflect.Method settings=MainActivity.class.getDeclaredMethod("settings");settings.setAccessible(true);settings.invoke(activity);
+            Dialog panel=ShadowDialog.getLatestDialog();View content=panel.getWindow().getDecorView();findButton(content,"文件").performClick();Button clear=findButton(content,"清理已接收文件");
+            clear.performClick();assertFalse("统计时不应能重复点击",clear.isEnabled());settle(service);Dialog confirm=ShadowDialog.getLatestDialog();String text=dialogText(confirm);
             assertTrue(text,text.contains("其中 2 个来自临时浏览器传输，清理后无法重新接收。"));assertTrue(text.contains("删除后文件不再保留"));assertFalse(text.contains("另存"));View decor=confirm.getWindow().getDecorView();measure(decor,786,1500);preview(decor,"guest-clear-warning.png",(Integer)field(activity,"SURFACE"));confirm.dismiss();assertTrue(unsaved.isFile());assertTrue(storage.exists(exported));
-            clear.invoke(activity);findButton(ShadowDialog.getLatestDialog().getWindow().getDecorView(),"清理").performClick();transferDone(service);assertFalse(unsaved.exists());assertFalse(exported.exists());assertFalse(chat.exists());
-            assertNull(storage.saved(exported));assertArrayEquals(new byte[]{9},Files.readAllBytes(docs.files.get(unrelated).toPath()));assertTrue(org.robolectric.shadows.ShadowToast.getTextOfLatestToast().contains("已清理 3 个已接收文件"));assertEquals(0,service.receivedUsage().guestFiles);assertEquals("",service.transferStatus());
+            clear.performClick();settle(service);File late=guestFile(context,"8".repeat(64),"确认后到达.txt",new byte[]{42},900);
+            findButton(ShadowDialog.getLatestDialog().getWindow().getDecorView(),"清理").performClick();transferDone(service);assertFalse(unsaved.exists());assertFalse(exported.exists());assertFalse(chat.exists());
+            assertTrue("清理删除了确认后才收到的访客文件",late.isFile());assertArrayEquals(new byte[]{42},Files.readAllBytes(late.toPath()));
+            assertNull(storage.saved(exported));assertArrayEquals(new byte[]{9},Files.readAllBytes(docs.files.get(unrelated).toPath()));assertTrue(org.robolectric.shadows.ShadowToast.getTextOfLatestToast().contains("已清理 3 个已接收文件"));assertEquals(1,service.receivedUsage().guestFiles);assertEquals("",service.transferStatus());
             ChatStore.FileTask deleted=fileTasks(service).stream().filter(row->unsaved.equals(row.guestFile)).findFirst().get();assertEquals(4,deleted.file.size);assertEquals(600,deleted.message.time);assertEquals("本机文件已删除",taskState(activity,deleted));
         }finally{controller.destroy();}
     }

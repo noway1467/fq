@@ -172,6 +172,27 @@ namespace FeiqLight.Tests
                     Pump(() => button.Enabled && (TimeSpan)Field(pair.Receiver, "verifyFrom") > before, "完成后不能再次刷新");
                 }
             });
+            Run("慢刷新期间切换搜索仍展示进度，新的错误不会被联系人计数抢占", () => {
+                using (Pair pair = new Pair("refresh-status"))
+                using (var held = new ManualResetEventSlim())
+                using (var release = new ManualResetEventSlim()) {
+                    Task blocker = Task.Run(() => { lock (Field(pair.Receiver, "sendGate")) { held.Set(); release.Wait(6000); } });
+                    Check(held.Wait(2000), "发送锁未就绪");
+                    var button = (Button)Field(pair.Main, "refresh");
+                    var search = (TextBox)Field(pair.Main, "search");
+                    try {
+                        button.PerformClick(); search.Text = "无匹配 / no match";
+                        Check(!button.Enabled && pair.Status.Text == "正在刷新", "搜索抢占刷新进度：" + pair.Status.Text);
+                        typeof(MainForm).GetMethod("OnError", BindingFlags.Instance | BindingFlags.NonPublic).Invoke(pair.Main, new object[] { "刷新联系人失败：测试 IO 错误" });
+                        Pump(() => pair.Status.Text.StartsWith("刷新联系人失败"), "未显示当前错误");
+                        search.Clear();
+                        Check(pair.Status.Text.StartsWith("刷新联系人失败"), "列表变化清除了当前错误");
+                    } finally { release.Set(); Check(blocker.Wait(2000), "发送锁未释放"); }
+                    Pump(() => button.Enabled, "刷新未完成");
+                    Check(pair.Status.Text.StartsWith("刷新联系人失败"), "刷新收尾清除了当前错误");
+                    button.PerformClick(); Pump(() => button.Enabled && pair.Status.Text == "1 人在线 · 1 个会话", "重试成功未恢复在线人数");
+                }
+            });
             foreach (bool reset in new[] { false, true })
             {
                 string name = reset ? "reset-dark" : "eof-light";

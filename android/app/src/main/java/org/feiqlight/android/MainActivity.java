@@ -1767,7 +1767,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         LinearLayout clearRow=row();
         Button clear=button("清理已接收文件",false); Button clearOffers=button("清理发送缓存",false);
         LinearLayout.LayoutParams clrP=weight();clrP.rightMargin=dp(8);clearRow.addView(clear,clrP);clearRow.addView(clearOffers,weight());box.addView(clearRow,settingSpacing(6,8));
-        clear.setOnClickListener(v->clearReceivedFiles());
+        clear.setOnClickListener(v->clearReceivedFiles(clear));
         box.addView(text("仅清理飞Q接收的文件，包含以前保存目录中的文件；其他文件保留。",12,MUTED),settingSpacing(0,8));
         clearOffers.setOnClickListener(v->confirm("清理发送缓存","撤销尚未接收的文件邀请并删除暂存副本？原文件不受影响。","清理",()->{
             if(service==null) { error("连接服务尚未就绪，请稍后重试"); return; }
@@ -2033,16 +2033,23 @@ public final class MainActivity extends Activity implements ChatService.Observer
         fileAction(options,dialog,"复制文件名",()->copyText("文件名",name));
     }
     // 先说明删什么、留什么再确认；没有可清理的文件直接提示，完成后报告实际结果，不让按钮“点了没反应”。
-    private void clearReceivedFiles() {
-        if(service==null) { error("连接服务尚未就绪，请稍后重试"); return; }
-        ChatService.Usage usage;
-        try {usage=service.receivedUsage();}catch(java.io.IOException e){error("无法统计已接收文件："+e.getMessage());return;}
-        if(usage.files==0) { error("没有可清理的已接收文件"); return; }
-        String detail="删除本机已接收的 "+usage.files+" 个文件，共 "+size(usage.bytes)+"。聊天与传输记录保留，删除后文件不再保留；聊天附件在对方在线且邀请有效时可重新接收。";
-        if(usage.guestFiles>0)detail+="\n注意：其中 "+usage.guestFiles+" 个来自临时浏览器传输，清理后无法重新接收。";
-        confirm("清理已接收文件",detail,"清理",()->{
-            if(service==null) { error("连接服务尚未就绪，请稍后重试"); return; }
-            service.clearFiles(result->error("已清理 "+result.files+" 个已接收文件，释放 "+size(result.bytes)));
+    private void clearReceivedFiles(Button button) {
+        ChatService source=service;
+        if(source==null) { error("连接服务尚未就绪，请稍后重试"); return; }
+        if(!button.isEnabled())return;
+        button.setEnabled(false);button.setText("正在统计…");
+        Runnable restore=()->{button.setEnabled(true);button.setText("清理已接收文件");};
+        source.reviewReceivedFiles(review->{
+            restore.run();if(service!=source||isFinishing()||isDestroyed()||!button.isShown())return;
+            if(review.files==0) { error("没有可清理的已接收文件"); return; }
+            String detail="删除本机已接收的 "+review.files+" 个文件，共 "+size(review.bytes)+"。聊天与传输记录保留，删除后文件不再保留；新收到的文件不删除。聊天附件在对方在线且邀请有效时可重新接收。";
+            if(review.guestFiles>0)detail+="\n注意：其中 "+review.guestFiles+" 个来自临时浏览器传输，清理后无法重新接收。";
+            confirm("清理已接收文件",detail,"清理",()->{
+                if(service!=source) { error("连接服务已变化，请重新清理"); return; }
+                source.clearFiles(review,result->{if(!isFinishing()&&!isDestroyed()&&service==source)error("已清理 "+result.files+" 个已接收文件，释放 "+size(result.bytes));});
+            });
+        },message->{
+            restore.run();if(service==source&&!isFinishing()&&!isDestroyed()&&button.isShown())error(message);
         });
     }
     private void fileActions(LanNode.Peer peer,long packet,Protocol.Attachment file) {
