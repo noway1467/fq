@@ -4,6 +4,7 @@
   const token = location.hash.slice(1).split('&')[0];
   const link = location.origin + '/#' + token;
   let expires = 0, uploading = false, ended = false;
+  let uploadLimit = 10 * 1024 ** 3, countLimit = 100;
   const queue = [];
   const size = bytes => bytes >= 1073741824 ? (bytes / 1073741824).toFixed(2) + ' GiB' : bytes >= 1048576 ? (bytes / 1048576).toFixed(1) + ' MiB' : bytes >= 1024 ? (bytes / 1024).toFixed(1) + ' KiB' : bytes + ' B';
   const message = (text, info = false) => {
@@ -74,7 +75,7 @@
   function add(files) {
     if (ended) { message('本次传输已结束'); return; }
     const active = queue.filter(t => t.state !== 'canceled');
-    if (active.length + files.length > 100 || active.reduce((sum, t) => sum + t.file.size, 0) + [...files].reduce((sum, f) => sum + f.size, 0) > 10737418240) { message('本次最多接收100个文件、合计10 GiB，请分批开启'); return; }
+    if (active.length + files.length > countLimit || active.reduce((sum, t) => sum + t.file.size, 0) + [...files].reduce((sum, f) => sum + f.size, 0) > uploadLimit) { message(`本次最多接收 ${countLimit} 个文件、合计 ${size(uploadLimit)}，请分批开启`); return; }
     for (const file of files) {
       const view = row(file.name), bar = document.createElement('progress'); bar.max = file.size || 1; bar.value = 0; view.main.append(bar);
       const retry = document.createElement('button'); retry.textContent = '继续'; retry.className = 'soft'; retry.hidden = true;
@@ -103,7 +104,7 @@
       if (task.state === 'canceled') return;
       task.view.meta.textContent = '正在校验保存…'; await api('/api/finish?id=' + task.id, 'POST', undefined, task.controller.signal);
       task.state = 'done'; task.bar.value = task.file.size || 1; task.bar.classList.add('done'); task.view.meta.className = 'meta done'; task.view.meta.textContent = size(task.file.size) + ' · 对方已保存'; task.cancel.hidden = true;
-    } catch (e) { if (task.state !== 'canceled') { task.state = 'failed'; task.view.meta.className = 'meta failed'; task.view.meta.textContent = '上传未完成 · ' + (e.name === 'AbortError' ? '连接超时，点击继续' : e.message); task.retry.hidden = false; } }
+    } catch (e) { if (task.state !== 'canceled') { task.state = 'failed'; task.view.meta.className = 'meta failed'; task.view.meta.textContent = ended ? '临时传输已到期，上传未完成' : '上传未完成 · ' + (e.name === 'AbortError' ? '连接超时，点击继续' : e.message); task.retry.hidden = ended; } }
     finally { task.controller = null; uploading = false; pump(); }
   }
   $('picker').onchange = e => { add(e.target.files); e.target.value = ''; };
@@ -114,6 +115,9 @@
     try {
       if (!/^[a-f0-9]{64}$/.test(token)) throw new Error('链接不完整，请使用对方复制的完整链接或二维码');
       const data = await api('/api/guest'); expires = Date.parse(data.until);
+      if (Number.isSafeInteger(data.limit) && data.limit > 0) uploadLimit = data.limit;
+      if (Number.isInteger(data.countLimit) && data.countLimit > 0 && data.countLimit <= 1000) countLimit = data.countLimit;
+      $('upload-quota').textContent = `限 ${countLimit} 个 · ${size(uploadLimit)}`;
       const totalSize = data.files.reduce((sum, f) => sum + (f.size || 0), 0);
       $('count').textContent = data.files.length ? data.files.length + ' 个文件 · ' + size(totalSize) : '0 个文件';
       $('downloads').replaceChildren();
@@ -134,7 +138,7 @@
       $('upload').hidden = !data.upload;
       const tick = () => {
         const seconds = Math.max(0, Math.ceil((expires - Date.now()) / 1000));
-        $('session').textContent = seconds ? '连接已就绪 · ' + Math.floor(seconds / 60) + '分' + String(seconds % 60).padStart(2, '0') + '秒后结束' : '本次临时传输已结束';
+        $('session').textContent = seconds ? '连接已就绪 · ' + Math.floor(seconds / 60) + '分' + String(seconds % 60).padStart(2, '0') + '秒后结束' : '本次临时传输已到期结束';
         if (!seconds && !ended) {
           ended = true; $('picker').disabled = true; $('copy').disabled = true; $('qr-toggle').disabled = true; $('qr-panel').hidden = true;
           $('qr-toggle').setAttribute('aria-expanded', 'false');

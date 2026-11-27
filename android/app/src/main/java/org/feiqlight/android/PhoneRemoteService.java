@@ -31,8 +31,10 @@ public final class PhoneRemoteService extends Service implements PhoneRemoteAcce
     private CompletableFuture<Integer> approval;
     private String pendingAddress="";
     private byte[] jpeg;
+    private Bitmap rawBitmap,croppedBitmap;
+    private java.nio.ByteBuffer paddedBuffer;
     private int screenWidth,screenHeight,imageWidth,imageHeight,rotation;
-    private long lastFrame;
+    private long lastFrame,frameSeq;
     private volatile boolean stopping;
     private boolean receiverRegistered;
     static PhoneRemoteService active(){PhoneRemoteService service=instance;return service==null||service.stopping?null:service;}
@@ -81,7 +83,7 @@ public final class PhoneRemoteService extends Service implements PhoneRemoteAcce
     private void resize(int width,int height){
         if(stopping||projection==null)return;
         float scale=Math.min(1f,1280f/Math.max(width,height));int w=Math.max(2,Math.round(width*scale)),h=Math.max(2,Math.round(height*scale));
-        synchronized(frames){if(reader!=null&&screenWidth==width&&screenHeight==height)return;screenWidth=width;screenHeight=height;imageWidth=w;imageHeight=h;jpeg=null;}
+        synchronized(frames){if(reader!=null&&screenWidth==width&&screenHeight==height)return;screenWidth=width;screenHeight=height;imageWidth=w;imageHeight=h;jpeg=null;frames.notifyAll();}
         ImageReader old=reader;reader=ImageReader.newInstance(w,h,PixelFormat.RGBA_8888,2);ImageReader source=reader;
         reader.setOnImageAvailableListener(value->readFrame(value,source,w,h),captureHandler);
         if(display==null)display=projection.createVirtualDisplay("飞Q手机远控",w,h,getResources().getDisplayMetrics().densityDpi,DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,reader.getSurface(),null,main);
@@ -90,21 +92,57 @@ public final class PhoneRemoteService extends Service implements PhoneRemoteAcce
     }
     private void readFrame(ImageReader value,ImageReader source,int width,int height){
         try(Image image=value.acquireLatestImage()){
-            if(image==null||stopping||SystemClock.elapsedRealtime()-lastFrame<250)return;lastFrame=SystemClock.elapsedRealtime();
+            if(image==null||stopping||reader!=source||SystemClock.elapsedRealtime()-lastFrame<100)return;lastFrame=SystemClock.elapsedRealtime();
             Image.Plane plane=image.getPlanes()[0];int padded=plane.getRowStride()/plane.getPixelStride();
-            Bitmap raw=Bitmap.createBitmap(padded,height,Bitmap.Config.ARGB_8888),cropped=null;
-            try{
-                java.nio.ByteBuffer buffer=plane.getBuffer();
-                if(buffer.remaining()<raw.getByteCount()){java.nio.ByteBuffer paddedBuffer=java.nio.ByteBuffer.allocate(raw.getByteCount());paddedBuffer.put(buffer);paddedBuffer.rewind();buffer=paddedBuffer;}
-                raw.copyPixelsFromBuffer(buffer);cropped=Bitmap.createBitmap(raw,0,0,width,height);
-                ByteArrayOutputStream output=new ByteArrayOutputStream();if(!cropped.compress(Bitmap.CompressFormat.JPEG,72,output))throw new IllegalStateException("画面压缩失败");
-                synchronized(frames){if(reader==source&&!stopping){jpeg=output.toByteArray();frames.notifyAll();}}
-            }finally{if(cropped!=null&&cropped!=raw)cropped.recycle();raw.recycle();}
+            if(rawBitmap==null||rawBitmap.getWidth()!=padded||rawBitmap.getHeight()!=height){if(rawBitmap!=null)rawBitmap.recycle();rawBitmap=Bitmap.createBitmap(padded,height,Bitmap.Config.ARGB_8888);paddedBuffer=null;}
+            if(croppedBitmap==null||croppedBitmap.getWidth()!=width||croppedBitmap.getHeight()!=height){if(croppedBitmap!=null)croppedBitmap.recycle();croppedBitmap=Bitmap.createBitmap(width,height,Bitmap.Config.ARGB_8888);}
+            java.nio.ByteBuffer buffer=plane.getBuffer();
+            if(buffer.remaining()<rawBitmap.getByteCount()){
+                if(paddedBuffer==null)paddedBuffer=java.nio.ByteBuffer.allocate(rawBitmap.getByteCount());
+                paddedBuffer.clear();paddedBuffer.put(buffer);paddedBuffer.rewind();buffer=paddedBuffer;
+            }
+            rawBitmap.copyPixelsFromBuffer(buffer);new Canvas(croppedBitmap).drawBitmap(rawBitmap,0,0,null);
+            ByteArrayOutputStream output=new ByteArrayOutputStream();if(!croppedBitmap.compress(Bitmap.CompressFormat.JPEG,72,output))throw new IllegalStateException("画面压缩失败");
+            byte[] next=output.toByteArray();
+            synchronized(frames){if(reader==source&&!stopping&&!java.util.Arrays.equals(jpeg,next)){jpeg=next;frameSeq=frameSeq==0xffffffffL?1:frameSeq+1;frames.notifyAll();}}
         }catch(RuntimeException e){if(reader==source&&!stopping)stopActive();}
     }
     @Override public void onConfigurationChanged(android.content.res.Configuration config){super.onConfigurationChanged(config);if(Build.VERSION.SDK_INT<34){DisplayMetrics metrics=realMetrics();resize(metrics.widthPixels,metrics.heightPixels);}rotation=getSystemService(WindowManager.class).getDefaultDisplay().getRotation();}
     @Override public byte[] capture()throws Exception{
         synchronized(frames){long until=SystemClock.elapsedRealtime()+3000;while(jpeg==null&&!stopping&&SystemClock.elapsedRealtime()<until)frames.wait(Math.max(1,until-SystemClock.elapsedRealtime()));if(stopping||jpeg==null)throw new ToolsHttp.Failure(503,"手机画面尚未就绪");return jpeg;}
+    }
+    @Override public byte[] captureDelta(long since,BooleanSupplier authorized)throws Exception{
+        synchronized(frames){
+            long until=System.nanoTime()+TimeUnit.MILLISECONDS.toNanos(jpeg==null?3000:300);
+            while(!stopping&&authorized.getAsBoolean()&&(jpeg==null||since==frameSeq)){
+                long left=until-System.nanoTime();if(left<=0)break;
+                // 短等待周期也能及时发现会话撤销，不把旧帧交给下一次连接。
+                frames.wait(Math.max(1,Math.min(75,TimeUnit.NANOSECONDS.toMillis(left))));
+            }
+            if(!authorized.getAsBoolean())throw new ToolsHttp.Failure(401,"控制已停止");
+            if(stopping||jpeg==null)throw new ToolsHttp.Failure(503,"手机画面尚未就绪");
+            boolean unchanged=since!=0&&since==frameSeq;
+            ByteArrayOutputStream bytes=new ByteArrayOutputStream();java.io.DataOutputStream output=new java.io.DataOutputStream(bytes);
+            output.writeInt(0x46514631);output.writeByte(unchanged?0:1);output.write(new byte[3]);output.writeInt((int)frameSeq);output.writeShort(imageWidth);output.writeShort(imageHeight);output.writeShort(unchanged?0:1);
+            if(!unchanged){output.writeShort(0);output.writeShort(0);output.writeShort(imageWidth);output.writeShort(imageHeight);output.writeInt(jpeg.length);output.write(jpeg);}
+            return bytes.toByteArray();
+        }
+    }
+    @Override public void clipboard(String text,BooleanSupplier authorized)throws Exception{
+        CompletableFuture<Void> result=new CompletableFuture<>();
+        Runnable action=()->{
+            if(result.isDone())return;
+            try{
+                if(stopping||!authorized.getAsBoolean()||getSystemService(KeyguardManager.class).isKeyguardLocked())throw new ToolsHttp.Failure(403,"手机远控已停止或屏幕已锁定");
+                getSystemService(ClipboardManager.class).setPrimaryClip(ClipData.newPlainText("飞Q远控",text));
+                android.widget.Toast.makeText(this,"远控已写入剪贴板",android.widget.Toast.LENGTH_SHORT).show();result.complete(null);
+            }catch(Exception e){result.completeExceptionally(e);}
+        };
+        main.post(action);
+        try{result.get(4,TimeUnit.SECONDS);}
+        catch(ExecutionException e){if(e.getCause() instanceof ToolsHttp.Failure)throw (ToolsHttp.Failure)e.getCause();throw e;}
+        catch(TimeoutException e){throw new ToolsHttp.Failure(408,"手机剪贴板操作超时，未自动重发");}
+        finally{result.cancel(false);main.removeCallbacks(action);}
     }
     @Override public JSONObject displays()throws Exception{return new JSONObject().put("platform","android").put("imeEnter",Build.VERSION.SDK_INT>=30).put("items",new JSONArray().put(new JSONObject().put("id",0).put("name","手机")));}
     @Override public void input(JSONObject data,BooleanSupplier authorized)throws Exception{
@@ -132,7 +170,8 @@ public final class PhoneRemoteService extends Service implements PhoneRemoteAcce
         stopping=true;if(instance==this)instance=null;main.removeCallbacksAndMessages(null);answer(false);
         if(access!=null){access.close();access=null;}synchronized(frames){jpeg=null;frames.notifyAll();}
         if(display!=null){display.release();display=null;}ImageReader old=reader;reader=null;if(old!=null)old.close();
-        if(projection!=null){projection.stop();projection=null;}if(captureThread!=null)captureThread.quitSafely();
+        if(projection!=null){projection.stop();projection=null;}
+        if(captureThread!=null){captureHandler.post(()->{if(rawBitmap!=null)rawBitmap.recycle();if(croppedBitmap!=null)croppedBitmap.recycle();rawBitmap=croppedBitmap=null;paddedBuffer=null;});captureThread.quitSafely();}
         if(receiverRegistered)unregisterReceiver(locked);stopForeground(STOP_FOREGROUND_REMOVE);super.onDestroy();
     }
 }

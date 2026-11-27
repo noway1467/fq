@@ -21,7 +21,7 @@ try {
     # 直接引用解压包里的 EXE，而非重新编译 src，防止源码通过但交付包仍带旧问题。
     $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
     $testExe = Join-Path $sandbox 'FeiqLight.PackageTests.exe'
-    & $compiler /nologo /utf8output /warn:4 /warnaserror+ /target:exe /main:FeiqLight.Tests.SelfTests "/out:$testExe" "/r:$extracted" /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.Web.Extensions.dll "/win32manifest:$root\src\app.manifest" "$PSScriptRoot\SelfTests.cs" "$PSScriptRoot\UiSmokeTests.cs" "$root\src\AssemblyInfo.cs"
+    & $compiler /nologo /utf8output /warn:4 /warnaserror+ /target:exe /main:FeiqLight.Tests.SelfTests "/out:$testExe" "/r:$extracted" /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.Web.Extensions.dll "/win32manifest:$root\src\app.manifest" "$PSScriptRoot\SelfTests.cs" "$PSScriptRoot\UiSmokeTests.cs" "$PSScriptRoot\ProtocolVectorTests.cs" "$root\src\AssemblyInfo.cs"
     if ($LASTEXITCODE -ne 0) { throw '包内程序的回归测试入口编译失败' }
     & $testExe
     $testCode = $LASTEXITCODE

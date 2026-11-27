@@ -91,6 +91,10 @@ public final class TransferFeatureTest {
     @Test public void guestCancelQuotaAndSlots()throws Exception {
         Context context=RuntimeEnvironment.getApplication();long large=6L*1024*1024*1024;
         try(GuestTransfer server=new GuestTransfer(context,Collections.emptyList(),true,true)) {
+            assertEquals(100L*1024*1024*1024,GuestTransfer.UPLOAD_QUOTA);assertEquals(1000,GuestTransfer.UPLOAD_FILE_LIMIT);
+            JSONObject advertised=request(server,"/api/guest",server.token,"GET",null,null).json();assertEquals(GuestTransfer.UPLOAD_QUOTA,advertised.getLong("limit"));assertEquals(1000,advertised.getInt("countLimit"));
+            // 只预置累计占用计数，仍走真实HTTP授权/取消，不创建90GiB测试文件。
+            setField(server,"reserved",GuestTransfer.UPLOAD_QUOTA-10L*1024*1024*1024);
             Reply prepared=post(server,"/api/prepare",new JSONObject().put("name","large.bin").put("size",large));assertEquals(200,prepared.code);String id=prepared.json().getString("id");
             assertEquals(409,post(server,"/api/prepare",new JSONObject().put("name","overflow.bin").put("size",large)).code);
             assertEquals(200,post(server,"/api/cancel?id="+id,new JSONObject()).code);
@@ -98,7 +102,8 @@ public final class TransferFeatureTest {
             assertEquals(410,post(server,"/api/cancel?id="+id,new JSONObject()).code);
             assertEquals(409,post(server,"/api/prepare",new JSONObject().put("name","double-refund.bin").put("size",5L*1024*1024*1024)).code);
             assertEquals(200,post(server,"/api/cancel?id="+replacement.json().getString("id"),new JSONObject()).code);
-            List<String> ids=new ArrayList<>();for(int i=0;i<100;i++){Reply ready=post(server,"/api/prepare",new JSONObject().put("name","empty.txt").put("size",0));assertEquals(200,ready.code);ids.add(ready.json().getString("id"));}
+            setField(server,"reserved",0L);
+            List<String> ids=new ArrayList<>();for(int i=0;i<1000;i++){Reply ready=post(server,"/api/prepare",new JSONObject().put("name","empty.txt").put("size",0));assertEquals(200,ready.code);ids.add(ready.json().getString("id"));}
             assertEquals(409,post(server,"/api/prepare",new JSONObject().put("name","extra.txt").put("size",0)).code);
             assertEquals(200,post(server,"/api/finish?id="+ids.get(0),new JSONObject()).code);assertEquals(409,post(server,"/api/cancel?id="+ids.get(0),new JSONObject()).code);
             assertEquals(200,post(server,"/api/cancel?id="+ids.get(1),new JSONObject()).code);assertEquals("取消后未释放有效文件名额",200,post(server,"/api/prepare",new JSONObject().put("name","new.txt").put("size",0)).code);
@@ -106,7 +111,7 @@ public final class TransferFeatureTest {
     }
     @Test public void guestCancelHistoryBound()throws Exception {
         try(GuestTransfer server=new GuestTransfer(RuntimeEnvironment.getApplication(),Collections.emptyList(),true,true)) {
-            for(int i=0;i<1024;i++){Reply ready=post(server,"/api/prepare",new JSONObject().put("name","empty.txt").put("size",0));assertEquals(200,ready.code);assertEquals(200,post(server,"/api/cancel?id="+ready.json().getString("id"),new JSONObject()).code);}
+            for(int i=0;i<4096;i++){Reply ready=post(server,"/api/prepare",new JSONObject().put("name","empty.txt").put("size",0));assertEquals(200,ready.code);assertEquals(200,post(server,"/api/cancel?id="+ready.json().getString("id"),new JSONObject()).code);}
             assertEquals("取消历史没有内存上限",409,post(server,"/api/prepare",new JSONObject().put("name","extra.txt").put("size",0)).code);
         }
     }
@@ -670,7 +675,18 @@ public final class TransferFeatureTest {
                     java.lang.reflect.Field all=adapter.getClass().getDeclaredField("all");all.setAccessible(true);all.set(adapter,rows);java.lang.reflect.Method refresh=adapter.getClass().getDeclaredMethod("refresh");refresh.setAccessible(true);refresh.invoke(adapter);
                     View view=dialog.getWindow().getDecorView();view.measure(View.MeasureSpec.makeMeasureSpec(786,View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(1500,View.MeasureSpec.EXACTLY));view.layout(0,0,786,1500);
                     File output=new File(System.getProperty("feiq.previewDir"));assertTrue(output.isDirectory()||output.mkdirs());Bitmap bitmap=Bitmap.createBitmap(786,1500,Bitmap.Config.ARGB_8888);view.draw(new Canvas(bitmap));try(OutputStream stream=new FileOutputStream(new File(output,"transfers-"+(dark?"dark":"light")+".png"))){bitmap.compress(Bitmap.CompressFormat.PNG,100,stream);}bitmap.recycle();
-                    EditText input=find(view,EditText.class);assertNotNull(input);assertEquals(View.VISIBLE,input.getVisibility());assertNull(findDescription(view,"搜索"));input.setText("不存在");Shadows.shadowOf(Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(150));assertEquals(0,((BaseAdapter)adapter).getCount());dialog.dismiss();
+                    EditText input=find(view,EditText.class);assertNotNull(input);assertEquals(View.VISIBLE,input.getVisibility());assertNull(findDescription(view,"搜索"));
+                    float density=activity.getResources().getDisplayMetrics().density;
+                    View sourceBar=(View)field(adapter,"sourceBar");
+                    assertTrue("来源栏底部仍有多余留白",sourceBar.getHeight()<=Math.ceil(66*density));
+                    assertTrue("来源栏与搜索之间间距过大",input.getTop()-sourceBar.getBottom()<=Math.ceil(4*density));
+                    assertTrue("搜索框没有压缩到40dp",input.getHeight()<=Math.ceil(42*density));
+                    assertTrue("搜索文字纵向裁切",input.getHeight()>=input.getLineHeight()+input.getCompoundPaddingTop()+input.getCompoundPaddingBottom());
+                    for(String caption:new String[]{"全部","进行中","待处理","已完成"}){
+                        Button filter=findButton(view,caption);assertNotNull(filter);assertTrue("页签没有压缩到36dp",filter.getHeight()<=Math.ceil(38*density));
+                        assertTrue("页签文字纵向裁切",filter.getHeight()>=filter.getLineHeight()+filter.getCompoundPaddingTop()+filter.getCompoundPaddingBottom());
+                    }
+                    input.setText("不存在");Shadows.shadowOf(Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(150));assertEquals(0,((BaseAdapter)adapter).getCount());dialog.dismiss();
                 }
             }
         }finally{serviceController.destroy();}

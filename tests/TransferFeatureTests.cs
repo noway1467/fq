@@ -409,6 +409,10 @@ namespace FeiqLight.Tests
                 using(var server=new GuestTransfer(new string[0],Path.Combine(root,"cancel-quota"),true,true))
                 {
                     long large=6L*1024*1024*1024;
+                    Check(GuestTransfer.UploadQuota==100L*1024*1024*1024&&GuestTransfer.UploadFileLimit==1000,"新接收限额不同步");
+                    var advertised=Data(Request(server.Port,"/api/guest",server.Token));Check(Convert.ToInt64(advertised["limit"])==GuestTransfer.UploadQuota&&Convert.ToInt32(advertised["countLimit"])==1000,"网页没有获得真实限额");
+                    // 预置已占90GiB的计数测试累计上限，实际只创建空断点，不分配大文件。
+                    var reserved=typeof(GuestTransfer).GetField("reserved",BindingFlags.Instance|BindingFlags.NonPublic);reserved.SetValue(server,GuestTransfer.UploadQuota-10L*1024*1024*1024);
                     Reply prepared=Json(server,"/api/prepare",new{name="large.bin",size=large});Check(prepared.Code==200,"大文件准备失败");string id=(string)Data(prepared)["id"];
                     Check(Json(server,"/api/prepare",new{name="blocked.bin",size=large}).Code==409,"未取消时未限制总配额");
                     Check(Json(server,"/api/cancel?id="+id,new{}).Code==200,"取消大文件失败");
@@ -416,19 +420,21 @@ namespace FeiqLight.Tests
                     Check(Json(server,"/api/cancel?id="+id,new{}).Code==410,"重复取消未保持取消终态");
                     Check(Json(server,"/api/prepare",new{name="overflow.bin",size=5L*1024*1024*1024}).Code==409,"重复取消多归还了配额");
                     Check(Json(server,"/api/cancel?id="+(string)Data(replacement)["id"],new{}).Code==200,"取消替换任务失败");
-                    var ids=new List<string>();for(int i=0;i<100;i++){Reply ready=Json(server,"/api/prepare",new{name="empty-"+i+".txt",size=0});Check(ready.Code==200,"有效文件名额过早用完");ids.Add((string)Data(ready)["id"]);}
-                    Check(Json(server,"/api/prepare",new{name="extra.txt",size=0}).Code==409,"超过100个有效任务仍获准上传");
+                    reserved.SetValue(server,0L);
+                    var ids=new List<string>();for(int i=0;i<1000;i++){Reply ready=Json(server,"/api/prepare",new{name="empty-"+i+".txt",size=0});Check(ready.Code==200,"有效文件名额过早用完");ids.Add((string)Data(ready)["id"]);}
+                    Check(Json(server,"/api/prepare",new{name="extra.txt",size=0}).Code==409,"超过1000个有效任务仍获准上传");
                     Check(Json(server,"/api/finish?id="+ids[0],new{}).Code==200,"完整任务无法保存");Check(Json(server,"/api/cancel?id="+ids[0],new{}).Code==409,"已保存文件被取消");
-                    Check(Json(server,"/api/cancel?id="+ids[1],new{}).Code==200,"取消有效任务失败");Check(Json(server,"/api/prepare",new{name="new-empty.txt",size=0}).Code==200,"取消后未释放100个文件名额");
+                    Check(Json(server,"/api/cancel?id="+ids[1],new{}).Code==200,"取消有效任务失败");Check(Json(server,"/api/prepare",new{name="new-empty.txt",size=0}).Code==200,"取消后未释放1000个文件名额");
                 }
             });
             Run("访客取消历史有硬上限，禁止无限准备任务耗内存",()=>{
                 using(var server=new GuestTransfer(new string[0],Path.Combine(root,"cancel-history"),true,true))
                 {
-                    for(int i=0;i<1024;i++){Reply ready=Json(server,"/api/prepare",new{name="empty.txt",size=0});Check(ready.Code==200,"取消历史过早阻断有效名额");Check(Json(server,"/api/cancel?id="+(string)Data(ready)["id"],new{}).Code==200,"取消历史任务失败");}
-                    Check(Json(server,"/api/prepare",new{name="excess.txt",size=0}).Code==409,"任务历史没有1024条内存上限");
+                    for(int i=0;i<4096;i++){Reply ready=Json(server,"/api/prepare",new{name="empty.txt",size=0});Check(ready.Code==200,"取消历史过早阻断有效名额");Check(Json(server,"/api/cancel?id="+(string)Data(ready)["id"],new{}).Code==200,"取消历史任务失败");}
+                    Check(Json(server,"/api/prepare",new{name="excess.txt",size=0}).Code==409,"任务历史没有4096条内存上限");
                 }
             });
+            if(args.Length>2&&args[2]=="guest-quota"){Console.WriteLine("TOTAL "+passed+" passed, "+failed+" failed");return failed==0?0:1;}
             Run("暂停保留断点并从实际偏移续传",PauseResume);
             Run("TLS接收暂停保留断点并完成SHA-256校验",()=>{
                 string source=Path.Combine(root,"tls-source.bin"),target=Path.Combine(root,"tls-received.bin");

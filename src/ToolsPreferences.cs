@@ -14,6 +14,7 @@ namespace FeiqLight
             public string[] Folders { get; set; }
             public bool ShareEnabled { get; set; }
             public bool RemoteEnabled { get; set; }
+            public bool RemoteClipboardRead { get; set; }
         }
         private readonly string path;
         internal State Value { get; private set; }
@@ -37,7 +38,14 @@ namespace FeiqLight
         }
         internal void SaveFolders(string[] folders, bool shareEnabled, bool remoteEnabled)
         {
-            State next = new State { Folder = folders.FirstOrDefault(), Folders = folders.ToArray(), ShareEnabled = shareEnabled, RemoteEnabled = remoteEnabled };
+            SaveState(new State { Folder = folders.FirstOrDefault(), Folders = folders.ToArray(), ShareEnabled = shareEnabled, RemoteEnabled = remoteEnabled, RemoteClipboardRead = Value.RemoteClipboardRead });
+        }
+        internal void SaveRemoteClipboardRead(bool enabled)
+        {
+            SaveState(new State { Folder = Value.Folder, Folders = Value.Folders.ToArray(), ShareEnabled = Value.ShareEnabled, RemoteEnabled = Value.RemoteEnabled, RemoteClipboardRead = enabled });
+        }
+        private void SaveState(State next)
+        {
             if (path != null)
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(path));

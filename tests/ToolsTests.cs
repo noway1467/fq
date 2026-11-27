@@ -17,6 +17,7 @@ namespace FeiqLight.Tests
     internal static class ToolsTests
     {
         [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+        [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern IntPtr WindowFromPoint(Point point);
         private sealed class Reply
         {
             internal int Code; internal byte[] Body; internal string Headers;
@@ -67,13 +68,124 @@ namespace FeiqLight.Tests
             string root = Path.GetFullPath(args.Length > 1 ? args[1] : Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "tools-test-data")); Directory.CreateDirectory(root);
             if (args.Length > 0 && args[0] == "serve") { Serve(root); return 0; }
             if (args.Length > 0 && args[0] == "render") { Render(root); return 0; }
+            if (args.Length > 0 && args[0] == "shadow") { RenderShadow(root); return Environment.ExitCode; }
             if (args.Length > 0 && args[0] == "desktop") { Desktop(root); return Environment.ExitCode; }
             if (args.Length > 0 && args[0] == "wheel-desktop") { WheelDesktop(root); return Environment.ExitCode; }
+            if (args.Length > 2 && args[0] == "benchmark") { Benchmark(root, Path.GetFullPath(args[2])); return Environment.ExitCode; }
             if (args.Length > 2 && args[0] == "upgrade") { try { Upgrade(root, Path.GetFullPath(args[2]), args.Length > 3 ? Path.GetFullPath(args[3]) : Path.GetFullPath(args[2])); return 0; } catch(Exception error) { Console.WriteLine("UPGRADE FAIL: " + error.GetType().Name + " " + error.Message); return 1; } }
             int passed = 0, failed = 0;
             Action<string, Action> run = (name, test) => { try { test(); Console.WriteLine("PASS " + name); passed++; } catch (Exception e) { Console.WriteLine("FAIL " + name + ": " + e); failed++; } };
             string folder = Path.Combine(root, "shared"); Directory.CreateDirectory(folder); Directory.CreateDirectory(Path.Combine(folder, "子目录"));
             File.WriteAllBytes(Path.Combine(folder, "视频 sample.mp4"), Enumerable.Range(0, 256).Select(i => (byte)i).ToArray()); File.WriteAllBytes(Path.Combine(folder, "empty.bin"), new byte[0]);
+            run("FQF1：首帧、静止、128像素脏块、整帧回退及基线恢复", () => {
+                using (RemoteDesktop desktop = new RemoteDesktop())
+                using (Bitmap bitmap = new Bitmap(400, 300, System.Drawing.Imaging.PixelFormat.Format32bppRgb))
+                {
+                    using (Graphics graphics = Graphics.FromImage(bitmap)) graphics.Clear(Color.White);
+                    byte[] first = desktop.EncodeFrame(bitmap, 0, 0); uint seq = FrameSequence(first);
+                    File.WriteAllBytes(Path.Combine(root,"frame-full.fqf"),first);
+                    Assert(Encoding.ASCII.GetString(first, 0, 4) == "FQF1" && first[4] == 1 && seq > 0 && first[17] == 1, "首帧头部");
+                    byte[] idle = desktop.EncodeFrame(bitmap, 0, seq); Assert(idle.Length == 18 && idle[4] == 0 && FrameSequence(idle) == seq, "静止帧重复传像素");
+                    object pixels = typeof(RemoteDesktop).GetField("currentPixels", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic).GetValue(desktop);
+                    desktop.EncodeFrame(bitmap, 0, seq);
+                    Assert(Object.ReferenceEquals(pixels, typeof(RemoteDesktop).GetField("currentPixels", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic).GetValue(desktop)), "静止帧重建像素数组");
+                    using (Graphics graphics = Graphics.FromImage(bitmap)) graphics.FillRectangle(Brushes.Blue, 12, 12, 10, 10);
+                    byte[] tile = desktop.EncodeFrame(bitmap, 0, seq); Assert(tile[4] == 2 && tile[17] == 1 && tile[23] == 128 && tile[25] == 128 && FrameSequence(tile) == seq + 1, "局部变化未返回128块");
+                    File.WriteAllBytes(Path.Combine(root,"frame-tile.fqf"),tile);
+                    using (MemoryStream bytes = new MemoryStream(tile, 30, tile.Length - 30)) using (Bitmap image = new Bitmap(bytes)) Assert(image.Width == 128 && image.GetPixel(16, 16).B > 150, "脏块JPEG内容错误");
+                    seq = FrameSequence(tile);
+                    using (Graphics graphics = Graphics.FromImage(bitmap)) graphics.Clear(Color.Green);
+                    byte[] large = desktop.EncodeFrame(bitmap, 0, seq); Assert(large[4] == 1, "大面积变化未回退整帧");seq=FrameSequence(large);
+                    File.WriteAllBytes(Path.Combine(root,"frame-large.fqf"),large);
+                    byte[] lost = desktop.EncodeFrame(bitmap, 0, seq - 1); Assert(lost[4] == 1 && FrameSequence(lost)>seq, "丢帧未恢复基线");
+                    byte[] switched = desktop.EncodeFrame(bitmap, 1, FrameSequence(lost));Assert(switched[4]==1, "切屏未强制整帧");
+                    using(Bitmap resized=new Bitmap(320,240))Assert(desktop.EncodeFrame(resized,1,FrameSequence(switched))[4]==1,"尺寸变化未强制整帧");
+                }
+            });
+            run("FQF1：静止请求短等待、旧JPEG兼容、等待中停止即时撤销", () => {
+                using(ToolsService server=new ToolsService(0,true))
+                using(RemoteDesktop desktop=new RemoteDesktop())
+                using(Bitmap bitmap=new Bitmap(400,300))
+                using(ManualResetEvent sampled=new ManualResetEvent(false))
+                {
+                    server.ConfirmRemote=address=>true;server.AllowRemote();string cookie=Login(server,"remote");int samples=0;
+                    server.Capture=display=>new byte[]{255,216,255,217};
+                    server.CaptureDelta=(display,since)=>{Interlocked.Increment(ref samples);sampled.Set();return desktop.EncodeFrame(bitmap,display,since);};
+                    Reply first=Request(server.Port,"/api/screen?delta=1&since=0",cookie);Assert(first.Code==200&&first.Headers.Contains("application/octet-stream"),"二进制内容类型");
+                    uint seq=FrameSequence(first.Body);Stopwatch watch=Stopwatch.StartNew();samples=0;
+                    Reply idle=Request(server.Port,"/api/screen?delta=1&since="+seq,cookie);
+                    Assert(idle.Code==200&&idle.Body.Length==18&&watch.ElapsedMilliseconds>=275&&samples<=5,"静止请求未节流或多传像素");
+                    Assert(Request(server.Port,"/api/screen?display=0",cookie).Headers.Contains("image/jpeg"),"旧JPEG不兼容");
+                    Assert(Request(server.Port,"/api/screen?delta=1&since=-1",cookie).Code==400,"无效帧序号未拒绝");
+                    sampled.Reset();Task<Reply> pending=Task.Run(()=>Request(server.Port,"/api/screen?delta=1&since="+seq,cookie));
+                    Assert(sampled.WaitOne(2000),"未开始长轮询");watch.Restart();server.StopRemote();
+                    Assert(pending.Wait(1000)&&pending.Result.Code==401&&watch.ElapsedMilliseconds<250,"撤销后仍交付或等待旧帧");
+                }
+            });
+            run("组合键：白名单、去重顺序、扩展键与安全热键拒绝", () => {
+                Func<string,ushort[]> parse=json=>RemoteDesktop.ParseChord(new JavaScriptSerializer().Deserialize<Dictionary<string,object>>(json));
+                Assert(parse("{\"key\":\"escape\",\"modifiers\":[\"shift\",\"ctrl\",\"ctrl\"]}").SequenceEqual(new ushort[]{0x11,0x10,0x1b}),"修饰键顺序或去重");
+                Assert(parse("{\"key\":\"win\",\"modifiers\":[]}").Single()==0x5b,"Win键");
+                foreach(string key in new[]{"a","z","0","9","f1","f12","delete","insert","space","home","end","pageup","pagedown"})Assert(parse("{\"key\":\""+key+"\",\"modifiers\":[]}").Length==1,"主键 "+key);
+                foreach(string json in new[]{"{\"key\":\"delete\",\"modifiers\":[\"ctrl\",\"alt\"]}","{\"key\":\"f12\",\"modifiers\":[\"alt\",\"ctrl\",\"shift\"]}","{\"key\":\"f13\",\"modifiers\":[]}","{\"key\":\"a\",\"modifiers\":[\"command\"]}","{\"key\":\"a\",\"modifiers\":\"ctrl\"}"})
+                {bool rejected=false;try{parse(json);}catch(ToolsHttp.HttpError e){rejected=e.Code==400;}Assert(rejected,"未拒绝非法组合 "+json);}
+                var keyMethod=typeof(RemoteDesktop).GetMethod("Key",System.Reflection.BindingFlags.Static|System.Reflection.BindingFlags.NonPublic);
+                foreach(ushort key in new ushort[]{0x5b,0x2e,0x2d,0x25,0x21})
+                {
+                    object native=keyMethod.Invoke(null,new object[]{key,true,false});object union=native.GetType().GetField("Value",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic).GetValue(native);
+                    object keyboard=union.GetType().GetField("Key",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic).GetValue(union);
+                    Assert((uint)keyboard.GetType().GetField("Flags",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic).GetValue(keyboard)==3,"释放丢失扩展键标志");
+                }
+            });
+            run("剪贴板：默认拒读、CSRF、文本边界、开关持久化不被共享覆盖", () => {
+                string profile=Path.Combine(root,"clipboard-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(profile);
+                File.WriteAllText(Path.Combine(profile,"tools-settings.json"),"{\"Folders\":[],\"RemoteEnabled\":false}",new UTF8Encoding(false));
+                using(ToolsService server=new ToolsService(0,true,profile))
+                using(RemoteDesktop desktop=new RemoteDesktop())
+                {
+                    string stored="远控测试 😀\n下一行";int reads=0,writes=0;
+                    server.Displays=desktop.Displays;server.ClipboardText=(text,authorized)=>{Assert(authorized(),"未复核会话");if(text==null){reads++;return stored;}stored=text;writes++;return "";};
+                    server.ConfirmRemote=address=>true;server.AllowRemote();string cookie=Login(server,"remote");
+                    Assert(!server.RemoteClipboardRead&&Request(server.Port,"/api/clipboard",cookie).Code==403&&reads==0,"旧配置默认开放读取");
+                    Assert((bool)Request(server.Port,"/api/displays",cookie).Json()["clipboardWrite"],"缺少写入能力");
+                    Assert(Request(server.Port,"/api/clipboard",cookie,"{\"text\":\"测试\"}").Code==403&&writes==0,"写入绕过CSRF");
+                    foreach(string text in new[]{"",new string('x',4001),"a\0b","\ud800"})
+                    {
+                        bool rejected=false;try{ToolsService.ValidateClipboardText(text);}catch(ToolsHttp.HttpError e){rejected=e.Code==400;}Assert(rejected,"非法剪贴板内容未拒绝");
+                    }
+                    Assert(Request(server.Port,"/api/clipboard",cookie,new JavaScriptSerializer().Serialize(new{text=stored}),TokenHeader(cookie)).Code==200&&writes==1,"授权推送失败");
+                    server.SetRemoteClipboardRead(true);server.Share(folder);server.StopSharing();
+                    Assert(server.RemoteClipboardRead&&new ToolsPreferences(profile).Value.RemoteClipboardRead,"保存共享覆盖剪贴板设置");
+                    Assert((string)Request(server.Port,"/api/clipboard",cookie).Json()["text"]==stored&&reads==1,"单次读取失败");
+                    server.SetRemoteClipboardRead(false);Assert(Request(server.Port,"/api/clipboard",cookie).Code==403&&reads==1,"关闭开关仍允许读取");
+                    server.SetRemoteClipboardRead(true);server.StopRemote();Assert(Request(server.Port,"/api/clipboard",cookie).Code==401,"停止后仍可读取");
+                }
+                using(ToolsService restarted=new ToolsService(0,true,profile))Assert(restarted.RemoteClipboardRead,"重启丢失读取开关");
+            });
+            run("剪贴板：真实WinForms STA读写、换行、长文本拒绝与本机提示", () => {
+                IDataObject previous=Clipboard.GetDataObject();
+                try
+                {
+                    using(ToolsWindow window=new ToolsWindow(-1,true))
+                    {
+                        ToolsService server=(ToolsService)typeof(ToolsWindow).GetField("service",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic).GetValue(window);
+                        server.ConfirmRemoteDevice=address=>1;server.AllowRemote();server.SetRemoteClipboardRead(true);string cookie=Login(server,"remote");
+                        Func<string,Reply> uiRequest=data=>{
+                            Task<Reply> request=Task.Run(()=>Request(server.Port,"/api/clipboard",cookie,data,data==null?"":TokenHeader(cookie)));
+                            Stopwatch watch=Stopwatch.StartNew();while(!request.IsCompleted&&watch.ElapsedMilliseconds<6000){Application.DoEvents();Thread.Sleep(5);}
+                            Assert(request.IsCompleted,"STA请求未完成");return request.Result;
+                        };
+                        Reply written=uiRequest("{\"text\":\"中文 😀\\n第二行\"}");Assert(written.Code==200,"STA写入失败 "+Encoding.UTF8.GetString(written.Body));
+                        Assert(Clipboard.GetText()=="中文 😀\r\n第二行","未保留Unicode或规整CRLF");
+                        Assert((string)uiRequest(null).Json()["text"]=="中文 😀\r\n第二行","STA读取失败");
+                        Form banner=(Form)typeof(ToolsWindow).GetField("banner",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic).GetValue(window);
+                        Assert(banner!=null&&Descendants(banner).OfType<Label>().Any(label=>label.Text=="控制端已读取本机剪贴板"),"缺少本机可见提示");
+                        Clipboard.SetText(new string('x',4001));Assert(uiRequest(null).Code==409,"长剪贴板应明确拒绝");
+                        server.StopRemote();
+                    }
+                }
+                finally{if(previous==null)Clipboard.Clear();else Clipboard.SetDataObject(previous,true);}
+            });
             run("范围解析：首段、尾段、超界、空文件、超过 2 GiB", () => {
                 Assert(ToolsHttp.Range("bytes=10-19", 100).SequenceEqual(new long[] { 10, 19 }), "首段");
                 Assert(ToolsHttp.Range("bytes=-10", 100).SequenceEqual(new long[] { 90, 99 }), "尾段");
@@ -411,7 +523,7 @@ namespace FeiqLight.Tests
             {
                 service.Share(Path.Combine(root, "shared")); service.ConfirmRemote = address => true;
                 service.Capture = display => { using (Bitmap bitmap = new Bitmap(1200, 720)) using (Graphics g = Graphics.FromImage(bitmap)) using (MemoryStream output = new MemoryStream()) { g.Clear(Color.FromArgb(23, 33, 43)); g.DrawString("Remote input test fixture / not a live desktop", SystemFonts.DefaultFont, Brushes.White, 40, 60); bitmap.Save(output, System.Drawing.Imaging.ImageFormat.Jpeg); return output.ToArray(); } };
-                service.Displays = () => new { items = new[] { new { id = 0, name = "主屏幕 · 1200 × 720" }, new { id = 1, name = "测试副屏 · 1200 × 720" } } };
+                service.Displays = read => new { items = new[] { new { id = 0, name = "主屏幕 · 1200 × 720" }, new { id = 1, name = "测试副屏 · 1200 × 720" } } };
                 service.Input = data => File.AppendAllText(Path.Combine(root, "input-events.jsonl"), new JavaScriptSerializer().Serialize(data) + "\n", new UTF8Encoding(false)); service.AllowRemote();
                 File.WriteAllText(Path.Combine(root, "server.json"), new JavaScriptSerializer().Serialize(new { port = service.Port, share = service.ShareCode, remote = service.RemoteCode }), new UTF8Encoding(false));
                 Stopwatch clock = Stopwatch.StartNew(); while (clock.Elapsed.TotalMinutes < 15 && !File.Exists(Path.Combine(root, "stop"))) Thread.Sleep(100);
@@ -421,6 +533,7 @@ namespace FeiqLight.Tests
         {
             Assert(reply.Code == 200, "目录请求失败"); return ((System.Collections.IEnumerable)reply.Json()["items"]).Cast<Dictionary<string, object>>().ToArray();
         }
+        private static uint FrameSequence(byte[] frame) { return ((uint)frame[8]<<24)|((uint)frame[9]<<16)|((uint)frame[10]<<8)|frame[11]; }
         private static IEnumerable<Control> Descendants(Control parent)
         {
             foreach (Control child in parent.Controls) { yield return child; foreach (Control nested in Descendants(child)) yield return nested; }
@@ -499,11 +612,12 @@ namespace FeiqLight.Tests
         {
             using (Form form = new Form { Text = "飞Q隔离远控测试（不会操作其他软件）", StartPosition = FormStartPosition.CenterScreen, ClientSize = new Size(640, 400), TopMost = true })
             using (RichTextBox editor = new RichTextBox { Dock = DockStyle.Fill, Font = new Font("Microsoft YaHei UI", 16), AccessibleName = "远控测试输入框" })
+            using (RemoteDesktop remote = new RemoteDesktop())
             {
                 form.Controls.Add(editor); Exception failure = null;
                 form.Shown += async delegate {
                     try {
-                        editor.Focus(); await Task.Delay(500); RemoteDesktop remote = new RemoteDesktop();
+                        editor.Focus(); await Task.Delay(500);
                         Assert(form.ContainsFocus && GetForegroundWindow() == form.Handle, "测试窗口不是前台窗口，已拒绝向其他软件输入");
                         Type native = typeof(RemoteDesktop).GetNestedType("NativeInput", System.Reflection.BindingFlags.NonPublic);
                         File.WriteAllText(Path.Combine(root, "desktop-layout.txt"), "size=" + System.Runtime.InteropServices.Marshal.SizeOf(native) + " union=" + System.Runtime.InteropServices.Marshal.OffsetOf(native, "Value"), new UTF8Encoding(false));
@@ -513,9 +627,12 @@ namespace FeiqLight.Tests
                         Assert(form.ContainsFocus && GetForegroundWindow() == form.Handle, "测试窗口失去焦点，已停止输入");
                         remote.Apply(new Dictionary<string, object> { { "type", "key" }, { "key", "selectall" } }); await Task.Delay(150);
                         Assert(editor.SelectionLength == editor.TextLength, "Ctrl+A 未到测试窗口");
+                        editor.Select(editor.TextLength,0);
+                        remote.Apply(new Dictionary<string,object>{{"type","chord"},{"key","a"},{"modifiers",new object[]{"ctrl"}}});await Task.Delay(150);
+                        Assert(editor.SelectionLength==editor.TextLength,"新chord Ctrl+A未到测试窗口");
                         byte[] frame = remote.Capture(); using (MemoryStream buffer = new MemoryStream(frame)) using (Image image = Image.FromStream(buffer)) Assert(image.Width > 0 && image.Width <= 1600, "真实桌面捕获无效");
                         using (Bitmap snapshot = new Bitmap(form.Width, form.Height)) { form.DrawToBitmap(snapshot, form.ClientRectangle); snapshot.Save(Path.Combine(root, "desktop-input.png")); }
-                        Console.WriteLine("PASS actual SendInput Chinese / multiline / emoji / Ctrl+A and desktop JPEG capture");
+                        Console.WriteLine("PASS actual SendInput Chinese / multiline / emoji / legacy and new chord Ctrl+A / desktop JPEG capture");
                     } catch (Exception e) { failure = e; }
                     finally { form.Close(); }
                 };
@@ -527,10 +644,11 @@ namespace FeiqLight.Tests
             using (Form form = new Form { Text = "飞Q隔离滚轮测试", StartPosition = FormStartPosition.CenterScreen, ClientSize = new Size(640, 400), TopMost = true })
             using (RichTextBox editor = new RichTextBox { Dock = DockStyle.Fill, Font = new Font("Microsoft YaHei UI", 16), ReadOnly = true })
             using (ToolsService service = new ToolsService(0, true))
+            using (RemoteDesktop remote = new RemoteDesktop())
             {
                 editor.Lines = Enumerable.Range(1, 200).Select(i => "远程滚轮测试 / Scroll line " + i).ToArray();
                 form.Controls.Add(editor); Exception failure = null; Point originalCursor = Cursor.Position;
-                RemoteDesktop remote = new RemoteDesktop(); service.Input = remote.Apply; service.ReleaseInput = remote.Release;
+                service.Input = remote.Apply; service.ReleaseInput = remote.Release;
                 service.ConfirmRemote = address => true; service.AllowRemote();
                 form.Shown += async delegate {
                     try {
@@ -566,22 +684,136 @@ namespace FeiqLight.Tests
                 using (ToolsWindow window = new ToolsWindow(-1, true))
                 {
                     window.ClientSize = new Size(640, 560); window.Show(); Application.DoEvents();
-                    using (Bitmap image = new Bitmap(window.Width, window.Height)) { window.DrawToBitmap(image, new Rectangle(Point.Empty, image.Size)); image.Save(Path.Combine(root, "windows-tools-" + (dark ? "dark" : "light") + ".png")); }
-                    window.ClientSize = new Size(540, 510); Application.DoEvents();
+                    using (Bitmap image = new Bitmap(window.Width, window.Height)) { window.DrawToBitmap(image, new Rectangle(Point.Empty, image.Size)); CheckWindowBorder(image); image.Save(Path.Combine(root, "windows-tools-" + (dark ? "dark" : "light") + ".png")); }
+                    window.MinimumSize = Size.Empty; window.ClientSize = new Size(540, 510); Application.DoEvents();
                     Panel body = window.Surface.Controls.OfType<Panel>().Single();
                     File.WriteAllText(Path.Combine(root, "windows-tools-layout.txt"), "client=" + body.ClientSize + " padding=" + body.Padding + " display=" + body.DisplayRectangle + "\n" + String.Join("\n", body.Controls.Cast<Control>().Select(c => c.GetType().Name + " " + c.Bounds + " margin=" + c.Margin)), new UTF8Encoding(false));
                     Assert(!body.HorizontalScroll.Visible, "共享窗口最小尺寸出现横向滚动条");
                     using (Bitmap image = new Bitmap(window.Width, window.Height)) { window.DrawToBitmap(image, new Rectangle(Point.Empty, image.Size)); image.Save(Path.Combine(root, "windows-tools-minimum-" + (dark ? "dark" : "light") + ".png")); }
+                    ToolsService service=(ToolsService)typeof(ToolsWindow).GetField("service",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic).GetValue(window);
+                    service.Share(root);typeof(ToolsWindow).GetMethod("UpdateState",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic).Invoke(window,null);Application.DoEvents();
+                    foreach(string field in new[]{"codeCaption","shareCode"})
+                    {
+                        Label label=(Label)typeof(ToolsWindow).GetField(field,System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic).GetValue(window);
+                        using(Graphics graphics=label.CreateGraphics())
+                        {
+                            Size required=TextRenderer.MeasureText(graphics,label.Text,label.Font,Size.Empty,TextFormatFlags.SingleLine|TextFormatFlags.NoPrefix);
+                            Assert(label.ClientSize.Height>=required.Height+label.Padding.Vertical&&label.ClientSize.Width>=required.Width,"连接码文字被裁切 "+field+" actual="+label.ClientSize+" required="+required);
+                        }
+                    }
+                    using(Bitmap image=new Bitmap(window.Width,window.Height)){window.DrawToBitmap(image,new Rectangle(Point.Empty,image.Size));image.Save(Path.Combine(root,"windows-tools-active-minimum-"+(dark?"dark":"light")+".png"));}
                     window.Close();
                 }
                 using (RemoteBanner banner = new RemoteBanner("192.168.100.123", () => { }))
                 {
                     banner.Show(); Application.DoEvents();
-                    using (Bitmap image = new Bitmap(banner.Width, banner.Height)) { banner.DrawToBitmap(image, new Rectangle(Point.Empty, image.Size)); image.Save(Path.Combine(root, "windows-banner-" + (dark ? "dark" : "light") + ".png")); }
+                    using (Bitmap image = new Bitmap(banner.Width, banner.Height)) { banner.DrawToBitmap(image, new Rectangle(Point.Empty, image.Size)); CheckWindowBorder(image); image.Save(Path.Combine(root, "windows-banner-" + (dark ? "dark" : "light") + ".png")); }
                     banner.Close();
                 }
             }
             Console.WriteLine("PASS Windows tools light/dark and minimum-size rendering");
+        }
+        private static void CheckWindowBorder(Bitmap image)
+        {
+            for(int x=0;x<image.Width;x++)Assert(image.GetPixel(x,0).ToArgb()==Color.Black.ToArgb()&&image.GetPixel(x,image.Height-1).ToArgb()==Color.Black.ToArgb(),"上下边框不是完整黑色实线");
+            for(int y=0;y<image.Height;y++)Assert(image.GetPixel(0,y).ToArgb()==Color.Black.ToArgb()&&image.GetPixel(image.Width-1,y).ToArgb()==Color.Black.ToArgb(),"左右边框不是完整黑色实线");
+            Assert(image.GetPixel(1,image.Height/2).ToArgb()!=Color.Black.ToArgb()&&image.GetPixel(image.Width-2,image.Height/2).ToArgb()!=Color.Black.ToArgb(),"边框超过1px");
+        }
+        private static void RenderShadow(string root)
+        {
+            using(Form backdrop=new Form{Text="飞Q窗口阴影验证",FormBorderStyle=FormBorderStyle.None,StartPosition=FormStartPosition.CenterScreen,ClientSize=new Size(900,620),BackColor=Color.FromArgb(235,235,235),TopMost=true})
+            {
+                Exception failure=null;
+                backdrop.Shown+=async delegate{
+                    try{
+                        foreach(bool dark in new[]{false,true}){
+                            Theme.Configure(dark,"blue");
+                            using(ModernWindow window=new ModernWindow{Text="窗口边框与阴影",StartPosition=FormStartPosition.Manual,ClientSize=new Size(450,320),TopMost=true})
+                            using(RemoteBanner banner=new RemoteBanner("隔离测试设备",()=>{})){
+                                window.Location=backdrop.PointToScreen(new Point(60,60));window.Show(backdrop);
+                                banner.Location=backdrop.PointToScreen(new Point(470,440));banner.Show(backdrop);await Task.Delay(400);
+                                foreach(Point point in new[]{new Point(10,10),new Point(890,10),new Point(10,610),new Point(890,610),new Point(300,250),new Point(600,480)}){
+                                    uint process;GetWindowThreadProcessId(WindowFromPoint(backdrop.PointToScreen(point)),out process);
+                                    Assert(process==(uint)Process.GetCurrentProcess().Id,"隔离测试画面被其他程序遮挡，未采集桌面");
+                                }
+                                using(Bitmap capture=new Bitmap(backdrop.ClientSize.Width,backdrop.ClientSize.Height)){
+                                    using(Graphics graphics=Graphics.FromImage(capture))graphics.CopyFromScreen(backdrop.PointToScreen(Point.Empty),Point.Empty,backdrop.ClientSize);
+                                    capture.Save(Path.Combine(root,"window-shadow-"+(dark?"dark":"light")+".png"));
+                                }
+                            }
+                        }
+                        Console.WriteLine("PASS 系统合成阴影实际桌面截图");
+                    }catch(Exception error){failure=error;}finally{backdrop.Close();}
+                };
+                Application.Run(backdrop);if(failure!=null){Console.WriteLine("FAIL shadow: "+failure);Environment.ExitCode=1;}
+            }
+        }
+        private static void Benchmark(string root, string previousExecutable)
+        {
+            AppDomain.MonitoringIsEnabled=true;
+            var oldType=System.Reflection.Assembly.LoadFile(previousExecutable).GetType("FeiqLight.RemoteDesktop",true);
+            object oldDesktop=Activator.CreateInstance(oldType,true);
+            var oldCapture=oldType.GetMethod("Capture",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic);
+            List<object> results=new List<object>();int phase=0,tick=0;
+            using(Form surface=new Form{Text="飞Q远控性能验证（隔离测试画面）",FormBorderStyle=FormBorderStyle.None,StartPosition=FormStartPosition.Manual,Bounds=Screen.PrimaryScreen.Bounds,TopMost=true})
+            using(System.Windows.Forms.Timer animation=new System.Windows.Forms.Timer{Interval=100})
+            {
+                surface.Paint+=delegate(object sender,PaintEventArgs e){
+                    e.Graphics.Clear(phase==2&&tick%2==1?Color.DarkSlateBlue:Color.FromArgb(22,36,50));
+                    e.Graphics.DrawString("飞Q远控性能验证 / 仅捕获本测试画面",SystemFonts.CaptionFont,Brushes.White,40,40);
+                    e.Graphics.DrawString(phase==0?"静止画面":phase==1?"局部变化":"整屏变化",SystemFonts.DefaultFont,Brushes.White,40,72);
+                    if(phase==1)e.Graphics.FillRectangle(Brushes.CornflowerBlue,120+(tick%20)*5,140,40,40);
+                };
+                animation.Tick+=delegate{if(phase!=0){tick++;surface.Invalidate();}};
+                Exception failure=null;
+                surface.Shown+=async delegate{
+                    try
+                    {
+                        animation.Start();await Task.Delay(300);
+                        for(phase=0;phase<3;phase++)
+                        {
+                            tick=0;surface.Invalidate();await Task.Delay(150);
+                            foreach(bool delta in new[]{false,true})
+                            {
+                                using(RemoteDesktop desktop=new RemoteDesktop())
+                                using(ToolsService server=new ToolsService(0,true))
+                                {
+                                    int captures=0;long captureTicks=0,captureAllocated=0;
+                                    server.Capture=display=>{
+                                        long memory=AppDomain.CurrentDomain.MonitoringTotalAllocatedMemorySize;Stopwatch captureClock=Stopwatch.StartNew();
+                                        byte[] bytes=(byte[])oldCapture.Invoke(oldDesktop,new object[]{display});
+                                        captureTicks+=captureClock.ElapsedTicks;captureAllocated+=AppDomain.CurrentDomain.MonitoringTotalAllocatedMemorySize-memory;captures++;return bytes;
+                                    };
+                                    server.CaptureDelta=(display,since)=>{
+                                        long memory=AppDomain.CurrentDomain.MonitoringTotalAllocatedMemorySize;Stopwatch captureClock=Stopwatch.StartNew();byte[] bytes=desktop.CaptureDelta(display,since);
+                                        captureTicks+=captureClock.ElapsedTicks;captureAllocated+=AppDomain.CurrentDomain.MonitoringTotalAllocatedMemorySize-memory;captures++;return bytes;
+                                    };
+                                    server.ConfirmRemote=address=>true;server.AllowRemote();string cookie=await Task.Run(()=>Login(server,"remote"));
+                                    // 首次分配两份像素数组是常驻缓存，热路径测量单独预热后计数。
+                                    Reply warmup=await Task.Run(()=>Request(server.Port,delta?"/api/screen?display=0&delta=1&since=0":"/api/screen?display=0",cookie));
+                                    Assert(warmup.Code==200,"性能预热失败");captures=0;captureTicks=0;captureAllocated=0;
+                                    Stopwatch duration=Stopwatch.StartNew();uint seq=delta?FrameSequence(warmup.Body):0;int requests=0,updates=0,full=0,tiles=0;long bytesTotal=0;
+                                    while(duration.ElapsedMilliseconds<10000)
+                                    {
+                                        Reply reply=await Task.Run(()=>Request(server.Port,delta?"/api/screen?display=0&delta=1&since="+seq:"/api/screen?display=0",cookie));
+                                        Assert(reply.Code==200,"性能回环请求失败");requests++;bytesTotal+=reply.Body.Length+Encoding.ASCII.GetByteCount(reply.Headers)+4;
+                                        if(delta){seq=FrameSequence(reply.Body);if(reply.Body[4]!=0)updates++;if(reply.Body[4]==1)full++;if(reply.Body[4]==2)tiles++;}
+                                        else{updates++;full++;}
+                                        await Task.Delay(delta?16:250);
+                                    }
+                                    var sample=new{scenario=phase==0?"static":phase==1?"local":"full",mode=delta?"FQF1":"old-JPEG",seconds=duration.Elapsed.TotalSeconds,requests,bytesTotal,updates,fps=updates/duration.Elapsed.TotalSeconds,full,tiles,captures,averageCaptureMs=captureTicks*1000.0/Stopwatch.Frequency/captures,managedAllocatedBytes=captureAllocated};
+                                    results.Add(sample);Console.WriteLine(new JavaScriptSerializer().Serialize(sample));
+                                }
+                            }
+                        }
+                    }
+                    catch(Exception error){failure=error;}
+                    finally{animation.Stop();surface.Close();}
+                };
+                Application.Run(surface);
+                File.WriteAllText(Path.Combine(root,"performance.json"),new JavaScriptSerializer().Serialize(results),new UTF8Encoding(false));
+                if(failure!=null){Console.WriteLine("FAIL benchmark: "+failure);Environment.ExitCode=1;}
+            }
         }
     }
 }

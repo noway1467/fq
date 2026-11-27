@@ -11,6 +11,13 @@ namespace FeiqLight
 {
     public sealed class AppSettings
     {
+        public const int DefaultGuestLifetimeMinutes = 60, MaxGuestLifetimeMinutes = 1440;
+        private int guestLifetimeMinutes = DefaultGuestLifetimeMinutes;
+        public int GuestLifetimeMinutes
+        {
+            get { return guestLifetimeMinutes; }
+            set { guestLifetimeMinutes = value >= 1 && value <= MaxGuestLifetimeMinutes ? value : DefaultGuestLifetimeMinutes; }
+        }
         public string DeviceId { get; set; }
         public string Avatar { get; set; }
         public string Nickname { get; set; }

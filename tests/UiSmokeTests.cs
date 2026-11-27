@@ -163,7 +163,7 @@ namespace FeiqLight.Tests
                     openMenu(); ToolStripDropDown menu = OpenMenu(); timer.Start();
                     if (keyboard) { menu.Items.Cast<ToolStripItem>().Single(i => i.Text == item).Select(); MenuKey(menu, Keys.Enter); }
                     else ClickMenu(menu, item);
-                    Application.DoEvents(); if (asynchronous != null) throw asynchronous; Check(shown, "菜单没有打开目标对话框：" + item);
+                    Application.DoEvents(); if (asynchronous != null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(asynchronous).Throw(); Check(shown, "菜单没有打开目标对话框：" + item);
                 }
                 // .NET Framework 的 add_ThreadException 替换而非叠加处理器；移除局部处理后恢复全局失败捕获。
                 finally { timer.Stop(); Application.ThreadException -= handler; SelfTests.InstallUiExceptionHandler(); }

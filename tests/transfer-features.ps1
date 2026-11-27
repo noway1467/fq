@@ -1,4 +1,4 @@
-param([switch]$Server,[string]$TemporaryDirectory,[string]$OutputDirectory,[ValidateSet('sources','source-layout','source-location','active-actions','settings-cleanup','ui-corrections')][string]$Case)
+param([switch]$Server,[string]$TemporaryDirectory,[string]$OutputDirectory,[ValidateSet('sources','source-layout','source-location','active-actions','settings-cleanup','ui-corrections','guest-quota')][string]$Case)
 $ErrorActionPreference='Stop'
 $root=Split-Path -Parent $PSScriptRoot
 $temporary=if($TemporaryDirectory){[IO.Path]::GetFullPath($TemporaryDirectory)}else{Join-Path $root 'build/tmp/transfer-features'}

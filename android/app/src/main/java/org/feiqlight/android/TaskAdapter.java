@@ -61,7 +61,7 @@ final class TaskAdapter extends BaseAdapter {
         };
         sourceBar.setPadding(host.dp(12),0,host.dp(12),0);
         sourceItems.setGravity(Gravity.TOP);
-        sourceItems.setPadding(0,host.dp(4),0,host.dp(4));
+        sourceItems.setPadding(0,host.dp(2),0,0);
         sourceScroll.setHorizontalScrollBarEnabled(false);
         sourceScroll.setContentDescription("传输来源");
         sourceScroll.addView(sourceItems);
@@ -135,7 +135,7 @@ final class TaskAdapter extends BaseAdapter {
             boolean chosen=item.key.equals(selectedSource);
             LinearLayout pick=host.column();
             pick.setGravity(Gravity.CENTER_HORIZONTAL);
-            pick.setPadding(host.dp(2),host.dp(2),host.dp(2),host.dp(4));
+            pick.setPadding(host.dp(2),0,host.dp(2),0);
             pick.setTag("task-source:"+item.key);
             pick.setSelected(chosen);
             pick.setFocusable(true);
@@ -162,7 +162,8 @@ final class TaskAdapter extends BaseAdapter {
             name.setSingleLine();
             name.setEllipsize(TextUtils.TruncateAt.END);
             name.setGravity(Gravity.CENTER);
-            name.setPadding(0,host.dp(4),0,0);
+            name.setIncludeFontPadding(false);
+            name.setPadding(0,host.dp(1),0,0);
             name.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
             pick.addView(name,new LinearLayout.LayoutParams(-1,-2));
             sourceItems.addView(pick,new LinearLayout.LayoutParams(host.dp(68),-2));

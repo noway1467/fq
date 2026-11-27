@@ -227,7 +227,7 @@ namespace FeiqLight
         private readonly Font monoFont = new Font("Consolas", 9.5F);
         private readonly Panel headerStrip = new BufferedCanvas();
         private readonly StatusChip statusChip = new StatusChip();
-        private readonly Label headerHint = Theme.Label("浏览器扫码或打开链接即可收发 · 15 分钟有效 · HTTP 明文仅限可信局域网", Theme.Small, Theme.Muted);
+        private readonly Label headerHint = Theme.Label("浏览器扫码或打开链接即可收发 · HTTP 明文仅限可信局域网", Theme.Small, Theme.Muted);
         private readonly Panel workspace = new BufferedCanvas();
         private readonly RoundedPanel filesPane = new RoundedPanel { Radius = 12, Border = Color.Empty };
         private readonly Panel filesHeader = new BufferedCanvas();
@@ -241,9 +241,12 @@ namespace FeiqLight
         private readonly Label linkCaption = Theme.Label("访问链接 · HTTP 局域网直连", Theme.Small, Theme.Muted);
         private readonly RoundedPanel linkFieldWrap = new RoundedPanel { Radius = 8, Border = Color.Empty };
         private readonly TextBox linkBox = new TextBox { ReadOnly = true, BorderStyle = BorderStyle.None };
-        private readonly ToggleSwitch upload = new ToggleSwitch { Text = "允许对方向我发送文件", AccessibleName = "允许浏览器上传", Description = "保存至接收目录 · 限 100 个文件 / 10 GiB", Checked = false };
+        private readonly ToggleSwitch upload = new ToggleSwitch { Text = "允许对方向我发送文件", AccessibleName = "允许浏览器上传", Description = "保存至接收目录 · 限 1000 个文件 / 100 GiB", Checked = false };
         private readonly Label netTitle = Theme.Label("局域网地址", Theme.Section, Theme.Ink);
         private readonly AddressPicker addressPicker;
+        private readonly Label lifetimeTitle = Theme.Label("链接有效期（分钟，1–1440）", Theme.Small, Theme.Muted);
+        private readonly TextBox lifetime = new TextBox { MaxLength = 8, AccessibleName = "链接有效期（分钟）" };
+        private readonly Button saveLifetime;
         private readonly Panel footerBar = new BufferedCanvas();
         private readonly Label state = Theme.Label("就绪", Theme.Small, Theme.Muted);
         private readonly Button choose, removeBtn, clearBtn, refreshIp, copy, qr, openTasks, start;
@@ -264,6 +267,12 @@ namespace FeiqLight
         {
             this.main = main;
             this.network = network;
+            lifetime.Text = network.Settings.GuestLifetimeMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            saveLifetime = Theme.Button("保存有效期", delegate {
+                try { SaveLifetime(); SetState("有效期已保存，下次开启时使用；重启不会恢复旧链接", false); }
+                catch (Exception error) { SetState(error.Message, true); lifetime.Focus(); }
+            }, false);
+            tips.SetToolTip(lifetime, "默认 60 分钟，最多 24 小时。只保存时长，不恢复旧链接。");
             Text = "临时浏览器传输";
             ClientSize = new Size(920, 620);
             MinimumSize = new Size(680, 580);
@@ -351,6 +360,9 @@ namespace FeiqLight
             inspectorPane.Controls.Add(netTitle);
             inspectorPane.Controls.Add(addressPicker);
             inspectorPane.Controls.Add(refreshIp);
+            inspectorPane.Controls.Add(lifetimeTitle);
+            inspectorPane.Controls.Add(lifetime);
+            inspectorPane.Controls.Add(saveLifetime);
 
             workspace.Controls.Add(filesPane);
             workspace.Controls.Add(inspectorPane);
@@ -464,7 +476,7 @@ namespace FeiqLight
                     int leftColW = Math.Max(180, (w - outer * 2 - gap) / 2);
                     int toggleH = upload.PreferredHeightFor(leftColW);
                     int pickerH = (int)Math.Round(34 * s);
-                    int settingsNeeded = (int)Math.Round(2 * s) + toggleH + (int)Math.Round(10 * s) + netTitle.PreferredHeight + (int)Math.Round(6 * s) + pickerH + (int)Math.Round(4 * s);
+                    int settingsNeeded = (int)Math.Round(2 * s) + toggleH + (int)Math.Round(10 * s) + netTitle.PreferredHeight + (int)Math.Round(6 * s) + pickerH + (int)Math.Round(76 * s);
                     int fieldH = Math.Max((int)Math.Round(36 * s), linkBox.PreferredHeight + (int)Math.Round(14 * s));
                     int linkNeeded = (int)Math.Round(12 * s) + (int)Math.Round(20 * s) + (int)Math.Round(8 * s) + fieldH + (int)Math.Round(10 * s) + (int)Math.Round(34 * s) + (int)Math.Round(14 * s);
                     int inspH = Math.Min(Math.Max(110, wsH - (int)Math.Round(120 * s)), Math.Max(settingsNeeded, linkNeeded));
@@ -526,17 +538,18 @@ namespace FeiqLight
         {
             LayoutLinkCard(0, 0, pw, s);
 
-            int toggleTop = linkBlock.Bottom + (int)Math.Round(18 * s);
+            int toggleTop = linkBlock.Bottom + (int)Math.Round(10 * s);
             int toggleH = upload.PreferredHeightFor(pw);
             upload.Bounds = new Rectangle(0, toggleTop, pw, toggleH);
 
-            int netTop = upload.Bottom + (int)Math.Round(14 * s);
+            int netTop = upload.Bottom + (int)Math.Round(8 * s);
             netTitle.Bounds = new Rectangle(0, netTop, pw, netTitle.PreferredHeight);
             int pickerH = (int)Math.Round(36 * s);
             int refreshSize = pickerH;
             int pickerTop = netTitle.Bottom + (int)Math.Round(8 * s);
             refreshIp.Bounds = new Rectangle(pw - refreshSize, pickerTop, refreshSize, refreshSize);
             addressPicker.Bounds = new Rectangle(0, pickerTop, Math.Max(80, pw - refreshSize - (int)Math.Round(8 * s)), pickerH);
+            LayoutLifetime(pw, addressPicker.Bottom, s);
         }
 
         private void LayoutInspectorHorizontal(int pw, int ph, float s)
@@ -558,6 +571,27 @@ namespace FeiqLight
             addressPicker.Bounds = new Rectangle(0, pickerTop, Math.Max(80, leftW - refreshSize - (int)Math.Round(8 * s)), pickerH);
 
             LayoutLinkCard(rightX, 0, rightW, s);
+            int lifetimeTop = Math.Max(addressPicker.Bottom, linkBlock.Bottom) + (int)(8 * s);
+            int buttonWidth = (int)(110 * s), inputWidth = (int)(72 * s), inputGap = (int)(10 * s);
+            saveLifetime.Bounds = new Rectangle(pw - buttonWidth, lifetimeTop, buttonWidth, (int)(32 * s));
+            lifetime.Bounds = new Rectangle(saveLifetime.Left - inputGap - inputWidth, lifetimeTop + (int)(3 * s), inputWidth, lifetime.PreferredHeight);
+            lifetimeTitle.Bounds = new Rectangle(0, lifetimeTop + (int)(5 * s), lifetime.Left - inputGap, (int)(24 * s));
+        }
+
+        private void LayoutLifetime(int width, int top, float scale)
+        {
+            lifetimeTitle.Bounds = new Rectangle(0, top + (int)(6 * scale), width, (int)(20 * scale));
+            int buttonWidth = (int)(110 * scale), gap = (int)(10 * scale);
+            saveLifetime.Bounds = new Rectangle(width - buttonWidth, lifetimeTitle.Bottom + (int)(2 * scale), buttonWidth, (int)(32 * scale));
+            lifetime.Bounds = new Rectangle(0, saveLifetime.Top + (int)(3 * scale), Math.Max(40, width - buttonWidth - gap), lifetime.PreferredHeight);
+        }
+
+        private void SaveLifetime()
+        {
+            int minutes;
+            if (!Int32.TryParse(lifetime.Text.Trim(), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out minutes) || minutes < 1 || minutes > AppSettings.MaxGuestLifetimeMinutes)
+                throw new ArgumentException("请输入 1–1440 的整数分钟数（最多 24 小时）。");
+            main.SaveGuestLifetime(minutes);
         }
 
         private static void StyleToolbarIcon(Button button, bool accentTonal)
@@ -618,6 +652,11 @@ namespace FeiqLight
             upload.BackColor = Theme.Canvas;
             netTitle.BackColor = Theme.Canvas;
             netTitle.ForeColor = Theme.Ink;
+            lifetimeTitle.BackColor = Theme.Canvas;
+            lifetimeTitle.ForeColor = Theme.Muted;
+            lifetime.BackColor = Theme.Surface;
+            lifetime.ForeColor = Theme.Ink;
+            StyleActionButton(saveLifetime, 0, 8);
 
             linkBlock.BackColor = Theme.Canvas;
             linkBlock.Fill = Theme.Surface;
@@ -904,7 +943,8 @@ namespace FeiqLight
             {
                 ReloadAddresses();
                 if (addressPicker.SelectedItem == null) throw new IOException("没有可用的局域网，请先连接 Wi-Fi、热点或以太网。");
-                session = new GuestTransfer(files.Items.Cast<ShareEntry>().Select(e => e.FullPath), network.Settings.ReceiveFolder, upload.Checked, network.LoopbackOnly);
+                SaveLifetime();
+                session = new GuestTransfer(files.Items.Cast<ShareEntry>().Select(e => e.FullPath), network.Settings.ReceiveFolder, upload.Checked, network.LoopbackOnly, network.Settings.GuestLifetimeMinutes);
                 session.Received = (path, name) => main.Ui(() =>
                 {
                     if (!IsDisposed) hasReceivedFiles = true;
@@ -943,6 +983,7 @@ namespace FeiqLight
             removeBtn.Enabled = !active && files.SelectedIndex >= 0;
             clearBtn.Enabled = !active && count > 0;
             upload.Enabled = !active;
+            lifetime.Enabled = saveLifetime.Enabled = !active;
             refreshIp.Enabled = !active;
             addressPicker.Enabled = !active;
             copy.Enabled = qr.Enabled = active;

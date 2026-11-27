@@ -19,7 +19,23 @@ final class GuestTransfer implements AutoCloseable {
         final String id,name;final long size;final File partial,target;long offset,time;boolean canceled,moved,placed,saved;String warning="";
         Upload(String name,long size,File directory){this.name=name;this.size=size;id=SharedFiles.random(32);target=new File(directory,id);partial=new File(directory,".fq-guest-"+id+".part");}
     }
-    static final long UPLOAD_QUOTA=10L*1024*1024*1024;
+    static final long UPLOAD_QUOTA=100L*1024*1024*1024;
+    static final int UPLOAD_FILE_LIMIT=1000, UPLOAD_TASK_LIMIT=4096;
+    static final int DEFAULT_LIFETIME_MINUTES=60, MAX_LIFETIME_MINUTES=1440;
+    static final String LIFETIME_KEY="guest_lifetime_minutes";
+    static int lifetimeMinutes(Context context) {
+        int minutes;
+        try { minutes=context.getSharedPreferences("settings",Context.MODE_PRIVATE).getInt(LIFETIME_KEY,DEFAULT_LIFETIME_MINUTES); }
+        catch(ClassCastException e) { return DEFAULT_LIFETIME_MINUTES; }
+        return minutes>=1&&minutes<=MAX_LIFETIME_MINUTES?minutes:DEFAULT_LIFETIME_MINUTES;
+    }
+    static void saveLifetime(Context context,String value)throws IOException {
+        int minutes;
+        try { if(!value.trim().matches("[0-9]+"))throw new NumberFormatException(); minutes=Integer.parseInt(value.trim()); }
+        catch(NumberFormatException e) { throw new IllegalArgumentException("请输入 1–1440 的整数分钟数（最多 24 小时）"); }
+        if(minutes<1||minutes>MAX_LIFETIME_MINUTES)throw new IllegalArgumentException("请输入 1–1440 的整数分钟数（最多 24 小时）");
+        if(!context.getSharedPreferences("settings",Context.MODE_PRIVATE).edit().putInt(LIFETIME_KEY,minutes).commit())throw new IOException("有效期保存失败，请重试");
+    }
     private final Context context;
     private final Map<String,Download> downloads=new LinkedHashMap<>();
     private final Map<String,Upload> uploads=new LinkedHashMap<>();
@@ -31,8 +47,8 @@ final class GuestTransfer implements AutoCloseable {
     private long reserved;
     private int activeUploads;
     final String token=SharedFiles.random(32);
-    final long until=System.currentTimeMillis()+TimeUnit.MINUTES.toMillis(15);
-    private final long deadline=System.nanoTime()+TimeUnit.MINUTES.toNanos(15);
+    final long until;
+    private final long deadline;
     volatile String cleanupError="";
     Runnable received=()->{};
     java.util.function.Consumer<String> warning=text->{};
@@ -45,11 +61,15 @@ final class GuestTransfer implements AutoCloseable {
         if(sources.size()>1000)throw new IOException("单次最多 1000 个文件");
         for(LanNode.Source source:sources){if(!Protocol.safeName(source.name())||source.size()<0)throw new IOException("文件名或大小无效");Download file=new Download(source);downloads.put(file.id,file);}
         if(downloads.isEmpty()&&!allowUpload)throw new IOException("请先选择文件或开启接收");
+        int minutes=lifetimeMinutes(context);
+        until=System.currentTimeMillis()+TimeUnit.MINUTES.toMillis(minutes);
+        deadline=System.nanoTime()+TimeUnit.MINUTES.toNanos(minutes);
         http=new ToolsHttp(0,loopback,this::handle,null,loopback?null:binding,1048576);
-        expiry.schedule(this::close,15,TimeUnit.MINUTES);
+        expiry.schedule(this::close,minutes,TimeUnit.MINUTES);
     }
     int port(){return http.port();}
     boolean active(){return !closed&&System.nanoTime()<deadline;}
+    long remainingMinutes(){return Math.max(0,(long)Math.ceil((deadline-System.nanoTime())/60000000000.0));}
     String url(String address){return "http://"+address+":"+port()+"/#"+token;}
     private void check()throws ToolsHttp.Failure{if(!active())throw new ToolsHttp.Failure(410,"临时传输已结束，请让对方重新开启");}
     private void authorize(ToolsHttp.Request request)throws IOException {
@@ -66,7 +86,7 @@ final class GuestTransfer implements AutoCloseable {
         authorize(request);
         if(request.method.equals("GET")&&request.path.equals("/api/guest")) {
             JSONArray list=new JSONArray();for(Download file:downloads.values())list.put(new JSONObject().put("id",file.id).put("name",file.source.name()).put("size",file.source.size()));
-            response.json(new JSONObject().put("files",list).put("upload",allowUpload).put("until",java.time.Instant.ofEpochMilli(until).toString()).put("limit",UPLOAD_QUOTA).toString(),"");return;
+            response.json(new JSONObject().put("files",list).put("upload",allowUpload).put("until",java.time.Instant.ofEpochMilli(until).toString()).put("limit",UPLOAD_QUOTA).put("countLimit",UPLOAD_FILE_LIMIT).toString(),"");return;
         }
         if((request.method.equals("GET")||request.method.equals("HEAD"))&&request.path.equals("/file")){send(request,response);return;}
         if(!allowUpload)throw new ToolsHttp.Failure(403,"对方未开启浏览器接收");
@@ -74,8 +94,8 @@ final class GuestTransfer implements AutoCloseable {
             if(!request.header("Content-Type").startsWith("application/json"))throw new ToolsHttp.Failure(400,"请求格式错误");
             JSONObject data=new JSONObject(new String(request.body,java.nio.charset.StandardCharsets.UTF_8));String name=data.optString("name");long size=data.optLong("size",-1);Upload upload;
             if(!Protocol.safeName(name)||size<0||size>UPLOAD_QUOTA)throw new ToolsHttp.Failure(400,"文件名或大小无效");
-            synchronized(this){check();if(uploads.size()>=1024)throw new ToolsHttp.Failure(409,"本次上传任务过多，请重新开启临时传输");
-                if(activeUploads>=100||size>UPLOAD_QUOTA-reserved)throw new ToolsHttp.Failure(409,"本次接收已达 100 个文件或 10 GiB 上限，请重新开启");
+            synchronized(this){check();if(uploads.size()>=UPLOAD_TASK_LIMIT)throw new ToolsHttp.Failure(409,"本次上传任务过多，请重新开启临时传输");
+                if(activeUploads>=UPLOAD_FILE_LIMIT||size>UPLOAD_QUOTA-reserved)throw new ToolsHttp.Failure(409,"本次接收已达 1000 个文件或 100 GiB 上限，请重新开启");
                 LanNode.requireSpace(directory,size);upload=new Upload(name,size,directory);Files.createFile(upload.partial.toPath());uploads.put(upload.id,upload);reserved+=size;activeUploads++;}
             response.json(new JSONObject().put("id",upload.id).put("offset",0).toString(),"");return;
         }

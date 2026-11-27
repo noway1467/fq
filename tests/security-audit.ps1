@@ -1,13 +1,17 @@
 param(
     [ValidateSet('Windows','Android','Both')][string]$Platform = 'Both',
     [switch]$Baseline,
-    [string]$JavaHome = 'C:\Program Files\Java\jdk-17'
+    [string]$JavaHome = 'C:\Program Files\Java\jdk-17',
+    [string]$TemporaryDirectory,
+    [string]$OutputDirectory
 )
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $mode = if ($Baseline) { 'baseline' } else { 'fixed' }
-$out = Join-Path $projectRoot "build/tmp/security-audit/$mode"
-$data = Join-Path $projectRoot ('build/test-data/security-audit-' + [Guid]::NewGuid().ToString('N'))
+$out = if($TemporaryDirectory){[IO.Path]::GetFullPath($TemporaryDirectory)}else{Join-Path $projectRoot "build/tmp/security-audit/$mode"}
+if(!$out.StartsWith([IO.Path]::GetFullPath((Join-Path $projectRoot 'build/tmp')).TrimEnd('\','/')+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)){throw '临时目录必须位于项目 build/tmp 内'}
+$data = if($OutputDirectory){[IO.Path]::GetFullPath($OutputDirectory)}else{Join-Path $projectRoot ('build/test-data/security-audit-' + [Guid]::NewGuid().ToString('N'))}
+if(!$data.StartsWith([IO.Path]::GetFullPath((Join-Path $projectRoot 'build')).TrimEnd('\','/')+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)){throw '测试输出必须位于项目 build 内'}
 New-Item -ItemType Directory -Force -Path $out,$data | Out-Null
 $env:TEMP=$out; $env:TMP=$out; $env:TMPDIR=$out
 $env:JAVA_TOOL_OPTIONS='-Djava.io.tmpdir="'+$out+'"'

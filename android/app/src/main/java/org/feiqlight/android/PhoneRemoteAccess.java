@@ -14,8 +14,10 @@ final class PhoneRemoteAccess implements AutoCloseable {
     interface Backend {
         int confirm(String address) throws Exception;
         byte[] capture() throws Exception;
+        byte[] captureDelta(long since,BooleanSupplier authorized) throws Exception;
         JSONObject displays() throws Exception;
         void input(JSONObject data,BooleanSupplier authorized) throws Exception;
+        void clipboard(String text,BooleanSupplier authorized) throws Exception;
         void disconnected();
     }
     private final Context context;
@@ -91,10 +93,25 @@ final class PhoneRemoteAccess implements AutoCloseable {
             int version=authorize(request);
             if(request.path.equals("/api/logout")){synchronized(gate){if(epoch==version){token="";epoch++;}}backend.disconnected();response.json("{\"ok\":true}","");return;}
             if(request.path.equals("/api/input")){backend.input(json(request),()->current(version));if(!current(version))throw new ToolsHttp.Failure(401,"控制已停止");response.json("{\"ok\":true}","");return;}
+            if(request.path.equals("/api/clipboard")){
+                Object value=json(request).opt("text");
+                if(!(value instanceof String))throw new ToolsHttp.Failure(400,"缺少剪贴板文字");
+                String text=(String)value;
+                if(text.isEmpty()||text.length()>4000||text.indexOf('\0')>=0)throw new ToolsHttp.Failure(400,"剪贴板文字须为 1 至 4000 字，不能包含空字符");
+                try{if(StandardCharsets.UTF_8.newEncoder().encode(java.nio.CharBuffer.wrap(text)).remaining()>12000)throw new ToolsHttp.Failure(400,"剪贴板文字超过 12000 字节，请用文件传输");}
+                catch(java.nio.charset.CharacterCodingException e){throw new ToolsHttp.Failure(400,"剪贴板文字编码无效");}
+                backend.clipboard(text,()->current(version));if(!current(version))throw new ToolsHttp.Failure(401,"控制已停止");response.json("{\"ok\":true}","");return;
+            }
             throw new ToolsHttp.Failure(404,"没有此操作");
         }
-        if(request.path.equals("/api/displays")){authorize(request);response.json(backend.displays().toString(),"");return;}
-        if(request.path.equals("/api/screen")){int version=authorize(request);byte[] frame=backend.capture();if(!current(version))throw new ToolsHttp.Failure(401,"控制已停止");response.bytes(200,"image/jpeg",frame,"");return;}
+        if(request.path.equals("/api/displays")){authorize(request);response.json(backend.displays().put("clipboardWrite",true).put("clipboardRead",false).toString(),"");return;}
+        if(request.path.equals("/api/clipboard")){authorize(request);throw new ToolsHttp.Failure(403,"手机仅支持写入剪贴板，不支持远程读取");}
+        if(request.path.equals("/api/screen")){
+            int version=authorize(request);boolean delta=request.parameter("delta").equals("1");long since=0;
+            if(delta){String number=request.parameter("since");if(!number.matches("[0-9]{1,10}"))throw new ToolsHttp.Failure(400,"帧序号无效");since=Long.parseLong(number);if(since>0xffffffffL)throw new ToolsHttp.Failure(400,"帧序号无效");}
+            byte[] frame=delta?backend.captureDelta(since,()->current(version)):backend.capture();
+            if(!current(version))throw new ToolsHttp.Failure(401,"控制已停止");response.bytes(200,delta?"application/octet-stream":"image/jpeg",frame,"");return;
+        }
         if(request.path.startsWith("/api/")||request.path.equals("/file"))throw new ToolsHttp.Failure(404,"没有此操作");
         if(request.path.equals("/favicon.ico")||request.path.startsWith("/native/")){response.bytes(204,"image/x-icon",new byte[0],"");return;}
         String asset=request.path.equals("/")?"index.html":request.path.substring(1);

@@ -1880,13 +1880,14 @@ public final class MainActivity extends Activity implements ChatService.Observer
         input.setTextColor(INK);
         input.setHintTextColor(MUTED);
         input.setHint("搜索文件或设备");
-        input.setPadding(dp(14),dp(8),dp(14),dp(8));
+        input.setPadding(dp(12),dp(5),dp(12),dp(5));
         input.setBackground(shape(PALE,CONTROL_RADIUS));
-        input.setMinHeight(dp(46));
+        input.setMinHeight(dp(40));
+        input.setMinimumHeight(dp(40));
         LinearLayout.LayoutParams ip=new LinearLayout.LayoutParams(-1,-2);
-        ip.setMargins(dp(16),dp(4),dp(16),dp(8));
+        ip.setMargins(dp(16),dp(2),dp(16),dp(4));
         controls.addView(input,ip);
-        TextView count=text("正在读取传输记录…",12,MUTED);count.setPadding(dp(20),dp(8),dp(20),dp(10));
+        TextView count=text("正在读取传输记录…",12,MUTED);count.setPadding(dp(20),dp(4),dp(20),dp(6));
         TaskAdapter tasks=new TaskAdapter(this,count,input,dialog,sourceKey);
         taskAdapter=tasks;
         controls.addView(tasks.sourceBar,0);
@@ -1899,10 +1900,11 @@ public final class MainActivity extends Activity implements ChatService.Observer
             Button pick=button(names[i],false);
             pick.setMinWidth(0);
             pick.setMinimumWidth(0);
-            pick.setMinHeight(dp(44));
+            pick.setMinHeight(dp(36));
+            pick.setMinimumHeight(dp(36));
             pick.setSingleLine();
             pick.setEllipsize(TextUtils.TruncateAt.END);
-            pick.setPadding(0,dp(8),0,dp(8));
+            pick.setPadding(0,dp(4),0,dp(4));
             filters.addView(pick,new LinearLayout.LayoutParams(0,-2,1));
             picks.add(pick);
             pick.setOnClickListener(v->{
@@ -2190,14 +2192,12 @@ public final class MainActivity extends Activity implements ChatService.Observer
         GradientDrawable cardBg=shape(PALE,CONTROL_RADIUS);cardBg.setStroke(dp(1),LINE);
         card.setBackground(cardBg);card.setPadding(dp(14),dp(12),dp(14),dp(12));
         LinearLayout topRow=row();
-        int leftMinutes=running?Math.max(0,(int)Math.ceil((active.until-System.currentTimeMillis())/60000.0)):0;
+        long leftMinutes=running?active.remainingMinutes():0;
         TextView badge=text(running?"开放中 · 剩余约 "+leftMinutes+" 分钟":"未开启",12,running?ONLINE:MUTED);
         badge.setTypeface(null,Typeface.BOLD);
         badge.setPadding(dp(10),dp(4),dp(10),dp(4));
         badge.setBackground(shape(blend(running?ONLINE:MUTED,SURFACE,DARK?.28f:.14f),99));
         topRow.addView(badge);
-        TextView safeNote=text("HTTP 明文 · 15 分钟有效",11,MUTED);safeNote.setGravity(Gravity.END|Gravity.CENTER_VERTICAL);
-        LinearLayout.LayoutParams safeParams=weight();safeParams.leftMargin=dp(8);topRow.addView(safeNote,safeParams);
         card.addView(topRow);
         if(running) {
             List<String> addresses=new ArrayList<>();
@@ -2246,6 +2246,24 @@ public final class MainActivity extends Activity implements ChatService.Observer
             Dialog dialog=sheet("临时浏览器传输",box,null,null);
             fileAction(box,dialog,"查看已接收文件",()->showTasks("guest"));
             fileAction(box,dialog,"结束临时传输",()->{source.stopGuest();error("临时传输已结束，完整文件保留");});
+            Handler countdownHandler=new Handler(Looper.getMainLooper());
+            Runnable countdown=new Runnable() {
+                @Override public void run() {
+                    if(!dialog.isShowing()||isDestroyed())return;
+                    if(source.guestTransfer()!=active||!active.active()) {
+                        dialog.dismiss();
+                        error("本次临时传输已结束，请重新开启生成新链接");
+                        return;
+                    }
+                    badge.setText(String.format(Locale.ROOT,"开放中 · 剩余约 %d 分钟",active.remainingMinutes()));
+                    countdownHandler.postDelayed(this,1000);
+                }
+            };
+            countdownHandler.postDelayed(countdown,1000);
+            badge.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
+                @Override public void onViewAttachedToWindow(View view) { }
+                @Override public void onViewDetachedFromWindow(View view) { countdownHandler.removeCallbacks(countdown); }
+            });
             return;
         }
         String summaryText=guestFiles.isEmpty()?"未选择分享文件（可仅开启接收）":"已选 "+guestFiles.size()+" 个文件";
@@ -2291,10 +2309,19 @@ public final class MainActivity extends Activity implements ChatService.Observer
         Switch receive=settingSwitch("允许对方向我发送文件",guestUpload);
         uploadCard.addView(receive);
         receive.setOnCheckedChangeListener((button,checked)->guestUpload=checked);
-        uploadCard.addView(text("保存至应用接收区 · 限 100 个文件 / 10 GiB",12,MUTED));
+        uploadCard.addView(text("保存至应用接收区 · 限 1000 个文件 / 100 GiB",12,MUTED));
         box.addView(uploadCard,new LinearLayout.LayoutParams(-1,-2));
 
+        EditText lifetime=formField(box,"链接有效期（分钟，1–1440）",String.valueOf(GuestTransfer.lifetimeMinutes(this)));
+        lifetime.setContentDescription("链接有效期（分钟）");
+        lifetime.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+        box.addView(text("最多 24 小时；只保存时长，重启不会恢复旧链接。",12,MUTED));
+        Button saveLifetime=button("保存有效期",false);
+        saveLifetime.setOnClickListener(v->{if(saveGuestLifetime(lifetime))error("有效期已保存，下次开启时使用");});
+        box.addView(saveLifetime,new LinearLayout.LayoutParams(-1,-2));
+
         Dialog dialog=sheet("临时浏览器传输",box,"开启临时传输",d->{
+            if(!saveGuestLifetime(lifetime))return;
             source.startGuest(new ArrayList<>(guestFiles),receive.isChecked(),success->{if(success&&!isDestroyed()&&
                     service==source){
                 d.dismiss();
@@ -2311,6 +2338,10 @@ public final class MainActivity extends Activity implements ChatService.Observer
             }catch(ActivityNotFoundException e){error("系统文件选择器不可用");}
         });
         if(clearBtn!=null)clearBtn.setOnClickListener(v->{dialog.dismiss();guestFiles.clear();showGuest();});
+    }
+    private boolean saveGuestLifetime(EditText input) {
+        try { GuestTransfer.saveLifetime(this,input.getText().toString());input.setError(null);return true; }
+        catch(IllegalArgumentException|java.io.IOException e) { input.setError(e.getMessage());input.requestFocus();return false; }
     }
     private void sharing() {
         if(service==null||!service.online()){error("请先连接局域网");return;}

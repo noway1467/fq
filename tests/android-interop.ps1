@@ -1,14 +1,17 @@
-param([string]$JavaHome = $env:JAVA_HOME, [switch]$LargeFiles, [switch]$Secure)
+param([string]$JavaHome = $env:JAVA_HOME, [switch]$LargeFiles, [switch]$Secure, [string]$TemporaryDirectory, [string]$OutputDirectory)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
-$workspaceTemp=Join-Path $root 'build\tmp'; New-Item -ItemType Directory -Force -Path $workspaceTemp | Out-Null
+$workspaceTemp=if($TemporaryDirectory){[IO.Path]::GetFullPath($TemporaryDirectory)}else{Join-Path $root 'build\tmp'}
+if($TemporaryDirectory -and !$workspaceTemp.StartsWith([IO.Path]::GetFullPath((Join-Path $root 'build/tmp')).TrimEnd('\','/')+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)){throw '临时目录必须位于项目 build/tmp 内'}
+New-Item -ItemType Directory -Force -Path $workspaceTemp | Out-Null
 $env:TEMP=$workspaceTemp;$env:TMP=$workspaceTemp;$env:TMPDIR=$workspaceTemp
 $env:JAVA_TOOL_OPTIONS='-Djava.io.tmpdir="'+$workspaceTemp+'"'
 if (!$JavaHome) { $JavaHome = 'C:\Program Files\Java\jdk-17' }
 $javac = Join-Path $JavaHome 'bin\javac.exe'
 $java = Join-Path $JavaHome 'bin\java.exe'
 if (!(Test-Path -LiteralPath $javac)) { throw '请使用 -JavaHome 指定 JDK 17 或更高版本。' }
-$out = Join-Path $root 'build\android-interop'
+$out = if($OutputDirectory){[IO.Path]::GetFullPath($OutputDirectory)}else{Join-Path $root 'build\android-interop'}
+if(!$out.StartsWith([IO.Path]::GetFullPath((Join-Path $root 'build')).TrimEnd('\','/')+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)){throw '测试输出必须位于项目 build 内'}
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 $core = @(Get-ChildItem -LiteralPath "$root\android\app\src\main\java\org\feiqlight\android\core" -Filter '*.java' | ForEach-Object FullName)
 & $javac -encoding UTF-8 -d $out @core "$PSScriptRoot\AndroidInterop.java"

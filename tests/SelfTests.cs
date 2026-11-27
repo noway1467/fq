@@ -80,6 +80,9 @@ namespace FeiqLight.Tests
             Console.OutputEncoding = Encoding.UTF8;
             // UI 消息循环异常不会沿普通 test() 调用栈抛出，必须单独计失败，不能弹窗后仍宣称通过。
             System.Windows.Forms.Application.SetUnhandledExceptionMode(System.Windows.Forms.UnhandledExceptionMode.CatchException);
+            // 本入口用 DoEvents 驱动 UI；模态窗口退出不能卸载 await 后续依赖的 STA 上下文。
+            System.Windows.Forms.WindowsFormsSynchronizationContext.AutoInstall = false;
+            SynchronizationContext.SetSynchronizationContext(new System.Windows.Forms.WindowsFormsSynchronizationContext());
             InstallUiExceptionHandler();
             // 包测试的解压路径较深，测试资料仍放工作区 build/test-data，避免测试自身叠出 MAX_PATH。
             string dataRoot=Environment.GetEnvironmentVariable("FEIQ_TEST_DATA_ROOT");
@@ -87,6 +90,7 @@ namespace FeiqLight.Tests
             root = Path.Combine(Path.GetFullPath(dataRoot), "FeiqLight-tests-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(root);
             try
             {
+                Run("双端共用协议向量核对", ProtocolVectorTests.RunAll);
                 Run("稳定设备身份：协议兼容、地址与登录变化、旧会话升级及重启", () => {
                     string id="0123456789abcdef0123456789abcdef"; Packet packet;
                     Assert(Protocol.TryParse(Protocol.Encode(1,"a","host",Protocol.Entry|Protocol.Utf8,"设备","组",id),out packet)&&packet.DeviceId==id&&packet.Extra=="组","身份扩展破坏基础字段");

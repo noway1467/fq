@@ -6,13 +6,14 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
+using System.Threading;
 using Microsoft.Win32.SafeHandles;
 
 namespace FeiqLight
 {
     internal sealed class ToolsService : IDisposable
     {
-        private sealed class Session { internal string Token, Address, Mode, Fingerprint; internal long Last; }
+        private sealed class Session { internal string Token, Address, Mode, Fingerprint; internal long Last, NextCapture; }
         private readonly object gate = new object();
         private readonly object captureGate = new object();
         private readonly Stopwatch clock = Stopwatch.StartNew();
@@ -30,7 +31,9 @@ namespace FeiqLight
         internal Func<string, bool> ConfirmRemote;
         internal Func<string, int> ConfirmRemoteDevice;
         internal Func<int, byte[]> Capture;
-        internal Func<object> Displays;
+        internal Func<int, uint, byte[]> CaptureDelta;
+        internal Func<bool, object> Displays;
+        internal Func<string, Func<bool>, string> ClipboardText;
         internal Action<Dictionary<string, object>> Input;
         internal Action ReleaseInput;
         internal int Port { get { return http.Port; } }
@@ -41,11 +44,13 @@ namespace FeiqLight
         internal bool RemoteActive { get { lock (gate) return sessions.Any(s => s.Mode == "remote" && Valid(s)); } }
         internal string RemoteAddress { get { lock (gate) { Session session = sessions.FirstOrDefault(s => s.Mode == "remote" && Valid(s)); return session == null ? "" : session.Address; } } }
         internal bool RemoteEnabled { get { lock (gate) return remoteEnabled; } }
+        internal bool RemoteClipboardRead { get { lock (gate) return preferences.Value.RemoteClipboardRead; } }
+        internal void SetRemoteClipboardRead(bool enabled) { lock (gate) preferences.SaveRemoteClipboardRead(enabled); }
         internal string SavedFolder { get { lock (gate) return preferences.Value.Folder; } }
         internal string[] SavedFolders { get { lock (gate) return preferences.Value.Folders.ToArray(); } }
         internal ToolsService(int port, bool loopback, string root = null,SecureIdentity security=null) { this.security=security;pairings = new ToolsPairings(root); preferences = new ToolsPreferences(root); http = new ToolsHttp(port, loopback, Handle,loopback?null:security);if(security!=null)security.TrustRevoked+=OnTrustRevoked; }
         private void OnTrustRevoked(string fingerprint){NetworkReset();lock(gate)pairings.ForgetFingerprint(fingerprint);}
-        internal void NetworkReset(){lock(gate){sessions.Clear();remoteEpoch++;shareEpoch++;remotePending=false;shareCode=ConnectionCode();remoteCode=ConnectionCode();shareUntil=remoteUntil=clock.ElapsedMilliseconds+600000;if(ReleaseInput!=null)ReleaseInput();}http.DisconnectClients();}
+        internal void NetworkReset(){lock(gate){sessions.Clear();Monitor.PulseAll(gate);remoteEpoch++;shareEpoch++;remotePending=false;shareCode=ConnectionCode();remoteCode=ConnectionCode();shareUntil=remoteUntil=clock.ElapsedMilliseconds+600000;if(ReleaseInput!=null)ReleaseInput();}http.DisconnectClients();}
         internal string RestoreSettings()
         {
             lock (gate)
@@ -115,7 +120,7 @@ namespace FeiqLight
         // 锁屏、注销和显示器切换只结束当前会话，不能把用户保存的开机恢复意愿改成关闭。
         internal void SuspendRemote() { lock (gate) EndRemote(); }
         internal void ResumeRemote() { lock (gate) { if (!closed && preferences.Value.RemoteEnabled && !remoteEnabled) StartRemote(false); } }
-        private void EndRemote() { remoteEpoch++; remoteEnabled = false; remotePending = false; remoteCode = ""; remoteUntil = 0; sessions.RemoveAll(s => s.Mode == "remote"); if (ReleaseInput != null) ReleaseInput(); }
+        private void EndRemote() { remoteEpoch++; remoteEnabled = false; remotePending = false; remoteCode = ""; remoteUntil = 0; sessions.RemoveAll(s => s.Mode == "remote"); Monitor.PulseAll(gate); if (ReleaseInput != null) ReleaseInput(); }
         internal void ForgetPairings() { lock (gate) { pairings.Clear(); shareEpoch++; StopRemote(); sessions.Clear(); } }
         private string Scope(string mode)
         {
@@ -190,6 +195,26 @@ namespace FeiqLight
         {
             object value; if (data == null || !data.TryGetValue(key, out value) || !(value is string)) throw new ToolsHttp.HttpError(400, "缺少请求字段"); return (string)value;
         }
+        internal static string ValidateClipboardText(string text, bool allowEmpty = false)
+        {
+            if ((!allowEmpty && text.Length == 0) || text.Length > 4000 || text.IndexOf('\0') >= 0) throw new ToolsHttp.HttpError(400, "剪贴板文字须为 1 至 4000 字，不能包含空字符");
+            try { if (new UTF8Encoding(false, true).GetByteCount(text) > 12000) throw new ToolsHttp.HttpError(400, "剪贴板文字超过 12000 字节，请用文件传输"); }
+            catch (EncoderFallbackException) { throw new ToolsHttp.HttpError(400, "剪贴板文字编码无效"); }
+            return text;
+        }
+        private void WaitForFrame(Session session, int milliseconds)
+        {
+            long until = clock.ElapsedMilliseconds + milliseconds;
+            lock (gate)
+            {
+                while (true)
+                {
+                    if (!Valid(session)) throw new ToolsHttp.HttpError(401, "控制已停止");
+                    int left = (int)(until - clock.ElapsedMilliseconds); if (left <= 0) return;
+                    Monitor.Wait(gate, left);
+                }
+            }
+        }
         private void Handle(ToolsHttp.Request request, ToolsHttp.Response response)
         {
             if (request.Method != "GET" && request.Method != "HEAD" && request.Method != "POST") throw new ToolsHttp.HttpError(405, "不支持此操作");
@@ -208,7 +233,7 @@ namespace FeiqLight
             if (request.Method == "POST" && request.Path == "/api/logout")
             {
                 string mode = Text(request.Json(), "mode"); if (mode != "share" && mode != "remote") throw new ToolsHttp.HttpError(400, "无效类型");
-                Session session = Authorize(request, mode); lock (gate) { sessions.Remove(session); if (mode == "remote" && ReleaseInput != null) ReleaseInput(); } response.Json(new { ok = true }); return;
+                Session session = Authorize(request, mode); lock (gate) { sessions.Remove(session); Monitor.PulseAll(gate); if (mode == "remote" && ReleaseInput != null) ReleaseInput(); } response.Json(new { ok = true }); return;
             }
             if (request.Path == "/api/input" && request.Method == "POST")
             {
@@ -216,10 +241,27 @@ namespace FeiqLight
                 lock (gate) { if (!Valid(session)) throw new ToolsHttp.HttpError(401, "控制已停止"); if (Input == null) throw new ToolsHttp.HttpError(503, "控制不可用"); Input(data); }
                 response.Json(new { ok = true }); return;
             }
+            if (request.Path == "/api/clipboard" && (request.Method == "GET" || request.Method == "POST"))
+            {
+                Session session = Authorize(request, "remote"); bool read = request.Method == "GET";
+                if (read && !RemoteClipboardRead) throw new ToolsHttp.HttpError(403, "对方未开启远控读取剪贴板");
+                if (ClipboardText == null) throw new ToolsHttp.HttpError(503, "剪贴板不可用");
+                string text = read ? null : ValidateClipboardText(Text(request.Json(), "text"));
+                // UI Invoke 期间不持有 gate；UI 定时刷新与停止操作也需要该锁。
+                string result = ClipboardText(text, () => { lock (gate) return Valid(session) && (!read || preferences.Value.RemoteClipboardRead); });
+                lock (gate)
+                {
+                    if (!Valid(session)) throw new ToolsHttp.HttpError(401, "控制已停止");
+                    if (read && !preferences.Value.RemoteClipboardRead) throw new ToolsHttp.HttpError(403, "对方未开启远控读取剪贴板");
+                }
+                if (read) response.Json(new { text = result, empty = result.Length == 0 });
+                else response.Json(new { ok = true });
+                return;
+            }
             if (request.Method == "POST") throw new ToolsHttp.HttpError(404, "没有此操作");
             if (request.Path == "/api/displays")
             {
-                Authorize(request, "remote"); if (Displays == null) throw new ToolsHttp.HttpError(503, "屏幕列表不可用"); response.Json(Displays()); return;
+                Authorize(request, "remote"); if (Displays == null) throw new ToolsHttp.HttpError(503, "屏幕列表不可用"); response.Json(Displays(RemoteClipboardRead)); return;
             }
             if (request.Path == "/api/screen")
             {
@@ -227,14 +269,29 @@ namespace FeiqLight
                 int display; string selected = request.Parameter("display");
                 if (selected.Length == 0) display = 0;
                 else if (!Int32.TryParse(selected, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out display)) throw new ToolsHttp.HttpError(400, "屏幕编号无效");
+                bool delta = request.Parameter("delta") == "1" && CaptureDelta != null;
+                uint since = 0;
+                if (delta && !UInt32.TryParse(request.Parameter("since"), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out since)) throw new ToolsHttp.HttpError(400, "帧序号无效");
                 // JPEG 编码不能占用共享授权锁，否则同时播放的视频每段读取都要等截图。
                 lock (captureGate)
                 {
-                    lock (gate) { if (!Valid(session) || Capture == null) throw new ToolsHttp.HttpError(401, "控制已停止"); }
-                    frame = Capture(display);
+                    lock (gate) { if (!Valid(session) || (!delta && Capture == null)) throw new ToolsHttp.HttpError(401, "控制已停止"); }
+                    if (delta)
+                    {
+                        WaitForFrame(session, (int)Math.Max(0, session.NextCapture - clock.ElapsedMilliseconds));
+                        session.NextCapture = clock.ElapsedMilliseconds + 80;
+                        frame = CaptureDelta(display, since);
+                        long unchangedUntil = clock.ElapsedMilliseconds + 300;
+                        for (int i = 0; frame[4] == 0 && i < 4 && clock.ElapsedMilliseconds < unchangedUntil; i++)
+                        {
+                            WaitForFrame(session, (int)Math.Min(75, unchangedUntil - clock.ElapsedMilliseconds));
+                            frame = CaptureDelta(display, since);
+                        }
+                    }
+                    else frame = Capture(display);
                 }
                 lock (gate) { if (!Valid(session)) throw new ToolsHttp.HttpError(401, "控制已停止"); }
-                response.Bytes(frame, "image/jpeg"); return;
+                response.Bytes(frame, delta ? "application/octet-stream" : "image/jpeg"); return;
             }
             if (request.Path == "/api/list")
             {

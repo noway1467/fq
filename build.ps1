@@ -32,7 +32,7 @@ if (Test-Path -LiteralPath $previous) {
 if ($Test) {
     $testOut = Join-Path $root 'build'
     New-Item -ItemType Directory -Force -Path $testOut | Out-Null
-    & $compiler @common '/target:exe' '/main:FeiqLight.Tests.SelfTests' "/win32manifest:$root\src\app.manifest" "/out:$testOut\FeiqLight.Tests.exe" @sources "$root\tests\SelfTests.cs" "$root\tests\UiSmokeTests.cs"
+    & $compiler @common '/target:exe' '/main:FeiqLight.Tests.SelfTests' "/win32manifest:$root\src\app.manifest" "/out:$testOut\FeiqLight.Tests.exe" @sources "$root\tests\SelfTests.cs" "$root\tests\UiSmokeTests.cs" "$root\tests\ProtocolVectorTests.cs"
     if ($LASTEXITCODE -ne 0) { throw '测试编译失败' }
     & "$testOut\FeiqLight.Tests.exe"
     if ($LASTEXITCODE -ne 0) { throw '测试未通过' }

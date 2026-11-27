@@ -22,16 +22,18 @@ namespace FeiqLight
         private long reserved;
         private int activeUploads;
         private volatile bool closed;
-        internal const long UploadQuota=10L*1024*1024*1024;
+        internal const long UploadQuota=100L*1024*1024*1024;
+        internal const int UploadFileLimit=1000, UploadTaskLimit=4096;
         internal readonly string Token;
-        internal readonly DateTime Until=DateTime.UtcNow.AddMinutes(15);
+        internal readonly DateTime Until;
         internal int Port { get { return http.Port; } }
         internal bool Active { get { return !closed&&DateTime.UtcNow<Until; } }
         internal string[] SavedFiles { get { lock(gate)return uploads.Values.Where(u=>u.Saved!=null).Select(u=>u.Saved).ToArray(); } }
         internal string CleanupError { get; private set; }
         internal Action<string,string> Received;
-        internal GuestTransfer(IEnumerable<string> files,string destination,bool allowUpload,bool loopback=false)
+        internal GuestTransfer(IEnumerable<string> files,string destination,bool allowUpload,bool loopback=false,int lifetimeMinutes=AppSettings.DefaultGuestLifetimeMinutes)
         {
+            if(lifetimeMinutes<1||lifetimeMinutes>AppSettings.MaxGuestLifetimeMinutes)throw new ArgumentException("请输入 1–1440 的整数分钟数（最多 24 小时）。");
             this.destination=ReceiveStorage.Folder(destination);this.allowUpload=allowUpload;
             if(allowUpload)ReceiveStorage.ValidateWritable(this.destination);
             Token=ToolsService.RandomToken(32);
@@ -42,8 +44,9 @@ namespace FeiqLight
                 string id=Guid.NewGuid().ToString("N");downloads.Add(id,new Download{Id=id,Path=info.FullName,Name=info.Name,Size=info.Length,Modified=info.LastWriteTimeUtc.Ticks});
             }
             if(downloads.Count==0&&!allowUpload)throw new IOException("请先选择文件或开启接收。");
+            Until=DateTime.UtcNow.AddMinutes(lifetimeMinutes);
             http=new ToolsHttp(0,loopback,Handle,null,1048576);
-            expiry=new Timer(_=>Dispose(),null,TimeSpan.FromMinutes(15),Timeout.InfiniteTimeSpan);
+            expiry=new Timer(_=>Dispose(),null,TimeSpan.FromMinutes(lifetimeMinutes),Timeout.InfiniteTimeSpan);
         }
         internal string Url(string address) { return "http://"+address+":"+Port+"/#"+Token; }
         private void Check() { if(!Active)throw new ToolsHttp.HttpError(410,"临时传输已结束，请让对方重新开启。"); }
@@ -64,7 +67,7 @@ namespace FeiqLight
             }
             if(request.Path=="/favicon.ico"){response.Bytes(new byte[0],"image/x-icon",204);return;}
             Authorize(request);
-            if(request.Method=="GET"&&request.Path=="/api/guest") {response.Json(new{files=downloads.Values.Select(f=>new{id=f.Id,name=f.Name,size=f.Size}),upload=allowUpload,until=Until.ToString("o"),limit=UploadQuota});return;}
+            if(request.Method=="GET"&&request.Path=="/api/guest") {response.Json(new{files=downloads.Values.Select(f=>new{id=f.Id,name=f.Name,size=f.Size}),upload=allowUpload,until=Until.ToString("o"),limit=UploadQuota,countLimit=UploadFileLimit});return;}
             if((request.Method=="GET"||request.Method=="HEAD")&&request.Path=="/file"){Send(request,response);return;}
             if(!allowUpload)throw new ToolsHttp.HttpError(403,"对方未开启浏览器接收。");
             if(request.Method=="POST"&&request.Path=="/api/prepare") {
@@ -72,8 +75,8 @@ namespace FeiqLight
                 if(!Protocol.SafeFileName(name)||!Int64.TryParse(Convert.ToString(data.ContainsKey("size")?data["size"]:null),out size)||size<0||size>UploadQuota)throw new ToolsHttp.HttpError(400,"文件名或大小无效。");
                 Upload upload;
                 lock(gate) {
-                    Check();if(uploads.Count>=1024)throw new ToolsHttp.HttpError(409,"本次上传任务过多，请重新开启临时传输。");
-                    if(activeUploads>=100||size>UploadQuota-reserved)throw new ToolsHttp.HttpError(409,"本次接收已达 100 个文件或 10 GiB 上限，请重新开启。");
+                    Check();if(uploads.Count>=UploadTaskLimit)throw new ToolsHttp.HttpError(409,"本次上传任务过多，请重新开启临时传输。");
+                    if(activeUploads>=UploadFileLimit||size>UploadQuota-reserved)throw new ToolsHttp.HttpError(409,"本次接收已达 1000 个文件或 100 GiB 上限，请重新开启。");
                     if(new DriveInfo(Path.GetPathRoot(destination)).AvailableFreeSpace<size+16L*1024*1024)throw new ToolsHttp.HttpError(409,"接收设备剩余空间不足。");
                     string id=Guid.NewGuid().ToString("N");upload=new Upload{Id=id,Name=name,Size=size,Partial=Path.Combine(destination,".fq-guest-"+id+".part")};
                     using(FileStream create=new FileStream(upload.Partial,FileMode.CreateNew,FileAccess.Write)){}uploads.Add(id,upload);reserved+=size;activeUploads++;

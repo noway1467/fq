@@ -556,7 +556,22 @@ namespace FeiqLight
             try { DwmSetWindowAttribute(handle, 33, ref preference, sizeof(int)); }
             catch (DllNotFoundException) { } catch (EntryPointNotFoundException) { }
         }
+        [StructLayout(LayoutKind.Sequential)] private struct WindowMargins { internal int Left, Right, Top, Bottom; }
+        internal static void WindowShadow(IntPtr handle)
+        {
+            // 仅请求此窗口的系统合成阴影，不创建抢焦点的影子窗口、不改变系统视觉设置。
+            try
+            {
+                int policy = 2;
+                DwmSetWindowAttribute(handle, 2, ref policy, sizeof(int));
+                WindowMargins margins = new WindowMargins { Left = 1, Right = 1, Top = 1, Bottom = 1 };
+                DwmExtendFrameIntoClientArea(handle, ref margins);
+                RoundWindow(handle, 1);
+            }
+            catch (DllNotFoundException) { } catch (EntryPointNotFoundException) { }
+        }
         [DllImport("dwmapi.dll")] private static extern int DwmSetWindowAttribute(IntPtr window, int attribute, ref int value, int size);
+        [DllImport("dwmapi.dll")] private static extern int DwmExtendFrameIntoClientArea(IntPtr window, ref WindowMargins margins);
         [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)] private static extern int SetWindowTheme(IntPtr window, string application, string list);
     }
     public sealed class RoundedButton : Button
@@ -937,6 +952,7 @@ namespace FeiqLight
         {
             get {
                 CreateParams value=base.CreateParams;
+                value.ClassStyle |= 0x00020000;
                 // 无边框只负责外观；保留 Shell 所需的系统菜单与最小化能力，任务栏再次点击才能收起。
                 if(ResizeWindow)value.Style|=0x00080000|0x00020000|0x00010000;
                 return value;
@@ -966,9 +982,7 @@ namespace FeiqLight
         {
             base.OnHandleCreated(e);
             UpdateResizePadding();
-            // 交给 DWM 处理圆角，不能在每个 WM_SIZE 重建 Region（会强制全窗重绘）。
-            // 旧系统不支持此属性时保留方角，不影响缩放与输入。
-            Theme.RoundWindow(Handle, 2);
+            Theme.WindowShadow(Handle);
         }
         protected override void SetVisibleCore(bool value)
         {
@@ -1085,6 +1099,7 @@ namespace FeiqLight
         }
         protected override void WndProc(ref Message m)
         {
+            if (m.Msg == 0x031e) Theme.WindowShadow(Handle);
             // Cursor 属性会被子控件继承；缩放光标只设置当前指针，且只接管本窗口自己的客户区。
             if (m.Msg == 0x0020 && m.WParam == Handle && (m.LParam.ToInt64() & 0xFFFF) == 1)
             {
@@ -1102,8 +1117,7 @@ namespace FeiqLight
         protected override void Dispose(bool disposing) { if (disposing && resizeTimer != null) resizeTimer.Dispose(); base.Dispose(disposing); }
         protected override void OnPaint(PaintEventArgs e) {
             base.OnPaint(e);
-            Color border=Theme.Blend(Theme.Ink,Theme.Surface,secondaryWindow?.5F:Theme.Dark?.22F:.16F);
-            using(Pen p=new Pen(border))e.Graphics.DrawRectangle(p,0,0,Width-1,Height-1);
+            using(Pen p=new Pen(Color.Black,1))e.Graphics.DrawRectangle(p,0,0,ClientSize.Width-1,ClientSize.Height-1);
         }
         [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern bool ReleaseCapture();
         [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr w, IntPtr l);

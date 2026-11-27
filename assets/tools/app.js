@@ -4,7 +4,10 @@
   const mode = location.hash === '#remote' ? 'remote' : 'share';
   const queryParams = new URLSearchParams(location.search);
   const gatewayAccess = queryParams.get('gateway') || queryParams.get('access') || '';
-  let token = '', generation = 0, frameTimer = 0, frameUrl = '', drag = false, frameFailures = 0;
+  let token = '', generation = 0, frameTimer = 0, drag = false, frameFailures = 0;
+  let lastSeq = 0, chordSupported = false, actionNoticeUntil = 0;
+  const modifiers = new Set();
+  Object.defineProperties($('screen'), {naturalWidth:{get(){return this.width;}}, naturalHeight:{get(){return this.height;}}});
   let frameAbort=null;
   let display = 0, displayVersion = 0, zoomLevel = 0;
   let phone = false, scale = 1, fillHeight = false;
@@ -80,12 +83,14 @@
     points.clear(); previous = null; start = null; $('drag').textContent = '拖拽';
     resetWheel();
     $('type-text').disabled = false;
+    $('clipboard-send').disabled = $('clipboard-read').disabled = false;
+    lastSeq = 0; resetModifiers(); actionNoticeUntil = 0;
     $('connect').disabled = $('reconnect').disabled = false;
     document.body.classList.remove('remote-active','controls-hidden','typing-mode'); $('restore-panel').hidden = true; $('remote-text').blur(); $('keyboard').textContent = '键盘'; $('keyboard').setAttribute('aria-pressed','false');
     zoomLevel=0; $('screen-wrap').classList.remove('zoomed','zoom-large'); $('zoom').textContent='放大';
     scale=1; fillHeight=false; screenPoints.clear(); screenDown=null; pinch=null;
     $('remote-error').hidden=true;
-    closePlayer(); if (frameUrl) URL.revokeObjectURL(frameUrl); frameUrl = ''; $('screen').removeAttribute('src'); status(message, error);
+    closePlayer(); $('screen').width = $('screen').height = 0; status(message, error);
     if (previousToken && options.logout !== false) closing = logout(previousToken);
     if(options.navigate&&document.documentElement.dataset.native==='true')location.href='/native/unavailable';
   }
@@ -106,10 +111,14 @@
       if (version !== generation) return;
       token = data.token; $('code').value = ''; $('login').hidden = true; $('disconnect').hidden = false;
       $(mode === 'remote' ? 'remote' : 'files').hidden = false;
-      status(''); document.body.classList.toggle('remote-active', mode === 'remote');
+      status(recoveryNotice); document.body.classList.toggle('remote-active', mode === 'remote');
       if (mode === 'remote') {
         const screens = await request('/api/displays'); if (version !== generation) return;
         phone=screens.platform==='android'; document.body.classList.toggle('phone-target',phone);$('phone-controls').hidden=!phone;$('phone-enter').hidden=!phone||!screens.imeEnter;
+        chordSupported=!phone&&screens.chord===true; $('chord-controls').hidden=!chordSupported;
+        document.querySelectorAll('[data-chord]').forEach(button=>button.hidden=!chordSupported);
+        $('clipboard-send').hidden=screens.clipboardWrite!==true; $('clipboard-read').hidden=phone||screens.clipboardRead!==true;
+        $('remote-text').setAttribute('aria-label',phone?'输入到手机':'输入到电脑'); lastSeq=0;
         $('display').replaceChildren(); screens.items.forEach((item,index) => { const option = document.createElement('option'); option.value = item.id; option.textContent = '屏幕 ' + (index+1); $('display').append(option); });
         $('display').hidden = screens.items.length < 2;
         if(document.documentElement.dataset.nativePairing==='true')location.href='/native/paired';
@@ -232,18 +241,61 @@
   }
   $('player').onerror = () => { $('player-error').textContent = '播放失败：格式不支持、共享已关闭，或来源不支持跳转读取。请检查连接或下载后播放。'; };
   $('close-player').onclick = closePlayer; $('refresh').onclick = loadDirectory; $('search').oninput = renderFiles;
+  async function decodeImage(blob) {
+    if (typeof createImageBitmap === 'function') return createImageBitmap(blob);
+    const url=URL.createObjectURL(blob), image=new Image();
+    try { await new Promise((resolve,reject)=>{image.onload=resolve;image.onerror=()=>reject(new Error('画面图片无法解码'));image.src=url;});return image; }
+    finally { URL.revokeObjectURL(url); }
+  }
+  async function drawFrame(blob, version, screenVersion) {
+    const canvas=$('screen'), images=[];
+    let width,height,seq=0,kind=1,tiles=[];
+    const legacy=blob.type.startsWith('image/');
+    try {
+      if (legacy) {
+        const image=await decodeImage(blob);images.push(image);width=image.width;height=image.height;tiles.push({x:0,y:0,w:width,h:height});
+      } else {
+        const bytes=await blob.arrayBuffer(), data=new DataView(bytes);
+        if(data.byteLength<18||data.getUint32(0)!==0x46514631||data.getUint8(5)||data.getUint16(6))throw new Error('远控帧格式无效');
+        kind=data.getUint8(4);seq=data.getUint32(8);width=data.getUint16(12);height=data.getUint16(14);
+        const count=data.getUint16(16);
+        if(kind>2||!seq||!width||!height||width>1600||width*height>40000000||count>4096||(kind===0&&count!==0)||(kind===1&&count!==1)||(kind===2&&!count))throw new Error('远控帧尺寸或类型无效');
+        if(kind!==1&&(!lastSeq||width!==canvas.width||height!==canvas.height||(kind===0&&seq!==lastSeq)))throw new Error('远控帧基线已变化');
+        let offset=18;
+        for(let i=0;i<count;i++) {
+          if(offset+12>data.byteLength)throw new Error('远控帧被截断');
+          const x=data.getUint16(offset),y=data.getUint16(offset+2),w=data.getUint16(offset+4),h=data.getUint16(offset+6),length=data.getUint32(offset+8);offset+=12;
+          if(!w||!h||x+w>width||y+h>height||!length||length>data.byteLength-offset||(kind===1&&(x||y||w!==width||h!==height)))throw new Error('远控图块范围无效');
+          tiles.push({x,y,w,h,blob:new Blob([bytes.slice(offset,offset+length)],{type:'image/jpeg'})});offset+=length;
+        }
+        if(offset!==data.byteLength)throw new Error('远控帧包含多余数据');
+        for(const tile of tiles) {
+          const image=await decodeImage(tile.blob);images.push(image);
+          if(image.width!==tile.w||image.height!==tile.h)throw new Error('远控图块尺寸不匹配');
+        }
+      }
+      // 全部图块解码完再一次性提交；切屏、退出或重新连接后的旧回调不得污染画布。
+      if(!token||version!==generation||screenVersion!==displayVersion)return legacy;
+      if(canvas.width!==width||canvas.height!==height){canvas.width=width;canvas.height=height;sizeScreen();}
+      const context=canvas.getContext('2d');
+      tiles.forEach((tile,index)=>context.drawImage(images[index],tile.x,tile.y,tile.w,tile.h));
+      lastSeq=seq;return legacy;
+    } finally { images.forEach(image=>{if(image.close)image.close();}); }
+  }
   async function frames(version) {
     if (!token || version !== generation) return;
     const screenVersion = displayVersion;
     try {
-      const blob = await request('/api/screen?display=' + display, undefined, 8000);
+      const blob = await request('/api/screen?display=' + display + '&delta=1&since=' + lastSeq, undefined, 8000);
       if (!token || version !== generation) return;
-      frameFailures=0;recoveryAttempts=0;
       if (screenVersion !== displayVersion) { frameTimer = setTimeout(() => frames(version), 0); return; }
-      const previous = frameUrl; frameUrl = URL.createObjectURL(blob); $('screen').src = frameUrl;
-      if (previous) URL.revokeObjectURL(previous);
-      if(!recoveryNotice)status('');
-      frameTimer = setTimeout(() => frames(version), 250);
+      let legacy;
+      try { legacy=await drawFrame(blob,version,screenVersion); }
+      catch(error){if(version===generation&&screenVersion===displayVersion)lastSeq=0;error.retryable=true;throw error;}
+      if(!token||version!==generation)return;
+      frameFailures=0;recoveryAttempts=0;
+      if(!recoveryNotice&&Date.now()>actionNoticeUntil)status('');
+      frameTimer = setTimeout(() => frames(version), legacy ? 250 : 16);
     } catch (error) {
       if(version!==generation)return;
       if(error.status===401){recoverRemoteSession(version);return;}
@@ -287,7 +339,45 @@
     }
     finally { sending = false; if (version === generation) $('type-text').disabled = false; if (pending.length && token) pump(); }
   }
-  document.querySelectorAll('[data-key]').forEach(button => { button.onclick = () => input({type: 'key', key: button.dataset.key}); });
+  function resetModifiers() { modifiers.clear();document.querySelectorAll('[data-modifier]').forEach(button=>button.setAttribute('aria-pressed','false')); }
+  function sendChord(key, selected = [...modifiers]) {
+    if(!chordSupported)return;
+    if(!/^(?:[a-z0-9]|f[1-9]|f1[0-2]|enter|escape|tab|backspace|delete|insert|space|up|down|left|right|home|end|pageup|pagedown|win)$/.test(key)) { status('请输入字母、数字、F1–F12 或常用导航键',true);actionNoticeUntil=Date.now()+5000;return; }
+    if((key==='win'&&selected.length)||(selected.includes('ctrl')&&selected.includes('alt')&&['delete','f12'].includes(key))) { status('系统安全组合键和本机停止热键不支持远程模拟',true);actionNoticeUntil=Date.now()+5000;resetModifiers();return; }
+    resetModifiers();input({type:'chord',modifiers:[...new Set(selected)],key});
+  }
+  document.querySelectorAll('[data-modifier]').forEach(button=>button.onclick=()=>{const key=button.dataset.modifier;if(modifiers.has(key))modifiers.delete(key);else modifiers.add(key);button.setAttribute('aria-pressed',String(modifiers.has(key)));});
+  document.querySelectorAll('[data-chord]').forEach(button=>button.onclick=()=>{const keys=button.dataset.chord.split('+');sendChord(keys.pop(),keys);});
+  $('chord-send').onclick=()=>sendChord($('chord-key').value.trim().toLowerCase());
+  $('chord-key').onkeydown=event=>{if(event.key==='Enter'&&!event.isComposing){event.preventDefault();$('chord-send').click();}};
+  document.querySelectorAll('[data-key]').forEach(button => { button.onclick = () => {
+    if(chordSupported&&modifiers.size) {
+      const fixed={selectall:['ctrl','a'],copy:['ctrl','c'],paste:['ctrl','v'],undo:['ctrl','z'],find:['ctrl','f'],switch:['alt','tab'],ctrlenter:['ctrl','enter'],newline:['shift','enter']};
+      const keys=fixed[button.dataset.key]||[button.dataset.key];sendChord(keys[keys.length-1],[...modifiers,...keys.slice(0,-1)]);
+    } else input({type: 'key', key: button.dataset.key});
+  }; });
+  async function clipboard(read) {
+    if(!token)return;
+    const version=generation; $('clipboard-send').disabled=$('clipboard-read').disabled=true;
+    try {
+      if(read) {
+        const data=await request('/api/clipboard',undefined,5000);if(version!==generation)return;
+        $('remote-text').value=data.text;document.body.classList.add('typing-mode');$('keyboard').textContent='鼠标';$('keyboard').setAttribute('aria-pressed','true');
+        status(data.empty?'对方剪贴板没有文本':'已读取到输入框，可选择并复制');
+      } else {
+        let text=$('remote-text').value;
+        if(!text) {
+          try { text=await navigator.clipboard.readText(); }
+          catch (_) { throw new Error('请先将文字粘贴到输入框，再点发到剪贴板'); }
+        }
+        if(version!==generation)return;
+        if(!text||text.length>4000||text.includes('\0')||new TextEncoder().encode(text).length>12000||new TextEncoder().encode(JSON.stringify({text})).length>16384)throw new Error('请输入 1 至 4000 字的纯文本，过长内容请用文件传输');
+        await request('/api/clipboard',{text},5000);if(version!==generation)return;status('已写入对方剪贴板');
+      }
+    } catch(error) { if(version===generation)status(error.retryable?'剪贴板请求结果不确定，未自动重发。请检查对方状态。':error.message,true); }
+    finally { if(version===generation){actionNoticeUntil=Date.now()+5000;$('clipboard-send').disabled=$('clipboard-read').disabled=false;} }
+  }
+  $('clipboard-send').onclick=()=>clipboard(false);$('clipboard-read').onclick=()=>clipboard(true);
   document.querySelectorAll('[data-input]').forEach(button => { button.onclick = () => input({type: button.dataset.input}); });
   $('double-click').onclick = () => { input({type: 'click'}); input({type: 'click'}); };
   $('drag').onclick = () => { drag = !drag; $('drag').setAttribute('aria-pressed', String(drag)); $('drag').textContent = drag ? '松开拖拽' : '拖拽'; input({type: drag ? 'drag' : 'release'}); };
@@ -370,7 +460,6 @@
   }
   const screenPosition=(x,y)=>{const r=$('screen').getBoundingClientRect();return {x:Math.max(0,clamp((x-r.left)/r.width*10000,10000)),y:Math.max(0,clamp((y-r.top)/r.height*10000,10000))};};
   const pair=()=>{const p=[...screenPoints.values()];return {x:(p[0].x+p[1].x)/2,y:(p[0].y+p[1].y)/2,d:Math.max(1,Math.hypot(p[0].x-p[1].x,p[0].y-p[1].y))};};
-  $('screen').onload=sizeScreen;
   $('screen-wrap').onpointerdown=event=>{
     if(!token||!$('screen').naturalWidth)return;event.preventDefault();$('screen-wrap').setPointerCapture(event.pointerId);
     screenPoints.set(event.pointerId,{x:event.clientX,y:event.clientY});
@@ -405,7 +494,7 @@
   $('rotate').onclick = () => { location.href = '/native/rotate'; };
   $('display').onchange = () => {
     if (drag) { input({type:'release'}); drag = false; $('drag').setAttribute('aria-pressed','false'); $('drag').textContent = '拖拽'; }
-    display = Number($('display').value); displayVersion++; zoomLevel=0;scale=1;sizeScreen();screenDown=null;resetWheel();
+    display = Number($('display').value); displayVersion++; lastSeq=0;resetModifiers();zoomLevel=0;scale=1;sizeScreen();screenDown=null;resetWheel();
     $('screen-wrap').scrollTop = 0; $('screen-wrap').scrollLeft = 0;
   };
   const viewport = () => {
@@ -424,6 +513,13 @@
     if (!token || phone || mode !== 'remote' || event.isComposing || !['screen-wrap','touchpad'].includes(document.activeElement.id)) return;
     const keys = {Escape:'escape',Tab:'tab',Backspace:'backspace',ArrowLeft:'left',ArrowRight:'right',ArrowUp:'up',ArrowDown:'down',PageUp:'pageup',PageDown:'pagedown',Home:'home',End:'end'};
     const chords = {a:'selectall',c:'copy',v:'paste',z:'undo',f:'find'};
+    if(chordSupported) {
+      const special={...keys,Enter:'enter',Delete:'delete',Insert:'insert',' ':'space'};
+      const main=special[event.key]||(/^(?:[a-z0-9]|F[1-9]|F1[0-2])$/i.test(event.key)?event.key.toLowerCase():'');
+      if(main&&(event.ctrlKey||event.altKey||event.metaKey||event.shiftKey||modifiers.size||special[event.key]||/^f\d+$/.test(main))) {
+        event.preventDefault();const held=[...modifiers];if(event.ctrlKey)held.push('ctrl');if(event.altKey)held.push('alt');if(event.shiftKey)held.push('shift');if(event.metaKey&&main!=='win')held.push('win');sendChord(main,held);return;
+      }
+    }
     let key = event.key === 'Enter' ? (event.ctrlKey ? 'ctrlenter' : event.shiftKey ? 'newline' : 'enter') : keys[event.key];
     if (event.ctrlKey && chords[event.key.toLowerCase()]) key = chords[event.key.toLowerCase()];
     if (key) {event.preventDefault();input({type:'key',key});}

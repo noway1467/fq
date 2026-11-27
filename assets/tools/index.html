@@ -60,7 +60,7 @@
       </section>
     </section>
     <section id="remote" hidden>
-      <div id="screen-wrap" tabindex="0" aria-label="远程画面"><div id="screen-stage"><img id="screen" alt="" draggable="false"></div></div>
+      <div id="screen-wrap" tabindex="0" aria-label="远程画面"><div id="screen-stage"><canvas id="screen" width="0" height="0" aria-label="远程屏幕"></canvas></div></div>
       <aside id="control-panel">
         <p id="remote-error" role="alert" hidden></p>
         <div class="remote-toolbar">
@@ -82,10 +82,18 @@
         <section class="typing-controls" aria-label="键盘操作">
           <textarea id="remote-text" aria-label="输入到电脑" rows="3" maxlength="4000"></textarea>
           <div class="type-buttons"><button id="type-text" class="primary">输入文字</button><button data-key="enter">Enter</button><button data-key="newline">换行</button><button id="phone-enter" hidden>确认</button></div>
+          <div class="clipboard-buttons"><button id="clipboard-send" hidden>发到剪贴板</button><button id="clipboard-read" hidden>读取剪贴板</button></div>
         </section>
         </div>
+      <div class="desktop-keys">
       <div class="shortcuts" aria-label="常用快捷键">
         <button data-key="escape">Esc</button><button data-key="tab">Tab</button><button data-key="backspace">退格</button><button data-key="selectall">全选</button><button data-key="copy">复制</button><button data-key="paste">粘贴</button><button data-key="undo">撤销</button><button data-key="find">查找</button><button data-key="switch">切换窗口</button><button data-key="up">↑</button><button data-key="down">↓</button><button data-key="left">←</button><button data-key="right">→</button><button data-key="pageup">上一页</button><button data-key="pagedown">下一页</button><button data-key="ctrlenter">Ctrl+Enter</button>
+        <button data-chord="win" hidden>Win</button><button data-chord="alt+f4" hidden>Alt+F4</button><button data-chord="win+d" hidden>Win+D</button><button data-chord="ctrl+shift+escape" hidden>Ctrl+Shift+Esc</button><button data-chord="delete" hidden>Del</button>
+      </div>
+      <div id="chord-controls" hidden>
+        <div class="modifiers" aria-label="单次组合修饰键"><button data-modifier="ctrl" aria-pressed="false">Ctrl</button><button data-modifier="alt" aria-pressed="false">Alt</button><button data-modifier="shift" aria-pressed="false">Shift</button><button data-modifier="win" aria-pressed="false">Win</button></div>
+        <div class="chord-entry"><input id="chord-key" aria-label="组合主键，例如 A、1、F5" placeholder="主键：A / 1 / F5" maxlength="9" autocomplete="off"><button id="chord-send">发送按键</button></div>
+      </div>
       </div>
       </aside>
       <button id="restore-panel" hidden>操作</button>

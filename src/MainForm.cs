@@ -110,6 +110,14 @@ public sealed class MainForm : ModernWindow
             catch (Exception error) { status.Text = "传输窗口状态保存失败：" + error.Message; }
         }
         internal WindowPlacement GuestWindowPlacement { get { return network.Settings.GuestWindow; } }
+        internal void SaveGuestLifetime(int minutes)
+        {
+            if (minutes < 1 || minutes > AppSettings.MaxGuestLifetimeMinutes) throw new ArgumentException("请输入 1–1440 的整数分钟数（最多 24 小时）。");
+            int previous = network.Settings.GuestLifetimeMinutes;
+            network.Settings.GuestLifetimeMinutes = minutes;
+            try { store.SaveSettings(network.Settings); }
+            catch { network.Settings.GuestLifetimeMinutes = previous; throw; }
+        }
         internal void SaveGuestWindowPlacement(WindowPlacement placement)
         {
             network.Settings.GuestWindow = placement;
@@ -647,6 +655,7 @@ public sealed class MainForm : ModernWindow
             next.Window = previous.Window;
             next.TransferWindow = previous.TransferWindow;
             next.GuestWindow = previous.GuestWindow;
+            next.GuestLifetimeMinutes = previous.GuestLifetimeMinutes;
             next.SidebarWidth = previous.SidebarWidth;
             next.KnownPeers = previous.KnownPeers;
             next.Conversations = previous.Conversations;
