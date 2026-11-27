@@ -4,9 +4,10 @@
 
 轻量级 Windows 与 Android 局域网聊天及文件传输工具，支持电脑与手机自由互通，无需注册账号或服务器。
 
-![飞Q 双端界面预览（经典浅色）](docs/preview.png)
-
-![飞Q 双端界面预览（暮紫深色）](docs/preview-dark.png)
+| Windows | Android |
+| --- | --- |
+| [![浅色：电脑端会话列表、聊天和文件卡片](docs/preview.png)](docs/preview.png) | [<img src="docs/preview-android.png" width="230" alt="浅色：手机端接收同一份路线文件">](docs/preview-android.png) |
+| [![炭灰深色：电脑端聊天](docs/preview-dark.png)](docs/preview-dark.png) | [<img src="docs/preview-android-dark.png" width="230" alt="炭灰深色：手机端按来源查看传输任务">](docs/preview-android-dark.png) |
 
 ## 主要功能
 
