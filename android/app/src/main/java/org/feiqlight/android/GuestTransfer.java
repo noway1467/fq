@@ -90,7 +90,7 @@ final class GuestTransfer implements AutoCloseable {
         authorize(request);
         if(request.method.equals("GET")&&request.path.equals("/api/guest")) {
             JSONArray list=new JSONArray();for(Download file:downloads.values())list.put(new JSONObject().put("id",file.id).put("name",file.source.name()).put("relativePath",file.relative).put("size",file.source.size()));
-            response.json(new JSONObject().put("files",list).put("upload",allowUpload).put("requestIds",true).put("folders",true).put("until",java.time.Instant.ofEpochMilli(until).toString()).put("limit",UPLOAD_QUOTA).put("countLimit",UPLOAD_FILE_LIMIT).toString(),"");return;
+            response.json(new JSONObject().put("files",list).put("upload",allowUpload).put("requestIds",true).put("folders",true).put("until",java.time.Instant.ofEpochMilli(until).toString()).put("remainingMilliseconds",Math.max(0,TimeUnit.NANOSECONDS.toMillis(deadline-System.nanoTime()))).put("limit",UPLOAD_QUOTA).put("countLimit",UPLOAD_FILE_LIMIT).toString(),"");return;
         }
         if((request.method.equals("GET")||request.method.equals("HEAD"))&&request.path.equals("/file")){send(request,response);return;}
         if(!allowUpload)throw new ToolsHttp.Failure(403,"对方未开启浏览器接收");

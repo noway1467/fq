@@ -216,6 +216,60 @@ public final class TransferFeatureTest {
             assertEquals(2,docs.files.size());assertTrue(docs.directories.contains(a)&&docs.directories.contains(b));
         }finally{restarted.destroy();}
     }
+    @Test public void cleanupProtectsEditedDocumentsAndUnverifiableLegacyFiles()throws Exception {
+        Context context=RuntimeEnvironment.getApplication();disableConnection(context);
+        FileFeaturesTest.Docs docs=documents(context);ReceivedStorage storage=new ReceivedStorage(context);
+        storage.choose(documentTree(),Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+        ServiceController<ChatService> controller=Robolectric.buildService(ChatService.class).create();
+        try {
+            ChatService service=controller.get();settle(service);
+            List<File> external=new ArrayList<>();
+            for(int index=0;index<4;index++) {
+                File local=guestFile(context,String.format("%064x",index+1),"保留-"+index+".txt",new byte[]{1,2,3},100+index);
+                android.net.Uri saved=storage.save(local,"保留-"+index+".txt",new LanNode.Transfer());
+                external.add(docs.files.get(android.provider.DocumentsContract.getDocumentId(saved)));
+                if(index==2)context.getSharedPreferences("received_locations",0).edit().remove(local.getName()+".hash").commit();
+            }
+            Files.write(external.get(0).toPath(),new byte[]{3,2,1});
+            ChatService.ReceivedReview review=service.receivedUsage();
+            Files.write(external.get(1).toPath(),new byte[11]);
+            List<ChatService.Usage> results=new ArrayList<>();service.clearFiles(review,results::add);transferDone(service);
+            assertEquals(1,results.size());assertEquals(1,results.get(0).files);assertEquals(3,results.get(0).skipped);
+            assertArrayEquals(new byte[]{3,2,1},Files.readAllBytes(external.get(0).toPath()));assertEquals(11,external.get(1).length());
+            assertTrue(external.get(2).exists());assertFalse(external.get(3).exists());
+        }finally{controller.destroy();}
+    }
+    @Test public void unavailableDirectoryKeepsSavedStateAndRestoresWithoutDownload()throws Exception {
+        Context context=RuntimeEnvironment.getApplication();disableConnection(context);context.getSharedPreferences("settings",0).edit().putBoolean(ReceivedStorage.AUTO,false).commit();
+        FileFeaturesTest.Docs docs=documents(context);ReceivedStorage storage=new ReceivedStorage(context);
+        storage.choose(documentTree(),Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+        ServiceController<ChatService> controller=Robolectric.buildService(ChatService.class).create();
+        try {
+            ChatService service=controller.get();settle(service);
+            LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:32425"),"audit","host","权限测试","");
+            ChatStore.FileTask incoming=task(peer.id(),333,"保留.txt",3);service.incoming(peer,incoming.message,false);settle(service);
+            File local=service.receivedFile(peer,333,incoming.file);Files.write(local.toPath(),new byte[]{1,2,3});
+            android.net.Uri saved=storage.save(local,incoming.file.name,new LanNode.Transfer());
+            java.lang.reflect.Method progress=ChatService.class.getDeclaredMethod("fileProgress",String.class,long.class,long.class,boolean.class,int.class,String.class,LanNode.Transfer.class);
+            progress.setAccessible(true);progress.invoke(service,peer.id(),333L,(long)incoming.file.id,false,100,"已保存",null);settle(service);
+            docs.deny=true;ChatStore.FileTask denied=fileTasks(service).get(0);
+            assertTrue(denied.unavailable);assertFalse(denied.stored);assertEquals("已保存",service.progress(peer.id(),333,incoming.file.id,false).state);
+            ChatService.ChatPage page=((ExecutorService)field(service,"io")).submit(()->service.resolveChatPage(peer.id(),Collections.singletonList(incoming.message),new HashMap<>(),()->true)).get(5,TimeUnit.SECONDS);
+            assertTrue(page.unavailable.contains(ChatService.fileKey(peer.id(),333,incoming.file.id,false)));assertEquals(saved,storage.saved(local));
+            Shadows.shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(context,ChatService.class),service.onBind(new Intent()));
+            for(boolean dark:new boolean[]{false,true}) {
+                context.getSharedPreferences("settings",0).edit().putBoolean("dark_mode",dark).putBoolean("follow_system_theme",false).commit();
+                try(ActivityController<MainActivity> activityController=Robolectric.buildActivity(MainActivity.class).setup()) {
+                    MainActivity activity=activityController.get();settle(service);showTasks(activity);settle(service);
+                    assertEquals(ReceivedStorage.UNAVAILABLE,activity.taskState(denied));assertTrue(MainActivity.taskEnded(activity.taskState(denied)));
+                    Dialog dialog=ShadowDialog.getLatestDialog();View decor=dialog.getWindow().getDecorView();measure(decor,786,1500);
+                    preview(decor,"permission-unavailable-"+(dark?"dark":"light")+".png",(Integer)field(activity,"SURFACE"));
+                }
+            }
+            docs.deny=false;ChatStore.FileTask restored=fileTasks(service).get(0);assertTrue(restored.stored);assertFalse(restored.unavailable);assertFalse(local.exists());
+            assertArrayEquals(new byte[]{1,2,3},Files.readAllBytes(docs.files.get(android.provider.DocumentsContract.getDocumentId(saved)).toPath()));
+        }finally{docs.deny=false;controller.destroy();}
+    }
     @Test public void guestTaskStableOrder()throws Exception {
         Context context=RuntimeEnvironment.getApplication();disableConnection(context);String low="1".repeat(64),high="2".repeat(64),legacy="3".repeat(64);File directory=new File(context.getFilesDir(),"received");assertTrue(directory.isDirectory()||directory.mkdirs());
         Files.write(new File(directory,low).toPath(),new byte[1]);Files.write(new File(directory,high).toPath(),new byte[2]);File old=new File(directory,legacy);Files.write(old.toPath(),new byte[5]);assertTrue(old.setLastModified(500));
@@ -329,8 +383,8 @@ public final class TransferFeatureTest {
                     ((ExecutorService)field(field(activity,"media"),"worker")).submit(()->{}).get(5,TimeUnit.SECONDS);settle(service);
                     View root=(View)field(activity,"root");assertNotNull(findDescription(root,image.name+"，媒体预览"));StringBuilder before=new StringBuilder();dialogText(root,before);assertTrue(before.toString().contains("已保存 2 / 2"));
                     ChatStore.FileTask item=fileTasks(service).stream().filter(row->row.message.number==message.number&&row.file.id==0).findFirst().get();assertEquals("已保存",taskState(activity,item));
-                    docs.deny=true;fileTasks(service);assertEquals("本机文件已删除",service.progress(peer.id(),message.number,image.id,false).state);assertEquals(imageUri,storage.saved(imageFile));
-                    docs.deny=false;item=fileTasks(service).stream().filter(row->row.message.number==message.number&&row.file.id==0).findFirst().get();assertEquals("授权恢复后应订正旧删除态","已保存",taskState(activity,item));assertEquals("已保存",service.progress(peer.id(),message.number,image.id,false).state);
+                    docs.deny=true;item=fileTasks(service).stream().filter(row->row.message.number==message.number&&row.file.id==0).findFirst().get();assertEquals(ReceivedStorage.UNAVAILABLE,taskState(activity,item));assertEquals("已保存",service.progress(peer.id(),message.number,image.id,false).state);assertEquals(imageUri,storage.saved(imageFile));
+                    docs.deny=false;item=fileTasks(service).stream().filter(row->row.message.number==message.number&&row.file.id==0).findFirst().get();assertEquals("授权恢复后应恢复文件访问","已保存",taskState(activity,item));assertEquals("已保存",service.progress(peer.id(),message.number,image.id,false).state);
                     Files.delete(docs.files.get(android.provider.DocumentsContract.getDocumentId(imageUri)).toPath());item=fileTasks(service).stream().filter(row->row.message.number==message.number&&row.file.id==0).findFirst().get();assertEquals("本机文件已删除",taskState(activity,item));activity.changed();settle(service);
                     assertNull(findDescription(root,image.name+"，媒体预览"));StringBuilder after=new StringBuilder();dialogText(root,after);assertTrue(after.toString(),after.toString().contains(" · 本机文件已删除"));assertEquals(0,service.progress(peer.id(),message.number,image.id,false).percent);assertTrue(after.toString().contains("已保存 1 / 2"));
                     java.lang.reflect.Method actions=MainActivity.class.getDeclaredMethod("fileActions",LanNode.Peer.class,long.class,Protocol.Attachment.class);actions.setAccessible(true);actions.invoke(activity,peer,message.number,image);Dialog dialog=ShadowDialog.getLatestDialog();View menu=dialog.getWindow().getDecorView();

@@ -555,7 +555,7 @@ namespace FeiqLight.Tests
         {
             string profile=Path.Combine(root,"profile"),folder=Path.Combine(root,"shared");Directory.CreateDirectory(folder);File.WriteAllText(Path.Combine(folder,"测试文件.txt"),"shared after replacement",new UTF8Encoding(false));
             int port=UpgradePort();
-            new LocalStore(profile).SaveSettings(new AppSettings {Nickname="隔离升级验证",CloseToTray=false,Notifications=false,ReceiveFolder=Path.Combine(root,"received")});
+            new LocalStore(profile).SaveSettings(new AppSettings {Port=port-1,Nickname="隔离升级验证",CloseToTray=false,Notifications=false,ReceiveFolder=Path.Combine(root,"received")});
             string pair,remotePair;
             // 由旧成品的实际实现写出配置，不能用新源码生成数据冒充跨版本升级。
             Type oldService=System.Reflection.Assembly.LoadFile(previousExecutable).GetType("FeiqLight.ToolsService",true);

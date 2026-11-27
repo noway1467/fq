@@ -20,6 +20,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
 public final class ChatService extends Service {
+    private static volatile ChatService instance;
+    static int phoneRemotePort() throws IOException {
+        ChatService current=instance;
+        if(current==null)throw new IOException("请先连接局域网，再开启手机远控");
+        return PhoneRemoteAccess.portFor(current.requireNode().port());
+    }
     static final int LEGACY_POLICY_VERSION=1;
     public interface Observer { void changed(); void error(String text); default void transfersChanged() { changed(); } default void sent(String peer) { } }
     public final class LocalBinder extends Binder { ChatService service() { return ChatService.this; } }
@@ -172,7 +178,7 @@ public final class ChatService extends Service {
                 Protocol.Attachment attachment=message.files.stream().filter(item->item.id==file).findFirst().orElse(null);
                 if(attachment==null)return;
                 File target=receivedFile(peer,packet,attachment);
-                if(storage.exists(target))return;
+                if(storage.exists(target)||storage.saved(target)!=null)return;
                 LanNode.Peer source=store.findPeer(peer);
                 if(source==null)return;
                 Files.deleteIfExists(LanNode.partialFile(source,packet,attachment,target).toPath());
@@ -212,7 +218,10 @@ public final class ChatService extends Service {
         // 主线程保存进度对象身份；后台慢查询回来时以期间新发布的保存/删除结果为准。
         Map<String,FileProgress> progressBefore=new HashMap<>(fileProgress);
         queue(()->{List<ChatStore.FileTask> rows=store.fileTasks();
-            for(ChatStore.FileTask task:rows)if(!task.message.outgoing)task.stored=storage.exists(receivedFile(task.peer,task.message.number,task.file));
+            for(ChatStore.FileTask task:rows)if(!task.message.outgoing) {
+                File local=receivedFile(task.peer,task.message.number,task.file);
+                task.stored=storage.exists(local);task.unavailable=!task.stored&&storage.saved(local)!=null;
+            }
             SharedPreferences guests=getSharedPreferences("guest_received",MODE_PRIVATE);
             for(Map.Entry<String,?> entry:guests.getAll().entrySet()) {
                 if(!entry.getKey().matches("[a-f0-9]{64}")||!(entry.getValue() instanceof String))continue;
@@ -223,7 +232,7 @@ public final class ChatService extends Service {
                 Protocol.Attachment file=new Protocol.Attachment(0,(String)entry.getValue(),size,0);
                 file.relativePath=relative;
                 LanNode.Message message=new LanNode.Message();message.number=Long.parseLong(entry.getKey().substring(0,15),16);message.outgoing=false;message.time=time;message.files=Collections.singletonList(file);message.text="[文件] "+file.name;message.state="已保存";
-                ChatStore.FileTask task=new ChatStore.FileTask("browser-guests",message,file);task.guestFile=local;task.stored=storage.exists(local);rows.add(task);
+                ChatStore.FileTask task=new ChatStore.FileTask("browser-guests",message,file);task.guestFile=local;task.stored=storage.exists(local);task.unavailable=!task.stored&&storage.saved(local)!=null;rows.add(task);
             }
             rows.sort(Comparator.comparingLong((ChatStore.FileTask task)->task.message.time).reversed().thenComparing(Comparator.comparingLong((ChatStore.FileTask task)->task.message.number).reversed()).thenComparing(task->task.peer));
             main.post(()->{if(stopped)return;
@@ -232,9 +241,11 @@ public final class ChatService extends Service {
                     String key=fileKey(task.peer,task.message.number,task.file.id,false);
                     if(previous!=progressBefore.get(key)&&previous!=null&&wasStored(previous.state)) {
                         task.stored=!previous.state.equals("本机文件已删除");
+                        task.unavailable=false;
                         task.savedProgress=new ChatStore.TransferState(key,previous.percent,previous.state);
                         continue;
                     }
+                    if(task.unavailable)continue;
                     String previousState=previous!=null?previous.state:task.savedProgress!=null?task.savedProgress.state:task.message.state;
                     if(task.stored) {
                         if("本机文件已删除".equals(previousState)) {
@@ -281,6 +292,7 @@ public final class ChatService extends Service {
     private final Runnable notifyChanges=()->{notificationQueued=false;for (Observer observer:new ArrayList<>(observers)) observer.changed();};
     @Override public void onCreate() {
         super.onCreate(); store=new ChatStore(this); storage=new ReceivedStorage(this);diagnostics=new Diagnostics(this);receivedBefore.addAll(getSharedPreferences("received_before",MODE_PRIVATE).getAll().keySet());
+        instance=this;
         NotificationManager manager=getSystemService(NotificationManager.class);
         manager.createNotificationChannel(new NotificationChannel("connection","局域网连接",NotificationManager.IMPORTANCE_LOW));
         manager.createNotificationChannel(new NotificationChannel("messages","新消息",NotificationManager.IMPORTANCE_DEFAULT));
@@ -590,6 +602,7 @@ public final class ChatService extends Service {
     static final class ChatPage {
         final List<LanNode.Message> rows;
         final Map<String,Uri> files=new HashMap<>();
+        final Set<String> unavailable=new HashSet<>();
         final Map<String,int[]> media=new HashMap<>();
         final Map<String,FileProgress> progress;
         ChatPage(List<LanNode.Message> rows,Map<String,FileProgress> progress){this.rows=rows;this.progress=progress;}
@@ -619,6 +632,7 @@ public final class ChatService extends Service {
             else {
                 File local=receivedFile(peer,message.number,file);
                 uri=local.isFile()?ReceivedFileProvider.uri(this,local,file.name):storage.existingSaved(local);
+                if(uri==null&&storage.saved(local)!=null)page.unavailable.add(key);
             }
             page.files.put(key,uri);
             // 尺寸随后台快照准备好，绑定和解码完成时均不读 SAF，也不改变气泡高度。
@@ -1013,6 +1027,7 @@ public final class ChatService extends Service {
             progress.accept(0,"连接中 · 点击取消");
             File dir=directory("received");
             if(!storage.exists(target)) {
+                if(storage.saved(target)!=null)throw new IOException(ReceivedStorage.UNAVAILABLE);
                 long partial=LanNode.partialFile(peer,packet,file,target).length();
                 quota(dir,file.size-(partial<=file.size?partial:0));
                 requireNode().receiveFile(peer,packet,file,target,task,new LanNode.Progress() {
@@ -1248,19 +1263,20 @@ public final class ChatService extends Service {
     /** 当前登记且真实存在的接收文件；旧版双份数据按一个文件统计，字节数包含两份。 */
     static class Usage {
         final int files, guestFiles; final long bytes;
+        int skipped;
         Usage(int files,long bytes,int guestFiles) { this.files=files; this.bytes=bytes; this.guestFiles=guestFiles; }
     }
     static final class ReceivedReview extends Usage {
-        final Map<File,Uri> locations;
-        ReceivedReview(Map<File,Uri> locations,long bytes,int guests) {
+        final Map<File,String> locations;
+        ReceivedReview(Map<File,String> locations,long bytes,int guests) {
             super(locations.size(),bytes,guests);this.locations=Collections.unmodifiableMap(locations);
         }
     }
     ReceivedReview receivedUsage() throws IOException {
-        Map<File,Uri> locations=new LinkedHashMap<>();int guestFiles=0;long bytes=0;
+        Map<File,String> locations=new LinkedHashMap<>();int guestFiles=0;long bytes=0;
         SharedPreferences guests=getSharedPreferences("guest_received",MODE_PRIVATE);
         for(File file:storage.receivedFiles())if(storage.exists(file)) {
-            bytes+=storage.bytes(file);locations.put(file,storage.saved(file));
+            bytes+=storage.bytes(file);locations.put(file,storage.cleanupVersion(file));
             if(file.getName().matches("[a-f0-9]{64}")&&guests.contains(file.getName()))guestFiles++;
         }
         return new ReceivedReview(locations,bytes,guestFiles);
@@ -1274,19 +1290,20 @@ public final class ChatService extends Service {
     void clearFiles(ReceivedReview review,Consumer<Usage> done) {
         if(busy()) { showError("请先完成或取消文件任务"); return; }
         transferJob(task->{
-            Set<File> deleted=new HashSet<>();int guestFiles=0;long bytes=0;Usage result=null;
+            Set<File> deleted=new HashSet<>();int guestFiles=0,skipped=0;long bytes=0;Usage result=null;
             SharedPreferences guests=getSharedPreferences("guest_received",MODE_PRIVATE);
             try {
-                for(Map.Entry<File,Uri> entry:review.locations.entrySet()) {
+                for(Map.Entry<File,String> entry:review.locations.entrySet()) {
                     File file=entry.getKey();
                     checkTransfer(task);if(!receivedFileOperations.add(file))continue;
                     try {
-                        if(!Objects.equals(entry.getValue(),storage.saved(file))||!storage.exists(file))continue;
-                        long length=storage.bytes(file);checkTransfer(task);storage.delete(file);deleted.add(file);bytes+=length;
+                        long length=storage.bytes(file);
+                        if(!storage.deleteReviewed(file,entry.getValue(),task)){skipped++;continue;}
+                        deleted.add(file);bytes+=length;
                         if(file.getName().matches("[a-f0-9]{64}")&&guests.contains(file.getName()))guestFiles++;
                     } finally {receivedFileOperations.remove(file);}
                 }
-                checkTransfer(task);result=new Usage(deleted.size(),bytes,guestFiles);
+                checkTransfer(task);result=new Usage(deleted.size(),bytes,guestFiles);result.skipped=skipped;
             } finally {
                 Usage completed=result;
                 // 部分文件删除后再取消或失败，也必须刷新那些已经删除的附件；数据库仍只在 I/O 队列访问。
@@ -1320,6 +1337,7 @@ public final class ChatService extends Service {
     private void fail(Exception e) { diagnostics.record(Diagnostics.Event.Error);showError(e.getMessage()==null?e.getClass().getSimpleName():e.getMessage()); }
     private void showError(String text) { main.post(()->{ for(Observer o:new ArrayList<>(observers)) o.error(text); }); }
     @Override public void onDestroy() {
+        if(instance==this)instance=null;
         stopGuest();
         cancelQueuedTransfers();
         closeGateways();securityConfirmation=null;

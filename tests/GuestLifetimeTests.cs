@@ -48,6 +48,9 @@ namespace FeiqLight.Tests
                         main.Show();window.Show();Application.DoEvents();var input=Field<TextBox>(window,"lifetime");
                         Control defaultSave=Field<Button>(window,"saveLifetime");Check(defaultSave.Parent.ClientRectangle.Contains(defaultSave.Bounds),"默认窗口有效期按钮越界");
                         Check(input.Text=="60","UI 默认值");
+                        Check(input.BorderStyle==BorderStyle.None&&input.Parent is RoundedInput,"有效期仍使用原生方框");
+                        Check(input.Parent.Top==defaultSave.Top&&input.Parent.Height==defaultSave.Height,"有效期与按钮未对齐");
+                        input.Focus();Application.DoEvents();Snapshot(window,Path.Combine(output,"guest-lifetime-focused-"+(dark?"dark":"light")+".png"));
                         string folder=Path.Combine(root,"目录-"+(dark?"暗":"亮"));Directory.CreateDirectory(Path.Combine(folder,"子目录"));File.WriteAllText(Path.Combine(folder,"子目录","中文 English 长文件名.txt"),"folder");
                         typeof(GuestWindow).GetMethod("AddFiles",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(window,new object[]{new[]{folder}});
                         Check(Field<ListBox>(window,"files").Items.Count==1,"文件夹入口未展开文件");
@@ -69,6 +72,8 @@ namespace FeiqLight.Tests
                         Check((session.Until-DateTime.UtcNow).TotalMinutes>119.8&&(session.Until-DateTime.UtcNow).TotalMinutes<=120,"链接没有使用设置值");
                         Check(!input.Enabled&&!Field<Button>(window,"saveLifetime").Enabled,"当前会话允许修改有效期");
                         Check(Get(session,session.Token).Contains(session.Until.ToString("o")),"网页到期时间与会话不同");
+                        var data=new System.Web.Script.Serialization.JavaScriptSerializer().DeserializeObject(Get(session,session.Token)) as System.Collections.Generic.Dictionary<string,object>;
+                        Check(Convert.ToInt64(data["remainingMilliseconds"])>119*60000L,"网页没有服务端剩余时长");
                         Check(Get(session,session.Token).Contains("relativePath"),"窗口到服务端丢失目录路径");
                         try{Get(session,new string('0',64));throw new Exception("接受无效令牌");}catch(WebException e){Check(((HttpWebResponse)e.Response).StatusCode==HttpStatusCode.Forbidden,"令牌错误状态");e.Response.Close();}
                         string suffix=dark?"dark":"light";
@@ -80,8 +85,9 @@ namespace FeiqLight.Tests
                         Snapshot(window,Path.Combine(output,"guest-min-"+suffix+".png"));
                         window.Stop();Check(!session.Active,"主动关闭未失效");
                         input.Text="1";Click(window,"start");session=Field<GuestTransfer>(window,"session");
-                        // 不等待一分钟：推进本次对象的截止时间，真实 HTTP 仍走原授权检查。
                         typeof(GuestTransfer).GetField("Until",BindingFlags.Instance|BindingFlags.NonPublic).SetValue(session,DateTime.UtcNow.AddSeconds(-1));
+                        Check(session.Active,"显示时刻变化不应改变实际会话有效期");
+                        typeof(GuestTransfer).GetField("lifetimeMilliseconds",BindingFlags.Instance|BindingFlags.NonPublic).SetValue(session,0L);
                         Check(!session.Active,"到期仍活跃");
                         try{Get(session,session.Token);throw new Exception("到期链接仍授权");}catch(WebException e){Check(((HttpWebResponse)e.Response).StatusCode==HttpStatusCode.Gone,"到期状态");e.Response.Close();}
                         typeof(Timer).GetMethod("OnTick",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(Field<Timer>(window,"timer"),new object[]{EventArgs.Empty});

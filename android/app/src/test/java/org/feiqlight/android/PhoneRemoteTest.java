@@ -39,6 +39,19 @@ public final class PhoneRemoteTest {
     }
     private static Reply login(PhoneRemoteAccess access)throws Exception{return call(access.port(),"/api/login","",new JSONObject().put("mode","remote").put("code",access.code()).toString(),true);}
     @Before public void setup()throws Exception{context=RuntimeEnvironment.getApplication();new ToolsPairings(context).clear();}
+    @Test public void remotePortUsesActiveConnectionAndRejectsDisconnectedService()throws Exception {
+        context.getSharedPreferences("settings",0).edit().putBoolean("auto_connect",false).putBoolean("connection_enabled",false).commit();
+        org.robolectric.android.controller.ServiceController<ChatService> controller=Robolectric.buildService(ChatService.class).create();
+        org.feiqlight.android.core.LanNode.Listener listener=new org.feiqlight.android.core.LanNode.Listener(){public void peersChanged(){}public void error(String text){}public void message(org.feiqlight.android.core.LanNode.Peer peer,org.feiqlight.android.core.LanNode.Message message,boolean update){}};
+        int port;try(ServerSocket socket=new ServerSocket(0,1,InetAddress.getByName("127.0.0.1"))){port=socket.getLocalPort();}
+        try(org.feiqlight.android.core.LanNode node=new org.feiqlight.android.core.LanNode(port,true,"port-test","Android","测试","",listener)) {
+            node.start();field(controller.get(),"node",node);
+            context.getSharedPreferences("settings",0).edit().putInt("port",3000).commit();
+            assertEquals(PhoneRemoteAccess.portFor(port),ChatService.phoneRemotePort());
+            field(controller.get(),"node",null);
+            try{ChatService.phoneRemotePort();fail("无连接仍开放被控端口");}catch(IOException expected){assertTrue(expected.getMessage().contains("连接"));}
+        }finally{controller.destroy();}
+    }
     @Test public void clipboardRoutesRequireAuthorizationRejectReadAndValidateText()throws Exception{
         Backend backend=new Backend();try(PhoneRemoteAccess server=new PhoneRemoteAccess(context,0,true,backend)){
             assertEquals(401,call(server.port(),"/api/clipboard","","{\"text\":\"test\"}",true).code);

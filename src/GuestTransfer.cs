@@ -17,6 +17,8 @@ namespace FeiqLight
         private readonly object gate=new object();
         private readonly ToolsHttp http;
         private readonly Timer expiry;
+        private readonly System.Diagnostics.Stopwatch lifetime = System.Diagnostics.Stopwatch.StartNew();
+        private readonly long lifetimeMilliseconds;
         private readonly string destination;
         private readonly bool allowUpload;
         private long reserved;
@@ -27,7 +29,8 @@ namespace FeiqLight
         internal readonly string Token;
         internal readonly DateTime Until;
         internal int Port { get { return http.Port; } }
-        internal bool Active { get { return !closed&&DateTime.UtcNow<Until; } }
+        internal long RemainingMilliseconds { get { return closed ? 0 : Math.Max(0, lifetimeMilliseconds - lifetime.ElapsedMilliseconds); } }
+        internal bool Active { get { return RemainingMilliseconds > 0; } }
         internal string[] SavedFiles { get { lock(gate)return uploads.Values.Where(u=>u.Saved!=null).Select(u=>u.Saved).ToArray(); } }
         internal string CleanupError { get; private set; }
         internal Action<string,string> Received;
@@ -47,6 +50,7 @@ namespace FeiqLight
             }
             if(downloads.Count==0&&!allowUpload)throw new IOException("请先选择文件或开启接收。");
             Until=DateTime.UtcNow.AddMinutes(lifetimeMinutes);
+            lifetimeMilliseconds=lifetimeMinutes*60000L;lifetime.Restart();
             http=new ToolsHttp(0,loopback,Handle,null,1048576);
             expiry=new Timer(_=>Dispose(),null,TimeSpan.FromMinutes(lifetimeMinutes),Timeout.InfiniteTimeSpan);
         }
@@ -69,7 +73,7 @@ namespace FeiqLight
             }
             if(request.Path=="/favicon.ico"){response.Bytes(new byte[0],"image/x-icon",204);return;}
             Authorize(request);
-            if(request.Method=="GET"&&request.Path=="/api/guest") {response.Json(new{files=downloads.Values.Select(f=>new{id=f.Id,name=f.Name,relativePath=f.Relative,size=f.Size}),upload=allowUpload,requestIds=true,folders=true,until=Until.ToString("o"),limit=UploadQuota,countLimit=UploadFileLimit});return;}
+            if(request.Method=="GET"&&request.Path=="/api/guest") {response.Json(new{files=downloads.Values.Select(f=>new{id=f.Id,name=f.Name,relativePath=f.Relative,size=f.Size}),upload=allowUpload,requestIds=true,folders=true,until=Until.ToString("o"),remainingMilliseconds=RemainingMilliseconds,limit=UploadQuota,countLimit=UploadFileLimit});return;}
             if((request.Method=="GET"||request.Method=="HEAD")&&request.Path=="/file"){Send(request,response);return;}
             if(!allowUpload)throw new ToolsHttp.HttpError(403,"对方未开启浏览器接收。");
             if(request.Method=="POST"&&request.Path=="/api/prepare") {

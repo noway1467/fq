@@ -210,7 +210,7 @@ final class ChatStore extends SQLiteOpenHelper {
     static final class FileTask {
         final String peer;final LanNode.Message message;final Protocol.Attachment file;
         java.io.File guestFile;
-        boolean stored;
+        boolean stored,unavailable;
         TransferState savedProgress;
         FileTask(String peer,LanNode.Message message,Protocol.Attachment file){this.peer=peer;this.message=message;this.file=file;}
     }

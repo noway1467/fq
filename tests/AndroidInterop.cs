@@ -32,7 +32,7 @@ public static class AndroidInteropHost
         }
         using (FileStream output = File.Create(source)) { for (long left = size; left > 0;) { int count = (int)Math.Min(left, bytes.Length); output.Write(bytes, 0, count); left -= count; } }
         Exception error = null; bool received = false; ManualResetEvent complete = new ManualResetEvent(false);
-        using (LanService node = new LanService(new AppSettings { Avatar = "builtin:15", Nickname = "Windows 测试👩🏽‍💻", Group = "互通验证" }, Int32.Parse(args[0]), true, "windows-test"))
+        using (LanService node = new LanService(new AppSettings { Avatar = "builtin:15", Nickname = "Windows 测试👩🏽‍💻", Group = "互通验证", ReceiveFolder = Path.Combine(args[1], "received") }, Int32.Parse(args[0]), true, "windows-test"))
         {
             int outgoingRate=0;node.TransferChanged+=(record,id,percent,state,rate)=>{if(rate>0)Interlocked.Exchange(ref outgoingRate,1);};
             node.Error+=text=>Console.Error.WriteLine("NOTICE "+text);

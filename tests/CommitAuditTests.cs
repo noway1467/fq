@@ -333,6 +333,31 @@ namespace FeiqLight.Tests
             string picture=Path.Combine(root,"头像与背景.png");
             using(Bitmap image=new Bitmap(128,96)) { using(Graphics g=Graphics.FromImage(image))g.Clear(Color.SeaGreen);image.Save(picture,ImageFormat.Png); }
             string avatar=EmojiAvatars.FromLocalImage(picture);
+            Run("连接端口：旧配置、验证、保存、明暗渲染及其他设置保留",delegate {
+                var store=new LocalStore(Path.Combine(root,"ports"));
+                File.WriteAllText(Path.Combine(store.Root,"settings.json"),"{\"Nickname\":\"旧配置\",\"Signature\":\"保留旧签名\"}",new UTF8Encoding(false));
+                Check(store.LoadSettings().Port==2425&&!store.LoadSettings().HasConfiguredPort,"旧配置默认端口错误");
+                Check(new AppSettings{Port=0}.Port==2425&&new AppSettings{Port=65536}.Port==2425,"非法旧值没有回退");
+                AppSettings settings=store.LoadSettings();settings.ReceiveFolder=Path.Combine(store.Root,"received");
+                foreach(bool dark in new[]{false,true}) {
+                    Theme.Change(dark,"slate");
+                    using(var dialog=new SettingsDialog(settings,store.Root,2425)) {
+                        dialog.Show();Application.DoEvents();
+                        TextBox port=All(dialog).OfType<TextBox>().Single(box=>box.AccessibleName=="端口");
+                        Check(!All(dialog).Any(field=>field.AccessibleName=="个性签名"||field.Text=="个性签名"),"无效签名入口仍存在");
+                        Check(All(dialog).Any(field=>field.Text=="连接")&&port.Visible,"通用页缺少连接设置");
+                        foreach(string invalid in new[]{"","abc","1023","65536","-1","30.1"}) {port.Text=invalid;Button(dialog,"保存").PerformClick();Check(dialog.Value==null&&dialog.DialogResult!=DialogResult.OK,"非法端口被保存："+invalid);}
+                        port.Text="3000";Appearance(dialog);All(dialog).OfType<Button>().Single(button=>button.AccessibleName=="设置标签：通用").PerformClick();
+                        Check(port.Text=="3000","跨页丢失端口");Application.DoEvents();
+                        using(var image=new Bitmap(dialog.Width,dialog.Height)){dialog.DrawToBitmap(image,dialog.ClientRectangle);image.Save(Path.Combine(root,"settings-port-"+(dark?"dark":"light")+".png"));}
+                        Button(dialog,"保存").PerformClick();Check(dialog.Value.Port==3000&&dialog.Value.Signature=="保留旧签名","端口或旧字段丢失");
+                        store.SaveSettings(dialog.Value);settings=store.LoadSettings();Check(settings.Port==3000,"重读端口丢失");
+                    }
+                }
+                using(var dialog=new SettingsDialog(settings,store.Root,2425)){dialog.Show();Application.DoEvents();Button(dialog,"保存").PerformClick();Check(dialog.Value.Port==3000,"再次保存被当前端口覆盖");}
+                Check(AddressDialog.Parse("127.0.0.1",3000).Port==3000&&AddressDialog.Parse("127.0.0.1:2425",3000).Port==2425,"手动添加默认值错误");
+                Theme.Change(false,"blue");
+            });
             Run("新增壁纸保存、重新读取及再次写回保留配置",delegate {
                 LocalStore store=new LocalStore(Path.Combine(root,"settings"));AppSettings settings=Settings("配置审计");
                 string identity=settings.DeviceId;

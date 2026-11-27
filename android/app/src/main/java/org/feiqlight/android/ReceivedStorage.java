@@ -16,6 +16,7 @@ import java.util.*;
 /** 每次接收只保留一份正式文件；SAF 提交失败时保留应用内完整文件。 */
 final class ReceivedStorage {
     static final String TREE="receive_tree", AUTO="auto_receive";
+    static final String UNAVAILABLE="保存目录不可访问，请重新授权";
     private final Context context;
     ReceivedStorage(Context context) { this.context=context; }
     SharedPreferences settings() { return context.getSharedPreferences("settings",Context.MODE_PRIVATE); }
@@ -53,7 +54,40 @@ final class ReceivedStorage {
         try {return ReceivedFileProvider.uri(context,file,message.files.get(index).name);}catch(IllegalArgumentException error){return null;}
     }
     private void forget(File file) {
-        String key=file.getName();locations().edit().remove(key).remove(key+".tree").remove(key+".size").remove(key+".name").apply();
+        String key=file.getName();locations().edit().remove(key).remove(key+".tree").remove(key+".size").remove(key+".name").remove(key+".hash").apply();
+    }
+    String cleanupVersion(File file) throws IOException {
+        if(Files.isSymbolicLink(file.toPath()))return null;
+        checkReceivedFile(file);
+        boolean internal=Files.isRegularFile(file.toPath(),LinkOption.NOFOLLOW_LINKS);
+        Uri document=existingSaved(file);
+        if(document==null&&saved(file)!=null)return null;
+        if(!internal&&document==null)return null;
+        String version=internal?file.length()+":"+file.lastModified():"missing";
+        if(document==null)return version;
+        try(Cursor cursor=context.getContentResolver().query(document,new String[]{DocumentsContract.Document.COLUMN_SIZE,DocumentsContract.Document.COLUMN_LAST_MODIFIED},null,null)) {
+            if(cursor==null||!cursor.moveToFirst()||cursor.isNull(0))return null;
+            return version+"|"+document+"|"+cursor.getLong(0)+"|"+(cursor.isNull(1)?"unknown":Long.toString(cursor.getLong(1)));
+        } catch(SecurityException error){return null;}
+    }
+    boolean deleteReviewed(File file,String version,LanNode.Transfer task) throws IOException {
+        check(task);
+        if(version==null||!version.equals(cleanupVersion(file)))return false;
+        Uri document=saved(file);
+        if(document!=null) {
+            String expected=locations().getString(file.getName()+".hash","");
+            if(expected.isEmpty())return false;
+            try(InputStream input=context.getContentResolver().openInputStream(document)) {
+                if(input==null)return false;
+                MessageDigest digest=MessageDigest.getInstance("SHA-256");
+                byte[] buffer=new byte[65536];int count;
+                while((count=input.read(buffer))!=-1){check(task);digest.update(buffer,0,count);}
+                if(!expected.equals(Base64.getEncoder().encodeToString(digest.digest())))return false;
+            } catch(java.security.NoSuchAlgorithmException error){throw new IllegalStateException(error);}
+        }
+        check(task);
+        if(!version.equals(cleanupVersion(file)))return false;
+        delete(file);return true;
     }
     List<File> receivedFiles() throws IOException {
         File directory=new File(context.getFilesDir(),"received");Map<String,File> files=new LinkedHashMap<>();
@@ -116,7 +150,7 @@ final class ReceivedStorage {
                 if(found||(!(e instanceof IllegalArgumentException)&&!(e instanceof FileNotFoundException)&&!(e.getCause() instanceof FileNotFoundException)))throw new IOException("保存目录中的文件未能删除："+e.getMessage(),e);
             }
             String key=file.getName();
-            if(!locations().edit().remove(key).remove(key+".tree").remove(key+".size").remove(key+".name").commit())throw new IOException("保存目录中的文件已删除，但位置记录未能更新，请重试");
+            if(!locations().edit().remove(key).remove(key+".tree").remove(key+".size").remove(key+".name").remove(key+".hash").commit())throw new IOException("保存目录中的文件已删除，但位置记录未能更新，请重试");
         }
         Files.deleteIfExists(file.toPath());
     }
@@ -164,9 +198,9 @@ final class ReceivedStorage {
                 if(output==null) throw new IOException("无法写入所选目录"); byte[] buffer=new byte[65536]; int count;
                 while((count=input.read(buffer))!=-1) { check(task); output.write(buffer,0,count); }
             }
-            verify(file,created,task);check(task);
+            String hash=verify(file,created,task);check(task);
             String key=file.getName();
-            if(!locations().edit().putString(key,created.toString()).putString(key+".tree",tree.toString()).putLong(key+".size",file.length()).putString(key+".name",candidate).commit())throw new IOException("保存位置未能记录");
+            if(!locations().edit().putString(key,created.toString()).putString(key+".tree",tree.toString()).putLong(key+".size",file.length()).putString(key+".name",candidate).putString(key+".hash",hash).commit())throw new IOException("保存位置未能记录");
             check(task);Files.delete(file.toPath());return created;
         } catch(Exception e) {
             boolean cleaned=created==null;
@@ -177,7 +211,7 @@ final class ReceivedStorage {
             throw new IOException((task.isCancelled()?"保存已取消":"保存目录不可用")+"，文件已保存在应用内接收区。"+(cleaned?"":"目标目录可能留下不完整副本。")+" "+e.getMessage(),e);
         }
     }
-    private void verify(File file,Uri destination,LanNode.Transfer task)throws IOException {
+    private String verify(File file,Uri destination,LanNode.Transfer task)throws IOException {
         try {
             MessageDigest original=MessageDigest.getInstance("SHA-256"),saved=MessageDigest.getInstance("SHA-256");byte[] buffer=new byte[65536];int count;long size=0;
             try(InputStream input=new FileInputStream(file)) {
@@ -187,7 +221,9 @@ final class ReceivedStorage {
                 if(input==null)throw new IOException("保存文件不可读");
                 while((count=input.read(buffer))!=-1){check(task);size+=count;if(size>file.length())throw new IOException("保存文件长度不一致");saved.update(buffer,0,count);}
             }
-            if(size!=file.length()||!Arrays.equals(original.digest(),saved.digest()))throw new IOException("保存文件校验不一致");
+            byte[] hash=original.digest();
+            if(size!=file.length()||!Arrays.equals(hash,saved.digest()))throw new IOException("保存文件校验不一致");
+            return Base64.getEncoder().encodeToString(hash);
         }catch(java.security.NoSuchAlgorithmException e){throw new IllegalStateException(e);}
     }
     private static String directory(ContentResolver resolver,Uri tree,String parent,String name,LanNode.Transfer task)throws IOException {

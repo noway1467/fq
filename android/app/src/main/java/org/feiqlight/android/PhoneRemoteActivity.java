@@ -36,6 +36,8 @@ public final class PhoneRemoteActivity extends Activity {
     private int dp(int n){return Math.round(n*getResources().getDisplayMetrics().density);}
     private void enable(){
         if(PhoneRemoteService.active()!=null)return;
+        try{ChatService.phoneRemotePort();}
+        catch(java.io.IOException error){Toast.makeText(this,error.getMessage(),Toast.LENGTH_LONG).show();return;}
         if(!RemoteInputService.available()){
             boolean night=SystemBars.isDark(this);
             AlertDialog dialog=new AlertDialog.Builder(this,night?android.R.style.Theme_Material_Dialog_Alert:android.R.style.Theme_Material_Light_Dialog_Alert).setTitle("开启远控辅助").setMessage(R.string.remote_accessibility_description).setNegativeButton("取消",null).setPositiveButton("打开系统设置",(d,w)->startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))).create();

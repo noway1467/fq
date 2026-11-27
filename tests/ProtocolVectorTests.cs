@@ -104,7 +104,7 @@ namespace FeiqLight.Tests
                 {"maxRelativePathSegments","value.Split('/').Length<={0}"},{"maxParsedAttachments",".Take({0})"},{"maxAvatarJpegBytes","bytes.Length > {0}"}
             };
             foreach(var item in checks) if(!protocol.Contains(String.Format(item.Value,constants[item.Key]))) throw new Exception("生产边界与常量不一致："+item.Key);
-            if(!File.ReadAllText(Path.Combine(root,"src/Program.cs")).Contains("int port = "+constants["defaultChatPort"]))throw new Exception("默认端口不同");
+            Equal(Number(constants,"defaultChatPort"),(long)new AppSettings().Port,"默认端口不同");
             string lan=File.ReadAllText(Path.Combine(root,"src/LanService.cs"));
             if(!lan.Contains("paths.Count > "+constants["maxAttachmentsPerMessage"])||!lan.Contains("5000),"+constants["helloFrameBytes"]))throw new Exception("邀请/Hello 上限不同");
             using(var output=new MemoryStream()) {

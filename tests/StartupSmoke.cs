@@ -40,29 +40,40 @@ internal static class StartupSmoke
             Directory.CreateDirectory(root);
             int port;using(TcpListenerHandle probe=new TcpListenerHandle())port=probe.Port;
             LocalStore store=new LocalStore(Path.Combine(root,"资料 with spaces"));
-            AppSettings settings=new AppSettings { Nickname="自启动真实烟测",CloseToTray=false,Notifications=false,ReceiveFolder=Path.Combine(root,"received") };
+            AppSettings settings=new AppSettings { Port=port,Nickname="自启动真实烟测",CloseToTray=false,Notifications=false,ReceiveFolder=Path.Combine(root,"received") };
             WindowsStartup startup=new WindowsStartup(Path.Combine(root,"startup-links"),executable,store.Root,port,true);
-            startup.SaveSettings(store,settings,new AppSettings { Nickname=settings.Nickname,CloseToTray=false,Notifications=false,StartWithWindows=true,ReceiveFolder=settings.ReceiveFolder });
-            process=Process.Start(new ProcessStartInfo(startup.ShortcutPath){UseShellExecute=true});
-            Require(process!=null,"启动快捷方式未返回进程句柄");
-            using(UdpClient socket=new UdpClient(new IPEndPoint(IPAddress.Loopback,0)))
+            startup.SaveSettings(store,settings,new AppSettings { Port=port,Nickname=settings.Nickname,CloseToTray=false,Notifications=false,StartWithWindows=true,ReceiveFolder=settings.ReceiveFolder });
+            int originalPort=port;
+            for(int launch=0;launch<2;launch++)
             {
-                socket.Client.ReceiveTimeout=200;bool ready=false;Stopwatch timer=Stopwatch.StartNew();
-                while(!ready&&timer.ElapsedMilliseconds<10000)
-                {
-                    Require(!process.HasExited,"自启动进程提前退出");
-                    byte[] query=Protocol.Encode(123,"startup-smoke","loopback",Protocol.Entry|Protocol.Utf8|Protocol.CapUtf8,"烟测",null);
-                    socket.Send(query,query.Length,new IPEndPoint(IPAddress.Loopback,port));
-                    try { IPEndPoint remote=new IPEndPoint(IPAddress.Any,0);Packet packet;byte[] response=socket.Receive(ref remote);ready=remote.Port==port&&Protocol.TryParse(response,out packet)&&packet.Body==settings.Nickname; }
-                    catch(SocketException) { Thread.Sleep(50); }
+                if(launch==1) {
+                    using(TcpListenerHandle probe=new TcpListenerHandle())port=probe.Port;
+                    settings=store.LoadSettings();settings.Port=port;store.SaveSettings(settings);
                 }
-                Require(ready,"快捷方式启动的 EXE 未使用隔离资料/端口回应 UDP");
-                Require(!AnyVisible(process),"自启动仍显示主窗口或错误弹窗");
-                duplicate=Process.Start(new ProcessStartInfo(startup.ShortcutPath){UseShellExecute=true});
-                Require(duplicate!=null&&duplicate.WaitForExit(5000)&&duplicate.ExitCode==0,"重复自启动没有静默退出");
-                Require(!process.HasExited,"重复启动影响了原实例");
+                ProcessStartInfo start=launch==0?new ProcessStartInfo(startup.ShortcutPath){UseShellExecute=true}:new ProcessStartInfo(executable,"--autostart --loopback --port "+originalPort+" --profile \""+store.Root+"\""){UseShellExecute=false,WindowStyle=ProcessWindowStyle.Hidden};
+                process=Process.Start(start);
+                Require(process!=null,"启动未返回进程句柄");
+                using(UdpClient socket=new UdpClient(new IPEndPoint(IPAddress.Loopback,0)))
+                {
+                    socket.Client.ReceiveTimeout=200;bool ready=false;Stopwatch timer=Stopwatch.StartNew();
+                    while(!ready&&timer.ElapsedMilliseconds<10000)
+                    {
+                        Require(!process.HasExited,"自启动进程提前退出");
+                        byte[] query=Protocol.Encode(123,"startup-smoke","loopback",Protocol.Entry|Protocol.Utf8|Protocol.CapUtf8,"烟测",null);
+                        socket.Send(query,query.Length,new IPEndPoint(IPAddress.Loopback,port));
+                        try { IPEndPoint remote=new IPEndPoint(IPAddress.Any,0);Packet packet;byte[] response=socket.Receive(ref remote);ready=remote.Port==port&&Protocol.TryParse(response,out packet)&&packet.Body==settings.Nickname; }
+                        catch(SocketException) { Thread.Sleep(50); }
+                    }
+                    Require(ready,"EXE 未使用已保存的隔离端口回应 UDP");
+                    Require(!AnyVisible(process),"自启动仍显示主窗口或错误弹窗");
+                    duplicate=Process.Start(new ProcessStartInfo(startup.ShortcutPath){UseShellExecute=true});
+                    Require(duplicate!=null&&duplicate.WaitForExit(5000)&&duplicate.ExitCode==0,"重复自启动没有静默退出");
+                    Require(!process.HasExited,"重复启动影响了原实例");
+                }
+                Close(process);process.Dispose();process=null;duplicate.Dispose();duplicate=null;
+                Console.WriteLine("PASS "+(launch==0?"真实快捷方式使用保存端口":"更换保存端口后兼容旧快捷方式参数")+"："+port);
             }
-            Close(process);startup.SetEnabled(false);Require(!File.Exists(startup.ShortcutPath),"关闭后启动项仍存在");
+            startup.SetEnabled(false);Require(!File.Exists(startup.ShortcutPath),"关闭后启动项仍存在");
             Console.WriteLine("STARTUP PASS: real .lnk -> packaged EXE; quoted Chinese/space profile; loopback UDP; no visible window; duplicate exits silently; normal close; own link removed.");
             return 0;
         }

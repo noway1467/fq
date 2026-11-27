@@ -131,6 +131,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
     private final Set<Long> displayedOutgoing=new HashSet<>();
     private final List<Runnable> fileProgressViews=new ArrayList<>();
     private final Map<String,Uri> chatFiles=new HashMap<>();
+    private final Set<String> unavailableChatFiles=new HashSet<>();
     private final Map<String,int[]> chatMedia=new HashMap<>();
     private final Map<String,ChatService.FileProgress> chatFileProgress=new HashMap<>();
     private final Map<String,ChatRow> chatRows=new HashMap<>();
@@ -350,7 +351,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         messageSelectionBar=null;
         closeHistory();
         chatRows.clear();
-        chatFiles.clear();
+        chatFiles.clear();unavailableChatFiles.clear();
         chatMedia.clear();
         chatFileProgress.clear();
         fileProgressViews.clear();
@@ -813,6 +814,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
     private void renderChatPage(ChatService.ChatPage page) {
         chatFiles.clear();
         chatFiles.putAll(page.files);
+        unavailableChatFiles.clear();unavailableChatFiles.addAll(page.unavailable);
         chatMedia.clear();
         chatMedia.putAll(page.media);
         chatFileProgress.clear();
@@ -867,7 +869,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
                 String fileKey=ChatService.fileKey(selected,message.number,file.id,message.outgoing);
                 int[] box=chatMedia.get(fileKey);
                 value.append('\0').append(file.id).append('\0').append(file.name).append('\0').append(file.size)
-                        .append('\0').append(chatFiles.get(fileKey)).append('\0').append(box==null?"":box[0]+"x"+box[1]);
+                        .append('\0').append(chatFiles.get(fileKey)).append('\0').append(unavailableChatFiles.contains(fileKey)).append('\0').append(box==null?"":box[0]+"x"+box[1]);
             }
             String signature=value.toString();
             rowSignatures.put(messageKey(message),signature);
@@ -1218,6 +1220,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
                 file.id)?"等待对方接收":"历史邀请 · 无活动传输"):saved?"已保存":"待接收 · 点击接收";
         if(!message.outgoing&&(progress==null||!taskActive(progress.state))) {
             if(saved){state="已保存";percent=100;}
+            else if(unavailableChatFiles.contains(ChatService.fileKey(selected,message.number,file.id,false))){state=ReceivedStorage.UNAVAILABLE;percent=100;}
             else if(ChatService.wasStored(message.state)||progress!=null&&ChatService.wasStored(progress.state)){
                 state="本机文件已删除";
                 percent=0;
@@ -1999,6 +2002,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         return saved==null?null:new ChatService.FileProgress(saved.percent,saved.state,null);
     }
     String taskState(ChatStore.FileTask item) {
+        if(item.unavailable)return ReceivedStorage.UNAVAILABLE;
         if(item.guestFile!=null)return item.stored?"已保存":"本机文件已删除";
         ChatService.FileProgress progress=taskProgress(item);
         if(!item.message.outgoing) {
@@ -2015,7 +2019,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
     }
     static boolean taskComplete(String state) { return state.equals("已保存")||state.equals("对方已校验保存"); }
     static boolean taskEnded(String state) {
-        return taskComplete(state)||state.contains("已拒绝")||state.contains("已取消发送")||state.equals("本机文件已删除");
+        return taskComplete(state)||state.contains("已拒绝")||state.contains("已取消发送")||state.equals("本机文件已删除")||state.equals(ReceivedStorage.UNAVAILABLE);
     }
     static boolean taskActive(String state) {
         return state.contains("中")&&!state.contains("中断")&&!taskEnded(state);
@@ -3524,13 +3528,13 @@ public final class MainActivity extends Activity implements ChatService.Observer
         source.reviewReceivedFiles(review->{
             restore.run();if(service!=source||isFinishing()||isDestroyed()||!button.isShown())return;
             if(review.files==0) { error("没有可清理的已接收文件"); return; }
-            String detail="删除本机已接收的 "+review.files+" 个文件，共 "+size(review.bytes)+"。聊天与传输记录保留，删除后文件不再保留；新收到的文件不删除。聊天附件在对方在线且邀请有效时可重新接收。";
+            String detail="检查并清理本机已接收的 "+review.files+" 个文件，共 "+size(review.bytes)+"。已修改、无法核实原内容或新收到的文件保留。聊天与传输记录保留，删除后文件不再保留；聊天附件在对方在线且邀请有效时可重新接收。";
             if(review.guestFiles>0)detail+="\n注意：其中 "+review.guestFiles+" 个来自临时浏览器传输，清理后无法重新接收。";
             confirm("清理已接收文件",detail,"清理",()->{
                 if(service!=source) { error("连接服务已变化，请重新清理"); return; }
                 source.clearFiles(review,result->{
                     if(!isFinishing()&&!isDestroyed()&&
-                            service==source)error("已清理 "+result.files+" 个已接收文件，释放 "+size(result.bytes));
+                            service==source)error("已清理 "+result.files+" 个已接收文件，释放 "+size(result.bytes)+(result.skipped>0?"；保留 "+result.skipped+" 个已修改或无法核实的文件":""));
                 });
             });
         },message->{
@@ -3552,6 +3556,8 @@ public final class MainActivity extends Activity implements ChatService.Observer
                     "删除文件",()->{
                 if(service==source)source.deleteReceivedFile(peer,packet,file);
             }));
+        } else if(receivedStorage.saved(cached)!=null) {
+            options.addView(text(ReceivedStorage.UNAVAILABLE+"。请在设置 → 文件中重新选择原保存目录。",14,MUTED));
         } else {
             fileAction(options,dialog,"接收文件",()->{ if(service!=null) service.receive(peer,packet,file); });
             fileAction(options,dialog,"拒绝这批文件",()->{ if(service!=null) service.reject(peer,packet); });

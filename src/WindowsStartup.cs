@@ -11,7 +11,7 @@ namespace FeiqLight
     // 只管理当前用户、当前资料目录的启动快捷方式；测试传入项目内隔离目录。
     public sealed class WindowsStartup
     {
-        private readonly string executable, arguments, marker;
+        private readonly string executable, arguments, legacyArguments, marker;
         public string ShortcutPath { get; private set; }
         public WindowsStartup(string startupFolder, string executablePath, string profile, int port, bool loopback)
         {
@@ -21,7 +21,8 @@ namespace FeiqLight
             using (SHA256 hash = SHA256.Create()) key = BitConverter.ToString(hash.ComputeHash(Encoding.UTF8.GetBytes(profile.TrimEnd(Path.DirectorySeparatorChar).ToUpperInvariant()))).Replace("-", "").Substring(0, 12);
             marker = "FeiqLight startup / " + key;
             ShortcutPath = Path.Combine(Path.GetFullPath(startupFolder), "飞Q-" + key + ".lnk");
-            arguments = "--autostart --port " + port.ToString(CultureInfo.InvariantCulture) + " --profile " + QuotePath(profile) + (loopback ? " --loopback" : "");
+            arguments = "--autostart --profile " + QuotePath(profile) + (loopback ? " --loopback" : "");
+            legacyArguments = "--autostart --port " + port.ToString(CultureInfo.InvariantCulture) + " --profile " + QuotePath(profile) + (loopback ? " --loopback" : "");
         }
         private static string QuotePath(string value)
         {
@@ -52,7 +53,7 @@ namespace FeiqLight
         }
         public bool IsEnabled
         {
-            get { return File.Exists(ShortcutPath) && Read("Description") == marker && String.Equals(Read("TargetPath"), executable, StringComparison.OrdinalIgnoreCase) && Read("Arguments") == arguments; }
+            get { return File.Exists(ShortcutPath) && Read("Description") == marker && String.Equals(Read("TargetPath"), executable, StringComparison.OrdinalIgnoreCase) && (Read("Arguments") == arguments || Read("Arguments") == legacyArguments); }
         }
         public void SetEnabled(bool enabled)
         {
@@ -60,7 +61,7 @@ namespace FeiqLight
             if (exists && Read("Description") != marker) throw new IOException("同名启动项不属于飞Q，未覆盖或删除；请先检查启动文件夹。");
             if (!enabled) { if (exists) File.Delete(ShortcutPath); return; }
             if (!File.Exists(executable)) throw new IOException("当前程序文件已移动，请从新位置重新运行后开启自启动。");
-            if (IsEnabled) return;
+            if (IsEnabled && Read("Arguments") == arguments) return;
             string folder = Path.GetDirectoryName(ShortcutPath); Directory.CreateDirectory(folder);
             string temporary = Path.Combine(folder, "~fq-" + Guid.NewGuid().ToString("N").Substring(0, 12) + ".lnk");
             try

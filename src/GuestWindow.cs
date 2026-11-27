@@ -245,7 +245,8 @@ namespace FeiqLight
         private readonly Label netTitle = Theme.Label("局域网地址", Theme.Section, Theme.Ink);
         private readonly AddressPicker addressPicker;
         private readonly Label lifetimeTitle = Theme.Label("链接有效期（分钟，1–1440）", Theme.Small, Theme.Muted);
-        private readonly TextBox lifetime = new TextBox { MaxLength = 8, AccessibleName = "链接有效期（分钟）" };
+        private readonly RoundedInput lifetimeField = new RoundedInput();
+        private readonly TextBox lifetime;
         private readonly Button saveLifetime;
         private readonly Panel footerBar = new BufferedCanvas();
         private readonly Label state = Theme.Label("就绪", Theme.Small, Theme.Muted);
@@ -265,6 +266,8 @@ namespace FeiqLight
 
         internal GuestWindow(MainForm main, LanService network)
         {
+            lifetime = lifetimeField.Input;
+            lifetime.MaxLength = 8; lifetime.AccessibleName = "链接有效期（分钟）";
             this.main = main;
             this.network = network;
             lifetime.Text = network.Settings.GuestLifetimeMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture);
@@ -368,7 +371,7 @@ namespace FeiqLight
             inspectorPane.Controls.Add(addressPicker);
             inspectorPane.Controls.Add(refreshIp);
             inspectorPane.Controls.Add(lifetimeTitle);
-            inspectorPane.Controls.Add(lifetime);
+            inspectorPane.Controls.Add(lifetimeField);
             inspectorPane.Controls.Add(saveLifetime);
 
             workspace.Controls.Add(filesPane);
@@ -582,8 +585,9 @@ namespace FeiqLight
             int lifetimeTop = Math.Max(addressPicker.Bottom, linkBlock.Bottom) + (int)(8 * s);
             int buttonWidth = (int)(110 * s), inputWidth = (int)(72 * s), inputGap = (int)(10 * s);
             saveLifetime.Bounds = new Rectangle(pw - buttonWidth, lifetimeTop, buttonWidth, (int)(32 * s));
-            lifetime.Bounds = new Rectangle(saveLifetime.Left - inputGap - inputWidth, lifetimeTop + (int)(3 * s), inputWidth, lifetime.PreferredHeight);
-            lifetimeTitle.Bounds = new Rectangle(0, lifetimeTop + (int)(5 * s), lifetime.Left - inputGap, (int)(24 * s));
+            lifetimeField.Padding = new Padding((int)(10 * s), 0, (int)(10 * s), 0);
+            lifetimeField.Bounds = new Rectangle(saveLifetime.Left - inputGap - inputWidth, lifetimeTop, inputWidth, saveLifetime.Height);
+            lifetimeTitle.Bounds = new Rectangle(0, lifetimeTop + (int)(5 * s), lifetimeField.Left - inputGap, (int)(24 * s));
         }
 
         private void LayoutLifetime(int width, int top, float scale)
@@ -591,7 +595,8 @@ namespace FeiqLight
             lifetimeTitle.Bounds = new Rectangle(0, top + (int)(6 * scale), width, (int)(20 * scale));
             int buttonWidth = (int)(110 * scale), gap = (int)(10 * scale);
             saveLifetime.Bounds = new Rectangle(width - buttonWidth, lifetimeTitle.Bottom + (int)(2 * scale), buttonWidth, (int)(32 * scale));
-            lifetime.Bounds = new Rectangle(0, saveLifetime.Top + (int)(3 * scale), Math.Max(40, width - buttonWidth - gap), lifetime.PreferredHeight);
+            lifetimeField.Padding = new Padding((int)(10 * scale), 0, (int)(10 * scale), 0);
+            lifetimeField.Bounds = new Rectangle(0, saveLifetime.Top, Math.Max(40, width - buttonWidth - gap), saveLifetime.Height);
         }
 
         private void SaveLifetime()
@@ -662,8 +667,10 @@ namespace FeiqLight
             netTitle.ForeColor = Theme.Ink;
             lifetimeTitle.BackColor = Theme.Canvas;
             lifetimeTitle.ForeColor = Theme.Muted;
-            lifetime.BackColor = Theme.Surface;
-            lifetime.ForeColor = Theme.Ink;
+            lifetimeField.BackColor = Theme.Canvas;
+            lifetime.BackColor = Theme.Ice;
+            lifetime.ForeColor = lifetimeField.Enabled ? Theme.Ink : Theme.Muted;
+            lifetimeField.Invalidate();
             StyleActionButton(saveLifetime, 0, 8);
 
             linkBlock.BackColor = Theme.Canvas;
@@ -708,7 +715,7 @@ namespace FeiqLight
             bool active = session != null && session.Active;
             if (active)
             {
-                int left = Math.Max(0, (int)Math.Ceiling((session.Until - DateTime.UtcNow).TotalMinutes));
+                int left = (int)Math.Ceiling(session.RemainingMilliseconds / 60000.0);
                 statusChip.Set("开放中 · 剩余 " + left + " 分钟", true);
             }
             else statusChip.Set("未开启", false);
@@ -902,7 +909,7 @@ namespace FeiqLight
 
         private string StateText()
         {
-            int left = Math.Max(0, (int)Math.Ceiling((session.Until - DateTime.UtcNow).TotalMinutes));
+            int left = (int)Math.Ceiling(session.RemainingMilliseconds / 60000.0);
             int received = session.SavedFiles.Length;
             return "剩余约 " + left + " 分钟 · 已接收 " + received + " 个文件";
         }
@@ -997,7 +1004,9 @@ namespace FeiqLight
             removeBtn.Enabled = !active && files.SelectedIndex >= 0;
             clearBtn.Enabled = !active && count > 0;
             upload.Enabled = !active;
-            lifetime.Enabled = saveLifetime.Enabled = !active;
+            lifetimeField.Enabled = saveLifetime.Enabled = !active;
+            lifetime.ForeColor = active ? Theme.Muted : Theme.Ink;
+            lifetimeField.Invalidate();
             refreshIp.Enabled = !active;
             addressPicker.Enabled = !active;
             copy.Enabled = qr.Enabled = active;

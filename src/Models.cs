@@ -11,6 +11,13 @@ namespace FeiqLight
 {
     public sealed class AppSettings
     {
+        private int port = 2425;
+        public int Port
+        {
+            get { return port; }
+            set { port = value >= 1024 && value <= 65535 ? value : 2425; HasConfiguredPort = true; }
+        }
+        internal bool HasConfiguredPort { get; private set; }
         public const int DefaultGuestLifetimeMinutes = 60, MaxGuestLifetimeMinutes = 1440;
         private int guestLifetimeMinutes = DefaultGuestLifetimeMinutes;
         public int GuestLifetimeMinutes

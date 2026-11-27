@@ -444,12 +444,12 @@ namespace FeiqLight
             Label label = Theme.Label("对方 IPv4 地址", Theme.Section, Theme.Ink); label.Dock=DockStyle.Top;label.Height=26;body.Controls.Add(label);
             RoundedInput input = new RoundedInput {Dock=DockStyle.Top,Height=44}; address = input.Input; address.AccessibleName = "好友 IP 地址"; input.Placeholder = "例如 192.168.1.100（默认端口 " + port + "）"; body.Controls.Add(input);input.BringToFront();
             Label error = Theme.Label("", Theme.Small, Theme.Danger); error.Dock=DockStyle.Top;error.Height=28;error.Padding=new Padding(2,6,0,0);error.TextAlign=ContentAlignment.TopLeft;body.Controls.Add(error);error.BringToFront();
-            Button add = Theme.Button("添加", delegate { try { Endpoint = Parse(address.Text); DialogResult = DialogResult.OK; } catch (ArgumentException e) { error.Text = e.Message; address.Focus(); } }, true);
+            Button add = Theme.Button("添加", delegate { try { Endpoint = Parse(address.Text, port); DialogResult = DialogResult.OK; } catch (ArgumentException e) { error.Text = e.Message; address.Focus(); } }, true);
             Button cancel=Theme.Button("取消",delegate {DialogResult=DialogResult.Cancel;},false);DialogLayout.Actions(this,add,cancel);Shown+=delegate {address.Focus();};
         }
-        public static IPEndPoint Parse(string text)
+        public static IPEndPoint Parse(string text, int defaultPort = 2425)
         {
-            string[] parts = text.Trim().Split(':'); IPAddress ip; int port = 2425;
+            string[] parts = text.Trim().Split(':'); IPAddress ip; int port = defaultPort;
             if (parts.Length > 2 || !IPAddress.TryParse(parts[0], out ip) || ip.AddressFamily != AddressFamily.InterNetwork || ip.Equals(IPAddress.Any) || ip.Equals(IPAddress.Broadcast) || ip.GetAddressBytes()[0] >= 224 || (parts.Length == 2 && !Int32.TryParse(parts[1], out port)) || port < 1024 || port > 65535) throw new ArgumentException("请输入有效 IPv4 地址，端口为 1024–65535。");
             return new IPEndPoint(ip, port);
         }
@@ -652,7 +652,10 @@ namespace FeiqLight
                     avatarValue = picker.SelectedValue; Image old = avatarPreview.Image; avatarPreview.Image = Theme.ContactAvatar(64, avatarIdentity, false, avatarValue); old.Dispose();
                 }
             }, false); avatarButton.Width = 118; avatarButton.Anchor = AnchorStyles.Left; DialogLayout.StyleSecondary(avatarButton); avatarRow.Controls.Add(avatarButton, 1, 0); body.Controls.Add(avatarRow);
-            TextBox name = Input("昵称", current.Nickname, 8, 32), group = Input("部门", current.Group, 80, 32), signature = Input("个性签名", current.Signature, 152, 80);
+            TextBox name = Input("昵称", current.Nickname, 8, 32), group = Input("部门", current.Group, 80, 32);
+            TextBox connectionPort = Input("端口", current.Port.ToString(System.Globalization.CultureInfo.InvariantCulture), 152, 5);
+            Label portHint = Theme.Label("当前监听 " + port + "；修改后重启飞Q生效。默认 2425，范围 1024–65535。", Theme.Small, Theme.Muted);
+            portHint.Top = 220; portHint.Height = 50; body.Controls.Add(portHint);
             ToggleSwitch close = new ToggleSwitch { Text = "关闭时收起到托盘", Checked = current.CloseToTray, BackColor = Theme.Surface }; close.SetBounds(26, 232, 458, 42); body.Controls.Add(close);
             ToggleSwitch notifications = new ToggleSwitch { Text = "新消息气泡通知", Checked = current.Notifications, BackColor = Theme.Surface }; notifications.SetBounds(26, 274, 458, 42); body.Controls.Add(notifications);
             ToggleSwitch startup = new ToggleSwitch { Text = "开机自启动", AccessibleName = "开机自启动", Checked = startupAvailable ? startupEnabled : current.StartWithWindows, Enabled = startupAvailable, BackColor = Theme.Surface }; startup.SetBounds(26, 275, 458, 42); body.Controls.Add(startup);
@@ -743,6 +746,7 @@ namespace FeiqLight
             dark.CheckedChanged+=delegate {preview.Invalidate();};foreach(Button choice in choices)choice.Click+=delegate{preview.Invalidate();};
             // 错误提示独占一行；空 Label 也会遮住兄弟控件，不能与按钮使用重叠坐标。
             Label error = Theme.Label("", Theme.Small, Theme.Danger); error.Dock = DockStyle.Fill; error.AutoEllipsis = true; error.Visible = false; error.AccessibleName = "设置错误"; footer.Controls.Add(error);
+            connectionPort.TextChanged += delegate { if(error.Text.StartsWith("端口",StringComparison.Ordinal))error.Text=""; };
             FlowLayoutPanel actionRow = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 40, FlowDirection = FlowDirection.RightToLeft, WrapContents = false, Margin = Padding.Empty };
             footer.Controls.Add(actionRow);
             error.TextChanged += delegate {
@@ -755,10 +759,13 @@ namespace FeiqLight
             save = Theme.Button("保存", delegate
             {
                 if (String.IsNullOrWhiteSpace(name.Text)) { error.Text = "昵称不能为空"; SelectTab(0); name.Focus(); return; }
+                int selectedPort;
+                if (!Int32.TryParse(connectionPort.Text.Trim(), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out selectedPort) || selectedPort < 1024 || selectedPort > 65535)
+                { error.Text = "端口须为 1024–65535 的整数"; SelectTab(0); connectionPort.Focus(); return; }
                 try
                 {
                     string path = ReceiveStorage.Folder(folder.Text); ReceiveStorage.ValidateWritable(path);
-                    Value = new AppSettings { Avatar = avatarValue, Nickname = Protocol.Field(name.Text.Trim()), Group = String.IsNullOrWhiteSpace(group.Text) ? "我的局域网" : Protocol.Field(group.Text.Trim()), Signature = signature.Text.Trim(), CloseToTray = close.Checked, StartWithWindows = startup.Checked, Notifications = notifications.Checked,DiagnosticsEnabled = diagnostics.Checked, AutoSendDroppedFiles=autoDrop.Checked, AllowLegacyProtocol=legacy.Checked, AutoReceiveFiles = auto.Checked, ReceiveFolder = path, ChatFontSize=messageSize,ChatBackground=backgroundMode,BackgroundImage=backgroundPath,DarkMode=dark.Checked, FollowSystemTheme=follow.Checked, Accent=accentKeys[accentIndex] };
+                    Value = new AppSettings { Port = selectedPort, Avatar = avatarValue, Nickname = Protocol.Field(name.Text.Trim()), Group = String.IsNullOrWhiteSpace(group.Text) ? "我的局域网" : Protocol.Field(group.Text.Trim()), Signature = current.Signature, CloseToTray = close.Checked, StartWithWindows = startup.Checked, Notifications = notifications.Checked,DiagnosticsEnabled = diagnostics.Checked, AutoSendDroppedFiles=autoDrop.Checked, AllowLegacyProtocol=legacy.Checked, AutoReceiveFiles = auto.Checked, ReceiveFolder = path, ChatFontSize=messageSize,ChatBackground=backgroundMode,BackgroundImage=backgroundPath,DarkMode=dark.Checked, FollowSystemTheme=follow.Checked, Accent=accentKeys[accentIndex] };
                     DialogResult = DialogResult.OK;
                 }
                 catch (Exception e) { error.Text = "保存目录不可用：" + e.Message; SelectTab(2); folder.Focus(); }
@@ -791,12 +798,12 @@ namespace FeiqLight
                     viewLog.Dock = clearLog.Dock = DockStyle.Fill;
                     viewLog.Margin = new Padding(0, 0, 6, 0); clearLog.Margin = new Padding(6, 0, 0, 0); logActions.Controls.Add(viewLog, 0, 0); logActions.Controls.Add(clearLog, 1, 0); layout.Controls.Add(logActions); continue;
                 }
-                string section = field == fields[0] ? "个人资料" : field == close ? "消息与窗口" : field == auto ? "文件接收" : field == clearReceived ? "存储管理" : field == autoDrop ? "文件发送" : field == dark ? "聊天外观" : field == diagnostics ? "故障诊断" : field == info ? "本机信息" : null;
+                string section = field == fields[0] ? "个人资料" : field is Label && field.Text == "端口" ? "连接" : field == close ? "消息与窗口" : field == auto ? "文件接收" : field == clearReceived ? "存储管理" : field == autoDrop ? "文件发送" : field == dark ? "聊天外观" : field == diagnostics ? "故障诊断" : field == info ? "本机信息" : null;
                 if (section != null) {
                     if(layout.Controls.Count>0) { Panel divider=new Panel { Height=1, BackColor=Theme.Line, Margin=new Padding(0,10,0,10) };layout.Controls.Add(divider); }
                     Label heading = Theme.Label(section, Theme.Section, Theme.Ink); heading.Height = 24; heading.Margin = new Padding(0, 0, 0, 4); layout.Controls.Add(heading);
                 }
-                if(field is Label && field != info && field != cleanHint) field.Height=20;
+                if(field is Label && field != info && field != cleanHint && field != portHint) field.Height=20;
                 if(field is ToggleSwitch) field.Height=((ToggleSwitch)field).PreferredHeightFor(458);
                 field.Margin = new Padding(0, 0, 0, field is Label ? 4 : 6); layout.Controls.Add(field);
             }
@@ -818,7 +825,7 @@ namespace FeiqLight
                         field.Width = width;
                         ToggleSwitch toggle = field as ToggleSwitch;
                         if(toggle != null) field.Height = toggle.PreferredHeightFor(width);
-                        else if(field == info || field == cleanHint)
+                        else if(field == info || field == cleanHint || field == portHint)
                             field.Height = TextRenderer.MeasureText(field.Text, field.Font, new Size(width, Int32.MaxValue), TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl | TextFormatFlags.NoPrefix).Height + 4;
                     }
                     layout.ResumeLayout(true);

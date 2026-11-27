@@ -160,7 +160,9 @@
   async function init() {
     try {
       if (!/^[a-f0-9]{64}$/.test(token)) throw new Error('链接不完整，请使用对方复制的完整链接或二维码');
-      const data = await api('/api/guest'); expires = Date.parse(data.until);
+      const data = await api('/api/guest');
+      const remaining = Number.isFinite(data.remainingMilliseconds) ? data.remainingMilliseconds : Date.parse(data.until) - Date.now();
+      expires = performance.now() + Math.max(0, remaining);
       requestIds=data.requestIds===true;folders=data.folders===true;
       $('choose-folder').hidden=!folders||!('webkitdirectory' in $('folder-picker'));
       if (Number.isSafeInteger(data.limit) && data.limit > 0) uploadLimit = data.limit;
@@ -185,7 +187,7 @@
       }
       $('upload').hidden = !data.upload;
       const tick = () => {
-        const seconds = Math.max(0, Math.ceil((expires - Date.now()) / 1000));
+        const seconds = Math.max(0, Math.ceil((expires - performance.now()) / 1000));
         $('session').textContent = seconds ? '连接已就绪 · ' + Math.floor(seconds / 60) + '分' + String(seconds % 60).padStart(2, '0') + '秒后结束' : '本次临时传输已到期结束';
         if (!seconds && !ended) {
           ended = true; $('picker').disabled = $('folder-picker').disabled = $('choose-folder').disabled = true; $('copy').disabled = true; $('qr-toggle').disabled = true; $('qr-panel').hidden = true;

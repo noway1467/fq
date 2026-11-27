@@ -17,32 +17,35 @@ namespace FeiqLight
             Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
             try
             {
-                int port = 2425; bool loopback = false, autoStart = false;
+                int? requestedPort = null; bool loopback = false, autoStart = false;
                 string root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FeiqLight"), name = null, peerAddress = null;
                 string[] shared=null;
                 for (int i = 0; i < args.Length; i++)
                 {
                     if (args[i] == "--loopback") loopback = true;
                     else if (args[i] == "--autostart") autoStart = true;
-                    else if (args[i] == "--port" && i + 1 < args.Length) port = Int32.Parse(args[++i]);
+                    else if (args[i] == "--port" && i + 1 < args.Length) requestedPort = Int32.Parse(args[++i]);
                     else if (args[i] == "--profile" && i + 1 < args.Length) root = args[++i];
                     else if (args[i] == "--name" && i + 1 < args.Length) name = args[++i];
                     else if (args[i] == "--peer" && i + 1 < args.Length) peerAddress = args[++i];
                     else if(args[i]=="--send"){shared=args.Skip(i+1).ToArray();break;}
                     else throw new ArgumentException("未知参数：" + args[i]);
                 }
+                if (requestedPort.HasValue && (requestedPort.Value < 1024 || requestedPort.Value > 65535)) throw new ArgumentException("端口须为 1024–65535。");
                 bool created;
                 if(shared!=null)WindowsShare.Enqueue(root,shared);
                 string profileKey;
                 using (SHA256 sha = SHA256.Create()) profileKey = BitConverter.ToString(sha.ComputeHash(Encoding.UTF8.GetBytes(Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar).ToUpperInvariant()))).Replace("-", "");
-                using (Mutex instance = new Mutex(true, "Local\\FeiqLight-Port-" + port, out created))
+                using (Mutex profileLock = new Mutex(true, "Local\\FeiqLight-Profile-" + profileKey, out created))
                 {
-                    if (!created) { if (!autoStart&&shared==null) Notice("已在运行", "此端口已被占用，请从托盘打开现有窗口。"); return; }
-                    bool profileCreated;
-                    using (Mutex profileLock = new Mutex(true, "Local\\FeiqLight-Profile-" + profileKey, out profileCreated))
+                    if (!created) { if (!autoStart&&shared==null) Notice("已在运行", "此资料目录已被占用，请从托盘打开现有窗口。多实例请使用不同的 --profile 目录。"); return; }
+                    LocalStore store = new LocalStore(root); AppSettings settings = store.LoadSettings();
+                    int port = requestedPort.HasValue && (!(autoStart || shared != null) || !settings.HasConfiguredPort) ? requestedPort.Value : settings.Port;
+                    settings.Port = port;
+                    bool portCreated;
+                    using (Mutex instance = new Mutex(true, "Local\\FeiqLight-Port-" + port, out portCreated))
                     {
-                        if (!profileCreated) { if (!autoStart) Notice("数据目录已占用", "多实例请使用不同的 --profile 目录。"); return; }
-                        LocalStore store = new LocalStore(root); AppSettings settings = store.LoadSettings();
+                        if (!portCreated) { if (!autoStart&&shared==null) Notice("已在运行", "此端口已被占用，请从托盘打开现有窗口。"); return; }
                         // 身份先落盘再广播，异常退出也不会在下次启动变成新设备。
                         store.SaveSettings(settings);
                         Theme.Configure(settings.FollowSystemTheme ? Theme.SystemDark : settings.DarkMode,settings.Accent);
@@ -58,7 +61,7 @@ namespace FeiqLight
                                 main.PrepareNetworkCallbacks();
                                 network.ConfigureSecurity(store.Root, main.ConfirmSecurity);
                                 network.Start();
-                                if (peerAddress != null) network.Probe(AddressDialog.Parse(peerAddress));
+                                if (peerAddress != null) network.Probe(AddressDialog.Parse(peerAddress, port));
                             }
                             catch (Exception e)
                             {
@@ -70,9 +73,9 @@ namespace FeiqLight
                             main.Shown += delegate { main.NetworkStarted(); };
                             Application.Run(main);
                         }
-                        profileLock.ReleaseMutex();
+                        instance.ReleaseMutex();
                     }
-                    instance.ReleaseMutex();
+                    profileLock.ReleaseMutex();
                 }
             }
             catch (Exception e) { Notice("启动失败", e.Message); }

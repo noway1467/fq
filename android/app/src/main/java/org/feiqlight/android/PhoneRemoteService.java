@@ -58,6 +58,7 @@ public final class PhoneRemoteService extends Service implements PhoneRemoteAcce
         if(intent==null||"stop".equals(intent.getAction())){stopActive();return START_NOT_STICKY;}
         if(projection!=null)return START_NOT_STICKY;
         try{
+            int port=ChatService.phoneRemotePort();
             if(!RemoteInputService.available())throw new IllegalStateException("请先开启飞Q远控辅助服务");
             if(Build.VERSION.SDK_INT>=29)startForeground(41,notification(),ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);else startForeground(41,notification());
             Intent result=Build.VERSION.SDK_INT>=33?intent.getParcelableExtra("projection",Intent.class):intent.getParcelableExtra("projection");
@@ -74,7 +75,6 @@ public final class PhoneRemoteService extends Service implements PhoneRemoteAcce
                 }
             },main);
             DisplayMetrics metrics=realMetrics();rotation=getSystemService(WindowManager.class).getDefaultDisplay().getRotation();resize(metrics.widthPixels,metrics.heightPixels);
-            int port=PhoneRemoteAccess.portFor(getSharedPreferences("settings",MODE_PRIVATE).getInt("port",2425));
             access=new PhoneRemoteAccess(this,port,false,this);main.post(heartbeat);
         }catch(Exception e){android.widget.Toast.makeText(this,"手机远控未开启："+e.getMessage(),android.widget.Toast.LENGTH_LONG).show();stopActive();}
         return START_NOT_STICKY;
