@@ -206,6 +206,14 @@ public final class SharedFilesTest {
                 assertTrue("聊天服务未启动："+service.status(),service.online());
                 if(generation==0){
                     SharedFiles before=service.sharedFiles();assertNotNull(before);
+                    Uri second=DocumentsContract.buildTreeDocumentUri("feiq.shared.test","folder");settings.acquire(second,Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+                    String code=before.code(),cookie=login(before);List<Boolean> updated=new ArrayList<>();service.shareFolder(second,updated::add);
+                    long updateDeadline=System.currentTimeMillis()+5000;
+                    while(updated.isEmpty()&&System.currentTimeMillis()<updateDeadline){org.robolectric.Shadows.shadowOf(Looper.getMainLooper()).idle();Thread.sleep(20);}
+                    assertEquals(Collections.singletonList(true),updated);assertSame(before,service.sharedFiles());assertEquals(code,before.code());assertEquals(2,get(before,"/api/list",cookie).json().getJSONArray("items").length());
+                    updated.clear();service.removeSharedFolder(second,updated::add);updateDeadline=System.currentTimeMillis()+5000;
+                    while(updated.isEmpty()&&System.currentTimeMillis()<updateDeadline){org.robolectric.Shadows.shadowOf(Looper.getMainLooper()).idle();Thread.sleep(20);}
+                    assertEquals(Collections.singletonList(true),updated);assertSame(before,service.sharedFiles());assertEquals(200,get(before,"/api/list",cookie).code);
                     java.lang.reflect.Field field=ChatService.class.getDeclaredField("node");field.setAccessible(true);
                     org.feiqlight.android.core.LanNode node=(org.feiqlight.android.core.LanNode)field.get(service);
                     java.lang.reflect.Method change=node.getClass().getDeclaredMethod("switchNetwork",Object.class);change.setAccessible(true);
@@ -244,6 +252,20 @@ public final class SharedFilesTest {
         try(SharedFiles server=new SharedFiles(context,TREE,0,true)) {
             assertEquals(401,request(server.port(),"/api/reconnect",pair,"{\"mode\":\"share\"}","X-FQ-Reconnect: 1\r\n","POST").code);
         }
+    }
+    @Test public void updatingFoldersKeepsSessionCodeAndPairingButRevokesRemovedIds()throws Exception {
+        Uri second=DocumentsContract.buildTreeDocumentUri("feiq.shared.test","folder");
+        try(SharedFiles server=new SharedFiles(context,TREE,0,true)){
+            String code=server.code();Reply reply=request(server.port(),"/api/login","",new JSONObject().put("mode","share").put("code",code).toString(),"","POST");
+            String pair=Arrays.stream(reply.headers.split("\r\n")).filter(s->s.startsWith("Set-Cookie: fq_pair_")).findFirst().get().substring(12).split(";")[0];
+            String cookie="fq_share="+reply.json().getString("token");JSONArray before=get(server,"/api/list",cookie).json().getJSONArray("items");String file=before.getJSONObject(0).getString("id");
+            int revision=get(server,"/api/share-status",cookie).json().getInt("revision");
+            server.updateFolders(Arrays.asList(TREE,second));assertEquals(code,server.code());assertEquals(2,get(server,"/api/list",cookie).json().getJSONArray("items").length());
+            assertTrue(get(server,"/api/share-status",cookie).json().getInt("revision")>revision);assertEquals(200,get(server,"/file?id="+file,cookie).code);
+            assertEquals(200,request(server.port(),"/api/reconnect",pair,"{\"mode\":\"share\"}","X-FQ-Reconnect: 1\r\n","POST").code);
+            server.updateFolders(Collections.singletonList(second));assertEquals(404,get(server,"/file?id="+file,cookie).code);assertEquals(200,get(server,"/api/list",cookie).code);
+        }
+        assertEquals("image/png",SharedFiles.previewMime("图片.png"));assertEquals("application/pdf",SharedFiles.previewMime("doc.pdf"));assertEquals("text/plain; charset=utf-8",SharedFiles.previewMime("data.json"));
     }
     @Test public void legacyFolderMigratesWithoutLosingGrants()throws Exception {
         Uri second=DocumentsContract.buildTreeDocumentUri("feiq.shared.test","folder");SharedFolderSettings settings=new SharedFolderSettings(context);

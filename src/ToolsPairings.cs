@@ -52,6 +52,18 @@ namespace FeiqLight
             Save(next); return token;
         }
         internal void Clear() { Save(new List<Pairing>()); }
+        internal void ChangeShareScope(string previous,string next)
+        {
+            if(previous==next)return;
+            List<Pairing> updated=new List<Pairing>();
+            foreach(Pairing item in items)
+            {
+                string scope=item.Scope;
+                if(scope==previous||scope.StartsWith(previous+"|tls=",StringComparison.Ordinal))scope=next+scope.Substring(previous.Length);
+                updated.Add(new Pairing{Hash=item.Hash,Scope=scope,Until=item.Until,AlwaysAllow=item.AlwaysAllow});
+            }
+            Save(updated);
+        }
         internal void ForgetFingerprint(string fingerprint){Save(items.Where(p=>!p.Scope.EndsWith("|tls="+fingerprint,StringComparison.Ordinal)).ToList());}
         private void Save(List<Pairing> next)
         {

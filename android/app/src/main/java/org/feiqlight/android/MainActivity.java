@@ -2765,14 +2765,24 @@ public final class MainActivity extends Activity implements ChatService.Observer
         port.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
         Switch autoConnect=settingSwitch("打开应用时自动恢复连接",prefs.getBoolean("auto_connect",true));
         box.addView(autoConnect,settingSpacing(6,0));
+        Switch keepBackground=settingSwitch("息屏保持连接",prefs.getBoolean("keep_background",true));
+        box.addView(keepBackground,new LinearLayout.LayoutParams(-1,-2));
+        box.addView(text("保持局域网收发，耗电会增加；系统回收后尝试恢复。",12,MUTED));
+        Button battery=button("电池与后台权限",false);box.addView(battery,settingSpacing(4,8));
+        battery.setOnClickListener(v->{
+            Intent intent=new Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS);
+            try{startActivity(intent);}catch(ActivityNotFoundException e){startActivity(new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,Uri.parse("package:"+getPackageName())));}
+        });
         Switch legacy=settingSwitch("允许旧版明文协议",ChatService.allowLegacy(prefs));
         box.addView(legacy,new LinearLayout.LayoutParams(-1,-2));
         box.addView(text("兼容旧设备明文；已配对设备与共享远控始终加密",12,MUTED));
         settingHeading(box,"文件接收");
+        EditText batchLimit=formField(box,"单批文件上限（100–50000）",Integer.toString(SendFiles.batchLimit(this)));
+        EditText pendingLimit=formField(box,"待处理文件上限（已完成不计，100–50000）",Integer.toString(SendFiles.limit(prefs,"pending_file_limit",10000)));
+        batchLimit.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);pendingLimit.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
         Switch automatic=settingSwitch("自动接收文件",receivedStorage.automatic());
         automatic.setContentDescription("自动接收文件");
         box.addView(automatic,new LinearLayout.LayoutParams(-1,-2));
-        TextView hint=text("仅用于可信局域网，不自动打开文件",12,MUTED); box.addView(hint);
         folderLabel=text(receivedStorage.folderLabel(),13,MUTED);
         folderLabel.setPadding(0,dp(10),0,dp(10));
         folderLabel.setContentDescription("文件保存目录");
@@ -2989,6 +2999,11 @@ public final class MainActivity extends Activity implements ChatService.Observer
                 p=Integer.parseInt(port.getText().toString());
                 if(p<1024||p>65535) throw new NumberFormatException();
             } catch(NumberFormatException e) { settingsError(dialog,port,"端口须为 1024–65535"); return; }
+            int batchCount,pendingCount;
+            try {batchCount=Integer.parseInt(batchLimit.getText().toString().trim());if(batchCount<100||batchCount>50000)throw new NumberFormatException();}
+            catch(NumberFormatException e){settingsError(dialog,batchLimit,"单批文件上限须为 100–50000");return;}
+            try {pendingCount=Integer.parseInt(pendingLimit.getText().toString().trim());if(pendingCount<100||pendingCount>50000)throw new NumberFormatException();}
+            catch(NumberFormatException e){settingsError(dialog,pendingLimit,"待处理文件上限须为 100–50000");return;}
             View color=accent.findViewById(accent.getCheckedRadioButtonId());
             String accentKey=color==null?"blue":color.getTag().toString();
             View backdrop=backgrounds.findViewById(backgrounds.getCheckedRadioButtonId());
@@ -3001,17 +3016,17 @@ public final class MainActivity extends Activity implements ChatService.Observer
             int nextSize=fontSize.getProgress()+14;
             boolean nextDark=follow.isChecked()?systemDark():dark.isChecked();
             String nextBgImage=prefs.getString("background_image","");
-            boolean saved=prefs.edit().putBoolean("allow_legacy_protocol",
+            boolean saved=prefs.edit().putInt("batch_file_limit",batchCount).putInt("pending_file_limit",pendingCount).putBoolean("allow_legacy_protocol",
                     legacy.isChecked()).putInt("legacy_protocol_policy",
                     ChatService.LEGACY_POLICY_VERSION).putString("avatar",avatarValue[0]).putString("name",
                     n).putString("group",g).putInt("port",p).putBoolean("auto_connect",
-                    autoConnect.isChecked()).putBoolean("diagnostics",
+                    autoConnect.isChecked()).putBoolean("keep_background",keepBackground.isChecked()).putBoolean("diagnostics",
                     diagnosticSwitch.isChecked()).putBoolean(ReceivedStorage.AUTO,
                     automatic.isChecked()).putBoolean("follow_system_theme",follow.isChecked()).putBoolean("dark_mode",
                     dark.isChecked()).putString("accent",accentKey).putInt("chat_font_size",
                     nextSize).putString("chat_background",backdropKey).commit();
             if(!saved){error("设置未保存，请检查设备存储空间");return;}
-            if(service!=null){service.receiveSettingsChanged();service.profileSettingsChanged();}
+            if(service!=null){service.receiveSettingsChanged();service.profileSettingsChanged();service.backgroundSettingsChanged();}
             dialog.dismiss();
             boolean visualChanged=nextDark!=DARK||!accentKey.equals(initialAccent)||nextSize!=initialFontSize||
                     !backdropKey.equals(initialBackground)||!nextBgImage.equals(initialBackgroundImage);
@@ -3762,7 +3777,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
     static List<Uri> selectedFiles(Intent data) {
         LinkedHashSet<Uri> files=new LinkedHashSet<>(); ClipData clip=data.getClipData();
         if(clip!=null) {
-            if(clip.getItemCount()>1000) throw new IllegalArgumentException("每批最多选择 1000 个文件");
+            if(clip.getItemCount()>LanNode.MAX_FILE_LIMIT) throw new IllegalArgumentException("每批最多选择 50000 个文件");
             for(int i=0;i<clip.getItemCount();i++) files.add(clip.getItemAt(i).getUri());
         } else if(data.getData()!=null) files.add(data.getData());
         if(files.isEmpty()||files.contains(null)) throw new IllegalArgumentException("未取得有效文件，请重新选择");

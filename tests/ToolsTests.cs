@@ -228,13 +228,15 @@ namespace FeiqLight.Tests
                 {
                     server.Share(folder); Reply first = Request(server.Port, "/api/login", "", "{\"mode\":\"share\",\"code\":\"" + server.ShareCode + "\"}");
                     string oldCookie = "fq_share=" + first.Json()["token"], oldPair = PairCookie(first);
+                    string code=server.ShareCode;int revision=Convert.ToInt32(Request(server.Port,"/api/share-status",oldCookie).Json()["revision"]);
                     server.AddFolders(new[] { second, folder + "\\" }); Assert(server.Folders.Length == 2 && server.SavedFolders.Length == 2, "追加覆盖旧目录或未去重");
-                    Assert(Request(server.Port, "/api/list", oldCookie).Code == 401, "旧会话仍然有效"); Assert(Reconnect(server, "share", oldPair).Code == 401, "旧配对获得新目录权限");
+                    Assert(server.ShareCode==code,"追加目录更换连接码");Assert(Request(server.Port, "/api/list", oldCookie).Code == 200, "追加目录断开旧会话"); Assert(Reconnect(server, "share", oldPair).Code == 200, "追加目录丢失配对");
+                    Assert(Convert.ToInt32(Request(server.Port,"/api/share-status",oldCookie).Json()["revision"])>revision,"目录变更未通知网页");
                     string cookie = Login(server, "share"); var roots = Items(Request(server.Port, "/api/list", cookie)); Assert(roots.Length == 2 && roots.All(i => (bool)i["dir"]), "没有虚拟目录列表");
                     var secondRoot = roots.Single(i => (string)i["name"] == "另一文件夹"); var children = Items(Request(server.Port, "/api/list?id=" + secondRoot["id"], cookie)); string file = "/file?id=" + children.Single()["id"];
                     Assert(Encoding.UTF8.GetString(Request(server.Port, file, cookie).Body) == "second folder", "读取第二个目录失败");
                     Assert(Request(server.Port, "/file?id=" + secondRoot["id"], cookie).Code == 404, "把目录当文件读取");
-                    server.RemoveFolder(second); Assert(server.Folders.SequenceEqual(new[] { folder }), "移除影响其他目录"); Assert(Request(server.Port, file, cookie).Code == 401, "移除未撤销下载");
+                    server.RemoveFolder(second); Assert(server.Folders.SequenceEqual(new[] { folder }), "移除影响其他目录"); Assert(Request(server.Port, file, cookie).Code == 404, "移除未撤销下载");Assert(Request(server.Port,"/api/list",oldCookie).Code==200,"移除断开其他目录");
                     string fresh = Login(server, "share"); Assert(Request(server.Port, file, fresh).Code == 404, "旧索引仍可读取移除目录"); Assert(File.Exists(Path.Combine(second, "second.txt")), "移除删除了用户文件");
                     Assert(Items(Request(server.Port, "/api/list", fresh)).Any(i => (string)i["name"] == "视频 sample.mp4"), "单目录旧浏览方式不兼容");
                     server.RemoveFolder(folder); Assert(server.Folder == null && server.SavedFolders.Length == 0, "移除最后一项未关闭");
@@ -262,11 +264,11 @@ namespace FeiqLight.Tests
                 new ToolsPreferences(profile).SaveFolders(new[] { folder, Path.Combine(root, "missing-" + Guid.NewGuid().ToString("N")) }, true, false);
                 using (ToolsService server = new ToolsService(0, true, profile)) { Assert(server.RestoreSettings() != null && server.Folder == null && server.SavedFolders.Length == 2, "失效目录被忽略或清除了原设置"); }
             });
-            run("撤销：停止共享、更换目录、注销使旧连接失效", () => {
+            run("撤销：停止和注销使旧连接失效，更新连接码保留会话", () => {
                 using (ToolsService server = new ToolsService(0, true))
                 {
                     server.Share(folder); string first = Login(server, "share"); server.StopSharing(); Assert(Request(server.Port, "/api/list", first).Code == 401, "停止未撤销");
-                    server.Share(folder); string second = Login(server, "share"); server.Share(folder); Assert(Request(server.Port, "/api/list", second).Code == 401, "更换未撤销");
+                    server.Share(folder); string second = Login(server, "share"); server.StartSavedSharing(); Assert(Request(server.Port, "/api/list", second).Code == 200, "更新码中断会话");
                     string third = Login(server, "share"); Assert(Request(server.Port, "/api/logout", third, "{\"mode\":\"share\"}", TokenHeader(third)).Code == 200, "注销失败"); Assert(Request(server.Port, "/api/list", third).Code == 401, "注销后仍可访问");
                 }
             });
@@ -321,7 +323,7 @@ namespace FeiqLight.Tests
                 {
                     Assert(Reconnect(server, "share", pair).Code == 403, "未开启也可重连"); server.Share(folder);
                     Assert(Reconnect(server, "share", pair).Code == 200, "重启后丢失配对");
-                    server.Share(Path.Combine(folder, "子目录")); Assert(Reconnect(server, "share", pair).Code == 401, "配对跨目录复用");
+                    server.Share(Path.Combine(folder, "子目录")); Assert(Reconnect(server, "share", pair).Code == 200, "本机更新目录丢失配对");
                     server.Share(folder); server.ForgetPairings(); Assert(Reconnect(server, "share", pair).Code == 401, "清除后仍可重连");
                 }
             });
@@ -375,7 +377,7 @@ namespace FeiqLight.Tests
                     typeof(ToolsWindow).GetMethod("UpdateState",members).Invoke(window,null);Application.DoEvents();
                     Form banner=(Form)typeof(ToolsWindow).GetField("banner",members).GetValue(window);Assert(banner!=null,"没有远控浮条");banner.Close();
                     Assert(!banner.IsDisposed&&banner.WindowState==FormWindowState.Minimized&&service.RemoteActive,"关闭浮条断开了控制");
-                    window.Show();Descendants(window.Surface).OfType<Button>().Single(b=>b.Text=="立即停止远控").PerformClick();
+                    window.Show();Descendants(window.Surface).OfType<Button>().Single(b=>b.Text=="停止远控").PerformClick();
                     Assert(!service.RemoteEnabled&&!service.RemoteActive,"手动停止未生效");Assert(Request(service.Port,"/api/screen",cookie).Code==401,"手动停止后旧会话仍能操作");
                 }
             });
@@ -528,7 +530,12 @@ namespace FeiqLight.Tests
                 service.Displays = read => new { items = new[] { new { id = 0, name = "主屏幕 · 1200 × 720" }, new { id = 1, name = "测试副屏 · 1200 × 720" } } };
                 service.Input = data => File.AppendAllText(Path.Combine(root, "input-events.jsonl"), new JavaScriptSerializer().Serialize(data) + "\n", new UTF8Encoding(false)); service.AllowRemote();
                 File.WriteAllText(Path.Combine(root, "server.json"), new JavaScriptSerializer().Serialize(new { port = service.Port, share = service.ShareCode, remote = service.RemoteCode }), new UTF8Encoding(false));
-                Stopwatch clock = Stopwatch.StartNew(); while (clock.Elapsed.TotalMinutes < 15 && !File.Exists(Path.Combine(root, "stop"))) Thread.Sleep(100);
+                bool added=false,removed=false;
+                Stopwatch clock = Stopwatch.StartNew(); while (clock.Elapsed.TotalMinutes < 15 && !File.Exists(Path.Combine(root, "stop"))) {
+                    if(!added&&File.Exists(Path.Combine(root,"add-folder"))){service.AddFolders(new[]{Path.Combine(root,"additional")});added=true;}
+                    if(!removed&&File.Exists(Path.Combine(root,"remove-folder"))){service.RemoveFolder(Path.Combine(root,"shared"));removed=true;}
+                    Thread.Sleep(100);
+                }
             }
         }
         private static Dictionary<string, object>[] Items(Reply reply)
@@ -693,8 +700,8 @@ namespace FeiqLight.Tests
                     Assert(!body.HorizontalScroll.Visible, "共享窗口最小尺寸出现横向滚动条");
                     using (Bitmap image = new Bitmap(window.Width, window.Height)) { window.DrawToBitmap(image, new Rectangle(Point.Empty, image.Size)); image.Save(Path.Combine(root, "windows-tools-minimum-" + (dark ? "dark" : "light") + ".png")); }
                     ToolsService service=(ToolsService)typeof(ToolsWindow).GetField("service",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic).GetValue(window);
-                    service.Share(root);typeof(ToolsWindow).GetMethod("UpdateState",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic).Invoke(window,null);Application.DoEvents();
-                    foreach(string field in new[]{"codeCaption","shareCode"})
+                    service.Share(root);service.AllowRemote();typeof(ToolsWindow).GetMethod("UpdateState",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic).Invoke(window,null);Application.DoEvents();
+                    foreach(string field in new[]{"codeCaption","shareCode","remoteCode"})
                     {
                         Label label=(Label)typeof(ToolsWindow).GetField(field,System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic).GetValue(window);
                         using(Graphics graphics=label.CreateGraphics())

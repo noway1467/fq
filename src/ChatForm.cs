@@ -160,7 +160,7 @@ namespace FeiqLight
             ApplyAppearance();
             try { var records = store.History(peer.Id, 150).Select(record => { ChatRecord outgoing=record.Outgoing?network.OutgoingRecord(peer.Id,record.Packet):null;if(outgoing!=null&&record.State=="已送达")outgoing.State=record.State;return outgoing??record; }).ToList(); history.SetRecords(records); editor.Text = store.LoadDraft(peer.Id);
                 foreach(ChatRecord record in records.Where(r=>!r.Outgoing))foreach(FileTransferState file in record.Transfers??new FileTransferState[0]) {
-                    if(files.Items.Count>=1000)break;
+                    if(files.Items.Count>=network.Settings.PendingFileLimit)break;
                     if(file.Status=="已拒绝"||file.Status=="对方已取消发送"||file.Status=="本机文件已删除"||file.Status=="已保存"||!String.IsNullOrEmpty(file.LocalPath)||!SecureIdentity.ValidFingerprint(file.Sha256))continue;
                     file.Status=file.Status=="已暂停"?"已暂停":"已恢复 · 点击续传";
                     files.Items.Add(new ReceivedFile{Packet=record.Packet,Record=record,File=new Attachment{Id=file.Id,Name=file.Name,Size=file.Size,Modified=file.Modified,Sha256=file.Sha256,RelativePath=file.RelativePath},AutomaticPending=false,Status=file.Status});
@@ -332,7 +332,7 @@ namespace FeiqLight
         }
         public void AddAttachments(IncomingMessage message)
         {
-            foreach (Attachment file in message.Files) {ReceivedFile restored=files.Items.Cast<ReceivedFile>().FirstOrDefault(f=>f.Packet==message.Record.Packet&&f.File.Id==file.Id);if(restored!=null){restored.AutomaticPending=true;continue;}if (files.Items.Count >= 1000) { fileStatus.Text = "待接收文件已达上限"; break; } files.Items.Add(new ReceivedFile { Packet = message.Record.Packet, File = file, Record = message.Record }); }
+            foreach (Attachment file in message.Files) {ReceivedFile restored=files.Items.Cast<ReceivedFile>().FirstOrDefault(f=>f.Packet==message.Record.Packet&&f.File.Id==file.Id);if(restored!=null){restored.AutomaticPending=true;continue;}if (files.Items.Count >= network.Settings.PendingFileLimit) { fileStatus.Text = "待接收文件已达设置上限，可在设置中调大"; break; } files.Items.Add(new ReceivedFile { Packet = message.Record.Packet, File = file, Record = message.Record }); }
             if (files.Items.Count > 0 && files.SelectedIndex < 0) files.SelectedIndex = 0;
             main.ReceiveAutomatically();
         }
@@ -374,7 +374,7 @@ namespace FeiqLight
         {
             foreach (string path in paths)
             {
-                if (attachments.Count >= 1000) { Error("附件数量", "单批最多 1000 项，请分批发送。"); break; }
+                if (attachments.Count >= network.Settings.BatchFileLimit) { Error("附件数量", "单批最多 "+network.Settings.BatchFileLimit+" 项，可在设置中调整。"); break; }
                 if ((File.Exists(path)||Directory.Exists(path)) && !attachments.Contains(path)) attachments.Add(path);
             } UpdateQueued();
         }

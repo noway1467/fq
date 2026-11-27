@@ -271,6 +271,32 @@ public final class LanNode implements AutoCloseable {
         StoredOfferSpan(int start,int length,long packet,long file,String peer){this.start=start;this.length=length;this.packet=packet;this.file=file;this.peer=peer;}
     }
     public boolean allowLegacyProtocol=true;
+    public static final int MIN_FILE_LIMIT=100,MAX_FILE_LIMIT=50000;
+    private static final int COMPLETED_OFFER_CACHE=1000,MAX_STORED_OFFERS=MAX_FILE_LIMIT+COMPLETED_OFFER_CACHE+8;
+    private volatile int pendingFileLimit=10000;
+    public void setPendingFileLimit(int value){pendingFileLimit=value>=MIN_FILE_LIMIT&&value<=MAX_FILE_LIMIT?value:10000;}
+    public void awaitSendSlot(Transfer task)throws IOException {
+        long until=System.nanoTime()+TimeUnit.SECONDS.toNanos(30);
+        while(true){
+            if(task.isCancelled())throw new IOException("已取消传输");
+            synchronized(gate){if(closed||udp==null)throw new IOException("连接已断开，已发邀请保留");if(pending.size()<64)return;}
+            if(System.nanoTime()>=until)throw new IOException("等待对方确认超时，已发邀请保留，请检查连接后继续");
+            try{Thread.sleep(25);}catch(InterruptedException e){Thread.currentThread().interrupt();throw new IOException("发送等待已中断",e);}
+        }
+    }
+    public void checkOfferCapacity(int count)throws IOException {
+        synchronized(gate){
+            if(count==0)return;
+            long now=System.nanoTime();
+            offers.entrySet().removeIf(entry->entry.getValue().expires<now&&entry.getValue().activeSockets.isEmpty());
+            List<Map.Entry<String,Offer>> completed=new ArrayList<>();
+            for(Map.Entry<String,Offer> entry:offers.entrySet())if(isOfferCompleted(entry.getValue())&&entry.getValue().activeSockets.isEmpty())completed.add(entry);
+            completed.sort((a,b)->Long.compare(b.getValue().expires,a.getValue().expires));
+            for(int index=COMPLETED_OFFER_CACHE;index<completed.size();index++)offers.remove(completed.get(index).getKey());
+            long waiting=offers.values().stream().filter(offer->!isOfferCompleted(offer)).count();
+            if(waiting+count>pendingFileLimit)throw new IOException("待处理文件已达设置上限 "+pendingFileLimit+"，请处理已有任务或在设置中调大");
+        }
+    }
     public SecureIdentity security(){return security;}
     public void configureSecurity(File root,SecureIdentity.Confirmation confirmation)throws IOException{configureSecurity(root,new SecureIdentity(root),confirmation);}
     public void configureSecurity(File root,SecureIdentity identity,SecureIdentity.Confirmation confirmation)throws IOException{if(started)throw new IllegalStateException("安全身份必须在启动前配置");dataRoot=root;security=identity;security.confirmation=confirmation;security.observeRevocation(transportRevoked);restoreOffers();}
@@ -284,13 +310,13 @@ public final class LanNode implements AutoCloseable {
             for(Offer o:saved){out.writeLong(o.packet);out.writeInt((int)o.id);out.writeUTF(o.source==null?o.file.getCanonicalPath():"uri:"+o.source.key());out.writeLong(o.size);out.writeLong(o.modified);out.writeLong(System.currentTimeMillis()+TimeUnit.NANOSECONDS.toMillis(o.expires-System.nanoTime()));out.writeUTF(o.deviceId);out.writeUTF(o.fingerprint);out.writeUTF(o.sha256);out.writeUTF(o.peer.endpoint.getAddress().getHostAddress()+":"+o.peer.endpoint.getPort());out.writeUTF(o.peer.login);out.writeUTF(o.peer.host);out.writeUTF(o.peer.name);out.writeUTF(o.peer.group);out.writeUTF(o.peer.id());}
             out.writeInt(OFFER_STATES_MARKER);out.writeInt(saved.size());
             for(Offer offer:saved){out.writeLong(offer.packet);out.writeInt((int)offer.id);out.writeUTF(offer.state==null?"":offer.state);out.writeInt(offer.percent);String state=offer.message==null?offer.storedMessageState:offer.message.state;out.writeUTF(state==null?"":state);}
-        }synchronized(storedOffersGate){SecureIdentity.atomic(new File(dataRoot,"transfer-offers.dat"),buffer.toByteArray());}}
+        }if(buffer.size()>64*1024*1024)throw new IOException("文件邀请记录过大，请先处理待发送文件");synchronized(storedOffersGate){SecureIdentity.atomic(new File(dataRoot,"transfer-offers.dat"),buffer.toByteArray());}}
     }
     private static Map<String,StoredOfferState> readOfferStates(DataInputStream input)throws IOException {
         Map<String,StoredOfferState> states=new HashMap<>();
         if(input.available()==0)return states;
         if(input.readInt()!=OFFER_STATES_MARKER)throw new IOException("文件任务状态格式无效");
-        int count=input.readInt();if(count<0||count>1000)throw new IOException("文件任务状态数量无效");
+        int count=input.readInt();if(count<0||count>MAX_STORED_OFFERS)throw new IOException("文件任务状态数量无效");
         for(int index=0;index<count;index++){long packet=input.readLong();int file=input.readInt();String state=input.readUTF();int percent=input.readInt();String messageState=input.readUTF();if(percent<0||percent>100)throw new IOException("文件任务进度无效");states.put(packet+":"+file,new StoredOfferState(state,percent,messageState));}
         if(input.read()!=-1)throw new IOException("文件任务状态含有多余数据");
         return states;
@@ -299,10 +325,10 @@ public final class LanNode implements AutoCloseable {
         if(packets.isEmpty())return;
         File saved=new File(root,"transfer-offers.dat");Set<Long> selectedPackets=new HashSet<>(packets);
         synchronized(storedOffersGate){
-            if(!saved.isFile())return;if(saved.length()>8*1024*1024)throw new IOException("文件任务记录过大");
+            if(!saved.isFile())return;if(saved.length()>64*1024*1024)throw new IOException("文件任务记录过大");
             byte[] bytes=Files.readAllBytes(saved.toPath());List<StoredOfferSpan> spans=new ArrayList<>();int format,count,metadataStart;Map<String,StoredOfferState> states;
             try(DataInputStream input=new DataInputStream(new ByteArrayInputStream(bytes))){
-                format=input.readInt();if(format!=1&&format!=2)throw new IOException("文件任务版本不支持");count=input.readInt();if(count<0||count>1000)throw new IOException("文件任务数量无效");
+                format=input.readInt();if(format!=1&&format!=2)throw new IOException("文件任务版本不支持");count=input.readInt();if(count<0||count>MAX_STORED_OFFERS)throw new IOException("文件任务数量无效");
                 for(int index=0;index<count;index++){
                     int start=bytes.length-input.available();long packet=input.readLong();int file=input.readInt();input.readUTF();input.readLong();input.readLong();input.readLong();
                     for(int field=0;field<8;field++)input.readUTF();String peer=input.readUTF();
@@ -332,8 +358,8 @@ public final class LanNode implements AutoCloseable {
     }
     private void restoreOffers()throws IOException {
         File saved=new File(dataRoot,"transfer-offers.dat");byte[] bytes;
-        synchronized(storedOffersGate){if(!saved.isFile())return;if(saved.length()>8*1024*1024)throw new IOException("文件任务记录过大");bytes=Files.readAllBytes(saved.toPath());}
-        try(DataInputStream in=new DataInputStream(new ByteArrayInputStream(bytes))){int format=in.readInt();if(format!=1&&format!=2)throw new IOException("文件任务版本不支持");int count=in.readInt();if(count<0||count>1000)throw new IOException("文件任务数量无效");
+        synchronized(storedOffersGate){if(!saved.isFile())return;if(saved.length()>64*1024*1024)throw new IOException("文件任务记录过大");bytes=Files.readAllBytes(saved.toPath());}
+        try(DataInputStream in=new DataInputStream(new ByteArrayInputStream(bytes))){int format=in.readInt();if(format!=1&&format!=2)throw new IOException("文件任务版本不支持");int count=in.readInt();if(count<0||count>MAX_STORED_OFFERS)throw new IOException("文件任务数量无效");
             for(int i=0;i<count;i++){Offer o=new Offer();o.packet=in.readLong();o.id=in.readInt();String origin=in.readUTF();o.size=in.readLong();o.modified=in.readLong();long until=in.readLong();o.deviceId=in.readUTF();o.fingerprint=in.readUTF();o.sha256=in.readUTF();o.peer=new Peer(endpoint(in.readUTF()),in.readUTF(),in.readUTF(),in.readUTF(),in.readUTF());o.peer.conversationId=in.readUTF();o.peer.deviceId=o.deviceId;o.peer.fingerprint=o.fingerprint;o.address=o.peer.endpoint.getAddress();
                 if(until<=System.currentTimeMillis()||!security.isTrusted(o.deviceId,o.fingerprint)||!SecureIdentity.validFingerprint(o.sha256))continue;
                 try {
@@ -656,7 +682,7 @@ public final class LanNode implements AutoCloseable {
         Pending item=new Pending(peer);Message m=new Message();m.number=sequence.incrementAndGet();m.time=System.currentTimeMillis();m.outgoing=true;m.text="";m.state="等待确认";Map<String,Offer> additions=new HashMap<>();
         for(Source source:sources){if(!Protocol.safeName(source.name())||source.size()<0)throw new IOException("文件元数据无效");int id=m.files.size();String hash=hashSource(source);Protocol.Attachment file=new Protocol.Attachment(id,source.name(),source.size(),source.modified()/1000);file.sha256=hash;m.files.add(file);m.localPaths.add("uri:"+source.key());Offer o=new Offer();o.source=source;o.size=source.size();o.modified=source.modified();o.expires=System.nanoTime()+TimeUnit.DAYS.toNanos(7);o.peer=peer;o.message=m;o.packet=m.number;o.id=id;o.deviceId=item.deviceId;o.fingerprint=item.fingerprint;o.sha256=hash;o.address=item.endpoint.getAddress();additions.put(m.number+":"+id,o);}
         item.message=m;item.bytes=Protocol.encode(m.number,login,host,Protocol.MESSAGE|Protocol.CHECK|Protocol.UTF8|Protocol.FILE,"",Protocol.files(m.files),deviceId,null,security.fingerprint);item.last=System.nanoTime();
-        synchronized(gate){if(closed||udp==null||offers.size()+sources.size()>1000||pending.size()>=256)throw new IOException("未连接或待处理任务过多");Map<String,Offer> next=new HashMap<>(offers);next.putAll(additions);saveOffers(next);offers.putAll(additions);pending.put(m.number,item);listener.message(peer,m.copy(),false);fileWorkers.execute(()->sendSecurePending(item));}return m.copy();
+        synchronized(gate){if(closed||udp==null)throw new IOException("尚未连接局域网");if(pending.size()>=256)throw new IOException("等待送达的消息过多，请等待对方上线后继续");checkOfferCapacity(additions.size());Map<String,Offer> next=new HashMap<>(offers);next.putAll(additions);saveOffers(next);offers.putAll(additions);pending.put(m.number,item);listener.message(peer,m.copy(),false);fileWorkers.execute(()->sendSecurePending(item));}return m.copy();
     }
     private boolean sourceUnchanged(Offer o)throws IOException {if(o.source==null)return o.file.isFile()&&o.file.length()==o.size&&o.file.lastModified()==o.modified;Source current=sourceResolver==null?o.source:sourceResolver.resolve(o.source.key());return current.size()==o.size&&current.modified()==o.modified;}
     public Message retryMessage(Peer peer,Message original) throws IOException {
@@ -694,7 +720,8 @@ public final class LanNode implements AutoCloseable {
         byte[] bytes=Protocol.encode(m.number,login,host,Protocol.MESSAGE|Protocol.CHECK|(utf8?Protocol.UTF8:0)|(paths.isEmpty()?0:Protocol.FILE),text,paths.isEmpty()?null:Protocol.files(m.files),deviceId,null,security==null?null:security.fingerprint);
         synchronized (gate) {
             if (closed || udp==null) throw new IOException("尚未连接局域网");
-            if (pending.size()>=256 || offers.size()+additions.size()>1000) throw new IOException("待处理任务过多，请稍后再试");
+            if (pending.size()>=256) throw new IOException("等待送达的消息过多，请等待对方上线后继续");
+            checkOfferCapacity(additions.size());
             // 先持久化候选邀请，写入失败时不发布消息，也不留下可自动重试的内容。
             Map<String,Offer> next=new HashMap<>(offers);next.putAll(additions);saveOffers(next);
             item.message=m; item.bytes=bytes; item.last=System.nanoTime(); pending.put(m.number,item); offers.putAll(additions);

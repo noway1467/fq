@@ -294,8 +294,8 @@ public sealed class MainForm : ModernWindow
                 if (chat != null && !chat.IsDisposed)
                 {
                     if (!loaded) chat.Append(message.Record);
-                    if (chats.Values.Sum(c => c.PendingFileCount) + (loaded?0:message.Files.Count) <= 1000) chat.AddAttachments(message);
-                    else status.Text = "待接收文件已达 1000 个，请处理后从历史记录继续。";
+                    if (chats.Values.Sum(c => c.PendingFileCount) + (loaded?0:message.Files.Count) <= network.Settings.PendingFileLimit) chat.AddAttachments(message);
+                    else status.Text = "待接收文件已达设置上限 "+network.Settings.PendingFileLimit+"，可调大上限后从传输任务继续。";
                 }
                 latestSender = message.Peer;
                 RefreshPeers();

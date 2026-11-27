@@ -26,7 +26,7 @@ namespace FeiqLight
         private string[] folders = new string[0];
         private string shareCode = "", remoteCode = "";
         private long shareUntil, remoteUntil, attemptsSince;
-        private int attempts, remoteEpoch, shareEpoch;
+        private int attempts, remoteEpoch, shareEpoch, shareRevision;
         private bool closed, remoteEnabled, remotePending;
         internal Func<string, bool> ConfirmRemote;
         internal Func<string, int> ConfirmRemoteDevice;
@@ -77,7 +77,7 @@ namespace FeiqLight
             return (value % 1000000).ToString("D6", System.Globalization.CultureInfo.InvariantCulture);
         }
         internal void Share(string path) { StartSharing(new[] { path }, true); }
-        internal void StartSavedSharing() { lock (gate) StartSharing(preferences.Value.Folders, true); }
+        internal void StartSavedSharing() { lock (gate) {StartSharing(preferences.Value.Folders, true);shareCode=ConnectionCode();shareUntil=clock.ElapsedMilliseconds+600000;} }
         internal void AddFolders(IEnumerable<string> paths)
         {
             lock (gate) StartSharing(preferences.Value.Folders.Concat(paths).ToArray(), true);
@@ -89,10 +89,11 @@ namespace FeiqLight
                 string[] remaining = preferences.Value.Folders.Where(p => !String.Equals(p, path, StringComparison.OrdinalIgnoreCase)).ToArray();
                 if (remaining.Length == preferences.Value.Folders.Length) return;
                 bool enabled = folders.Length > 0 && remaining.Length > 0;
-                // 移除必须立即撤销访问，即使配置保存失败，也不能继续暴露被移除的目录。
-                EndSharing();
-                preferences.SaveFolders(remaining, enabled, preferences.Value.RemoteEnabled);
-                if (enabled) StartSharing(remaining, false);
+                try {
+                    if(enabled)StartSharing(remaining,true);
+                    else {EndSharing();preferences.SaveFolders(remaining,false,preferences.Value.RemoteEnabled);}
+                }
+                catch {EndSharing();throw;}
             }
         }
         private void StartSharing(string[] paths, bool save)
@@ -104,9 +105,14 @@ namespace FeiqLight
             lock (gate)
             {
                 if (closed) throw new ObjectDisposedException("ToolsService");
+                bool starting=folders.Length==0;string previous=Scope("share");
                 if (save) preferences.SaveFolders(full, true, preferences.Value.RemoteEnabled);
-                EndSharing(); folders = full;
-                shareCode = ConnectionCode(); shareUntil = clock.ElapsedMilliseconds + 600000;
+                string[] old=folders;folders=full;
+                try {if(!starting)pairings.ChangeShareScope(previous,Scope("share"));}
+                catch {folders=old;throw;}
+                foreach(string id in entries.Where(item=>!SharedPath(item.Value)).Select(item=>item.Key).ToList())entries.Remove(id);
+                shareRevision++;
+                if(starting){shareCode = ConnectionCode(); shareUntil = clock.ElapsedMilliseconds + 600000;}
             }
         }
         internal void StopSharing() { lock (gate) { EndSharing(); preferences.SaveFolders(preferences.Value.Folders, false, preferences.Value.RemoteEnabled); } }
@@ -126,7 +132,7 @@ namespace FeiqLight
         {
             if (mode == "remote") return "remote";
             if (folders.Length <= 1) return "share:" + (folders.FirstOrDefault() ?? "").ToUpperInvariant();
-            // 配对绑定整个目录集合；追加目录不能让旧配对悄悄获得新目录权限。
+            // 本机修改共享集合时同步迁移现有配对，保留证书绑定与到期时间。
             return "shares:" + String.Join("|", folders.Select(p => p.ToUpperInvariant()).OrderBy(p => p, StringComparer.Ordinal).Select(p => p.Length + ":" + p));
         }
         private string PairCookie(string mode) { return "fq_pair_" + mode + "_" + Port; }
@@ -301,7 +307,7 @@ namespace FeiqLight
                     if (!Valid(session)) throw new ToolsHttp.HttpError(401, "共享已关闭");
                     if (request.Parameter("id").Length == 0 && folders.Length > 1)
                     {
-                        response.Json(new { name = "共享文件夹", items = folders.Select(p => new { id = Id(p), name = FolderName(p), dir = true, size = 0, seek = true }).ToArray() });
+                        response.Json(new { name = "共享文件夹", revision=shareRevision, items = folders.Select(p => new { id = Id(p), name = FolderName(p), dir = true, size = 0, seek = true }).ToArray() });
                         return;
                     }
                     string path = Resolve(request.Parameter("id")); CheckNoLinks(path);
@@ -315,10 +321,11 @@ namespace FeiqLight
                         bool directory = (attributes & FileAttributes.Directory) != 0; string id = Id(child);
                         items.Add(new { id = id, name = Path.GetFileName(child), dir = directory, size = directory ? 0 : new FileInfo(child).Length, seek = true });
                     }
-                    response.Json(new { name = Path.GetFileName(path.TrimEnd('\\')), items = items });
+                    response.Json(new { name = Path.GetFileName(path.TrimEnd('\\')), revision=shareRevision, items = items });
                 }
                 return;
             }
+            if(request.Path=="/api/share-status") {Authorize(request,"share");lock(gate)response.Json(new {revision=shareRevision});return;}
             if (request.Path == "/file") { FileResponse(request, response, Authorize(request, "share")); return; }
             if (request.Path == "/favicon.ico" || request.Path.StartsWith("/native/", StringComparison.Ordinal)) { response.Bytes(new byte[0], "image/x-icon", 204); return; }
             string asset = request.Path == "/" ? "index.html" : request.Path.TrimStart('/');
@@ -333,8 +340,9 @@ namespace FeiqLight
         {
             if (folders.Length == 0) throw new ToolsHttp.HttpError(403, "共享已关闭");
             if (id.Length == 0 && folders.Length == 1) return folders[0];
-            string path; if (!entries.TryGetValue(id, out path)) throw new ToolsHttp.HttpError(404, "文件索引已失效，请刷新目录"); return path;
+            string path; if (!entries.TryGetValue(id, out path)||!SharedPath(path)) throw new ToolsHttp.HttpError(404, "文件索引已失效，请刷新目录"); return path;
         }
+        private bool SharedPath(string path){return folders.Any(root=>String.Equals(path,root,StringComparison.OrdinalIgnoreCase)||path.StartsWith(root.TrimEnd('\\')+"\\",StringComparison.OrdinalIgnoreCase));}
         internal static string FolderName(string path) { string name = Path.GetFileName(path.TrimEnd('\\')); return name.Length == 0 ? path : name; }
         private string Id(string path)
         {
@@ -365,13 +373,13 @@ namespace FeiqLight
                 string extra = "Accept-Ranges: bytes\r\n";
                 if (request.Header("Range").Length > 0) extra += "Content-Range: bytes " + range[0] + "-" + range[1] + "/" + length + "\r\n";
                 if (request.Parameter("download") == "1") extra += "Content-Disposition: attachment; filename*=UTF-8''" + Uri.EscapeDataString(Path.GetFileName(path)) + "\r\n";
-                lock (gate) { if (!Valid(session)) throw new ToolsHttp.HttpError(401, "共享已关闭"); }
+                lock (gate) { if (!Valid(session)||!SharedPath(path)) throw new ToolsHttp.HttpError(401, "共享已关闭或目录已移除"); }
                 response.Begin(request.Header("Range").Length > 0 ? 206 : 200, Mime(path), Math.Max(0, range[1] - range[0] + 1), extra);
                 if (request.Method == "HEAD") return;
                 input.Position = range[0]; byte[] buffer = new byte[262144]; long left = range[1] - range[0] + 1;
                 while (left > 0)
                 {
-                    lock (gate) { if (!Valid(session)) return; session.Last = clock.ElapsedMilliseconds; }
+                    lock (gate) { if (!Valid(session)||!SharedPath(path)) return; session.Last = clock.ElapsedMilliseconds; }
                     int read = input.Read(buffer, 0, (int)Math.Min(left, buffer.Length)); if (read == 0) throw new IOException("文件读取中断"); response.Write(buffer, read); left -= read;
                 }
             }
@@ -382,6 +390,10 @@ namespace FeiqLight
             {
                 case ".mp4": case ".m4v": return "video/mp4"; case ".webm": return "video/webm"; case ".mkv": return "video/x-matroska";
                 case ".mov": return "video/quicktime"; case ".mp3": return "audio/mpeg"; case ".ogg": return "audio/ogg";
+                case ".wav":return "audio/wav";case ".flac":return "audio/flac";case ".m4a":return "audio/mp4";case ".aac":return "audio/aac";
+                case ".png":return "image/png";case ".jpg":case ".jpeg":return "image/jpeg";case ".gif":return "image/gif";case ".webp":return "image/webp";case ".bmp":return "image/bmp";case ".svg":return "image/svg+xml";
+                case ".pdf":return "application/pdf";
+                case ".txt":case ".md":case ".json":case ".csv":case ".log":case ".xml":return "text/plain; charset=utf-8";
                 default: return "application/octet-stream";
             }
         }

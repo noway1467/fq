@@ -63,6 +63,25 @@ namespace FeiqLight.Tests
                 Check(!LanNetwork.Eligible(System.Net.NetworkInformation.NetworkInterfaceType.Ethernet,"WireGuard Tunnel"),"VPN 被选用");
                 var link=new LanNetwork.Link{Address=IPAddress.Parse("192.168.43.1"),Mask=IPAddress.Parse("255.255.255.0"),Index=1};Check(link.Broadcast.Equals(IPAddress.Parse("192.168.43.255")),"广播错误");Check(!link.Contains(IPAddress.Parse("10.0.0.1")),"放行网段外地址");
             });
+            Run("文件额度：完成释放、可调上限、千项邀请重启恢复",()=>{
+                string profile=Path.Combine(root,"quota-sender"),receiver=Path.Combine(root,"quota-receiver"),source=Path.Combine(root,"quota.txt");File.WriteAllText(source,"quota");
+                var settings=new AppSettings{BatchFileLimit=50000,PendingFileLimit=100};var store=new LocalStore(Path.Combine(root,"quota-settings"));store.SaveSettings(settings);
+                Check(store.LoadSettings().BatchFileLimit==50000&&store.LoadSettings().PendingFileLimit==100,"额度没有持久化");
+                var legacy=new System.Web.Script.Serialization.JavaScriptSerializer().Deserialize<AppSettings>("{}");Check(legacy.BatchFileLimit==5000&&legacy.PendingFileLimit==10000,"旧设置默认额度错误");
+                using(LanService a=Node(profile,Port(),"11111111111111111111111111111112"))using(LanService b=Node(receiver,Port(),"22222222222222222222222222222223")){
+                    a.Settings.PendingFileLimit=100;Peer peer=Find(a,b),sender=Find(b,a);var incoming=new System.Collections.Concurrent.ConcurrentQueue<IncomingMessage>();b.MessageReceived+=incoming.Enqueue;int completed=0;
+                    a.TransferChanged+=(record,id,percent,state,rate)=>{if(state=="对方已校验保存")Interlocked.Increment(ref completed);};
+                    for(int i=0;i<5;i++){ChatRecord sent=a.SendMessage(peer,"",Enumerable.Repeat(source,20).ToArray());Wait(()=>sent.State=="已送达","邀请未送达");}
+                    Wait(()=>incoming.Count==5,"邀请未入队");bool full=false;try{a.SendMessage(peer,"",new[]{source});}catch(InvalidOperationException){full=true;}Check(full,"待处理上限未生效");
+                    IncomingMessage first;Check(incoming.TryPeek(out first),"无首条邀请");b.ReceiveFileAsync(sender,first.Record.Packet,first.Files[0],Path.Combine(root,"quota-received.txt"),null,CancellationToken.None).GetAwaiter().GetResult();
+                    Wait(()=>completed==1,"未收到保存确认");
+                    ChatRecord next=a.SendMessage(peer,"",new[]{source});Wait(()=>next.State=="已送达","已收完文件仍占额度");
+                    a.Settings.PendingFileLimit=2000;
+                    for(int i=0;i<51;i++){ChatRecord sent=a.SendMessage(peer,"",Enumerable.Repeat(source,20).ToArray());Wait(()=>sent.State=="已送达","扩大额度后未送达");}
+                    Check(Entries(a,"offers")==1121,"千项邀请数量错误");
+                }
+                using(LanService restored=Node(profile,Port(),"11111111111111111111111111111112"))Check(Entries(restored,"offers")==1121,"超过千项的邀请重启丢失");
+            });
             Run("目录协议与路径越界拒绝",()=>{var file=new Attachment{Id=0,Name="中文😀.txt",RelativePath="目录/子目录/中文😀.txt",Size=6,Sha256=new string('a',64)};var parsed=Protocol.ParseFiles(Protocol.FileList(new[]{file}));Check(parsed.Count==1&&parsed[0].RelativePath==file.RelativePath,"目录协议丢失");foreach(string path in new[]{"../secret","/root/a","a//b","a/CON","a/../b","a\\b"})Check(!Protocol.SafeRelativePath(path),"接受路径："+path);});
             Run("文件夹展开、相对目录与系统分享隔离队列",()=>{
                 string folder=Path.Combine(root,"batch"),child=Path.Combine(folder,"子目录");Directory.CreateDirectory(child);for(int i=0;i<25;i++)File.WriteAllText(Path.Combine(child,"文件"+i+".txt"),"数据 "+i);

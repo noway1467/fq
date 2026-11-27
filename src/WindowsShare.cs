@@ -12,16 +12,16 @@ namespace FeiqLight
     {
         internal static void Enqueue(string root,string[] paths)
         {
-            if(paths.Length==0||paths.Length>1000)throw new IOException("请选择 1–1000 个文件或文件夹。");
+            if(paths.Length==0||paths.Length>AppSettings.MaxFileLimit)throw new IOException("请选择 1–50000 个文件或文件夹。");
             string[] full=paths.Select(Path.GetFullPath).ToArray();if(full.Any(p=>!File.Exists(p)&&!Directory.Exists(p)))throw new IOException("部分分享文件已不存在。");
             string folder=Path.Combine(root,"system-share");Directory.CreateDirectory(folder);if(Directory.GetFiles(folder,"*.json").Length>=16)throw new IOException("待处理系统分享过多，请先打开飞Q处理。");
-            SecureIdentity.AtomicBytes(Path.Combine(folder,Guid.NewGuid().ToString("N")+".json"),Encoding.UTF8.GetBytes(new JavaScriptSerializer().Serialize(full)));
+            SecureIdentity.AtomicBytes(Path.Combine(folder,Guid.NewGuid().ToString("N")+".json"),Encoding.UTF8.GetBytes(new JavaScriptSerializer{MaxJsonLength=16*1024*1024}.Serialize(full)));
         }
         internal static string[] Take(string root)
         {
             string folder=Path.Combine(root,"system-share");if(!Directory.Exists(folder))return null;
             string path=Directory.GetFiles(folder,"*.json").OrderBy(File.GetCreationTimeUtc).FirstOrDefault();if(path==null)return null;
-            try{if(new FileInfo(path).Length>1024*1024)throw new IOException("分享列表过大。");string[] files=new JavaScriptSerializer().Deserialize<string[]>(File.ReadAllText(path,Encoding.UTF8));if(files==null||files.Length>1000||files.Any(p=>!Path.IsPathRooted(p)))throw new IOException("分享列表无效。");return files;}
+            try{if(new FileInfo(path).Length>16*1024*1024)throw new IOException("分享列表过大。");string[] files=new JavaScriptSerializer{MaxJsonLength=16*1024*1024}.Deserialize<string[]>(File.ReadAllText(path,Encoding.UTF8));if(files==null||files.Length>AppSettings.MaxFileLimit||files.Any(p=>!Path.IsPathRooted(p)))throw new IOException("分享列表无效。");return files;}
             finally{File.Delete(path);}
         }
         internal static void Install(string folder,string executable,string root,int port)

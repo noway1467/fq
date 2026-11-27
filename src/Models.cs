@@ -18,6 +18,10 @@ namespace FeiqLight
             set { port = value >= 1024 && value <= 65535 ? value : 2425; HasConfiguredPort = true; }
         }
         internal bool HasConfiguredPort { get; private set; }
+        public const int MinFileLimit = 100, MaxFileLimit = 50000;
+        private int batchFileLimit = 5000, pendingFileLimit = 10000;
+        public int BatchFileLimit { get { return batchFileLimit; } set { batchFileLimit = value >= MinFileLimit && value <= MaxFileLimit ? value : 5000; } }
+        public int PendingFileLimit { get { return pendingFileLimit; } set { pendingFileLimit = value >= MinFileLimit && value <= MaxFileLimit ? value : 10000; } }
         public const int DefaultGuestLifetimeMinutes = 60, MaxGuestLifetimeMinutes = 1440;
         private int guestLifetimeMinutes = DefaultGuestLifetimeMinutes;
         public int GuestLifetimeMinutes

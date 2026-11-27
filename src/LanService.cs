@@ -115,6 +115,7 @@ namespace FeiqLight
         public AppSettings Settings { get; set; }
         public SecureIdentity Security { get; private set; }
         private string dataRoot;
+        private const int CompletedOfferCache = 1000, MaxStoredOffers = AppSettings.MaxFileLimit + CompletedOfferCache + 8, OfferJsonLimit = 64 * 1024 * 1024;
         public sealed class StoredOffer
         {
             public string Key, Path, Address, DeviceId, Fingerprint, Sha256;
@@ -140,17 +141,32 @@ namespace FeiqLight
             if(dataRoot==null)return;
             lock(gate) {
                 if(disposed)return;
-                var saved=(snapshot??offers).Where(o=>o.Value.Fingerprint!=null).Select(o=>new StoredOffer{Key=o.Key,Path=o.Value.Path,Address=o.Value.Address,DeviceId=o.Value.DeviceId,Fingerprint=o.Value.Fingerprint,Sha256=o.Value.Sha256,Size=o.Value.Size,ModifiedTicks=o.Value.Modified.Ticks,ExpiresTicks=o.Value.Expires.Ticks,FileId=o.Value.FileId,Record=o.Value.Record,TransferState=o.Value.TransferState,Percent=o.Value.Percent}).ToArray();
-                SecureIdentity.AtomicBytes(Path.Combine(dataRoot,"transfer-offers.json"),System.Text.Encoding.UTF8.GetBytes(new System.Web.Script.Serialization.JavaScriptSerializer{MaxJsonLength=8*1024*1024}.Serialize(saved)));
+                // 同一批的消息只保存一次，避免附件数量增长时重复写入整批记录。
+                HashSet<long> records = new HashSet<long>();
+                var saved=(snapshot??offers).Where(o=>o.Value.Fingerprint!=null).Select(o=>new StoredOffer{Key=o.Key,Path=o.Value.Path,Address=o.Value.Address,DeviceId=o.Value.DeviceId,Fingerprint=o.Value.Fingerprint,Sha256=o.Value.Sha256,Size=o.Value.Size,ModifiedTicks=o.Value.Modified.Ticks,ExpiresTicks=o.Value.Expires.Ticks,FileId=o.Value.FileId,Record=records.Add(o.Value.Record.Packet)?o.Value.Record:null,TransferState=o.Value.TransferState,Percent=o.Value.Percent}).ToArray();
+                byte[] bytes=System.Text.Encoding.UTF8.GetBytes(new System.Web.Script.Serialization.JavaScriptSerializer{MaxJsonLength=OfferJsonLimit}.Serialize(saved));
+                if(bytes.Length>OfferJsonLimit)throw new IOException("文件邀请记录过大，请先处理待发送文件。");
+                string path=Path.Combine(dataRoot,"transfer-offers.json");
+                for(int attempt=0;;attempt++){
+                    try{SecureIdentity.AtomicBytes(path,bytes);break;}
+                    catch(IOException error){
+                        int code=error.HResult&0xffff;
+                        // 连续原子替换可能遇到扫描器的短暂文件占用；只重试明确的共享/替换占用错误。
+                        if(attempt>=3||(code!=32&&code!=33&&code!=1175))throw;
+                        Thread.Sleep(25*(attempt+1));
+                    }
+                }
             }
         }
         private void RestoreOffers()
         {
             string path=Path.Combine(dataRoot,"transfer-offers.json");if(!File.Exists(path))return;
-            if(new FileInfo(path).Length>8*1024*1024)throw new IOException("文件任务记录过大。");
-            var saved=new System.Web.Script.Serialization.JavaScriptSerializer{MaxJsonLength=8*1024*1024}.Deserialize<StoredOffer[]>(File.ReadAllText(path,System.Text.Encoding.UTF8));
-            if(saved==null||saved.Length>1000)throw new IOException("文件任务记录损坏。");
+            if(new FileInfo(path).Length>OfferJsonLimit)throw new IOException("文件任务记录过大。");
+            var saved=new System.Web.Script.Serialization.JavaScriptSerializer{MaxJsonLength=OfferJsonLimit}.Deserialize<StoredOffer[]>(File.ReadAllText(path,System.Text.Encoding.UTF8));
+            if(saved==null||saved.Length>MaxStoredOffers)throw new IOException("文件任务记录损坏。");
+            var records=saved.Where(item=>item!=null&&item.Record!=null).GroupBy(item=>item.Record.Packet).ToDictionary(group=>group.Key,group=>group.First().Record);
             foreach(StoredOffer item in saved) {
+                if(item!=null&&item.Record==null){long packet;string[] key=(item.Key??"").Split(':');ChatRecord record;if(key.Length==2&&Int64.TryParse(key[0],out packet)&&records.TryGetValue(packet,out record))item.Record=record;}
                 if(item==null||item.Record==null||item.ExpiresTicks<=DateTime.UtcNow.Ticks||!Security.IsTrusted(item.DeviceId,item.Fingerprint)||!SecureIdentity.ValidFingerprint(item.Sha256))continue;
                 FileInfo file=new FileInfo(item.Path);if(!file.Exists||file.Length!=item.Size||file.LastWriteTimeUtc.Ticks!=item.ModifiedTicks)continue;
                 if(item.Key!=item.Record.Packet+":"+item.FileId)throw new IOException("文件任务编号无效。");
@@ -572,12 +588,20 @@ namespace FeiqLight
         }
         public List<ChatRecord> SendBatchContent(Peer peer,string text,IEnumerable<string> paths,string root,Action<ChatRecord,int,int> sent)
         {
-            List<SendBatch.Item> expanded=SendBatch.Expand(paths);if(expanded.Any(f=>f.Relative!=null)&&peer.Fingerprint==null)throw new IOException("文件夹发送需要新版加密协议。");
+            int limit=Settings.BatchFileLimit;
+            List<SendBatch.Item> expanded=SendBatch.Expand(paths,limit);if(expanded.Any(f=>f.Relative!=null)&&peer.Fingerprint==null)throw new IOException("文件夹发送需要新版加密协议。");
             bool longText=MessageText.AsFile(text);
-            if(longText&&expanded.Count>=1000)throw new IOException("超长正文需要一个 TXT 附件位置，请最多选择 999 个文件。");
+            if(longText&&expanded.Count>=limit)throw new IOException("超长正文需要一个 TXT 附件位置，请最多选择 "+(limit-1)+" 个文件。");
+            lock(gate)CheckOfferCapacity(expanded.Count+(longText?1:0),null);
             if(Security!=null&&peer.Fingerprint!=null)VerifyPeer(peer);
             List<ChatRecord> records=new List<ChatRecord>();
             for(int offset=0;offset<expanded.Count;){
+                TimeSpan deadline=clock.Elapsed+TimeSpan.FromSeconds(30);
+                while(true){
+                    lock(gate){if(disposed)throw new IOException("连接已断开，已发邀请保留。");if(pending.Count<64)break;}
+                    if(clock.Elapsed>=deadline)throw new IOException("等待对方确认超时，已发邀请保留，请检查连接后继续。");
+                    Thread.Sleep(25);
+                }
                 var batch=expanded.Skip(offset).Take(offset==0&&longText?19:20).ToList();
                 ChatRecord record=SendContent(peer,offset==0?text:"",batch.Select(f=>f.Path).ToArray(),root,batch.ToDictionary(f=>f.Path,f=>f.Relative,StringComparer.OrdinalIgnoreCase));
                 records.Add(record);offset+=batch.Count;sent(record,offset,expanded.Count);
@@ -636,7 +660,8 @@ namespace FeiqLight
             foreach (Attachment file in files) { Offer offer = additions[number + ":" + file.Id]; offer.Record = record; offer.FileId = file.Id; }
             lock (gate)
             {
-                if (pending.Count >= 256 || offers.Count + additions.Count > 1000) throw new InvalidOperationException("待处理消息或文件过多，请稍后再试。");
+                if (pending.Count >= 256) throw new InvalidOperationException("等待送达的消息过多，请等待对方上线后继续。");
+                CheckOfferCapacity(additions.Count,additions.Keys);
                 // 写盘成功后才加入重试和文件授权；否则调用方收到失败后仍可能被后台补发。
                 var nextOffers = new Dictionary<string,Offer>(offers);
                 foreach (var item in additions) nextOffers[item.Key] = item.Value;
@@ -660,6 +685,17 @@ namespace FeiqLight
                 throw;
             }
             return record;
+        }
+        private void CheckOfferCapacity(int count,IEnumerable<string> replaced)
+        {
+            if(count==0)return;
+            foreach(string key in offers.Where(item=>item.Value.Expires<DateTime.UtcNow&&item.Value.ActiveClients.Count==0).Select(item=>item.Key).ToList())offers.Remove(key);
+            // 完成邀请只作重新接收缓存；不计待处理额度，压力下淘汰最旧项。
+            var completed=offers.Where(item=>IsOfferCompleted(item.Value)&&item.Value.ActiveClients.Count==0).OrderByDescending(item=>item.Value.Expires).ToList();
+            foreach(var item in completed.Skip(CompletedOfferCache))offers.Remove(item.Key);
+            HashSet<string> replacement=new HashSet<string>(replaced??Enumerable.Empty<string>());
+            int waiting=offers.Count(item=>!IsOfferCompleted(item.Value)&&!replacement.Contains(item.Key));
+            if(waiting+count>Settings.PendingFileLimit)throw new InvalidOperationException("待处理文件已达设置上限 "+Settings.PendingFileLimit+"，请处理已有任务或在设置中调大。");
         }
         private void Tick(object ignored)
         {

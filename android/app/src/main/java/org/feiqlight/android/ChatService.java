@@ -119,6 +119,8 @@ public final class ChatService extends Service {
     private final java.util.concurrent.atomic.AtomicLong transferEpoch=new java.util.concurrent.atomic.AtomicLong();
     private Diagnostics diagnostics;
     private WifiManager.MulticastLock multicast;
+    private WifiManager.WifiLock wifiLock;
+    private PowerManager.WakeLock cpuLock;
     private ConnectivityManager connectivity;
     private ConnectivityManager.NetworkCallback callback;
     private BroadcastReceiver tetherReceiver;
@@ -308,12 +310,14 @@ public final class ChatService extends Service {
     boolean canDisconnect() { return node!=null || connecting; }
     @Override public int onStartCommand(Intent intent,int flags,int startId) {
         if (intent!=null && "stop".equals(intent.getAction())) { disconnect(); return START_NOT_STICKY; }
-        if(node!=null || connecting) return START_NOT_STICKY;
+        boolean keepBackground=getSharedPreferences("settings",MODE_PRIVATE).getBoolean("keep_background",true);
+        if(node!=null || connecting) return keepBackground?START_STICKY:START_NOT_STICKY;
+        if(intent==null&&(!keepBackground||!getSharedPreferences("settings",MODE_PRIVATE).getBoolean("connection_enabled",false))){stopSelf(startId);return START_NOT_STICKY;}
         if(stopped || (intent!=null && "restore".equals(intent.getAction()) && !shouldRestoreConnection(this))) { stopSelf(startId); return START_NOT_STICKY; }
-        // 必须先进入前台再异步绑定套接字；恢复仅由用户打开的 Activity 发起。
+        // 系统回收后可恢复用户仍开启的连接；手动断开后不能被粘性服务重新拉起。
         try { startForeground(1,notification("connection","局域网连接","正在连接…",true)); connect(); }
-        catch (RuntimeException e) { fail(e); stopSelf(); }
-        return START_NOT_STICKY;
+        catch (RuntimeException e) { fail(e); stopSelf();return START_NOT_STICKY; }
+        return keepBackground?START_STICKY:START_NOT_STICKY;
     }
     private Notification notification(String channel,String title,String text,boolean ongoing) {
         PendingIntent open=PendingIntent.getActivity(this,0,new Intent(this,MainActivity.class),PendingIntent.FLAG_IMMUTABLE|PendingIntent.FLAG_UPDATE_CURRENT);
@@ -379,6 +383,7 @@ public final class ChatService extends Service {
                     try {
                         WifiManager wifi=(WifiManager)getApplicationContext().getSystemService(WIFI_SERVICE);
                         if (wifi!=null) { multicast=wifi.createMulticastLock("FeiqLight"); multicast.setReferenceCounted(false); multicast.acquire(); }
+                        backgroundSettingsChanged();
                         connectivity=getSystemService(ConnectivityManager.class);
                         callback=new ConnectivityManager.NetworkCallback() {
                             private void update(Network network,boolean lost) {
@@ -437,7 +442,7 @@ public final class ChatService extends Service {
                 if(!currentConnection(epoch)||disconnecting) return;
                 for(Protocol.Attachment file:message.files) {
                     String key=receivedFile(peer,message.number,file).getName();
-                    if(waiting.size()>=1000) { showError("待接收文件已达 1000 个，请处理后从历史记录继续"); break; }
+                    if(waiting.size()>=SendFiles.limit(getSharedPreferences("settings",MODE_PRIVATE),"pending_file_limit",10000)) { showError("待接收文件已达设置上限，可调大上限后从传输任务继续"); break; }
                     waiting.putIfAbsent(key,new ReceiveRequest(peer,message.number,file));
                 }
                 drainReceives();
@@ -455,6 +460,7 @@ public final class ChatService extends Service {
         target.nickname=prefs.getString("name",Build.MODEL);
         target.group=prefs.getString("group","我的局域网");
         target.allowLegacyProtocol=allowLegacy(prefs);
+        target.setPendingFileLimit(SendFiles.limit(prefs,"pending_file_limit",10000));
     }
     static boolean allowLegacy(SharedPreferences prefs) {
         if(!prefs.contains("legacy_protocol_policy")) {
@@ -553,7 +559,7 @@ public final class ChatService extends Service {
     void removeSharedFolder(Uri tree,Consumer<Boolean> done) {
         try {
             SharedFolderSettings settings=new SharedFolderSettings(this);List<Uri> trees=settings.trees();trees.remove(tree);
-            if(sharedFiles!=null&&!trees.isEmpty()){shareFolders(trees,done);return;}
+            if(sharedFiles!=null&&!trees.isEmpty()){shareFolders(trees,success->{if(!success)closeSharing();done.accept(success);});return;}
             closeSharing();settings.save(trees,false);done.accept(true);
         }catch(IOException e){showError(e.getMessage());done.accept(false);}
     }
@@ -561,10 +567,19 @@ public final class ChatService extends Service {
         if(!online()){showError("请先连接局域网");done.accept(false);return;}
         List<Uri> trees=new ArrayList<>(new LinkedHashSet<>(folders));
         if(trees.isEmpty()||trees.size()>20){showError("请选择 1–20 个共享文件夹");done.accept(false);return;}
-        closeSharing();long version=sharingEpoch,connection=connectionEpoch;int port=ToolsHttp.portFor(connectedPort);
+        SharedFiles active=sharedFiles;long version=++sharingEpoch,connection=connectionEpoch;int port=ToolsHttp.portFor(connectedPort);
         io.execute(()->{
             try {
                 SharedFolderSettings settings=new SharedFolderSettings(this);for(Uri tree:trees)settings.requireGrant(tree);
+                if(active!=null){
+                    active.updateFolders(trees);
+                    main.post(()->{
+                        if(stopped||version!=sharingEpoch||connection!=connectionEpoch||sharedFiles!=active){done.accept(false);return;}
+                        try{settings.save(trees,true);done.accept(true);}
+                        catch(IOException e){closeSharing();showError(e.getMessage());done.accept(false);}
+                    });
+                    return;
+                }
                 SharedFiles next=sharedFactory.create(trees,port);
                 main.post(()->{
                     if(stopped||version!=sharingEpoch||connection!=connectionEpoch){next.close();done.accept(false);return;}
@@ -825,10 +840,27 @@ public final class ChatService extends Service {
         main.removeCallbacks(notifyTransfers);main.post(notifyTransfers);
     }
     private void releaseNetwork() {
+        releaseBackgroundLocks();
         if (multicast!=null && multicast.isHeld()) multicast.release(); multicast=null;
         if (callback!=null && connectivity!=null) { try { connectivity.unregisterNetworkCallback(callback); } catch (RuntimeException ignored) { } } callback=null;
         if (tetherReceiver!=null) { try { unregisterReceiver(tetherReceiver); } catch (RuntimeException ignored) { } } tetherReceiver=null;
         LanNetwork route=lanNetwork;lanNetwork=null;if(route!=null)route.clearTrackedNetworks();
+    }
+    @android.annotation.SuppressLint("WakelockTimeout")
+    void backgroundSettingsChanged(){
+        releaseBackgroundLocks();
+        if(node==null||stopped||disconnecting||!getSharedPreferences("settings",MODE_PRIVATE).getBoolean("keep_background",true))return;
+        // 锁随用户开启的前台连接生存；断开、销毁和关闭此设置均立即释放。
+        try {
+            PowerManager power=getSystemService(PowerManager.class);
+            cpuLock=power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK,"FeiqLight:connection");cpuLock.setReferenceCounted(false);cpuLock.acquire();
+            WifiManager wifi=(WifiManager)getApplicationContext().getSystemService(WIFI_SERVICE);
+            if(wifi!=null){wifiLock=wifi.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF,"FeiqLight:connection");wifiLock.setReferenceCounted(false);wifiLock.acquire();}
+        }catch(RuntimeException e){releaseBackgroundLocks();showError("后台连接保护未开启："+e.getMessage());}
+    }
+    private void releaseBackgroundLocks(){
+        if(cpuLock!=null&&cpuLock.isHeld())cpuLock.release();cpuLock=null;
+        if(wifiLock!=null&&wifiLock.isHeld())wifiLock.release();wifiLock=null;
     }
     void cancelTransfer() { LanNode.Transfer task=transfer; if (task!=null) task.close(); }
     private void transferJob(Throwing job) {
@@ -908,24 +940,25 @@ public final class ChatService extends Service {
         return sendFiles(peer,Collections.singletonList(uri),keyboardMime,finished);
     }
     void sendFiles(LanNode.Peer peer,List<Uri> uris) { sendFiles(peer,uris,null,()->{}); }
-    void sendFolder(LanNode.Peer peer,Uri tree){sendBatch(peer,()->SendFiles.folder(this,tree));}
+    void sendFolder(LanNode.Peer peer,Uri tree){sendBatch(peer,()->SendFiles.folder(this,tree,SendFiles.batchLimit(this)));}
     private interface BatchSource {List<SendFiles.Entry> read()throws IOException;}
     private void sendBatch(LanNode.Peer peer,BatchSource source){
-        transferJob(task->{LanNode current=requireNode();if(peer.fingerprint==null)throw new IOException("文件夹发送需要新版加密协议");current.verifyPeer(peer);List<SendFiles.Entry> entries=source.read();preflightCopies(entries.stream().map(e->e.uri).collect(java.util.stream.Collectors.toList()),task);int sent=0;
+        transferJob(task->{LanNode current=requireNode();if(peer.fingerprint==null)throw new IOException("文件夹发送需要新版加密协议");current.verifyPeer(peer);List<SendFiles.Entry> entries=source.read();current.checkOfferCapacity(entries.size());preflightCopies(entries.stream().map(e->e.uri).collect(java.util.stream.Collectors.toList()),task);int sent=0;
             for(int start=0;start<entries.size();start+=20){List<File> copies=new ArrayList<>();Map<String,String> relatives=new HashMap<>();boolean published=false;
                 try {for(SendFiles.Entry entry:entries.subList(start,Math.min(start+20,entries.size()))){checkTransfer(task);String name=entry.relative.substring(entry.relative.lastIndexOf('/')+1);File dir=new File(directory("offers"),UUID.randomUUID().toString());if(!dir.mkdir())throw new IOException("无法暂存文件");File copy=new File(dir,name);copies.add(copy);try(InputStream in=getContentResolver().openInputStream(entry.uri);OutputStream out=new FileOutputStream(copy)){copy(in,out,task,remaining(dir),"暂存空间不足");}relatives.put(copy.getCanonicalPath(),entry.relative);}
-                    current.sendFiles(peer,copies,relatives);published=true;sent+=copies.size();final int done=sent;main.post(()->{if(transfer==task){transferStatus="邀请已发送 "+done+" / "+entries.size();changed();}});
+                    current.awaitSendSlot(task);current.sendFiles(peer,copies,relatives);published=true;sent+=copies.size();final int done=sent;main.post(()->{if(transfer==task){transferStatus="邀请已发送 "+done+" / "+entries.size();changed();}});
                 }finally{if(!published)for(File copy:copies){Files.deleteIfExists(copy.toPath());Files.deleteIfExists(copy.getParentFile().toPath());}}
             }
         },()->{},"全部文件邀请已发送，接收状态见各文件","已取消，已发邀请保留",true);
     }
     private boolean sendFiles(LanNode.Peer peer,List<Uri> uris,String keyboardMime,Runnable finished) {
-        if(uris==null||uris.isEmpty()||uris.size()>1000) { finished.run();showError("每批请选择 1–1000 个文件");return false; }
+        int limit=SendFiles.batchLimit(this);
+        if(uris==null||uris.isEmpty()||uris.size()>limit) { finished.run();showError("每批请选择 1–"+limit+" 个文件，可在设置中调整");return false; }
         List<Uri> batch=new ArrayList<>(new LinkedHashSet<>(uris));
         return transferJob(task->{
-            LanNode current=requireNode(); List<File> staged=new ArrayList<>();int published=0;if(current.security()!=null&&peer.fingerprint!=null)current.verifyPeer(peer);
+            LanNode current=requireNode();current.checkOfferCapacity(batch.size()); List<File> staged=new ArrayList<>();int published=0;if(current.security()!=null&&peer.fingerprint!=null)current.verifyPeer(peer);
             if(keyboardMime==null&&peer.fingerprint!=null){List<LanNode.Source> direct=new ArrayList<>();boolean stable=true;for(Uri uri:batch)try{direct.add(new DocumentSource(this,uri));}catch(IOException unavailable){stable=false;break;}
-                if(stable){for(int start=0;start<direct.size();start+=20){checkTransfer(task);current.sendSources(peer,direct.subList(start,Math.min(start+20,direct.size())));}return;}
+                if(stable){for(int start=0;start<direct.size();start+=20){checkTransfer(task);current.awaitSendSlot(task);current.sendSources(peer,direct.subList(start,Math.min(start+20,direct.size())));}return;}
             }
             cleanStaging();
             if(keyboardMime==null)preflightCopies(batch,task);
@@ -971,7 +1004,7 @@ public final class ChatService extends Service {
                 }
             // 暂存完成后分组发送；已经发布的邀请保留，失败后可从对应记录处理。
             if(task.isCancelled()) throw new IOException("已取消发送");
-            for(int offset=0;offset<staged.size();offset+=20){checkTransfer(task);int end=Math.min(offset+20,staged.size());current.sendMessage(peer,"",staged.subList(offset,end));published=end;}
+            for(int offset=0;offset<staged.size();offset+=20){checkTransfer(task);current.awaitSendSlot(task);int end=Math.min(offset+20,staged.size());current.sendMessage(peer,"",staged.subList(offset,end));published=end;}
             } finally {
                 if(published<staged.size()) {
                     IOException cleanupFailure=null;
@@ -1003,7 +1036,7 @@ public final class ChatService extends Service {
         if(before!=null&&wasStored(before.state))rememberReceivedBefore(receiveKey,true);
         if(busy()) {
             if(activeReceive!=null&&activeReceive.peer.id().equals(peer.id())&&activeReceive.packet==packet&&activeReceive.file.id==file.id)return;
-            if(waiting.size()>=1000){showError("待接收文件已达 1000 个，请先处理已有任务");return;}
+            if(waiting.size()>=SendFiles.limit(getSharedPreferences("settings",MODE_PRIVATE),"pending_file_limit",10000)){showError("待接收文件已达设置上限，请处理已有任务或在设置中调大");return;}
             // 排队进度也会写库；先读取旧终态，避免覆盖后丢失「曾保存」标记。
             if(before==null)queue(()->{ChatStore.TransferState saved=store.transfer(receiveKey);if(saved!=null&&wasStored(saved.state))rememberReceivedBefore(receiveKey,true);});
             waiting.put(receivedFile(peer,packet,file).getName(),new ReceiveRequest(peer,packet,file));

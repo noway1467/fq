@@ -46,6 +46,20 @@ namespace FeiqLight.Tests
             foreach (bool dark in new[] { false, true })
             {
                 Theme.Configure(dark, "blue"); string theme = dark ? "dark" : "light";
+                Run("文件设置："+theme+" 可调额度、范围校验与保存",()=>{
+                    string receive=Path.Combine(data,"settings-"+theme);Directory.CreateDirectory(receive);
+                    using(var dialog=new SettingsDialog(new AppSettings{ReceiveFolder=receive},data,2425,false,false,SettingsPage.Files)){
+                        dialog.Show();Application.DoEvents();
+                        TextBox batch=All(dialog).OfType<TextBox>().Single(box=>box.AccessibleName=="单批文件上限（100–50000）");
+                        TextBox pending=All(dialog).OfType<TextBox>().Single(box=>box.AccessibleName=="待处理文件上限（100–50000）");
+                        Check(batch.Visible&&pending.Visible&&batch.Text=="5000"&&pending.Text=="10000","文件页未显示默认额度");
+                        Panel body=(Panel)typeof(SettingsDialog).GetField("body",BindingFlags.NonPublic|BindingFlags.Instance).GetValue(dialog);
+                        body.AutoScrollPosition=new Point(0,Math.Max(0,batch.Parent.Top-120));Layout(dialog);
+                        Check(body.RectangleToScreen(body.ClientRectangle).Contains(pending.RectangleToScreen(pending.ClientRectangle)),"额度输入无法完整滚动到视口");Snapshot(dialog,"file-limits-"+theme);
+                        batch.Text="99";Button(dialog,"保存").PerformClick();Check(dialog.DialogResult!=DialogResult.OK,"接受超出范围额度");
+                        batch.Text="50000";pending.Text="20000";Button(dialog,"保存").PerformClick();Check(dialog.Value.BatchFileLimit==50000&&dialog.Value.PendingFileLimit==20000,"保存额度错误");
+                    }
+                });
                 Run("共享窗口：" + theme + " 空列表、多个长路径、最小/常用/最大化及操作", () => {
                     string profile = Path.Combine(data, theme, "profile");
                     using (ToolsWindow window = new ToolsWindow(-1, true, profile))

@@ -27,6 +27,19 @@ import static org.robolectric.Shadows.shadowOf;
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk=35,qualifiers="w393dp-h852dp-xhdpi")
 public final class ReliabilityTest {
+    @Test public void backgroundConnectionRestartsAndManualDisconnectReleasesLocks()throws Exception {
+        ServiceController<ChatService> controller=Robolectric.buildService(ChatService.class).create();ChatService service=controller.get();
+        try {
+            settle(service);int port=freePort();service.connectionFactory=(prefs,listener)->new LanNode(port,true,"background","host","后台测试","",listener);
+            service.getSharedPreferences("settings",0).edit().putBoolean("connection_enabled",true).putBoolean("keep_background",true).commit();
+            assertEquals(android.app.Service.START_STICKY,service.onStartCommand(null,0,1));settle(service);assertTrue(service.online());
+            PowerManager.WakeLock cpu=(PowerManager.WakeLock)field(service,"cpuLock");assertNotNull(cpu);assertTrue(cpu.isHeld());
+            android.net.wifi.WifiManager.WifiLock wifi=(android.net.wifi.WifiManager.WifiLock)field(service,"wifiLock");assertTrue(wifi.isHeld());
+            service.getSharedPreferences("settings",0).edit().putBoolean("keep_background",false).commit();service.backgroundSettingsChanged();assertFalse(cpu.isHeld());assertFalse(wifi.isHeld());
+            service.getSharedPreferences("settings",0).edit().putBoolean("keep_background",true).commit();service.backgroundSettingsChanged();cpu=(PowerManager.WakeLock)field(service,"cpuLock");assertTrue(cpu.isHeld());
+            service.disconnect();settle(service);assertFalse(cpu.isHeld());assertEquals(android.app.Service.START_NOT_STICKY,service.onStartCommand(null,0,2));assertFalse(service.online());
+        }finally{controller.destroy();assertTrue(io(service).awaitTermination(5,TimeUnit.SECONDS));}
+    }
     @Test public void stableIdentityStorePreservesOldHistoryDraftAndMetadata() throws Exception {
         Context context=RuntimeEnvironment.getApplication();String device="0123456789abcdef0123456789abcdef";
         LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:32425"),"old","host","设备","组");String key=peer.id();

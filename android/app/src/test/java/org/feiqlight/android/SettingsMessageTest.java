@@ -62,6 +62,12 @@ public final class SettingsMessageTest {
                     ScrollView scroller=(ScrollView)views(decor).stream().filter(v->v instanceof ScrollView).findFirst().orElseThrow();
                     scroller.scrollTo(0,follow.getTop());snapshot(decor,"settings-grid-"+(dark?"dark":"light"));
                     click(dialog,"文件");snapshot(decor,"settings-files-"+(dark?"dark":"light"));
+                    List<EditText> limits=new ArrayList<>();for(View view:views(decor.findViewWithTag("settings-page:2")))if(view instanceof EditText)limits.add((EditText)view);
+                    assertEquals("5000",limits.get(0).getText().toString());assertEquals("10000",limits.get(1).getText().toString());
+                    limits.get(0).setText("99");click(dialog,"保存");assertTrue(dialog.isShowing());
+                    limits.get(0).setText("50000");limits.get(1).setText("20000");click(dialog,"保存");assertFalse(dialog.isShowing());
+                    assertEquals(50000,SendFiles.batchLimit(activity));assertEquals(20000,activity.getSharedPreferences("settings",0).getInt("pending_file_limit",0));
+                    activity.getSharedPreferences("settings",0).edit().remove("batch_file_limit").remove("pending_file_limit").commit();
                 } finally {dialog.dismiss();}
             } finally {service.destroy();}
         }

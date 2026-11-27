@@ -659,8 +659,10 @@ namespace FeiqLight
             ToggleSwitch close = new ToggleSwitch { Text = "关闭时收起到托盘", Checked = current.CloseToTray, BackColor = Theme.Surface }; close.SetBounds(26, 232, 458, 42); body.Controls.Add(close);
             ToggleSwitch notifications = new ToggleSwitch { Text = "新消息气泡通知", Checked = current.Notifications, BackColor = Theme.Surface }; notifications.SetBounds(26, 274, 458, 42); body.Controls.Add(notifications);
             ToggleSwitch startup = new ToggleSwitch { Text = "开机自启动", AccessibleName = "开机自启动", Checked = startupAvailable ? startupEnabled : current.StartWithWindows, Enabled = startupAvailable, BackColor = Theme.Surface }; startup.SetBounds(26, 275, 458, 42); body.Controls.Add(startup);
-            ToggleSwitch auto = new ToggleSwitch { Text = "自动接收文件", AccessibleName = "自动接收文件", Description = "仅用于可信局域网，不自动运行文件", Checked = current.AutoReceiveFiles, BackColor = Theme.Surface }; auto.SetBounds(26, 316, 458, 52); body.Controls.Add(auto);
+            ToggleSwitch auto = new ToggleSwitch { Text = "自动接收文件", AccessibleName = "自动接收文件", Checked = current.AutoReceiveFiles, BackColor = Theme.Surface }; auto.SetBounds(26, 316, 458, 42); body.Controls.Add(auto);
             ToggleSwitch autoDrop=new ToggleSwitch {Text="拖入文件自动发送",AccessibleName="拖入文件自动发送",Description="仅发本次拖入文件，不夹带草稿或已排队附件",Checked=current.AutoSendDroppedFiles,BackColor=Theme.Surface};autoDrop.SetBounds(26,520,458,52);body.Controls.Add(autoDrop);
+            TextBox batchLimit=Input("单批文件上限（100–50000）",current.BatchFileLimit.ToString(),521,5);
+            TextBox pendingLimit=Input("待处理文件上限（100–50000）",current.PendingFileLimit.ToString(),580,5);
             ToggleSwitch legacy=new ToggleSwitch {Text="允许旧版明文协议",AccessibleName="允许旧版明文协议",Description="兼容旧设备明文；已配对设备与共享远控始终加密",Checked=current.AllowLegacyProtocol,BackColor=Theme.Surface};legacy.SetBounds(26,280,458,52);body.Controls.Add(legacy);
             TextBox folder = Input("文件保存文件夹", current.ReceiveFolder ?? AppSettings.DefaultReceiveFolder, 404, 240); folder.Parent.Width = 350;
             Button browse = Theme.Button("选择文件夹", delegate
@@ -671,14 +673,14 @@ namespace FeiqLight
             Button reset = Theme.Button("恢复默认目录", delegate { folder.Text = AppSettings.DefaultReceiveFolder; }, false); reset.SetBounds(26, 486, 146, 36); DialogLayout.StyleSecondary(reset); body.Controls.Add(reset);
             Button clearReceived = Theme.Button("清理已接收文件", null, false);
             clearReceived.AccessibleName = "清理已接收文件"; clearReceived.Enabled = cleanReceived != null;
-            clearReceived.SetBounds(26, 540, 180, 40); DialogLayout.StyleSecondary(clearReceived); body.Controls.Add(clearReceived);
+            clearReceived.SetBounds(26, 650, 180, 40); DialogLayout.StyleSecondary(clearReceived); body.Controls.Add(clearReceived);
             clearReceived.Click += async delegate {
                 clearReceived.Enabled = false;
                 try { await cleanReceived(this); }
                 finally { if (!IsDisposed) clearReceived.Enabled = true; }
             };
             Label cleanHint = Theme.Label("仅清理飞Q登记的接收文件（含以前目录）；保留其他文件。", Theme.Small, Theme.Muted);
-            cleanHint.Top = 541; cleanHint.Height = 54; cleanHint.AutoSize = false; body.Controls.Add(cleanHint);
+            cleanHint.Top = 651; cleanHint.Height = 54; cleanHint.AutoSize = false; body.Controls.Add(cleanHint);
             Label info = Theme.Label("端口 " + port + " · 资料目录 " + dataPath, Theme.Small, Theme.Muted); info.SetBounds(26, 532, 458, 40); info.AutoEllipsis = true; body.Controls.Add(info);
             ToggleSwitch dark=new ToggleSwitch { Text="夜间模式",AccessibleName="夜间模式",Checked=current.DarkMode,BackColor=Theme.Surface }; dark.SetBounds(26,590,458,42);body.Controls.Add(dark);
             ToggleSwitch follow=new ToggleSwitch { Text="跟随系统主题",AccessibleName="跟随系统切换",Checked=current.FollowSystemTheme,BackColor=Theme.Surface };follow.Top=290;body.Controls.Add(follow);
@@ -762,11 +764,17 @@ namespace FeiqLight
                 int selectedPort;
                 if (!Int32.TryParse(connectionPort.Text.Trim(), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out selectedPort) || selectedPort < 1024 || selectedPort > 65535)
                 { error.Text = "端口须为 1024–65535 的整数"; SelectTab(0); connectionPort.Focus(); return; }
+                int selectedBatch,selectedPending;
+                if(!Int32.TryParse(batchLimit.Text.Trim(),out selectedBatch)||selectedBatch<AppSettings.MinFileLimit||selectedBatch>AppSettings.MaxFileLimit)
+                {error.Text="单批文件上限须为 100–50000 的整数";SelectTab(2);batchLimit.Focus();return;}
+                if(!Int32.TryParse(pendingLimit.Text.Trim(),out selectedPending)||selectedPending<AppSettings.MinFileLimit||selectedPending>AppSettings.MaxFileLimit)
+                {error.Text="待处理文件上限须为 100–50000 的整数";SelectTab(2);pendingLimit.Focus();return;}
                 try
                 {
                     string path = ReceiveStorage.Folder(folder.Text); ReceiveStorage.ValidateWritable(path);
                     Value = new AppSettings { Port = selectedPort, Avatar = avatarValue, Nickname = Protocol.Field(name.Text.Trim()), Group = String.IsNullOrWhiteSpace(group.Text) ? "我的局域网" : Protocol.Field(group.Text.Trim()), Signature = current.Signature, CloseToTray = close.Checked, StartWithWindows = startup.Checked, Notifications = notifications.Checked,DiagnosticsEnabled = diagnostics.Checked, AutoSendDroppedFiles=autoDrop.Checked, AllowLegacyProtocol=legacy.Checked, AutoReceiveFiles = auto.Checked, ReceiveFolder = path, ChatFontSize=messageSize,ChatBackground=backgroundMode,BackgroundImage=backgroundPath,DarkMode=dark.Checked, FollowSystemTheme=follow.Checked, Accent=accentKeys[accentIndex] };
                     DialogResult = DialogResult.OK;
+                    Value.BatchFileLimit=selectedBatch;Value.PendingFileLimit=selectedPending;
                 }
                 catch (Exception e) { error.Text = "保存目录不可用：" + e.Message; SelectTab(2); folder.Focus(); }
             }, true); save.Size = new Size(92, 38); save.Margin = Padding.Empty; cancel.Margin = new Padding(0, 0, 10, 0); actionRow.Controls.Add(save); actionRow.Controls.Add(cancel); AcceptButton = save;
@@ -800,8 +808,7 @@ namespace FeiqLight
                 }
                 string section = field == fields[0] ? "个人资料" : field is Label && field.Text == "端口" ? "连接" : field == close ? "消息与窗口" : field == auto ? "文件接收" : field == clearReceived ? "存储管理" : field == autoDrop ? "文件发送" : field == dark ? "聊天外观" : field == diagnostics ? "故障诊断" : field == info ? "本机信息" : null;
                 if (section != null) {
-                    if(layout.Controls.Count>0) { Panel divider=new Panel { Height=1, BackColor=Theme.Line, Margin=new Padding(0,10,0,10) };layout.Controls.Add(divider); }
-                    Label heading = Theme.Label(section, Theme.Section, Theme.Ink); heading.Height = 24; heading.Margin = new Padding(0, 0, 0, 4); layout.Controls.Add(heading);
+                    Label heading = Theme.Label(section, Theme.Section, Theme.Ink); heading.Height = 24; heading.Margin = new Padding(0, layout.Controls.Count>0?18:0, 0, 6); layout.Controls.Add(heading);
                 }
                 if(field is Label && field != info && field != cleanHint && field != portHint) field.Height=20;
                 if(field is ToggleSwitch) field.Height=((ToggleSwitch)field).PreferredHeightFor(458);

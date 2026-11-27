@@ -33,6 +33,16 @@ final class ToolsPairings {
         return token;
     }
     void clear()throws IOException{if(!preferences.edit().clear().commit())throw new IOException("无法清除配对记录");}
+    void changeShareScope(String previous,String next)throws IOException {
+        if(previous.equals(next))return;
+        SharedPreferences.Editor editor=preferences.edit();
+        for(Map.Entry<String,?> entry:preferences.getAll().entrySet())if(entry.getValue() instanceof String){
+            String value=(String)entry.getValue();int end=value.lastIndexOf('|');if(end<0)continue;
+            String scope=value.substring(0,end);
+            if(scope.equals(previous)||scope.startsWith(previous+"|tls="))editor.putString(entry.getKey(),next+scope.substring(previous.length())+value.substring(end));
+        }
+        if(!editor.commit())throw new IOException("共享配对更新失败");
+    }
     void forgetFingerprint(String fingerprint)throws IOException{
         SharedPreferences.Editor editor=preferences.edit();String suffix="|tls="+fingerprint;
         for(Map.Entry<String,?> entry:preferences.getAll().entrySet())if(entry.getValue() instanceof String){String value=(String)entry.getValue();int end=value.lastIndexOf('|');if(end>=0&&value.substring(0,end).endsWith(suffix)){editor.remove(entry.getKey());editor.remove("allow:"+entry.getKey());}}

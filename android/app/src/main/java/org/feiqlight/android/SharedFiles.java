@@ -19,7 +19,8 @@ final class SharedFiles implements AutoCloseable {
     private static final class Session {final String token,address,fingerprint;volatile long last;Session(String token,String address,String fingerprint){this.token=token;this.address=address;this.fingerprint=fingerprint;last=SystemClock.elapsedRealtime();}}
     private final Context context;
     private final List<Entry> roots=new ArrayList<>();
-    private final String scope;
+    private String scope="";
+    private int revision;
     private final Map<String,Entry> entries=new LinkedHashMap<>();
     private final List<Session> sessions=new ArrayList<>();
     private final ToolsHttp http;
@@ -37,19 +38,26 @@ final class SharedFiles implements AutoCloseable {
     }
     SharedFiles(Context context,List<Uri> folders,int port,boolean loopback,LanNode.SocketBinding binding) throws IOException {
         if(!loopback&&binding==null)throw new IOException("请先连接局域网");
-        this.context=context.getApplicationContext();List<Uri> trees=new ArrayList<>(new LinkedHashSet<>(folders));
+        this.context=context.getApplicationContext();pairings=new ToolsPairings(this.context);
+        updateFolders(folders);
+        http=new ToolsHttp(port,loopback,this::handle,loopback?null:AppIdentity.get(context),loopback?null:binding);
+    }
+    synchronized void updateFolders(List<Uri> folders)throws IOException {
+        if(closed)throw new IOException("共享已关闭");
+        List<Uri> trees=new ArrayList<>(new LinkedHashSet<>(folders));List<Entry> next=new ArrayList<>();
         if(trees.isEmpty()||trees.size()>20)throw new IOException("请选择 1–20 个共享文件夹");
         for(Uri tree:trees) {
             if(tree==null||!"content".equals(tree.getScheme())||!DocumentsContract.isTreeUri(tree))throw new IOException("请选择系统授权的文件夹");
             Uri root=DocumentsContract.buildDocumentUriUsingTree(tree,DocumentsContract.getTreeDocumentId(tree));
             try(Cursor cursor=context.getContentResolver().query(root,new String[]{DocumentsContract.Document.COLUMN_MIME_TYPE,DocumentsContract.Document.COLUMN_DISPLAY_NAME},null,null)) {
                 if(cursor==null||!cursor.moveToFirst()||!DocumentsContract.Document.MIME_TYPE_DIR.equals(cursor.getString(0)))throw new IOException("无法读取所选目录，请重新授权");
-                roots.add(new Entry(tree,root,cursor.getString(1)==null?"共享文件夹":cursor.getString(1),0,true));
+                next.add(new Entry(tree,root,cursor.getString(1)==null?"共享文件夹":cursor.getString(1),0,true));
             }
         }
-        // 单目录保留旧配对范围；多目录配对绑定完整集合，增减目录后原凭据不可复用。
-        scope="share:"+String.join("\n",trees.stream().map(Uri::toString).sorted().collect(java.util.stream.Collectors.toList()));
-        pairings=new ToolsPairings(this.context);http=new ToolsHttp(port,loopback,this::handle,loopback?null:AppIdentity.get(context),loopback?null:binding);
+        String nextScope="share:"+String.join("\n",trees.stream().map(Uri::toString).sorted().collect(java.util.stream.Collectors.toList()));
+        if(!scope.isEmpty())pairings.changeShareScope(scope,nextScope);
+        roots.clear();roots.addAll(next);scope=nextScope;revision++;
+        entries.entrySet().removeIf(entry->!trees.contains(entry.getValue().tree));
     }
     String code(){return SystemClock.elapsedRealtime()<codeUntil?code:"已过期，请停止后重新开启";}
     int port(){return http.port();}
@@ -98,6 +106,7 @@ final class SharedFiles implements AutoCloseable {
             throw new ToolsHttp.Failure(404,"没有此操作");
         }
         if(request.path.equals("/api/list")){list(request,response,authorize(request));return;}
+        if(request.path.equals("/api/share-status")){authorize(request);synchronized(this){response.json(new JSONObject().put("revision",revision).toString(),"");}return;}
         if(request.path.equals("/file")){file(request,response,authorize(request));return;}
         if(request.path.equals("/favicon.ico")||request.path.startsWith("/native/")){response.bytes(204,"image/x-icon",new byte[0],"");return;}
         String asset=request.path.equals("/")?"index.html":request.path.substring(1);
@@ -109,18 +118,20 @@ final class SharedFiles implements AutoCloseable {
     }
     private synchronized Entry entry(String id) throws ToolsHttp.Failure {
         if(id.isEmpty())return roots.size()==1?roots.get(0):new Entry(null,null,"共享文件夹",0,true);
-        Entry entry=entries.get(id);if(entry==null)throw new ToolsHttp.Failure(404,"文件索引已失效，请刷新目录");return entry;
+        Entry entry=entries.get(id);if(entry==null||!shared(entry))throw new ToolsHttp.Failure(404,"文件索引已失效，请刷新目录");return entry;
     }
+    private synchronized boolean shared(Entry entry){return !closed&&roots.stream().anyMatch(root->root.tree.equals(entry.tree));}
     private synchronized String remember(Entry entry) throws ToolsHttp.Failure {
+        if(!shared(entry))throw new ToolsHttp.Failure(404,"共享目录已移除");
         for(Map.Entry<String,Entry> item:entries.entrySet())if(item.getValue().uri.equals(entry.uri)&&item.getValue().tree.equals(entry.tree)){item.setValue(entry);return item.getKey();}
         if(entries.size()>=10000)throw new ToolsHttp.Failure(409,"浏览项已达上限，请重新开启共享");String id=random(16);entries.put(id,entry);return id;
     }
     private void list(ToolsHttp.Request request,ToolsHttp.Response response,Session session) throws Exception {
-        Entry parent=entry(request.parameter("id"));if(!parent.directory)throw new ToolsHttp.Failure(404,"目录不存在");JSONArray items=new JSONArray();
+        Entry parent;int listedRevision;synchronized(this){parent=entry(request.parameter("id"));listedRevision=revision;}if(!parent.directory)throw new ToolsHttp.Failure(404,"目录不存在");JSONArray items=new JSONArray();
         if(parent.uri==null) {
-            for(Entry root:roots)items.put(new JSONObject().put("id",remember(root)).put("name",root.name).put("dir",true).put("size",0).put("seek",true));
+            synchronized(this){for(Entry root:roots)items.put(new JSONObject().put("id",remember(root)).put("name",root.name).put("dir",true).put("size",0).put("seek",true));}
             if(!valid(session))throw new ToolsHttp.Failure(401,"共享已关闭");
-            response.json(new JSONObject().put("name","共享文件夹").put("items",items).toString(),"");return;
+            response.json(new JSONObject().put("name","共享文件夹").put("revision",listedRevision).put("items",items).toString(),"");return;
         }
         Uri tree=parent.tree;
         Uri children=DocumentsContract.buildChildDocumentsUriUsingTree(tree,DocumentsContract.getDocumentId(parent.uri));
@@ -134,7 +145,7 @@ final class SharedFiles implements AutoCloseable {
                 items.put(new JSONObject().put("id",remember(entry)).put("name",entry.name).put("dir",dir).put("size",size).put("seek",true));
             }
         }
-        if(!valid(session))throw new ToolsHttp.Failure(401,"共享已关闭");response.json(new JSONObject().put("name",parent.name).put("items",items).toString(),"");
+        if(!valid(session))throw new ToolsHttp.Failure(401,"共享已关闭");response.json(new JSONObject().put("name",parent.name).put("revision",listedRevision).put("items",items).toString(),"");
     }
     private void file(ToolsHttp.Request request,ToolsHttp.Response response,Session session) throws Exception {
         Entry entry=entry(request.parameter("id"));if(entry.directory)throw new ToolsHttp.Failure(404,"请选择文件");
@@ -149,12 +160,20 @@ final class SharedFiles implements AutoCloseable {
             String extra="Accept-Ranges: "+(seek?"bytes":"none")+"\r\n";
             if(!request.header("Range").isEmpty())extra+="Content-Range: bytes "+range[0]+"-"+range[1]+"/"+length+"\r\n";
             if(request.parameter("download").equals("1"))extra+="Content-Disposition: attachment; filename*=UTF-8''"+Uri.encode(entry.name)+"\r\n";
-            if(!valid(session))throw new ToolsHttp.Failure(401,"共享已关闭");
-            String mime=ReceivedStorage.mime(entry.name);if(!mime.startsWith("video/")&&!mime.startsWith("audio/"))mime="application/octet-stream";
+            if(!valid(session)||!shared(entry))throw new ToolsHttp.Failure(401,"共享已关闭或目录已移除");
+            String mime=previewMime(entry.name);
             response.begin(request.header("Range").isEmpty()?200:206,mime,Math.max(0,range[1]-range[0]+1),extra);if(request.method.equals("HEAD"))return;
             long left=range[1]-range[0]+1;byte[] buffer=new byte[262144];
-            while(left>0){if(!valid(session))return;session.last=SystemClock.elapsedRealtime();int count=input.read(buffer,0,(int)Math.min(left,buffer.length));if(count<0)throw new EOFException();response.write(buffer,count);left-=count;}
+            while(left>0){if(!valid(session)||!shared(entry))return;session.last=SystemClock.elapsedRealtime();int count=input.read(buffer,0,(int)Math.min(left,buffer.length));if(count<0)throw new EOFException();response.write(buffer,count);left-=count;}
         }
+    }
+    static String previewMime(String name){
+        String lower=name.toLowerCase(Locale.ROOT);
+        if(lower.matches(".*\\.(txt|md|json|csv|log|xml)$"))return "text/plain; charset=utf-8";
+        if(lower.endsWith(".svg"))return "image/svg+xml";
+        if(lower.endsWith(".pdf"))return "application/pdf";
+        String mime=ReceivedStorage.mime(name);
+        return mime.startsWith("video/")||mime.startsWith("audio/")||mime.startsWith("image/")?mime:"application/octet-stream";
     }
     @Override public void close(){synchronized(this){closed=true;sessions.clear();entries.clear();}http.close();}
 }

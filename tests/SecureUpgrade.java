@@ -59,6 +59,7 @@ public final class SecureUpgrade {
     }
     public static void main(String[] args)throws Exception {
         Path root=Paths.get(args[0]);Files.createDirectories(root);
+        if(args.length>1&&args[1].equals("quota")){quotaTest(root);System.out.println("ANDROID QUOTA: "+passed+" passed, "+failed+" failed");System.exit(failed==0?0:1);return;}
         if(args.length>1&&args[1].equals("partial")){partialTests(root);System.out.println("ANDROID PARTIAL TLS: "+passed+" passed, "+failed+" failed");System.exit(failed==0?0:1);return;}
         if(args.length>1&&args[1].equals("text-cancel")){textCancelTests(root);System.out.println("ANDROID TEXT CANCEL TLS: "+passed+" passed, "+failed+" failed");System.exit(failed==0?0:1);return;}
         disconnectTests(root);
@@ -251,6 +252,22 @@ public final class SecureUpgrade {
             }
         });
         System.out.println("ANDROID SECURE: "+passed+" passed, "+failed+" failed");System.exit(failed==0?0:1);
+    }
+    private static void quotaTest(Path root){
+        run("文件额度：完成释放、扩大额度及千项邀请重启",()->{
+            File source=root.resolve("quota.txt").toFile();Files.write(source.toPath(),new byte[]{1,2,3});File profile=root.resolve("quota-a").toFile();
+            try(Node a=new Node(profile,port(),"12121212121212121212121212121212");Node b=new Node(root.resolve("quota-b").toFile(),port(),"34343434343434343434343434343434")){
+                LanNode.Peer target=find(a,b),back=find(b,a);a.node.verifyPeer(target);a.node.setPendingFileLimit(100);LanNode.Message first=null;
+                for(int i=0;i<5;i++){a.node.sendMessage(target,"",Collections.nCopies(20,source));LanNode.Message got=b.incoming.poll(5,TimeUnit.SECONDS);check(got!=null,"邀请未收到");if(first==null)first=got;}
+                boolean full=false;try{a.node.sendMessage(target,"",Collections.singletonList(source));}catch(IOException e){full=true;}check(full,"上限未生效");
+                b.node.receiveFile(back,first.number,first.files.get(0),root.resolve("quota-received.txt").toFile(),new LanNode.Transfer(),null);
+                String expected=first.number+"/0/对方已校验保存";long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(5);while(!a.states.contains(expected)&&System.nanoTime()<deadline)Thread.sleep(10);check(a.states.contains(expected),"未收到保存确认");
+                a.node.sendMessage(target,"",Collections.singletonList(source));check(b.incoming.poll(5,TimeUnit.SECONDS)!=null,"已收完仍占额度");a.node.setPendingFileLimit(2000);
+                for(int i=0;i<51;i++){a.node.sendMessage(target,"",Collections.nCopies(20,source));check(b.incoming.poll(5,TimeUnit.SECONDS)!=null,"扩大额度后未送达");}
+                check(((Map<?,?>)field(a.node,"offers")).size()==1121,"邀请数量错误");
+            }
+            try(Node restored=new Node(profile,port(),"12121212121212121212121212121212")){check(((Map<?,?>)field(restored.node,"offers")).size()==1121,"千项邀请重启丢失");}
+        });
     }
     private static Object member(Object target,String name)throws Exception {java.lang.reflect.Field value=target.getClass().getDeclaredField(name);value.setAccessible(true);return value.get(target);}
     private static void textCancelTests(Path root)throws Exception {

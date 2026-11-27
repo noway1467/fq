@@ -68,7 +68,7 @@ namespace FeiqLight
             // 保持 Surface 下仅包含 body 一个顶层 Panel，兼容窗口布局回归检测。
             TableLayoutPanel body = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5, Padding = new Padding(24, 16, 24, 14), Margin = Padding.Empty, AutoScroll = true, AutoScrollMinSize = new Size(0, 510) };
             body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            foreach (int height in new[] { 98, 48, -1, 166, 52 }) body.RowStyles.Add(new RowStyle(height < 0 ? SizeType.Percent : SizeType.Absolute, height < 0 ? 100 : height));
+            foreach (int height in new[] { 98, 48, -1, 150, 52 }) body.RowStyles.Add(new RowStyle(height < 0 ? SizeType.Percent : SizeType.Absolute, height < 0 ? 100 : height));
             Surface.Controls.Add(body);
 
             // 区块一：共享文件夹状态与 6 位连接码卡片
@@ -140,9 +140,9 @@ namespace FeiqLight
             };
             listFrame.Controls.Add(emptyPanel); body.Controls.Add(listFrame, 0, 2);
 
-            tips.SetToolTip(addFolder, "支持多选；增减目录后需重新配对。");
-            tips.SetToolTip(removeFolder, "仅取消共享，不删除文件；现有连接会断开。");
-            tips.SetToolTip(startShare, "连接码有效 10 分钟；更新后现有连接会断开。");
+            tips.SetToolTip(addFolder, "支持多选；已连接设备会自动刷新目录。");
+            tips.SetToolTip(removeFolder, "取消所选目录的共享，保留文件和其他目录的连接。");
+            tips.SetToolTip(startShare, "连接码有效 10 分钟；更新连接码不影响已连接设备。");
             tips.SetToolTip(shareCode, "共享连接码 · 有效 10 分钟");
 
             // 区块二：远程控制卡片（所有卡片内按钮均使用 Surface 底 + Line 描边，绝不与卡片底色融在一起）
@@ -150,22 +150,21 @@ namespace FeiqLight
             TableLayoutPanel remoteBody = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, BackColor = Theme.Ice, Margin = Padding.Empty };
             remoteBody.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); remoteBody.RowStyles.Add(new RowStyle(SizeType.Absolute, 34)); remoteBody.RowStyles.Add(new RowStyle(SizeType.Absolute, 46)); remoteBody.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             TableLayoutPanel remoteHeader = new TableLayoutPanel { Dock = DockStyle.Fill, BackColor = Theme.Ice, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty };
-            remoteHeader.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); remoteHeader.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 160)); remoteHeader.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            remoteHeader.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); remoteHeader.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 116)); remoteHeader.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             FlowLayoutPanel remoteTitleRow = new FlowLayoutPanel { Dock = DockStyle.Fill, BackColor = Theme.Ice, FlowDirection = FlowDirection.LeftToRight, WrapContents = false, Margin = Padding.Empty };
             Label remoteTitle = Theme.Label("远程控制", Theme.Strong, Theme.Ink); remoteTitle.AutoSize = true; remoteTitle.Margin = new Padding(0, 4, 10, 0); remoteTitleRow.Controls.Add(remoteTitle);
             remotePill = new StatusPill { Margin = new Padding(0, 2, 8, 0) }; remoteTitleRow.Controls.Add(remotePill);
-            remoteCode = Theme.Label("", codeFont, Theme.Blue); remoteCode.AutoSize = true; remoteCode.Margin = new Padding(4, 2, 0, 0); remoteCode.AccessibleName = "远控连接码";
+            remoteCode = Theme.Label("", codeFont, Theme.Ink); remoteCode.Dock=DockStyle.Fill;remoteCode.TextAlign=ContentAlignment.MiddleRight;remoteCode.Margin=Padding.Empty; remoteCode.AccessibleName = "远控连接码";
             remoteHeader.Controls.Add(remoteTitleRow, 0, 0);
-            Label remoteHint = Theme.Label("Ctrl+Alt+F12 随时停止", Theme.Small, Theme.Muted); remoteHint.Dock = DockStyle.Fill; remoteHint.TextAlign = ContentAlignment.MiddleRight; remoteHint.Margin = Padding.Empty;
-            remoteHeader.Controls.Add(remoteHint, 1, 0);
+            remoteHeader.Controls.Add(remoteCode, 1, 0);
             remoteBody.Controls.Add(remoteHeader, 0, 0);
             tips.SetToolTip(remotePill, "连接需本机确认，已信任的设备除外。Ctrl+Alt+F12 停止。");
             FlowLayoutPanel remoteActions = new FlowLayoutPanel { Dock = DockStyle.Fill, Margin = Padding.Empty, Padding = new Padding(0, 10, 0, 0), WrapContents = false, BackColor = Theme.Ice };
-            AddButton(remoteActions, "生成远控连接码", delegate { ChangeSettings(service.AllowRemote); }, false, 148);
-            stopControl = AddButton(remoteActions, "立即停止远控", StopRemote, false, 134);
-            remoteActions.Controls.Add(remoteCode);
+            AddButton(remoteActions, "生成连接码", delegate { ChangeSettings(service.AllowRemote); }, false, 120);
+            stopControl = AddButton(remoteActions, "停止远控", StopRemote, false, 108);
+            tips.SetToolTip(stopControl,"停止远控（Ctrl+Alt+F12）");
             remoteBody.Controls.Add(remoteActions, 0, 1); remoteCard.Controls.Add(remoteBody); body.Controls.Add(remoteCard, 0, 3);
-            clipboardRead = new ToggleSwitch { Text = "允许远控读取本机剪贴板", AccessibleName = "允许远控读取本机剪贴板", Description = "默认关闭 · 仅单次手动读取纯文本", Dock = DockStyle.Fill, Margin = Padding.Empty, BackColor = Theme.Ice, Checked = service.RemoteClipboardRead };
+            clipboardRead = new ToggleSwitch { Text = "允许读取剪贴板", AccessibleName = "允许远控读取本机剪贴板", Dock = DockStyle.Fill, Margin = Padding.Empty, BackColor = Theme.Ice, Checked = service.RemoteClipboardRead };
             clipboardRead.CheckedChanged += delegate { if (clipboardRead.Checked != service.RemoteClipboardRead) ChangeSettings(() => service.SetRemoteClipboardRead(clipboardRead.Checked)); };
             tips.SetToolTip(clipboardRead, "仅允许控制端点击后读取一次纯文本，不自动同步，不读取文件或图片。");
             remoteBody.Controls.Add(clipboardRead, 0, 2);

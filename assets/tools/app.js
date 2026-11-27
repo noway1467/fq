@@ -16,6 +16,7 @@
   let recoveryNotice='';
   let recoveryAttempts=0;
   let capabilityTimer=0, statusChecking=false;
+  let shareTimer=0, shareRevision=null;
   const status = (text, error = false) => {
     const activeRemote=mode==='remote'&&Boolean(token);
     $('status').textContent=text;$('status').hidden=!text||activeRemote;$('status').classList.toggle('error',error);
@@ -74,7 +75,6 @@
       else if(!token&&!quiet)status('连接状态暂时不可用，可点“连接上次”重试。',true);
     } finally {statusChecking=false;}
   };
-  function closePlayer() { $('player').pause(); $('player').removeAttribute('src'); $('player').load(); $('player-panel').hidden = true; }
   function logout(previousToken) {
     if(!previousToken)return Promise.resolve();
     const abort=new AbortController(),timeout=setTimeout(()=>abort.abort(),5000);
@@ -84,6 +84,7 @@
   function end(message, error = false, options = {}) {
     const previousToken = token; token = ''; generation++; listing++; clearTimeout(frameTimer); pending = []; drag = false;
     clearTimeout(capabilityTimer);
+    clearTimeout(shareTimer);shareRevision=null;
     frameFailures=0;
     if(frameAbort){frameAbort.abort();frameAbort=null;}
     $('drag').setAttribute('aria-pressed', 'false'); $('disconnect').hidden = true; $('remote').hidden = true; $('files').hidden = true; $('login').hidden = false;
@@ -97,7 +98,7 @@
     zoomLevel=0; $('screen-wrap').classList.remove('zoomed','zoom-large'); $('zoom').textContent='放大';
     scale=1; fillHeight=false; screenPoints.clear(); screenDown=null; pinch=null;
     $('remote-error').hidden=true;
-    closePlayer(); $('screen').width = $('screen').height = 0; status(message, error);
+    $('screen').width = $('screen').height = 0; status(message, error);
     if (previousToken && options.logout !== false) closing = logout(previousToken);
     if(options.navigate&&document.documentElement.dataset.native==='true')location.href='/native/unavailable';
   }
@@ -139,7 +140,7 @@
           if(version===generation&&token)capabilityTimer=setTimeout(checkCapabilities,3000);
         };
         capabilityTimer=setTimeout(checkCapabilities,3000);
-      } else { trail = [{id: '', name: '共享文件夹'}]; await loadDirectory(); }
+      } else { trail = [{id: '', name: '共享文件夹'}]; await loadDirectory();watchSharing(version); }
     } catch (error) {
       if(version===generation) {
         if(recovery&&(error.retryable||error.status===401||error.status===409)&&recoveryAttempts<4) {
@@ -163,13 +164,30 @@
   $('connect-form').onsubmit = event => { event.preventDefault(); connect(!$('code').value.trim()); };
   $('reconnect').onclick = () => connect(true);
   const size = value => value < 0 ? '大小未知' : value >= 1073741824 ? (value / 1073741824).toFixed(1) + ' GB' : value >= 1048576 ? (value / 1048576).toFixed(1) + ' MB' : value >= 1024 ? Math.ceil(value / 1024) + ' KB' : value + ' B';
+  async function watchSharing(version) {
+    if(version!==generation||!token)return;
+    try {
+      const data=await request('/api/share-status');
+      if(version!==generation||!token)return;
+      if(shareRevision!==null&&data.revision!==shareRevision)await loadDirectory();
+      shareRevision=data.revision;
+    }catch(error){
+      if(version!==generation||!token)return;
+      if(error.status===404)return;
+      if(error.status===401||error.status===403){end(error.message,true);return;}
+    }
+    if(version===generation&&token)shareTimer=setTimeout(()=>watchSharing(version),3000);
+  }
   async function loadDirectory() {
     const version = ++listing; $('refresh').disabled = true; $('file-list').textContent = '正在加载目录…';
     try {
       const data = await request('/api/list?id=' + encodeURIComponent(trail[trail.length - 1].id));
       if (version !== listing || !token) return;
-      items = data.items; renderFiles(); breadcrumbs(); status('');
-    } catch (error) { if (version === listing) { $('file-list').textContent = '目录读取失败，可以返回上级或刷新重试。'; status(error.message, true); breadcrumbs(); } }
+      items = data.items;if(typeof data.revision==='number')shareRevision=data.revision; renderFiles(); breadcrumbs(); status('');
+    } catch (error) { if (version === listing) {
+      if(error.status===404&&trail.length>1){trail=[{id:'',name:'共享文件夹'}];await loadDirectory();return;}
+      $('file-list').textContent = '目录读取失败，可以返回上级或刷新重试。'; status(error.message, true); breadcrumbs();
+    } }
     finally { if (version === listing) $('refresh').disabled = false; }
   }
   function breadcrumbs() {
@@ -195,10 +213,12 @@
     if (item.dir) return {kind: 'dir', label: '目录', media: false};
     if (/\.(mp4|m4v|webm|mkv|mov)$/i.test(item.name)) return {kind: 'video', label: '视频', media: true};
     if (/\.(mp3|ogg)$/i.test(item.name)) return {kind: 'audio', label: '音频', media: true};
-    if (/\.(wav|flac|aac|m4a)$/i.test(item.name)) return {kind: 'audio', label: '音频', media: false};
-    if (/\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(item.name)) return {kind: 'image', label: '图片', media: false};
+    if (/\.(wav|flac|aac|m4a)$/i.test(item.name)) return {kind: 'audio', label: '音频', media: true};
+    if (/\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(item.name)) return {kind: 'image', label: '图片', preview: true};
+    if (/\.pdf$/i.test(item.name)) return {kind:'doc',label:'PDF',preview:true};
+    if (/\.(txt|md|json|csv|log|xml)$/i.test(item.name)) return {kind:'doc',label:'文本',preview:true};
     if (/\.(zip|rar|7z|tar|gz)$/i.test(item.name)) return {kind: 'archive', label: '压缩', media: false};
-    if (/\.(pdf|docx?|xlsx?|pptx?|txt|md|json|csv|log)$/i.test(item.name)) return {kind: 'doc', label: '文档', media: false};
+    if (/\.(docx?|xlsx?|pptx?)$/i.test(item.name)) return {kind: 'doc', label: '文档', media: false};
     return {kind: 'file', label: '文件', media: false};
   }
   function enterDirectory(dirItem) {
@@ -239,22 +259,23 @@
       const name = document.createElement('div'); name.className = 'file-name'; name.textContent = item.name; name.title = item.name;
       const info = document.createElement('div'); info.className = 'file-size'; info.textContent = item.dir ? '文件夹 · 双击进入' : `${meta.label} · ${size(item.size)}`; detail.append(name, info); row.append(detail);
       const actions = document.createElement('div'); actions.className = 'file-actions';
-      if (item.dir || meta.media) {
-        const open = document.createElement('button'); open.type = 'button'; open.className = item.dir ? 'btn-enter' : 'btn-play';
-        open.textContent = item.dir ? '进入' : '播放'; open.setAttribute('aria-label', open.textContent + ' ' + item.name);
-        open.onclick = () => { if (item.dir) enterDirectory(item); else play(item); }; actions.append(open);
+      if (item.dir) {
+        const open = document.createElement('button'); open.type = 'button'; open.className = 'btn-enter';
+        open.textContent = '进入'; open.setAttribute('aria-label', '进入 ' + item.name);
+        open.onclick = () => enterDirectory(item); actions.append(open);
+      }
+      if(meta.media||meta.preview){
+        const open=document.createElement('a');open.className='btn-play';open.textContent=meta.media?'播放':'查看';open.setAttribute('aria-label',open.textContent+' '+item.name);
+        open.href=fileUrl(item.id,false);open.target='_blank';open.rel='noopener noreferrer';
+        actions.append(open);
+        const fileLink=document.createElement('a');fileLink.className='file-open';fileLink.href=open.href;fileLink.target=open.target;fileLink.rel=open.rel;fileLink.textContent=item.name;
+        name.replaceChildren(fileLink);
       }
       if (!item.dir) { const download = document.createElement('a'); download.className = 'btn-download'; download.textContent = '下载'; download.href = fileUrl(item.id, true); download.download = item.name; download.setAttribute('aria-label', '下载 ' + item.name); actions.append(download); }
       row.append(actions); $('file-list').append(row);
     });
   }
-  function play(item) {
-    closePlayer(); $('player-panel').hidden = false; $('player-title').textContent = item.name; $('player-error').textContent = '';
-    $('player').src = fileUrl(item.id, false); $('player').play().catch(() => { $('player-error').textContent = '请点播放按钮；若仍无法播放，可下载后用本机播放器打开。'; });
-    $('close-player').focus();
-  }
-  $('player').onerror = () => { $('player-error').textContent = '播放失败：格式不支持、共享已关闭，或来源不支持跳转读取。请检查连接或下载后播放。'; };
-  $('close-player').onclick = closePlayer; $('refresh').onclick = loadDirectory; $('search').oninput = renderFiles;
+  $('refresh').onclick = loadDirectory; $('search').oninput = renderFiles;
   async function decodeImage(blob) {
     if (typeof createImageBitmap === 'function') return createImageBitmap(blob);
     const url=URL.createObjectURL(blob), image=new Image();

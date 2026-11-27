@@ -78,6 +78,8 @@ public final class FileFeaturesTest {
         assertEquals(Collections.singletonList(a),MainActivity.selectedFiles(new Intent().setData(a)));
         try {MainActivity.selectedFiles(new Intent().setData(Uri.parse("file:///private")));fail();}catch(IllegalArgumentException expected){}
         for(int i=3;i<1001;i++)clip.addItem(new ClipData.Item(a));
+        assertEquals(Arrays.asList(a,b),MainActivity.selectedFiles(selection));
+        for(int i=1001;i<=LanNode.MAX_FILE_LIMIT;i++)clip.addItem(new ClipData.Item(a));
         try {MainActivity.selectedFiles(selection);fail();}catch(IllegalArgumentException expected){}
     }
     @Test public void batchSendUsesOneInvitationAndCleansFailedBatch() throws Exception {
