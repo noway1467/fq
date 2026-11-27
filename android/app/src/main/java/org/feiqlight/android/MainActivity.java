@@ -24,8 +24,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /** 原生 View 界面：借鉴 Telegram 的信息层级，不加载 WebView 或第三方 UI 运行时。 */
 public final class MainActivity extends Activity implements ChatService.Observer {
     private static final String GITHUB_REPOSITORY="https://github.com/noway1467/fq";
-    private int BLUE=0xff3390ec, INK=0xff17212b, MUTED=0xff64727f, PALE=0xfff1f4f7, LINE=0xffe7ecf0, WALL=0xffd1dff5,
-            SURFACE=Color.WHITE, BUBBLE=0xffd6e9fb, OUTGOING=0xffe0eefc, ONLINE=0xff3cb34f;
+    int BLUE=0xff3390ec, INK=0xff17212b, MUTED=0xff64727f, PALE=0xfff1f4f7, LINE=0xffe7ecf0;
+    int SURFACE=Color.WHITE, ONLINE=0xff3cb34f;
+    private int WALL=0xffd1dff5, BUBBLE=0xffd6e9fb, OUTGOING=0xffe0eefc;
     private int[] WALLS={0xffd6e9fa,0xffc6d6f6,0xffcbe5ee,0xffdbd6f5};
     private boolean DARK;
     // 十二套配色与 Windows Theme.Configure 同表：强调、表面、正文、次要文字、输入底、分隔线、壁纸四色；派生色按同一公式换算。
@@ -88,18 +89,19 @@ public final class MainActivity extends Activity implements ChatService.Observer
     }
     private int serviceFill(){return (blend(Color.BLACK,WALL,DARK?.45f:.42f)&0xffffff)|((DARK?150:165)<<24);}
     private int bubbleShadow(){return DARK?0x46000000:(blend(Color.BLACK,BLUE,.7f)&0xffffff)|(26<<24);}
-    private ChatService service;
+    ChatService service;
     private DraftStore drafts;
     private ReceivedStorage receivedStorage;
     private MediaPreview media;
     private TextView folderLabel;
     private RadioGroup wallpaperChoices;
     private String editorSavedText="";
-    private boolean bound, visible, rendering, sending;
+    boolean visible;
+    private boolean bound, rendering, sending;
     private String sendingPeer="";
     private TextView sendStatus;
     private boolean restoreAttempted;
-    private boolean resumed;
+    boolean resumed;
     private Bitmap backgroundBitmap;
     private String loadedBackground="";
     private int messageSize(){
@@ -132,17 +134,10 @@ public final class MainActivity extends Activity implements ChatService.Observer
     private final Map<String,int[]> chatMedia=new HashMap<>();
     private final Map<String,ChatService.FileProgress> chatFileProgress=new HashMap<>();
     private final Map<String,ChatRow> chatRows=new HashMap<>();
-    private static final class ChatRow {
-        String signature;
-        LinearLayout row,bubble;
-        View portrait;
-        int previews;
-        final List<Runnable> progress=new ArrayList<>();
-    }
-    private final Handler chatUpdates=new Handler(Looper.getMainLooper());
+    final Handler chatUpdates=new Handler(Looper.getMainLooper());
     private boolean chatLoading,chatReloadPending;
     private volatile long chatLoadGeneration;
-    private List<LanNode.Message> deferredChatRows;
+    List<LanNode.Message> deferredChatRows;
     private boolean chatProgressPending;
     private final Runnable refreshChatProgress=()->{
         chatProgressPending=false;
@@ -158,14 +153,15 @@ public final class MainActivity extends Activity implements ChatService.Observer
     private AvatarDrawable incomingMessageAvatar, outgoingMessageAvatar;
     private String messageAvatarSignature="";
     private final List<View> messageAvatarViews=new ArrayList<>();
-    private EditText search, editor;
+    EditText search;
+    private EditText editor;
     private ListView list;
-    private ScrollView scroll;
+    ScrollView scroll;
     private Button connect;
     private IconButton sendButton;
-    private Dialog historyDialog;
-    private Dialog tasksDialog;
-    private TaskAdapter taskAdapter;
+    Dialog historyDialog;
+    Dialog tasksDialog;
+    TaskAdapter taskAdapter;
     private boolean loadingTasks,reloadTasksPending;
     private final List<Uri> guestFiles=new ArrayList<>();
     private boolean guestUpload;
@@ -174,10 +170,6 @@ public final class MainActivity extends Activity implements ChatService.Observer
     private final java.util.concurrent.ExecutorService avatarLoader=java.util.concurrent.Executors.newSingleThreadExecutor();
     private AvatarSelection avatarSelection, avatarImageRequest;
     private int avatarImageRevision;
-    private static final class AvatarSelection {
-        String value; Dialog dialog; TextView preview; Button confirm,local; int revision; boolean loading;
-        final List<ImageButton> choices=new ArrayList<>();
-    }
     private boolean selectingMessages;
     private final Set<String> messageMarks=new LinkedHashSet<>();
     private final Map<String,View> messageViews=new HashMap<>();
@@ -287,8 +279,8 @@ public final class MainActivity extends Activity implements ChatService.Observer
         Set<String> marks=new LinkedHashSet<>(messageMarks);
         renderPage();selectingMessages=choosing;messageMarks.addAll(marks);updateMessageSelection();
     }
-    private int dp(float n) { return Math.round(n*getResources().getDisplayMetrics().density); }
-    private GradientDrawable shape(int color,int radius) {
+    int dp(float n) { return Math.round(n*getResources().getDisplayMetrics().density); }
+    GradientDrawable shape(int color,int radius) {
         GradientDrawable d=new GradientDrawable();
         d.setColor(color);
         d.setCornerRadius(dp(radius));
@@ -300,21 +292,21 @@ public final class MainActivity extends Activity implements ChatService.Observer
                 (int)(Color.green(front)*amount+Color.green(back)*(1-amount)),
                 (int)(Color.blue(front)*amount+Color.blue(back)*(1-amount)));
     }
-    private TextView text(String value,float size,int color) {
+    TextView text(String value,float size,int color) {
         TextView v=new TextView(this); v.setText(value); v.setTextSize(size); v.setTextColor(color); return v;
     }
-    private LinearLayout column() {
+    LinearLayout column() {
         LinearLayout box=new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
         return box;
     }
-    private LinearLayout row() {
+    LinearLayout row() {
         LinearLayout box=new LinearLayout(this);
         box.setOrientation(LinearLayout.HORIZONTAL);
         box.setGravity(Gravity.CENTER_VERTICAL);
         return box;
     }
-    private LinearLayout.LayoutParams weight() {
+    LinearLayout.LayoutParams weight() {
         return new LinearLayout.LayoutParams(0,ViewGroup.LayoutParams.WRAP_CONTENT,1);
     }
     @Override public boolean dispatchTouchEvent(MotionEvent event) {
@@ -395,7 +387,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         toolbar.setPadding(dp(8),0,dp(8),0);
         toolbar.setMinimumHeight(dp(64));
         root.addView(toolbar,new LinearLayout.LayoutParams(-1,-2));
-        IconButton menu=new IconButton(selected.isEmpty()?"menu":"back",selected.isEmpty()?"打开菜单":"返回会话列表",MUTED);
+        IconButton menu=new IconButton(this,selected.isEmpty()?"menu":"back",selected.isEmpty()?"打开菜单":"返回会话列表",MUTED);
         toolbar.addView(menu,new LinearLayout.LayoutParams(dp(48),dp(48)));
         menu.setOnClickListener(v->{
             if(selectingMessages)endMessageSelection();
@@ -427,10 +419,10 @@ public final class MainActivity extends Activity implements ChatService.Observer
         subtitle.setEllipsize(TextUtils.TruncateAt.END);
         headings.addView(title); headings.addView(subtitle); toolbar.addView(headings,weight());
         // 主页与聊天页顶栏都有传输任务入口：主页默认「全部」，聊天页默认当前联系人。
-        IconButton transfers=new IconButton("transfer","传输任务",MUTED);
+        IconButton transfers=new IconButton(this,"transfer","传输任务",MUTED);
         toolbar.addView(transfers,new LinearLayout.LayoutParams(dp(48),dp(48)));
         transfers.setOnClickListener(v->{if(selected.isEmpty())showTasks();else showTasks("peer:"+selected);});
-        IconButton action=new IconButton(selected.isEmpty()?"add":"more",selected.isEmpty()?"手动添加联系人":"会话菜单",MUTED);
+        IconButton action=new IconButton(this,selected.isEmpty()?"add":"more",selected.isEmpty()?"手动添加联系人":"会话菜单",MUTED);
         toolbar.addView(action,new LinearLayout.LayoutParams(dp(48),dp(48)));
         action.setOnClickListener(v->{
             if(selected.isEmpty()) addPeer();
@@ -496,7 +488,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         PullRefreshLayout content=new PullRefreshLayout(this,SURFACE,LINE,BLUE);
         body.addView(content,new LinearLayout.LayoutParams(-1,0,1));
         list=new ListView(this); list.setDivider(null); list.setClipToPadding(false); list.setPadding(0,0,0,dp(12));
-        adapter=new ConversationAdapter();
+        adapter=new ConversationAdapter(this);
         list.setAdapter(adapter);
         content.addView(list,new FrameLayout.LayoutParams(-1,-1));
         empty=text("",15,MUTED);
@@ -551,7 +543,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
     private int editorGeneration;
     private void renderChat() {
         body.setBackground(chatWallpaper());
-        scroll=new ChatScroll();
+        scroll=new ChatScroll(this);
         scroll.setFillViewport(true);
         scroll.setClipToPadding(false);
         messages=column();
@@ -592,10 +584,10 @@ public final class MainActivity extends Activity implements ChatService.Observer
         composer.setPadding(dp(4),dp(8),dp(8),dp(8));
         composer.setBackgroundColor(SURFACE);
         body.addView(composer);
-        IconButton file=new IconButton("clip","发送文件",MUTED);
+        IconButton file=new IconButton(this,"clip","发送文件",MUTED);
         composer.addView(file,new LinearLayout.LayoutParams(dp(48),dp(48)));
         file.setOnClickListener(v->pickFile());
-        IconButton emoji=new IconButton("smile","表情",MUTED);
+        IconButton emoji=new IconButton(this,"smile","表情",MUTED);
         composer.addView(emoji,new LinearLayout.LayoutParams(dp(48),dp(48)));
         emoji.setOnClickListener(v->showEmoji());
         final String inputPeer=selected;
@@ -640,7 +632,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
             }
             public void afterTextChanged(Editable value) { }
         });
-        sendButton=new IconButton("send","发送消息",Color.WHITE);
+        sendButton=new IconButton(this,"send","发送消息",Color.WHITE);
         sendButton.setBackground(shape(BLUE,28));
         LinearLayout.LayoutParams sendParams=new LinearLayout.LayoutParams(dp(48),dp(48));
         sendParams.leftMargin=dp(8);
@@ -709,7 +701,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         if(length-(end-start)+emoji.length()>MessageText.INPUT_LIMIT)return false;
         input.getText().replace(start,end,emoji);input.setSelection(start+emoji.length());return true;
     }
-    private ChatStore.Conversation conversation(String id) {
+    ChatStore.Conversation conversation(String id) {
         if(service!=null) for(ChatStore.Conversation item:service.conversations()) if(item.peer.id().equals(id)) return item;
         return null;
     }
@@ -842,39 +834,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
                 ChatService.wasStored(progress.state))return !progress.state.equals("本机文件已删除");
         return chatFiles.get(key)!=null;
     }
-    private final class ChatScroll extends ScrollView {
-        private boolean touching;
-        private long movedAt=-1000;
-        private final Runnable settled=()->{
-            if(scroll!=this||touching||android.os.SystemClock.uptimeMillis()-movedAt<100)return;
-            if(!visible||historyDialog!=null&&historyDialog.isShowing()||tasksDialog!=null&&
-                    tasksDialog.isShowing())return;
-            if(deferredChatRows!=null){
-                List<LanNode.Message> rows=deferredChatRows;
-                deferredChatRows=null;
-                renderMessages(rows);
-            }
-            transfersChanged();
-        };
-        ChatScroll(){super(MainActivity.this);}
-        boolean moving(){return touching||android.os.SystemClock.uptimeMillis()-movedAt<100;}
-        @Override public boolean dispatchTouchEvent(MotionEvent event) {
-            if(event.getActionMasked()==MotionEvent.ACTION_DOWN)touching=true;
-            if(event.getActionMasked()==MotionEvent.ACTION_UP||event.getActionMasked()==MotionEvent.ACTION_CANCEL){
-                touching=false;
-                chatUpdates.removeCallbacks(settled);
-                chatUpdates.postDelayed(settled,120);
-            }
-            return super.dispatchTouchEvent(event);
-        }
-        @Override protected void onScrollChanged(int x,int y,int oldX,int oldY){
-            super.onScrollChanged(x,y,oldX,oldY);
-            movedAt=android.os.SystemClock.uptimeMillis();
-            chatUpdates.removeCallbacks(settled);
-            chatUpdates.postDelayed(settled,120);
-        }
-    }
-    private void renderMessages(List<LanNode.Message> rows) {
+    void renderMessages(List<LanNode.Message> rows) {
         boolean sent=rows.stream().anyMatch(message->message.outgoing&&!displayedOutgoing.contains(message.number));
         if(!historySignature.isEmpty()&&!sent&&!forceLatest&&pendingMessageLocation==null&&
                 scroll instanceof ChatScroll&&((ChatScroll)scroll).moving()){
@@ -906,7 +866,8 @@ public final class MainActivity extends Activity implements ChatService.Observer
             for(Protocol.Attachment file:message.files) {
                 String fileKey=ChatService.fileKey(selected,message.number,file.id,message.outgoing);
                 int[] box=chatMedia.get(fileKey);
-                value.append('\0').append(file.id).append('\0').append(file.name).append('\0').append(file.size).append('\0').append(chatFiles.get(fileKey)).append('\0').append(box==null?"":box[0]+"x"+box[1]);
+                value.append('\0').append(file.id).append('\0').append(file.name).append('\0').append(file.size)
+                        .append('\0').append(chatFiles.get(fileKey)).append('\0').append(box==null?"":box[0]+"x"+box[1]);
             }
             String signature=value.toString();
             rowSignatures.put(messageKey(message),signature);
@@ -1246,9 +1207,6 @@ public final class MainActivity extends Activity implements ChatService.Observer
         if(scroll instanceof ChatScroll&&((ChatScroll)scroll).moving())return;
         if(!chatProgressPending){chatProgressPending=true;chatUpdates.postDelayed(refreshChatProgress,120);}
     }
-    private static final class CardState {
-        int percent;boolean active,receivable,ended;String label;
-    }
     private CardState cardState(LanNode.Message message,Protocol.Attachment file,ChatStore.Conversation conversation) {
         CardState card=new CardState();ChatService.FileProgress progress=chatProgress(message,file);
         int fileIndex=message.files.indexOf(file);
@@ -1586,7 +1544,9 @@ public final class MainActivity extends Activity implements ChatService.Observer
                 if(result.skippedBusy==0)endMessageSelection();changed();
                 if(result.deleted==0&&result.skippedDeleted==0&&
                         result.skippedBusy==0)error("所选消息没有已保存的本机文件（未接收附件请在传输任务中处理）");
-                else error("已删除 "+result.deleted+" 个本机文件，"+result.skippedDeleted+" 个已删除跳过。"+(result.skippedBusy>0?result.skippedBusy+" 个正在接收或处理的文件已跳过。":"")+(result.unreceived>0?"（另有 "+result.unreceived+" 个未接收附件未处理）":""));
+                else error("已删除 "+result.deleted+" 个本机文件，"+result.skippedDeleted+" 个已删除跳过。"
+                        +(result.skippedBusy>0?result.skippedBusy+" 个正在接收或处理的文件已跳过。":"")
+                        +(result.unreceived>0?"（另有 "+result.unreceived+" 个未接收附件未处理）":""));
             });
         });
     }
@@ -1677,7 +1637,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
                 repoBg,null));
         repository.setFocusable(true);
         repository.setContentDescription("GitHub 仓库：github.com/noway1467/fq");
-        IconButton source=new IconButton("code","源码",BLUE);
+        IconButton source=new IconButton(this,"code","源码",BLUE);
         source.setClickable(false);
         source.setFocusable(false);
         source.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
@@ -1878,7 +1838,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         Dialog dialog=new Dialog(this);dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);tasksDialog=dialog;
         LinearLayout page=column();page.setBackgroundColor(SURFACE);page.setFocusableInTouchMode(true);
         LinearLayout header=row();header.setPadding(dp(8),dp(6),dp(12),dp(6));
-        IconButton back=new IconButton("back","返回",MUTED);
+        IconButton back=new IconButton(this,"back","返回",MUTED);
         header.addView(back,new LinearLayout.LayoutParams(dp(48),dp(48)));
         back.setOnClickListener(v->dialog.dismiss());
         TextView caption=text("传输任务",20,INK);
@@ -1887,7 +1847,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         caption.setEllipsize(TextUtils.TruncateAt.END);
         header.addView(caption,weight());
         page.addView(header);
-        IconButton queueMenu=new IconButton("more","传输任务操作",MUTED);
+        IconButton queueMenu=new IconButton(this,"more","传输任务操作",MUTED);
         header.addView(queueMenu,new LinearLayout.LayoutParams(dp(48),dp(48)));
         queueMenu.setOnClickListener(v->{
             if(service==null)return;
@@ -1927,7 +1887,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         ip.setMargins(dp(16),dp(4),dp(16),dp(8));
         controls.addView(input,ip);
         TextView count=text("正在读取传输记录…",12,MUTED);count.setPadding(dp(20),dp(8),dp(20),dp(10));
-        TaskAdapter tasks=new TaskAdapter(count,input,dialog,sourceKey);
+        TaskAdapter tasks=new TaskAdapter(this,count,input,dialog,sourceKey);
         taskAdapter=tasks;
         controls.addView(tasks.sourceBar,0);
         LinearLayout filters=row();
@@ -2012,7 +1972,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         page.requestApplyInsets();
         loadTaskRows();
     }
-    private void loadTaskRows() {
+    void loadTaskRows() {
         if(tasksDialog==null||taskAdapter==null||service==null)return;
         if(loadingTasks){reloadTasksPending=true;return;}
         TaskAdapter expected=taskAdapter;ChatService source=service;loadingTasks=true;
@@ -2029,14 +1989,14 @@ public final class MainActivity extends Activity implements ChatService.Observer
             if(reloadTasksPending&&tasksDialog!=null&&tasksDialog.isShowing()){reloadTasksPending=false;loadTaskRows();}
         });
     }
-    private ChatService.FileProgress taskProgress(ChatStore.FileTask item) {
+    ChatService.FileProgress taskProgress(ChatStore.FileTask item) {
         ChatService.FileProgress live=service==null?null:service.progress(item.peer,item.message.number,item.file.id,
                 item.message.outgoing);
         if(live!=null)return live;
         ChatStore.TransferState saved=item.savedProgress;
         return saved==null?null:new ChatService.FileProgress(saved.percent,saved.state,null);
     }
-    private String taskState(ChatStore.FileTask item) {
+    String taskState(ChatStore.FileTask item) {
         if(item.guestFile!=null)return item.stored?"已保存":"本机文件已删除";
         ChatService.FileProgress progress=taskProgress(item);
         if(!item.message.outgoing) {
@@ -2051,14 +2011,14 @@ public final class MainActivity extends Activity implements ChatService.Observer
                 item.message.state.equals("已取消发送")))return item.message.state;
         return item.message.outgoing?"等待对方接收":"待接收";
     }
-    private static boolean taskComplete(String state) { return state.equals("已保存")||state.equals("对方已校验保存"); }
-    private static boolean taskEnded(String state) {
+    static boolean taskComplete(String state) { return state.equals("已保存")||state.equals("对方已校验保存"); }
+    static boolean taskEnded(String state) {
         return taskComplete(state)||state.contains("已拒绝")||state.contains("已取消发送")||state.equals("本机文件已删除");
     }
-    private static boolean taskActive(String state) {
+    static boolean taskActive(String state) {
         return state.contains("中")&&!state.contains("中断")&&!taskEnded(state);
     }
-    private String taskLabel(ChatStore.FileTask item,String state,ChatService.FileProgress progress) {
+    String taskLabel(ChatStore.FileTask item,String state,ChatService.FileProgress progress) {
         String label=state;
         if(progress!=null&&progress.bytesPerSecond>0&&taskActive(state)) {
             double seconds=item.file.size*(1-progress.percent/100.0)/progress.bytesPerSecond;
@@ -2067,12 +2027,12 @@ public final class MainActivity extends Activity implements ChatService.Observer
         }
         return label;
     }
-    private Uri taskUri(ChatStore.FileTask item) {
+    Uri taskUri(ChatStore.FileTask item) {
         if(item.message.outgoing||item.guestFile==null&&service==null)return null;
         File local=item.guestFile==null?service.receivedFile(item.peer,item.message.number,item.file):item.guestFile;
         return local.isFile()?ReceivedFileProvider.uri(this,local,item.file.name):receivedStorage.existingSaved(local);
     }
-    private List<String> taskQuickActions(ChatStore.FileTask item,String state,ChatService.FileProgress progress,
+    List<String> taskQuickActions(ChatStore.FileTask item,String state,ChatService.FileProgress progress,
             ChatStore.Conversation contact) {
         List<String> actions=new ArrayList<>();
         if(item.guestFile==null&&!item.message.outgoing&&service!=null&&contact!=null&&!taskEnded(state)) {
@@ -2088,7 +2048,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
                 item.message.number))actions.add("取消发送");
         return actions;
     }
-    private Button taskButton(LinearLayout row) {
+    Button taskButton(LinearLayout row) {
         Button button=button("",false);button.setTextSize(14);
         button.setPadding(dp(12),dp(6),dp(12),dp(6));
         button.setMinWidth(0);
@@ -2100,17 +2060,17 @@ public final class MainActivity extends Activity implements ChatService.Observer
         row.addView(button,spacing);
         return button;
     }
-    private void requestCancelFile(ChatStore.FileTask item) {
+    void requestCancelFile(ChatStore.FileTask item) {
         ChatService source=service;if(source==null)return;
         confirm("取消接收","已下载但尚未完成的数据将被清理，之后需要重新接收。","取消接收",()->{
             if(service==source)source.cancelFile(item.peer,item.message.number,item.file.id);
         });
     }
-    private void requestRejectFiles(LanNode.Peer peer,long packet) {
+    void requestRejectFiles(LanNode.Peer peer,long packet) {
         ChatService source=service;if(source==null)return;
         confirm("拒绝这批文件？","将拒绝该消息中未接收的文件并清理断点；已保存的文件保留。","拒绝这批文件",()->{if(service==source)source.reject(peer,packet);});
     }
-    private void requestCancelOutgoingTask(ChatStore.FileTask item) {
+    void requestCancelOutgoingTask(ChatStore.FileTask item) {
         ChatService source=service;if(source==null)return;
         confirm("取消发送？","撤销这批未完成的文件邀请；原文件和对方已保存的文件保留。","取消发送",()->{
             if(service==source)source.cancelOutgoing(item.peer,item.message,success->{if(success)loadTaskRows();});
@@ -2127,7 +2087,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
                     !taskActive(state))source.receive(contact.peer,item.message.number,item.file);
         }
     }
-    private static String taskTime(long time,long now) {
+    static String taskTime(long time,long now) {
         if(time<=0)return "";
         Calendar day=Calendar.getInstance(),current=Calendar.getInstance();
         day.setTimeInMillis(time);
@@ -2137,286 +2097,6 @@ public final class MainActivity extends Activity implements ChatService.Observer
         boolean today=sameYear&&day.get(Calendar.DAY_OF_YEAR)==current.get(Calendar.DAY_OF_YEAR);
         return new SimpleDateFormat(today?"HH:mm":sameYear?"MM-dd HH:mm":"yyyy-MM-dd HH:mm",
                 Locale.CHINA).format(new Date(time));
-    }
-    private static final class TaskSource {
-        final String key,name,avatar;
-        final long time;
-        TaskSource(String key,String name,String avatar,long time) {
-            this.key=key;
-            this.name=name;
-            this.avatar=avatar;
-            this.time=time;
-        }
-    }
-    private final class TaskAdapter extends BaseAdapter {
-        List<ChatStore.FileTask> all=new ArrayList<>(),items=new ArrayList<>();
-        final TextView count;
-        final EditText input;
-        int filter;
-        final LinearLayout sourceBar=row(),sourceItems=row();
-        final HorizontalScrollView sourceScroll=new HorizontalScrollView(MainActivity.this);
-        final Dialog dialog;
-        TextView empty;
-        boolean scrolling;
-        private boolean refreshScheduled;
-        final Map<Long,String> times=new HashMap<>();
-        private String selectedSource,sourceSignature,contentSignature,summaryText;
-        // 行签名、绘制与午夜刷新共用时钟；回归可注入时间而不修改系统时钟。
-        private java.util.function.LongSupplier clock=System::currentTimeMillis;
-        private final Handler clockHandler=new Handler(Looper.getMainLooper());
-        private final Runnable dayRefresh;
-        private final Runnable deferredRefresh;
-        private final Runnable storageRefresh;
-        TaskAdapter(TextView count,EditText input,Dialog dialog,String sourceKey) {
-            this.count=count;
-            this.input=input;
-            this.dialog=dialog;
-            selectedSource=sourceKey;
-            deferredRefresh=()->{
-                refreshScheduled=false;
-                if(resumed&&taskAdapter==this&&dialog.isShowing()&&!scrolling)refresh();
-            };
-            storageRefresh=()->{if(resumed&&taskAdapter==this&&dialog.isShowing()){
-                if(scrolling)scheduleStorageRefresh();
-                else loadTaskRows();
-            }
-            };
-            dayRefresh=()->{if(resumed&&taskAdapter==this&&dialog.isShowing()&&!isDestroyed()){
-                times.clear();
-                if(!scrolling)refresh();
-                scheduleDayRefresh();
-            }
-            };
-            sourceBar.setPadding(dp(12),0,dp(12),0);
-            sourceItems.setGravity(Gravity.TOP);
-            sourceItems.setPadding(0,dp(4),0,dp(4));
-            sourceScroll.setHorizontalScrollBarEnabled(false);
-            sourceScroll.setContentDescription("传输来源");
-            sourceScroll.addView(sourceItems);
-            sourceBar.addView(sourceScroll,new LinearLayout.LayoutParams(0,-2,1));
-            sourceScroll.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob)->{if(r-l!=or-ol)showSelectedSource();});
-            sourceItems.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob)->{if(r-l!=or-ol)showSelectedSource();});
-        }
-        void requestSearch() {
-            clockHandler.removeCallbacks(deferredRefresh);
-            refreshScheduled=true;
-            clockHandler.postDelayed(deferredRefresh,120);
-        }
-        void requestRefresh() {
-            if(resumed&&!scrolling&&!refreshScheduled){
-                refreshScheduled=true;
-                clockHandler.postDelayed(deferredRefresh,200);
-            }
-        }
-        void scheduleStorageRefresh() {
-            clockHandler.removeCallbacks(storageRefresh);
-            if(resumed&&dialog.isShowing())clockHandler.postDelayed(storageRefresh,3000);
-        }
-        private String time(ChatStore.FileTask item,long now) {
-            return times.computeIfAbsent(item.message.time,value->taskTime(value,now));
-        }
-        void scheduleDayRefresh() {
-            clockHandler.removeCallbacks(dayRefresh);
-            long now=clock.getAsLong();
-            Calendar midnight=Calendar.getInstance();
-            midnight.setTimeInMillis(now);
-            midnight.add(Calendar.DAY_OF_MONTH,1);
-            midnight.set(Calendar.HOUR_OF_DAY,0);
-            midnight.set(Calendar.MINUTE,0);
-            midnight.set(Calendar.SECOND,0);
-            midnight.set(Calendar.MILLISECOND,0);
-            clockHandler.postDelayed(dayRefresh,Math.max(1,midnight.getTimeInMillis()-now));
-        }
-        void stop() {
-            refreshScheduled=false;
-            clockHandler.removeCallbacks(dayRefresh);
-            clockHandler.removeCallbacks(deferredRefresh);
-            clockHandler.removeCallbacks(storageRefresh);
-        }
-        private void showSelectedSource() {
-            if(sourceScroll.getWidth()==0)return;
-            View selected=sourceItems.findViewWithTag("task-source:"+selectedSource);
-            if(selected==null)return;
-            int x=sourceScroll.getScrollX();
-            if(selected.getLeft()<x)x=selected.getLeft();
-            else if(selected.getRight()>x+sourceScroll.getWidth())x=selected.getRight()-sourceScroll.getWidth();
-            sourceScroll.scrollTo(x,0);
-        }
-        private void refreshSources() {
-            Map<String,Long> latest=new HashMap<>();
-            for(ChatStore.FileTask item:all) {
-                String key=item.guestFile!=null?"guest":"peer:"+item.peer;
-                latest.merge(key,Math.max(0,item.message.time),Math::max);
-            }
-            List<TaskSource> sources=new ArrayList<>();
-            for(Map.Entry<String,Long> entry:latest.entrySet())sources.add(source(entry.getKey(),entry.getValue()));
-            sources.sort(Comparator.comparingLong((TaskSource item)->item.time).reversed().thenComparing(item->item.name).thenComparing(item->item.key));
-            if(!selectedSource.isEmpty()&&!latest.containsKey(selectedSource))sources.add(0,source(selectedSource,0));
-            sources.add(0,new TaskSource("","全部",null,0));
-            StringBuilder signature=new StringBuilder(selectedSource);
-            for(TaskSource item:sources)signature.append('\0').append(item.key).append('\0').append(item.name).append('\0').append(item.avatar);
-            String value=signature.toString();
-            if(value.equals(sourceSignature))return;
-            sourceSignature=value;
-            sourceItems.removeAllViews();
-            for(TaskSource item:sources) {
-                boolean chosen=item.key.equals(selectedSource);
-                LinearLayout pick=column();
-                pick.setGravity(Gravity.CENTER_HORIZONTAL);
-                pick.setPadding(dp(2),dp(2),dp(2),dp(4));
-                pick.setTag("task-source:"+item.key);
-                pick.setSelected(chosen);
-                pick.setFocusable(true);
-                pick.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
-                pick.setContentDescription(item.name+"，"+(chosen?"已选中":"未选中"));
-                FrameLayout circle=new FrameLayout(MainActivity.this);
-                GradientDrawable ring=shape(PALE,99);
-                ring.setStroke(dp(2),chosen?BLUE:Color.TRANSPARENT);
-                circle.setBackground(ring);
-                circle.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-                if(item.key.isEmpty()||item.key.equals("guest")) {
-                    ImageView icon=new ImageView(MainActivity.this);
-                    icon.setPadding(dp(8),dp(8),dp(8),dp(8));
-                    icon.setImageDrawable(new MenuIcon(item.key.isEmpty()?"传输任务":"临时浏览器传输",chosen?BLUE:MUTED));
-                    circle.addView(icon,new FrameLayout.LayoutParams(dp(40),dp(40),Gravity.CENTER));
-                } else {
-                    TextView avatar=text("",18,Color.WHITE);
-                    avatar.setBackground(new AvatarDrawable(MainActivity.this,item.key.substring(5),false,0,SURFACE,
-                            ONLINE,item.avatar));
-                    circle.addView(avatar,new FrameLayout.LayoutParams(dp(40),dp(40),Gravity.CENTER));
-                }
-                pick.addView(circle,new LinearLayout.LayoutParams(dp(44),dp(44)));
-                TextView name=text(item.name,12,chosen?BLUE:MUTED);
-                name.setSingleLine();
-                name.setEllipsize(TextUtils.TruncateAt.END);
-                name.setGravity(Gravity.CENTER);
-                name.setPadding(0,dp(4),0,0);
-                name.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-                pick.addView(name,new LinearLayout.LayoutParams(-1,-2));
-                sourceItems.addView(pick,new LinearLayout.LayoutParams(dp(68),-2));
-                pick.setOnClickListener(v->{if(!selectedSource.equals(item.key)){selectedSource=item.key;refresh();}});
-            }
-            sourceItems.post(()->{if(taskAdapter==this&&dialog.isShowing())showSelectedSource();});
-        }
-        private TaskSource source(String key,long time) {
-            if(key.equals("guest"))return new TaskSource(key,"浏览器访客",null,time);
-            ChatStore.Conversation contact=conversation(key.substring(5));
-            return new TaskSource(key,contact==null?"已移除的设备":contact.displayName(),
-                    contact==null?null:Protocol.normalizeAvatar(contact.peer.avatar),time);
-        }
-        void refresh() {
-            refreshScheduled=false;
-            clockHandler.removeCallbacks(deferredRefresh);
-            refreshSources();
-            long now=clock.getAsLong();
-            String query=input.getText().toString().trim().toLowerCase(Locale.ROOT);
-            List<ChatStore.FileTask> next=new ArrayList<>();
-            int completed=0;
-            double total=0,done=0;
-            StringBuilder content=new StringBuilder();
-            for(ChatStore.FileTask item:all){String source=item.guestFile!=null?"guest":"peer:"+item.peer;
-                if(!selectedSource.isEmpty()&&!selectedSource.equals(source))continue;
-                String state=taskState(item);
-                ChatStore.Conversation contact=conversation(item.peer);
-                String name=item.guestFile!=null?"浏览器访客":contact==null?"已移除的设备":contact.displayName();
-                if(!(item.file.name+" "+name).toLowerCase(Locale.ROOT).contains(query)||filter==1&&!taskActive(state)||
-                        filter==2&&(taskActive(state)||taskComplete(state))||filter==3&&!taskComplete(state))continue;
-                next.add(item);if(taskComplete(state))completed++;ChatService.FileProgress p=taskProgress(item);
-                int percent=taskComplete(state)?100:state.equals("本机文件已删除")?0:p==null?0:p.percent;
-                total+=item.file.size;
-                done+=item.file.size*percent/100.0;
-                content.append(item.peer).append('\0').append(item.message.number).append('\0').append(item.message.outgoing).append('\0').append(item.file.id).append('\0')
-                    .append(item.file.name).append('\0').append(item.file.size).append('\0').append(name).append('\0').append(time(item,
-                            now)).append('\0').append(state).append('\0').append(percent).append('\0')
-                    .append(taskLabel(item,state,
-                            p)).append('\0').append(item.guestFile==null?"":item.guestFile.getAbsolutePath()).append('\0')
-                    .append(taskQuickActions(item,state,p,contact)).append('\0');
-            }
-            String signature=content.toString();int queued=service==null?0:service.queuedTransfers();
-            String summary=next.size()+" 个文件 · "+completed+" 个已完成"+(total>0?" · "+size((long)done)+" / "+size((long)total):"")+(queued>0?"\n另有 "+queued+" 项文件操作排队中":"");
-            boolean rowsChanged=!signature.equals(contentSignature),summaryChanged=!summary.equals(summaryText);
-            items=next;
-            String emptyText=!query.isEmpty()?"没有匹配的文件或设备":!selectedSource.isEmpty()||
-                    filter!=0?"当前筛选下没有传输任务":"暂无传输任务\n收到或发送的文件会显示在这里";
-            if(empty!=null&&!emptyText.contentEquals(empty.getText()))empty.setText(emptyText);
-            if(!rowsChanged&&!summaryChanged)return;
-            contentSignature=signature;summaryText=summary;
-            if(summaryChanged&&!summary.contentEquals(count.getText()))count.setText(summary);
-            if(rowsChanged)notifyDataSetChanged();
-        }
-        public int getCount(){return items.size();}
-        public Object getItem(int position){return items.get(position);}
-        public long getItemId(int position){return position;}
-        public View getView(int position,View old,ViewGroup parent) {
-            ChatStore.FileTask item=items.get(position);LinearLayout box;
-            if(old==null){
-                box=column();
-                box.setPadding(dp(20),dp(12),dp(20),dp(12));
-                TextView name=text("",15,INK);
-                name.setTypeface(null,Typeface.BOLD);
-                name.setSingleLine();
-                name.setEllipsize(TextUtils.TruncateAt.END);
-                box.addView(name);
-                TextView meta=text("",12,MUTED);
-                meta.setSingleLine();
-                meta.setEllipsize(TextUtils.TruncateAt.END);
-                meta.setPadding(0,dp(5),0,dp(4));
-                box.addView(meta);
-                TextView status=text("",12,MUTED);
-                status.setMaxLines(2);
-                box.addView(status);
-                ProgressBar bar=new ProgressBar(MainActivity.this,null,android.R.attr.progressBarStyleHorizontal);
-                bar.setMax(100);
-                bar.setProgressTintList(android.content.res.ColorStateList.valueOf(BLUE));
-                bar.setProgressBackgroundTintList(android.content.res.ColorStateList.valueOf(LINE));
-                LinearLayout.LayoutParams bp=new LinearLayout.LayoutParams(-1,dp(3));
-                bp.topMargin=dp(8);
-                box.addView(bar,bp);
-                LinearLayout actions=row();
-                LinearLayout.LayoutParams ap=new LinearLayout.LayoutParams(-1,-2);
-                ap.topMargin=dp(8);
-                box.addView(actions,ap);
-            }else box=(LinearLayout)old;
-            ChatStore.Conversation contact=conversation(item.peer);
-            String state=taskState(item);
-            ChatService.FileProgress p=taskProgress(item);
-            String time=time(item,clock.getAsLong());
-            ((TextView)box.getChildAt(0)).setText(item.file.name);
-            ((TextView)box.getChildAt(1)).setText((item.message.outgoing?"发送给 ":"来自 ")+(item.guestFile!=null?"浏览器访客":contact==null?"已移除的设备":contact.displayName())+" · "+size(item.file.size)+(time.isEmpty()?"":" · "+time));
-            String label=taskLabel(item,state,p);
-            TextView status=(TextView)box.getChildAt(2);
-            status.setText(label);
-            status.setTextColor(taskComplete(state)?ONLINE:taskActive(state)?BLUE:MUTED);
-            ProgressBar bar=(ProgressBar)box.getChildAt(3);
-            bar.setProgress(taskComplete(state)?100:state.equals("本机文件已删除")?0:p==null?0:p.percent);
-            bar.setVisibility(taskEnded(state)?View.GONE:View.VISIBLE);
-            LinearLayout actions=(LinearLayout)box.getChildAt(4);ChatService source=service;
-            List<String> labels=taskQuickActions(item,state,p,contact);
-            while(actions.getChildCount()>labels.size())actions.removeViewAt(actions.getChildCount()-1);
-            for(int index=0;index<labels.size();index++) {
-                String action=labels.get(index);
-                Button button=index<actions.getChildCount()?(Button)actions.getChildAt(index):taskButton(actions);
-                if(!action.contentEquals(button.getText()))button.setText(action);
-                button.setTextColor(action.equals("拒绝")||action.startsWith("取消")?0xffd24e54:BLUE);
-                button.setOnClickListener(v->{
-                if(service!=source)return;
-                switch(action) {
-                    case "暂停":case "暂停排队":source.pauseFile(item.peer,item.message.number,item.file.id);break;
-                    case "取消":requestCancelFile(item);break;
-                    case "接收":case "继续接收":source.receive(contact.peer,item.message.number,item.file);break;
-                    case "拒绝":requestRejectFiles(contact.peer,item.message.number);break;
-                    case "打开":Uri uri=taskUri(item);
-                    if(uri==null)error("本机文件已删除");
-                    else openFile(uri,item.file.name,false);
-                    break;
-                    case "取消发送":requestCancelOutgoingTask(item);break;
-                }
-                });
-            }
-            actions.setVisibility(actions.getChildCount()==0?View.GONE:View.VISIBLE);
-            box.setContentDescription(item.file.name+"，"+label);
-            return box;
-        }
     }
     private void taskActions(ChatStore.FileTask item) {
         if(item.guestFile!=null) {
@@ -2690,7 +2370,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
             title.setMaxLines(2);
             title.setEllipsize(TextUtils.TruncateAt.MIDDLE);
             item.addView(title,weight());
-            IconButton remove=new IconButton("close","移除共享文件夹",MUTED);
+            IconButton remove=new IconButton(this,"close","移除共享文件夹",MUTED);
             item.addView(remove,new LinearLayout.LayoutParams(dp(48),dp(48)));
             remove.setOnClickListener(v->confirm("移除共享文件夹","仅取消这个目录的共享，不删除文件；当前共享连接将结束。","移除",()->{
                 ChatService expected=service;
@@ -2710,7 +2390,8 @@ public final class MainActivity extends Activity implements ChatService.Observer
         });
         fileAction(box,dialog,"添加文件夹并开启",()->{
             try {
-                Intent pick=new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION|Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
+                Intent pick=new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                        |Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION|Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
                 if(!savedTrees.isEmpty())pick.putExtra(android.provider.DocumentsContract.EXTRA_INITIAL_URI,
                         savedTrees.get(0));
                 startActivityForResult(pick,24);
@@ -2770,7 +2451,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         caption.setMaxLines(2);
         caption.setEllipsize(TextUtils.TruncateAt.END);
         heading.addView(caption,weight());
-        IconButton close=new IconButton("close","关闭聊天记录",MUTED);
+        IconButton close=new IconButton(this,"close","关闭聊天记录",MUTED);
         heading.addView(close,new LinearLayout.LayoutParams(dp(44),dp(44)));
         close.setOnClickListener(v->dialog.dismiss());
         frame.addView(heading);
@@ -3146,12 +2827,14 @@ public final class MainActivity extends Activity implements ChatService.Observer
         fontSize.setMax(10);
         fontSize.setProgress(messageSize()-14);
         box.addView(fontSize,new LinearLayout.LayoutParams(-1,dp(48)));
-        fontSize.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener(){public void onStartTrackingTouch(SeekBar bar){}public void onStopTrackingTouch(SeekBar bar){}public void onProgressChanged(SeekBar bar,
-                int value,boolean user){
-            sizeCaption.setText("聊天字号 · "+(value+14)+" sp");
-            sampleIn.setTextSize(value+14);
-            sampleOut.setTextSize(value+14);
-        }
+        fontSize.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener(){
+            public void onStartTrackingTouch(SeekBar bar){}
+            public void onStopTrackingTouch(SeekBar bar){}
+            public void onProgressChanged(SeekBar bar,int value,boolean user){
+                sizeCaption.setText("聊天字号 · "+(value+14)+" sp");
+                sampleIn.setTextSize(value+14);
+                sampleOut.setTextSize(value+14);
+            }
         });
         TextView wallpaperHeading=text("聊天背景",14,INK);
         wallpaperHeading.setPadding(0,dp(12),0,dp(8));
@@ -3211,7 +2894,9 @@ public final class MainActivity extends Activity implements ChatService.Observer
         Button chooseBackground=button("选择背景图片…",false);
         box.addView(chooseBackground,settingSpacing(0,4));
         chooseBackground.setOnClickListener(v->{try{
-            startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("image/*").addCategory(Intent.CATEGORY_OPENABLE).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION),
+            startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("image/*")
+                    .addCategory(Intent.CATEGORY_OPENABLE)
+                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION),
                     23);
         }catch(ActivityNotFoundException e){error("系统没有可用的图片选择器");}
         });
@@ -3550,7 +3235,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         caption.setContentDescription("设置");
         caption.setTypeface(null,Typeface.BOLD);
         heading.addView(caption,weight());
-        IconButton close=new IconButton("close","关闭设置",MUTED);
+        IconButton close=new IconButton(this,"close","关闭设置",MUTED);
         heading.addView(close,new LinearLayout.LayoutParams(dp(48),dp(48)));
         close.setOnClickListener(v->dialog.dismiss());
         frame.addView(heading);
@@ -3675,7 +3360,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         caption.setEllipsize(TextUtils.TruncateAt.END);
         caption.setContentDescription(name);
         heading.addView(caption,weight());
-        IconButton close=new IconButton("close","关闭",MUTED);
+        IconButton close=new IconButton(this,"close","关闭",MUTED);
         heading.addView(close,new LinearLayout.LayoutParams(dp(42),dp(42)));
         close.setOnClickListener(v->dialog.dismiss());
         box.addView(heading);
@@ -3768,7 +3453,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         item.setGravity(Gravity.START|Gravity.CENTER_VERTICAL);
         item.setMinHeight(dp(52));
         item.setPadding(dp(12),dp(10),dp(12),dp(10));
-        item.setCompoundDrawablesWithIntrinsicBounds(new MenuIcon(label,danger?color:MUTED),null,null,null);
+        item.setCompoundDrawablesWithIntrinsicBounds(new MenuIcon(this,label,danger?color:MUTED),null,null,null);
         item.setCompoundDrawablePadding(dp(14));
         item.setBackground(new android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(BUBBLE),
                 shape(SURFACE,CONTROL_RADIUS),shape(Color.WHITE,CONTROL_RADIUS)));
@@ -3776,130 +3461,6 @@ public final class MainActivity extends Activity implements ChatService.Observer
         p.topMargin=dp(2);
         options.addView(item,p);
         item.setOnClickListener(v->{ dialog.dismiss(); action.run(); });
-    }
-    private final class MenuIcon extends android.graphics.drawable.Drawable {
-        private final String label; private final Paint paint=new Paint(Paint.ANTI_ALIAS_FLAG);
-        MenuIcon(String label,int color) {
-            this.label=label;
-            paint.setColor(color);
-            paint.setStyle(Paint.Style.STROKE);
-            paint.setStrokeWidth(1.7f);
-            paint.setStrokeCap(Paint.Cap.ROUND);
-            paint.setStrokeJoin(Paint.Join.ROUND);
-        }
-        @Override public int getIntrinsicWidth() { return dp(22); }
-        @Override public int getIntrinsicHeight() { return dp(22); }
-        @Override public void setAlpha(int alpha) { paint.setAlpha(alpha); }
-        @Override public void setColorFilter(ColorFilter filter) { paint.setColorFilter(filter); }
-        @Override public int getOpacity() { return PixelFormat.TRANSLUCENT; }
-        @Override public void draw(Canvas c) {
-            c.save();
-            Rect b=getBounds();
-            c.translate(b.left,b.top);
-            c.scale(b.width()/24f,b.height()/24f);
-            Path p=new Path();
-            if(label.contains("传输任务")) {
-                c.drawLine(4,7,20,7,paint);
-                p.moveTo(16,3);
-                p.lineTo(20,7);
-                p.lineTo(16,11);
-                c.drawLine(20,17,4,17,paint);
-                p.moveTo(8,13);
-                p.lineTo(4,17);
-                p.lineTo(8,21);
-                c.drawPath(p,paint);
-            }
-            else if(label.contains("临时浏览器")) {
-                c.drawCircle(12,12,9,paint);
-                c.drawLine(3,12,21,12,paint);
-                c.drawOval(7.5f,3,16.5f,21,paint);
-            }
-            else if(label.startsWith("复制")) {
-                c.drawRoundRect(8,8,20,21,2,2,paint);
-                p.moveTo(5,16);
-                p.lineTo(3,16);
-                p.lineTo(3,3);
-                p.lineTo(15,3);
-                p.lineTo(15,5);
-                c.drawPath(p,paint);
-            }
-            else if(label.contains("转发")||label.contains("分享")) {
-                p.moveTo(3,4);
-                p.lineTo(21,12);
-                p.lineTo(3,20);
-                p.lineTo(6,12);
-                p.close();
-                c.drawPath(p,paint);
-                c.drawLine(6,12,21,12,paint);
-            }
-            else if(label.contains("目录")||label.contains("位置")||label.contains("共享")||label.contains("文件夹")) {
-                p.moveTo(3,6);
-                p.lineTo(9,6);
-                p.lineTo(11,9);
-                p.lineTo(21,9);
-                p.lineTo(21,20);
-                p.lineTo(3,20);
-                p.close();
-                c.drawPath(p,paint);
-            }
-            else if(label.contains("Windows")){
-                c.drawRoundRect(3,4,21,17,2,2,paint);
-                c.drawLine(12,17,12,21,paint);
-                c.drawLine(8,21,16,21,paint);
-            }
-            else if(label.contains("刷新")||label.contains("重试")) {
-                c.drawArc(4,4,20,20,40,285,false,paint);
-                p.moveTo(15,3);
-                p.lineTo(20,4);
-                p.lineTo(19,9);
-                c.drawPath(p,paint);
-            }
-            else if(label.contains("备注")){
-                p.moveTo(4,17);
-                p.lineTo(16,5);
-                p.lineTo(20,9);
-                p.lineTo(8,21);
-                p.lineTo(3,22);
-                p.close();
-                c.drawPath(p,paint);
-            }
-            else if(label.contains("置顶")){
-                p.moveTo(9,3.5f);
-                p.lineTo(15,3.5f);
-                p.lineTo(14.2f,9.6f);
-                p.lineTo(17.5f,13.6f);
-                p.lineTo(6.5f,13.6f);
-                p.lineTo(9.8f,9.6f);
-                p.close();
-                c.drawPath(p,paint);
-                c.drawLine(12,13.6f,12,20.5f,paint);
-            }
-            else if(label.contains("设置")) {
-                c.drawCircle(12,12,7,paint);
-                c.drawCircle(12,12,3,paint);
-                for(int i=0;i<8;i++){
-                    double a=i*Math.PI/4;
-                    c.drawLine(12+(float)Math.cos(a)*8,12+(float)Math.sin(a)*8,12+(float)Math.cos(a)*10,
-                            12+(float)Math.sin(a)*10,paint);
-                }
-            }
-            else if(label.contains("添加")) { c.drawLine(12,4,12,20,paint);c.drawLine(4,12,20,12,paint); }
-            else if(label.contains("连接")||label.equals("断开")) {
-                c.drawArc(4,4,20,20,-50,280,false,paint);
-                c.drawLine(12,2,12,12,paint);
-            }
-            else if(label.equals("取消发送")||label.startsWith("拒绝")||label.startsWith("删除")) {
-                c.drawLine(5,5,19,19,paint);
-                c.drawLine(5,19,19,5,paint);
-            }
-            else if(label.equals("关于")) {
-                c.drawCircle(12,12,9,paint);
-                c.drawLine(12,11,12,17,paint);
-                c.drawPoint(12,7,paint);
-            }
-            else { c.drawRoundRect(5,3,19,21,2,2,paint);c.drawLine(9,11,15,11,paint);c.drawLine(9,16,15,16,paint); }
-            c.restore();
-        }
     }
     private void sentFileActions(Uri uri,String name,LanNode.Message message,LanNode.Peer peer) {
         int generation=editorGeneration;
@@ -3960,7 +3521,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         }
         fileAction(options,dialog,"复制文件名",()->copyText("文件名",file.name));
     }
-    private void openFile(Uri uri,String name,boolean share) { openFileWith(uri,name,share,false); }
+    void openFile(Uri uri,String name,boolean share) { openFileWith(uri,name,share,false); }
     private void openFileWith(Uri uri,String name,boolean share,boolean chooser) {
         if(!share&&name.toLowerCase(Locale.ROOT).endsWith(".apk")&&!getPackageManager().canRequestPackageInstalls()){
             confirm("允许安装此来源的应用","系统尚未允许飞Q请求安装 APK。请在下一页允许此来源，返回后再次点击打开文件；安装仍需系统确认。只安装可信来源的文件。","前往系统设置",()->{try{
@@ -4013,7 +3574,9 @@ public final class MainActivity extends Activity implements ChatService.Observer
         reject.setOnClickListener(v->{ dialog.dismiss(); service.reject(peer,packet); });
     }
     private void chooseFolder() {
-        Intent intent=new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_WRITE_URI_PERMISSION|Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION|Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
+        Intent intent=new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                |Intent.FLAG_GRANT_WRITE_URI_PERMISSION|Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
+                |Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
         if(receivedStorage.tree()!=null) intent.putExtra(DocumentsContract.EXTRA_INITIAL_URI,receivedStorage.tree());
         try { startActivityForResult(intent,22); } catch(ActivityNotFoundException e) { error("系统没有可用的目录选择器"); }
     }
@@ -4025,7 +3588,8 @@ public final class MainActivity extends Activity implements ChatService.Observer
             if(service==null||!service.online()){error("请先连接局域网");return;}
             pickerPeer=selected;
             try{
-                startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION|Intent.FLAG_GRANT_PREFIX_URI_PERMISSION),
+                startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                        |Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION|Intent.FLAG_GRANT_PREFIX_URI_PERMISSION),
                         26);
             }catch(ActivityNotFoundException e){error("系统没有目录选择器");}
         });
@@ -4188,12 +3752,12 @@ public final class MainActivity extends Activity implements ChatService.Observer
         return !expired.get()&&accepted.get()&&!isFinishing()&&!isDestroyed();
     }
     private Handler mainHandler(){return new Handler(Looper.getMainLooper());}
-    private static String size(long value) {
+    static String size(long value) {
         if(value>=1048576) return String.format(Locale.CHINA,"%.1f MB",value/1048576.0);
         if(value>=1024) return String.format(Locale.CHINA,"%.1f KB",value/1024.0);
         return value+" B";
     }
-    private void bindAvatar(TextView avatar,String id,String name,boolean online,String value) {
+    void bindAvatar(TextView avatar,String id,String name,boolean online,String value) {
         String selectedAvatar=Protocol.normalizeAvatar(value);
         EmojiAvatars avatars=EmojiAvatars.get(this);
         int index=selectedAvatar!=null &&
@@ -4206,158 +3770,5 @@ public final class MainActivity extends Activity implements ChatService.Observer
                 java.util.Objects.equals(((AvatarDrawable)avatar.getBackground()).avatarValue(),
                 selectedAvatar)) ((AvatarDrawable)avatar.getBackground()).setOnline(online);
         else avatar.setBackground(new AvatarDrawable(this,id,online,dp(6),SURFACE,ONLINE,selectedAvatar));
-    }
-    private final class ConversationAdapter extends BaseAdapter {
-        private final List<ChatStore.Conversation> items=new ArrayList<>();
-        void refresh() {
-            items.clear();
-            String query=search==null?"":search.getText().toString().toLowerCase(Locale.ROOT);
-            if(service!=null) for(ChatStore.Conversation c:service.conversations()) if((c.displayName()+" "+c.peer.name+" "+c.peer.id()+" "+c.preview).toLowerCase(Locale.ROOT).contains(query)) items.add(c);
-            notifyDataSetChanged();
-        }
-        @Override public int getCount() { return items.size(); }
-        @Override public Object getItem(int p) { return items.get(p); }
-        @Override public long getItemId(int p) { return p; }
-        @Override public View getView(int position,View convert,ViewGroup parent) {
-            ChatStore.Conversation c=items.get(position);
-            LinearLayout row=row();
-            row.setPadding(dp(10),dp(5),dp(16),dp(5));
-            row.setMinimumHeight(dp(82));
-            // 禁止按文字基线预先测量加权中栏，先给右侧完整时间留出宽度。
-            row.setBaselineAligned(false);
-            TextView avatar=text("",21,Color.WHITE); avatar.setGravity(Gravity.CENTER);
-            bindAvatar(avatar,c.peer.id(),c.displayName(),c.peer.online,c.peer.avatar);
-            row.addView(avatar,new LinearLayout.LayoutParams(dp(68),dp(68)));
-            LinearLayout center=column();
-            LinearLayout.LayoutParams cp=weight();
-            cp.leftMargin=dp(8);
-            row.addView(center,cp);
-            TextView name=text(c.displayName(),16,INK); name.setTypeface(null,Typeface.BOLD); name.setSingleLine();
-            // 中间省略保留末尾编号，短名称时编号紧跟昵称，不挤到消息时间旁。
-            name.setEllipsize(c.duplicateName?TextUtils.TruncateAt.MIDDLE:TextUtils.TruncateAt.END);
-            name.setContentDescription(c.displayName());
-            if(c.duplicateName) {
-                SpannableString caption=new SpannableString(name.getText());
-                int start=caption.length()-c.nameSuffix().length();
-                caption.setSpan(new android.text.style.ForegroundColorSpan(MUTED),start,caption.length(),
-                        Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-                caption.setSpan(new android.text.style.RelativeSizeSpan(.8f),start,caption.length(),
-                        Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-                name.setText(caption);
-            }
-            if(c.pinned) {
-                MenuIcon pin=new MenuIcon("置顶会话",MUTED);
-                pin.setBounds(0,0,dp(17),dp(17));
-                name.setCompoundDrawables(pin,null,null,null);
-                name.setCompoundDrawablePadding(dp(4));
-                name.setContentDescription("已置顶，"+c.displayName());
-            }
-            center.addView(name);
-            TextView preview=text(c.preview.isEmpty()?(c.peer.online?"在线 · ":"离线 · ")+c.peer.endpoint.getAddress().getHostAddress():MessageText.normalizeLineBreaks(c.preview).replace('\n',
-                    ' '),14,MUTED);
-            preview.setSingleLine();
-            preview.setEllipsize(TextUtils.TruncateAt.END);
-            preview.setPadding(0,dp(5),0,0);
-            center.addView(preview);
-            LinearLayout right=column();
-            right.setGravity(Gravity.END);
-            LinearLayout.LayoutParams rp=new LinearLayout.LayoutParams(-2,-2);
-            rp.leftMargin=dp(8);
-            row.addView(right,rp);
-            TextView time=text(c.time==0?"":new SimpleDateFormat("HH:mm",Locale.CHINA).format(new Date(c.time)),11,
-                    MUTED);
-            time.setSingleLine();
-            right.addView(time);
-            if(c.unread>0) {
-                TextView badge=text(c.unread>99?"99+":Integer.toString(c.unread),11,Color.WHITE);
-                badge.setGravity(Gravity.CENTER);
-                badge.setBackground(shape(BLUE,14));
-                LinearLayout.LayoutParams b=new LinearLayout.LayoutParams(dp(28),dp(23));
-                b.topMargin=dp(7);
-                right.addView(badge,b);
-            }
-            return row;
-        }
-    }
-    private final class IconButton extends View {
-        private final String kind; private final Paint p=new Paint(3); private final Path path=new Path();
-        IconButton(String kind,String description,int color) {
-            super(MainActivity.this);
-            this.kind=kind;
-            p.setColor(color);
-            p.setStyle(Paint.Style.STROKE);
-            p.setStrokeWidth(1.8f);
-            p.setStrokeCap(Paint.Cap.ROUND);
-            p.setStrokeJoin(Paint.Join.ROUND);
-            setContentDescription(description);
-            setFocusable(true);
-            setClickable(true);
-            android.util.TypedValue value=new android.util.TypedValue();
-            getTheme().resolveAttribute(android.R.attr.selectableItemBackgroundBorderless,value,true);
-            setBackgroundResource(value.resourceId);
-        }
-        @Override protected void onDraw(Canvas canvas) {
-            super.onDraw(canvas);
-            canvas.save();
-            canvas.translate(getWidth()/2f-dp(12),getHeight()/2f-dp(12));
-            canvas.scale(dp(24)/24f,dp(24)/24f);
-            path.reset();
-            if(kind.equals("menu")) { for(int y=6;y<=18;y+=6) canvas.drawLine(3,y,21,y,p); }
-            else if(kind.equals("more")) { for(int y=5;y<=19;y+=7) canvas.drawCircle(12,y,1,p); }
-            else if(kind.equals("search")) { canvas.drawCircle(10,10,6,p);canvas.drawLine(14.5f,14.5f,21,21,p); }
-            else if(kind.equals("close")) { canvas.drawLine(5,5,19,19,p); canvas.drawLine(19,5,5,19,p); }
-            else if(kind.equals("add")) { canvas.drawLine(12,3,12,21,p); canvas.drawLine(3,12,21,12,p); }
-            else if(kind.equals("back")) {
-                path.moveTo(12,4);
-                path.lineTo(4,12);
-                path.lineTo(12,20);
-                canvas.drawPath(path,p);
-                canvas.drawLine(4,12,21,12,p);
-            }
-            else if(kind.equals("transfer")) {
-                canvas.drawLine(4,7,20,7,p);path.moveTo(16,3);path.lineTo(20,7);path.lineTo(16,11);
-                canvas.drawLine(20,17,4,17,p);
-                path.moveTo(8,13);
-                path.lineTo(4,17);
-                path.lineTo(8,21);
-                canvas.drawPath(path,p);
-            }
-            else if(kind.equals("send")) {
-                path.moveTo(3,3);
-                path.lineTo(22,12);
-                path.lineTo(3,21);
-                path.lineTo(6,12);
-                path.close();
-                canvas.drawPath(path,p);
-                canvas.drawLine(6,12,21,12,p);
-            }
-            else if(kind.equals("smile")) {
-                canvas.drawCircle(12,12,9,p);
-                canvas.drawPoint(9,9,p);
-                canvas.drawPoint(15,9,p);
-                canvas.drawArc(7,9,17,17,15,150,false,p);
-            }
-            else if(kind.equals("code")) {
-                path.moveTo(7,6);
-                path.lineTo(2,12);
-                path.lineTo(7,18);
-                path.moveTo(17,6);
-                path.lineTo(22,12);
-                path.lineTo(17,18);
-                canvas.drawPath(path,p);
-                canvas.drawLine(14,4,10,20,p);
-            }
-            else {
-                path.moveTo(17,8);
-                path.lineTo(8,17);
-                path.cubicTo(4,21,0,16,4,12);
-                path.lineTo(13,3);
-                path.cubicTo(19,-3,27,5,21,11);
-                path.lineTo(11,21);
-                canvas.drawPath(path,p);
-            }
-            canvas.restore();
-        }
-        @Override public boolean performClick() { super.performClick(); return true; }
     }
 }
