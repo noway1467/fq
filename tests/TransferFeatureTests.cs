@@ -434,6 +434,34 @@ namespace FeiqLight.Tests
                     Check(Json(server,"/api/prepare",new{name="excess.txt",size=0}).Code==409,"任务历史没有4096条内存上限");
                 }
             });
+            Run("访客准备幂等、取消早到和迟到准备不能复活",()=>{
+                using(var server=new GuestTransfer(new string[0],Path.Combine(root,"prepare-races"),true,true)) {
+                    string key=new string('a',32);
+                    Reply first=Json(server,"/api/prepare",new{name="a.txt",size=7,requestId=key});
+                    Reply again=Json(server,"/api/prepare",new{name="a.txt",size=7,requestId=key});
+                    Check(first.Code==200&&again.Code==200&&Equals(Data(first)["id"],Data(again)["id"]),"准备重试重复预留");
+                    Check(Json(server,"/api/prepare",new{name="b.txt",size=7,requestId=key}).Code==409,"同标识不同文件被接受");
+                    Check(Json(server,"/api/cancel?requestId="+key,new{}).Code==200,"响应丢失后无法按请求取消");
+                    Check(Json(server,"/api/cancel?requestId="+key,new{}).Code==200,"新取消接口不幂等");
+                    Check(Json(server,"/api/prepare",new{name="a.txt",size=7,requestId=key}).Code==410,"取消后准备复活");
+                    string early=new string('b',32);
+                    Check(Json(server,"/api/cancel?requestId="+early,new{}).Code==200,"先到取消失败");
+                    Check(Json(server,"/api/prepare",new{name="late.txt",size=1,requestId=early}).Code==410,"晚到准备复活");
+                    Check(Json(server,"/api/cancel?requestId=../bad",new{}).Code==400,"未校验请求标识");
+                    Check((long)typeof(GuestTransfer).GetField("reserved",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(server)==0,"取消遗留配额");
+                    Check(!Directory.EnumerateFiles(Path.Combine(root,"prepare-races"),"*.part").Any(),"取消遗留临时文件");
+                }
+            });
+            Run("访客文件夹复用目录枚举、路径校验和同名避让",()=>{
+                string tree=Path.Combine(root,"folder-source","资料"),folder=Path.Combine(root,"folder-receive");Directory.CreateDirectory(Path.Combine(tree,"子目录"));File.WriteAllText(Path.Combine(tree,"子目录","同名.txt"),"nested");
+                using(var server=new GuestTransfer(new[]{tree},folder,true,true)) {
+                    var list=(object[])Data(Request(server.Port,"/api/guest",server.Token))["files"];var entry=(Dictionary<string,object>)list[0];
+                    Check((string)entry["relativePath"]=="资料/子目录/同名.txt","下载列表丢失目录");
+                    foreach(string invalid in new[]{"../escape.txt","a/../../escape.txt","a/other.txt","/a.txt","a\\a.txt"})Check(Json(server,"/api/prepare",new{name="a.txt",size=0,relativePath=invalid}).Code==400,"接受非法目录 "+invalid);
+                    for(int i=0;i<2;i++){string id=(string)Data(Json(server,"/api/prepare",new{name="同名.txt",size=0,relativePath="资料/子目录/同名.txt"}))["id"];Check(Json(server,"/api/finish?id="+id,new{}).Code==200,"目录保存失败");}
+                    Check(File.Exists(Path.Combine(folder,"资料","子目录","同名.txt"))&&File.Exists(Path.Combine(folder,"资料","子目录","同名 (1).txt")),"目录保存未防覆盖");
+                }
+            });
             if(args.Length>2&&args[2]=="guest-quota"){Console.WriteLine("TOTAL "+passed+" passed, "+failed+" failed");return failed==0?0:1;}
             Run("暂停保留断点并从实际偏移续传",PauseResume);
             Run("TLS接收暂停保留断点并完成SHA-256校验",()=>{
@@ -515,7 +543,8 @@ namespace FeiqLight.Tests
                     setItems.Invoke(picker,new object[]{new[]{"192.0.2.90"}});open.Invoke(main,null);Check(picker.Text=="127.0.0.1","唤醒闲置窗口未剔除失效IP");
                     string unsafeName=Path.Combine(root,new string('测',81)+".txt");File.WriteAllText(unsafeName,"名称超过UTF-8字节上限");
                     Check(!Protocol.SafeFileName(Path.GetFileName(unsafeName)),"非法文件名测试资料不成立");
-                    typeof(GuestWindow).GetMethod("AddFiles",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(guest,new object[]{new[]{sample,unsafeName,root,Path.Combine(root,"missing-file.txt")}});
+                    string emptyFolder=Path.Combine(root,"empty-folder");Directory.CreateDirectory(emptyFolder);
+                    typeof(GuestWindow).GetMethod("AddFiles",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(guest,new object[]{new[]{sample,unsafeName,emptyFolder,Path.Combine(root,"missing-file.txt")}});
                     Check(Field<ListBox>(guest,"files").Items.Count==1,"拖入非法条目未被跳过");Check(Field<Label>(guest,"state").Text.Contains("已忽略"),"跳过条目没有提示");
                     Field<ToggleSwitch>(guest,"upload").Checked=true;setItems.Invoke(picker,new object[]{new[]{"192.0.2.91"}});Field<Button>(guest,"start").PerformClick();
                     GuestTransfer session=Field<GuestTransfer>(guest,"session");Check(session!=null&&picker.Text=="127.0.0.1","开启前未刷新失效IP");

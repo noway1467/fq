@@ -15,6 +15,7 @@
   let pending = [], sending = false, closing = Promise.resolve();
   let recoveryNotice='';
   let recoveryAttempts=0;
+  let capabilityTimer=0, statusChecking=false;
   const status = (text, error = false) => {
     const activeRemote=mode==='remote'&&Boolean(token);
     $('status').textContent=text;$('status').hidden=!text||activeRemote;$('status').classList.toggle('error',error);
@@ -53,20 +54,25 @@
     finally { clearTimeout(timer); if(frameAbort===abort)frameAbort=null; }
   }
   function unavailable() { end('设备未连接或尚未开启远控', true, {navigate:true}); }
-  window.feiqCheck = async () => {
-    if(mode!=='remote')return;
+  window.feiqCheck = async (quiet=false) => {
+    if(mode!=='remote'||statusChecking)return;
+    statusChecking=true;
     const version=generation, activeToken=token;
     try {
       const data=await request('/api/status',undefined,4000);
       if(version!==generation||activeToken!==token)return;
+      if(token){
+        if(typeof data.clipboardWrite==='boolean')$('clipboard-send').hidden=!data.clipboardWrite;
+        if(typeof data.clipboardRead==='boolean')$('clipboard-read').hidden=phone||!data.clipboardRead;
+      }
       if(!data.remote)unavailable();
       else if((data.remotePaired||data.paired)&&!token&&!$('connect').disabled)connect(true);
     } catch (error) {
       if(version!==generation||activeToken!==token||error.status===404)return;
       if(error.status===401&&activeToken)recoverRemoteSession(version);
-      else if(token)status('连接状态检查暂时不可用，当前远控会话保持中。',true);
-      else status('连接状态暂时不可用，可点“连接上次”重试。',true);
-    }
+      else if(token&&!quiet)status('连接状态检查暂时不可用，当前远控会话保持中。',true);
+      else if(!token&&!quiet)status('连接状态暂时不可用，可点“连接上次”重试。',true);
+    } finally {statusChecking=false;}
   };
   function closePlayer() { $('player').pause(); $('player').removeAttribute('src'); $('player').load(); $('player-panel').hidden = true; }
   function logout(previousToken) {
@@ -77,6 +83,7 @@
   }
   function end(message, error = false, options = {}) {
     const previousToken = token; token = ''; generation++; listing++; clearTimeout(frameTimer); pending = []; drag = false;
+    clearTimeout(capabilityTimer);
     frameFailures=0;
     if(frameAbort){frameAbort.abort();frameAbort=null;}
     $('drag').setAttribute('aria-pressed', 'false'); $('disconnect').hidden = true; $('remote').hidden = true; $('files').hidden = true; $('login').hidden = false;
@@ -125,6 +132,13 @@
         display = Number($('display').value); frameFailures=0; viewport();
         if(recoveryNotice)status(recoveryNotice);
         frames(version);
+        clearTimeout(capabilityTimer);
+        const checkCapabilities=async()=>{
+          if(version!==generation||!token)return;
+          await window.feiqCheck(true);
+          if(version===generation&&token)capabilityTimer=setTimeout(checkCapabilities,3000);
+        };
+        capabilityTimer=setTimeout(checkCapabilities,3000);
       } else { trail = [{id: '', name: '共享文件夹'}]; await loadDirectory(); }
     } catch (error) {
       if(version===generation) {

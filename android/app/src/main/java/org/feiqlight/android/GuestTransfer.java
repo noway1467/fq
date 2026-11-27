@@ -12,12 +12,12 @@ import java.util.concurrent.*;
 /** 临时访客只访问本次文件；共享、远控的证书授权不参与此端口。 */
 final class GuestTransfer implements AutoCloseable {
     private static final class Download {
-        final LanNode.Source source;final String id;
-        Download(LanNode.Source source){this.source=source;id=SharedFiles.random(16);}
+        final LanNode.Source source;final String id,relative;
+        Download(LanNode.Source source,String relative){this.source=source;this.relative=relative;id=SharedFiles.random(16);}
     }
     private static final class Upload {
-        final String id,name;final long size;final File partial,target;long offset,time;boolean canceled,moved,placed,saved;String warning="";
-        Upload(String name,long size,File directory){this.name=name;this.size=size;id=SharedFiles.random(32);target=new File(directory,id);partial=new File(directory,".fq-guest-"+id+".part");}
+        final String id,name,relative;final long size;final File partial,target;long offset,time;boolean canceled,moved,placed,saved;String warning="";
+        Upload(String name,long size,File directory,String relative){this.name=name;this.size=size;this.relative=relative;id=SharedFiles.random(32);target=new File(directory,id);partial=new File(directory,".fq-guest-"+id+".part");}
     }
     static final long UPLOAD_QUOTA=100L*1024*1024*1024;
     static final int UPLOAD_FILE_LIMIT=1000, UPLOAD_TASK_LIMIT=4096;
@@ -39,6 +39,7 @@ final class GuestTransfer implements AutoCloseable {
     private final Context context;
     private final Map<String,Download> downloads=new LinkedHashMap<>();
     private final Map<String,Upload> uploads=new LinkedHashMap<>();
+    private final Map<String,Upload> requests=new HashMap<>();
     private final File directory;
     private final boolean allowUpload;
     private final ToolsHttp http;
@@ -56,10 +57,13 @@ final class GuestTransfer implements AutoCloseable {
         this(context,sources,allowUpload,loopback,loopback?null:new LanNetwork(context.getSystemService(android.net.ConnectivityManager.class)));
     }
     GuestTransfer(Context context,List<LanNode.Source> sources,boolean allowUpload,boolean loopback,LanNode.SocketBinding binding)throws IOException {
+        this(context,sources,Collections.emptyMap(),allowUpload,loopback,binding);
+    }
+    GuestTransfer(Context context,List<LanNode.Source> sources,Map<String,String> relatives,boolean allowUpload,boolean loopback,LanNode.SocketBinding binding)throws IOException {
         if(!loopback&&binding==null)throw new IOException("请先连接局域网");
         this.context=context.getApplicationContext();this.allowUpload=allowUpload;directory=new File(context.getFilesDir(),"received");Files.createDirectories(directory.toPath());
         if(sources.size()>1000)throw new IOException("单次最多 1000 个文件");
-        for(LanNode.Source source:sources){if(!Protocol.safeName(source.name())||source.size()<0)throw new IOException("文件名或大小无效");Download file=new Download(source);downloads.put(file.id,file);}
+        for(LanNode.Source source:sources){String relative=relatives.get(source.key());if(!Protocol.safeName(source.name())||source.size()<0||relative!=null&&(!Protocol.safeRelativePath(relative)||!relative.endsWith("/"+source.name())))throw new IOException("文件名、目录或大小无效");Download file=new Download(source,relative);downloads.put(file.id,file);}
         if(downloads.isEmpty()&&!allowUpload)throw new IOException("请先选择文件或开启接收");
         int minutes=lifetimeMinutes(context);
         until=System.currentTimeMillis()+TimeUnit.MINUTES.toMillis(minutes);
@@ -85,8 +89,8 @@ final class GuestTransfer implements AutoCloseable {
         if(request.path.equals("/favicon.ico")){response.bytes(204,"image/x-icon",new byte[0],"");return;}
         authorize(request);
         if(request.method.equals("GET")&&request.path.equals("/api/guest")) {
-            JSONArray list=new JSONArray();for(Download file:downloads.values())list.put(new JSONObject().put("id",file.id).put("name",file.source.name()).put("size",file.source.size()));
-            response.json(new JSONObject().put("files",list).put("upload",allowUpload).put("until",java.time.Instant.ofEpochMilli(until).toString()).put("limit",UPLOAD_QUOTA).put("countLimit",UPLOAD_FILE_LIMIT).toString(),"");return;
+            JSONArray list=new JSONArray();for(Download file:downloads.values())list.put(new JSONObject().put("id",file.id).put("name",file.source.name()).put("relativePath",file.relative).put("size",file.source.size()));
+            response.json(new JSONObject().put("files",list).put("upload",allowUpload).put("requestIds",true).put("folders",true).put("until",java.time.Instant.ofEpochMilli(until).toString()).put("limit",UPLOAD_QUOTA).put("countLimit",UPLOAD_FILE_LIMIT).toString(),"");return;
         }
         if((request.method.equals("GET")||request.method.equals("HEAD"))&&request.path.equals("/file")){send(request,response);return;}
         if(!allowUpload)throw new ToolsHttp.Failure(403,"对方未开启浏览器接收");
@@ -94,14 +98,24 @@ final class GuestTransfer implements AutoCloseable {
             if(!request.header("Content-Type").startsWith("application/json"))throw new ToolsHttp.Failure(400,"请求格式错误");
             JSONObject data=new JSONObject(new String(request.body,java.nio.charset.StandardCharsets.UTF_8));String name=data.optString("name");long size=data.optLong("size",-1);Upload upload;
             if(!Protocol.safeName(name)||size<0||size>UPLOAD_QUOTA)throw new ToolsHttp.Failure(400,"文件名或大小无效");
-            synchronized(this){check();if(uploads.size()>=UPLOAD_TASK_LIMIT)throw new ToolsHttp.Failure(409,"本次上传任务过多，请重新开启临时传输");
+            String key=data.has("requestId")?data.optString("requestId"):null,relative=data.has("relativePath")?data.optString("relativePath"):null;
+            if(key!=null&&!key.matches("[a-f0-9]{32}")||relative!=null&&(!Protocol.safeRelativePath(relative)||!relative.substring(relative.lastIndexOf('/')+1).equals(name)))throw new ToolsHttp.Failure(400,"上传标识或目录结构无效");
+            synchronized(this){check();
+                upload=key==null?null:requests.get(key);
+                if(upload!=null){if(upload.canceled)throw new ToolsHttp.Failure(410,"上传已取消");if(!upload.name.equals(name)||upload.size!=size||!Objects.equals(upload.relative,relative))throw new ToolsHttp.Failure(409,"上传标识已用于其他文件");response.json(new JSONObject().put("id",upload.id).put("offset",0).toString(),"");return;}
+                if(uploads.size()>=UPLOAD_TASK_LIMIT)throw new ToolsHttp.Failure(409,"本次上传任务过多，请重新开启临时传输");
                 if(activeUploads>=UPLOAD_FILE_LIMIT||size>UPLOAD_QUOTA-reserved)throw new ToolsHttp.Failure(409,"本次接收已达 1000 个文件或 100 GiB 上限，请重新开启");
-                LanNode.requireSpace(directory,size);upload=new Upload(name,size,directory);Files.createFile(upload.partial.toPath());uploads.put(upload.id,upload);reserved+=size;activeUploads++;}
+                LanNode.requireSpace(directory,size);upload=new Upload(name,size,directory,relative);Files.createFile(upload.partial.toPath());uploads.put(upload.id,upload);if(key!=null)requests.put(key,upload);reserved+=size;activeUploads++;}
             response.json(new JSONObject().put("id",upload.id).put("offset",0).toString(),"");return;
         }
-        Upload upload;synchronized(this){upload=uploads.get(request.parameter("id"));}if(upload==null)throw new ToolsHttp.Failure(404,"上传任务不存在");
+        String cancelKey=request.parameter("requestId");boolean cancelRequest=request.method.equals("POST")&&request.path.equals("/api/cancel")&&!cancelKey.isEmpty();
+        if(cancelRequest&&!cancelKey.matches("[a-f0-9]{32}"))throw new ToolsHttp.Failure(400,"上传标识无效");
+        Upload upload;synchronized(this){upload=cancelRequest?requests.get(cancelKey):uploads.get(request.parameter("id"));
+            if(upload==null){if(!cancelRequest)throw new ToolsHttp.Failure(404,"上传任务不存在");if(uploads.size()>=UPLOAD_TASK_LIMIT)throw new ToolsHttp.Failure(409,"本次上传任务过多，请重新开启临时传输");
+                // 取消先到时保留有界记录，迟到的准备请求不能重新占用配额。
+                upload=new Upload("",0,directory,null);upload.canceled=true;uploads.put(upload.id,upload);requests.put(cancelKey,upload);}}
         synchronized(upload) {
-            check();if(upload.canceled)throw new ToolsHttp.Failure(410,"上传已取消");
+            check();if(upload.canceled){if(cancelRequest){response.json("{\"ok\":true}","");return;}throw new ToolsHttp.Failure(410,"上传已取消");}
             if(request.method.equals("GET")&&request.path.equals("/api/upload-status")){response.json(new JSONObject().put("offset",upload.offset).put("complete",upload.saved).toString(),"");return;}
             if(request.method.equals("POST")&&request.path.equals("/api/cancel")){
                 if(upload.saved||upload.moved)throw new ToolsHttp.Failure(409,"文件已保存");
@@ -123,13 +137,13 @@ final class GuestTransfer implements AutoCloseable {
                 synchronized(this){check();if(!upload.moved){Files.move(upload.partial.toPath(),upload.target.toPath());upload.moved=true;upload.time=System.currentTimeMillis();}}
                 ReceivedStorage storage=new ReceivedStorage(context);
                 if(!upload.placed) {
-                    if(storage.tree()!=null)try(LanNode.Transfer task=new LanNode.Transfer()){storage.save(upload.target,upload.name,task);}
+                    if(storage.tree()!=null)try(LanNode.Transfer task=new LanNode.Transfer()){storage.save(upload.target,upload.name,upload.relative,task);}
                     catch(IOException e){upload.warning=e.getMessage();}
                     upload.placed=true;
                 }
                 if(!storage.exists(upload.target))throw new IOException("已接收的本机文件已删除，请重新选择文件上传");
                 // 文件已移动后记录仍可能写入失败；重试只补写记录，完成时间和原文件保持不变。
-                String meta=new JSONObject().put("size",upload.size).put("time",upload.time).toString();
+                String meta=new JSONObject().put("size",upload.size).put("time",upload.time).put("relativePath",upload.relative).toString();
                 if(!context.getSharedPreferences("guest_received",Context.MODE_PRIVATE).edit().putString(upload.id,upload.name).putString("meta:"+upload.id,meta).commit())throw new IOException("文件已保存，接收记录未能写入");
                 upload.saved=true;
                 if(!upload.warning.isEmpty())warning.accept(upload.warning);

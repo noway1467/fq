@@ -225,7 +225,7 @@ namespace FeiqLight
                     string sharePair = Cookie(request, PairCookie("share")), remotePair = Cookie(request, PairCookie("remote"));
                     bool sharePaired = !closed && folders.Length > 0 && pairings.Contains(sharePair, request.PairScope(Scope("share")));
                     bool remotePaired = !closed && remoteEnabled && pairings.Contains(remotePair, request.PairScope(Scope("remote")));
-                    response.Json(new { remote = remoteEnabled, share = folders.Length > 0, paired = sharePaired, remotePaired = remotePaired, trusted = remotePaired && pairings.AlwaysAllows(remotePair, request.PairScope(Scope("remote"))), platform = "windows" });
+                    response.Json(new { remote = remoteEnabled, share = folders.Length > 0, paired = sharePaired, remotePaired = remotePaired, trusted = remotePaired && pairings.AlwaysAllows(remotePair, request.PairScope(Scope("remote"))), platform = "windows", clipboardWrite = true, clipboardRead = preferences.Value.RemoteClipboardRead });
                 }
                 return;
             }

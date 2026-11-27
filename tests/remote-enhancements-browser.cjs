@@ -21,7 +21,7 @@ const server=http.createServer(async(request,response)=>{
   const chunks=[];for await(const chunk of request)chunks.push(chunk);
   const json=(status,value)=>{response.writeHead(status,{'Content-Type':'application/json'});response.end(JSON.stringify(value));};
   if(url.pathname==='/api/login'||url.pathname==='/api/reconnect')return json(200,{token:'isolated-session',mode:'remote'});
-  if(url.pathname==='/api/status')return json(200,{remote:true,remotePaired:true});
+  if(url.pathname==='/api/status')return json(200,{remote:true,remotePaired:true,clipboardRead:allowRead,clipboardWrite:true});
   if(url.pathname==='/api/displays')return json(200,{platform:phone?'android':'windows',clipboardWrite:true,clipboardRead:allowRead,chord:!phone,items:[{id:0,name:'测试屏幕'}]});
   if(url.pathname==='/api/input'){inputs.push(JSON.parse(Buffer.concat(chunks)));return json(200,{ok:true});}
   if(url.pathname==='/api/logout')return json(200,{ok:true});
@@ -58,6 +58,10 @@ const server=http.createServer(async(request,response)=>{
   try{
     await page.goto(`http://127.0.0.1:${server.address().port}/#remote`);await connect();
     check('real C# full frame decoded',(await pixel(16,16)).slice(0,3).every(value=>value>240));
+    await page.evaluate(()=>document.documentElement.dataset.native='true');
+    check('Android native toolbar removes zoom button',await page.locator('#zoom').isHidden());
+    await page.evaluate(()=>delete document.documentElement.dataset.native);
+    check('desktop browser keeps zoom button',await page.locator('#zoom').isVisible());
     const before=screens;await page.waitForTimeout(1050);check('idle polling stays bounded',screens-before<=5);
     frame=tile;await page.waitForFunction(()=>{const p=document.querySelector('#screen').getContext('2d').getImageData(16,16,1,1).data;return p[2]>150&&p[0]<90;});
     check('real C# dirty tile preserves untouched pixels',(await pixel(300,250)).slice(0,3).every(value=>value>240));
@@ -86,6 +90,10 @@ const server=http.createServer(async(request,response)=>{
     await page.locator('#keyboard').click();await page.locator('#remote-text').fill('中文 😀\nEnglish\t长文本');await page.locator('#clipboard-send').click();
     await page.waitForFunction(()=>document.querySelector('#remote-error').textContent.includes('已写入'));check('clipboard push is single explicit action',clipboardWrites===1&&clipboardText==='中文 😀\nEnglish\t长文本');
     await page.locator('#remote-text').fill('');await page.locator('#clipboard-read').click();await page.waitForFunction(()=>document.querySelector('#remote-text').value.includes('English'));check('clipboard pull fills text input',reads===1);
+    allowRead=false;await page.waitForFunction(()=>document.querySelector('#clipboard-read').hidden,null,{timeout:6500});
+    check('permission revocation hides read during active session',await page.locator('#remote').isVisible());
+    allowRead=true;await page.waitForFunction(()=>!document.querySelector('#clipboard-read').hidden,null,{timeout:6500});
+    check('permission enable restores button without reading or losing draft',reads===1&&(await page.locator('#remote-text').inputValue()).includes('English'));
     await page.locator('#remote-text').fill('');await page.evaluate(()=>Object.defineProperty(navigator,'clipboard',{value:{readText:()=>Promise.reject(new Error('denied'))},configurable:true}));
     await page.locator('#clipboard-send').click();await page.waitForFunction(()=>document.querySelector('#remote-error').textContent.includes('请先将文字粘贴到输入框'));check('WebView denied clipboard has input fallback',clipboardWrites===1);
     await page.screenshot({path:path.join(output,'keyboard-clipboard-dark.png')});

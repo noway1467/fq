@@ -155,9 +155,11 @@ namespace FeiqLight.Tests
                     }
                     Assert(Request(server.Port,"/api/clipboard",cookie,new JavaScriptSerializer().Serialize(new{text=stored}),TokenHeader(cookie)).Code==200&&writes==1,"授权推送失败");
                     server.SetRemoteClipboardRead(true);server.Share(folder);server.StopSharing();
+                    Assert((bool)Request(server.Port,"/api/status",cookie).Json()["clipboardRead"],"状态接口未同步开启读取");
                     Assert(server.RemoteClipboardRead&&new ToolsPreferences(profile).Value.RemoteClipboardRead,"保存共享覆盖剪贴板设置");
                     Assert((string)Request(server.Port,"/api/clipboard",cookie).Json()["text"]==stored&&reads==1,"单次读取失败");
                     server.SetRemoteClipboardRead(false);Assert(Request(server.Port,"/api/clipboard",cookie).Code==403&&reads==1,"关闭开关仍允许读取");
+                    Assert(!(bool)Request(server.Port,"/api/status",cookie).Json()["clipboardRead"],"状态接口未同步关闭读取");
                     server.SetRemoteClipboardRead(true);server.StopRemote();Assert(Request(server.Port,"/api/clipboard",cookie).Code==401,"停止后仍可读取");
                 }
                 using(ToolsService restarted=new ToolsService(0,true,profile))Assert(restarted.RemoteClipboardRead,"重启丢失读取开关");

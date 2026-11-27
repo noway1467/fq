@@ -191,7 +191,7 @@ namespace FeiqLight
 
         private sealed class ShareEntry
         {
-            internal string FullPath, Name, Folder, Extension, Kind;
+            internal string FullPath, Name, Folder, Extension, Kind, Relative;
             internal long Size;
             internal static ShareEntry FromPath(string path)
             {
@@ -249,7 +249,7 @@ namespace FeiqLight
         private readonly Button saveLifetime;
         private readonly Panel footerBar = new BufferedCanvas();
         private readonly Label state = Theme.Label("就绪", Theme.Small, Theme.Muted);
-        private readonly Button choose, removeBtn, clearBtn, refreshIp, copy, qr, openTasks, start;
+        private readonly Button choose, chooseFolder, removeBtn, clearBtn, refreshIp, copy, qr, openTasks, start;
         private readonly Timer timer = new Timer { Interval = 1000 };
         private readonly Timer copyReset = new Timer { Interval = 1800 };
         private readonly Timer windowSaveTimer = new Timer { Interval = 500 };
@@ -289,8 +289,14 @@ namespace FeiqLight
 
             // 主体工作区卡片：白底/深卡衬于 Canvas 之上，突出核心文件操作区。
             listTitle.AutoSize = true;
-            fileSummary.AutoSize = true;
+            fileSummary.AutoSize = false;fileSummary.AutoEllipsis=true;
             choose = Theme.IconButton("plus", "添加文件", delegate { PickFiles(); }, false);
+            chooseFolder = Theme.IconButton("folder", "添加文件夹", delegate {
+                if(session!=null)return;
+                try { string[] selected=SharedFolderPicker.Show(this);if(selected.Length>0)AddFiles(selected); }
+                catch(COMException error){SetState("无法选择文件夹："+error.Message,true);}
+            }, false);
+            tips.SetToolTip(chooseFolder,"添加文件夹（包含子目录文件，不发送空文件夹）");
             removeBtn = Theme.IconButton("trash", "移除所选", delegate { RemoveSelectedFile(); }, false);
             clearBtn = Theme.IconButton("eraser", "清空列表", delegate { ClearFiles(); }, false);
             tips.SetToolTip(choose, "添加待分享文件");
@@ -299,6 +305,7 @@ namespace FeiqLight
             filesHeader.Controls.Add(listTitle);
             filesHeader.Controls.Add(fileSummary);
             filesHeader.Controls.Add(choose);
+            filesHeader.Controls.Add(chooseFolder);
             filesHeader.Controls.Add(removeBtn);
             filesHeader.Controls.Add(clearBtn);
 
@@ -504,7 +511,8 @@ namespace FeiqLight
             int gap = (int)Math.Round(6 * s);
             clearBtn.Bounds = new Rectangle(innerW - iconSize, btnY, iconSize, iconSize);
             removeBtn.Bounds = new Rectangle(clearBtn.Left - gap - iconSize, btnY, iconSize, iconSize);
-            choose.Bounds = new Rectangle(removeBtn.Left - gap - iconSize, btnY, iconSize, iconSize);
+            chooseFolder.Bounds = new Rectangle(removeBtn.Left - gap - iconSize, btnY, iconSize, iconSize);
+            choose.Bounds = new Rectangle(chooseFolder.Left - gap - iconSize, btnY, iconSize, iconSize);
 
             int titleW = listTitle.PreferredWidth;
             listTitle.Bounds = new Rectangle(0, (hdrH - listTitle.PreferredHeight) / 2, titleW, listTitle.PreferredHeight);
@@ -666,6 +674,7 @@ namespace FeiqLight
             linkBox.BackColor = Theme.Ice;
 
             StyleToolbarIcon(choose, true);
+            StyleToolbarIcon(chooseFolder, false);
             StyleToolbarIcon(removeBtn, false);
             StyleToolbarIcon(clearBtn, false);
             clearBtn.ForeColor = Theme.Muted;
@@ -740,20 +749,25 @@ namespace FeiqLight
             files.BeginUpdate();
             foreach (string raw in paths)
             {
-                if (string.IsNullOrWhiteSpace(raw) || !File.Exists(raw) || Directory.Exists(raw)) { skipped++; continue; }
+                if (string.IsNullOrWhiteSpace(raw)) { skipped++; continue; }
                 try
                 {
-                    FileInfo info = new FileInfo(raw);
-                    if ((ReadAttributes(info) & FileAttributes.ReparsePoint) != 0 || !Protocol.SafeFileName(info.Name)) { skipped++; continue; }
-                    if (!existing.Add(info.FullName)) continue;
-                    if (files.Items.Count >= 1000) { SetState("单次最多选择 1000 个文件", true); break; }
-                    files.Items.Add(ShareEntry.FromPath(info.FullName));
+                    var expanded=SendBatch.Expand(new[]{raw});
+                    if(files.Items.Count+expanded.Count(item=>!existing.Contains(item.Path))>1000){files.EndUpdate();UpdateActions();SetState("单次最多选择 1000 个文件",true);return;}
+                    foreach(var item in expanded) {
+                        FileInfo info=new FileInfo(item.Path);
+                        if((ReadAttributes(info)&FileAttributes.ReparsePoint)!=0){skipped++;continue;}
+                        if(!existing.Add(info.FullName))continue;
+                        ShareEntry entry=ShareEntry.FromPath(info.FullName);entry.Relative=item.Relative;
+                        if(item.Relative!=null)entry.Folder=item.Relative;
+                        files.Items.Add(entry);
+                    }
                 }
                 catch (IOException) { skipped++; }
                 catch (UnauthorizedAccessException) { skipped++; }
             }
             files.EndUpdate();
-            if (skipped > 0) SetState("已忽略文件夹、链接及名称不安全或不可读取的条目，仅支持普通文件", false);
+            if (skipped > 0) SetState("已忽略空文件夹、链接及名称不安全或不可读取的条目", false);
             else SetState("已就绪，点击「开启临时传输」生成链接", false);
             UpdateActions();
         }
@@ -944,7 +958,7 @@ namespace FeiqLight
                 ReloadAddresses();
                 if (addressPicker.SelectedItem == null) throw new IOException("没有可用的局域网，请先连接 Wi-Fi、热点或以太网。");
                 SaveLifetime();
-                session = new GuestTransfer(files.Items.Cast<ShareEntry>().Select(e => e.FullPath), network.Settings.ReceiveFolder, upload.Checked, network.LoopbackOnly, network.Settings.GuestLifetimeMinutes);
+                session = new GuestTransfer(files.Items.Cast<ShareEntry>().Select(e => new SendBatch.Item{Path=e.FullPath,Relative=e.Relative}), network.Settings.ReceiveFolder, upload.Checked, network.LoopbackOnly, network.Settings.GuestLifetimeMinutes);
                 session.Received = (path, name) => main.Ui(() =>
                 {
                     if (!IsDisposed) hasReceivedFiles = true;
@@ -979,7 +993,7 @@ namespace FeiqLight
             StyleActionButton(start, active ? 3 : 4, 8);
             start.Invalidate();
 
-            choose.Enabled = !active;
+            choose.Enabled = chooseFolder.Enabled = !active;
             removeBtn.Enabled = !active && files.SelectedIndex >= 0;
             clearBtn.Enabled = !active && count > 0;
             upload.Enabled = !active;

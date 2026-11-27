@@ -75,7 +75,9 @@ public final class GuestLifetimeTest {
                 settle(service);node.start();set(service,"node",node);MainActivity activity=ac.get();invoke(activity,"showGuest");Dialog dialog=ShadowDialog.getLatestDialog();
                 EditText input=input(dialog);assertEquals("60",input.getText().toString());input.setText("1441");button(dialog,"保存有效期").performClick();assertNotNull(input.getError());assertEquals(60,GuestTransfer.lifetimeMinutes(context));
                 input.setText("120");button(dialog,"保存有效期").performClick();assertNull(input.getError());assertEquals(120,GuestTransfer.lifetimeMinutes(context));
-                screenshot(dialog,"android-guest-settings-"+(dark?"dark":"light"));dialog.dismiss();
+                screenshot(dialog,"android-guest-settings-"+(dark?"dark":"light"));
+                Button folderButton=button(dialog,"添加文件夹");assertTrue(folderButton.getWidth()>0);assertTrue(folderButton.getRight()<=((View)folderButton.getParent()).getWidth());
+                dialog.dismiss();
                 invoke(activity,"settings");Dialog settings=ShadowDialog.getLatestDialog();button(settings,"保存").performClick();settle(service);assertEquals(120,GuestTransfer.lifetimeMinutes(context));if(settings.isShowing())settings.dismiss();
                 invoke(activity,"showGuest");dialog=ShadowDialog.getLatestDialog();assertEquals("120",input(dialog).getText().toString());dialog.dismiss();
                 try(GuestTransfer server=new GuestTransfer(context,Collections.emptyList(),true,true)) {

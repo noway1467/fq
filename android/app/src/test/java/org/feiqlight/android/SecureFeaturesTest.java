@@ -36,6 +36,7 @@ public final class SecureFeaturesTest {
             result.addRow(row);return result;
         }
         @Override public Cursor queryChildDocuments(String parent,String[] projection,String sort){return queryDocument("file",projection);}
+        @Override public boolean isChildDocument(String parent,String child){return parent.equals("root")&&child.equals("file");}
         @Override public ParcelFileDescriptor openDocument(String id,String mode,CancellationSignal signal)throws FileNotFoundException{return ParcelFileDescriptor.open(file,ParcelFileDescriptor.MODE_READ_ONLY);}
     }
     @Test public void stableDocumentRequiresPersistentPermissionAndChecksChangedSource()throws Exception{
@@ -45,6 +46,20 @@ public final class SecureFeaturesTest {
         try{new DocumentSource(context,uri);fail("无持久权限也接受直接读取");}catch(IOException expected){}
         context.getContentResolver().takePersistableUriPermission(uri,Intent.FLAG_GRANT_READ_URI_PERMISSION);
         DocumentSource source=new DocumentSource(context,uri);try(InputStream input=source.open(2)){assertEquals(3,input.read());assertEquals(4,input.read());assertEquals(-1,input.read());}
+        Uri tree=DocumentsContract.buildTreeDocumentUri(info.authority,"root"),child=DocumentsContract.buildDocumentUriUsingTree(tree,"file");
+        try{new DocumentSource(context,child,tree);fail("无目录权限也接受读取");}catch(IOException expected){}
+        context.getContentResolver().takePersistableUriPermission(tree,Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        java.util.List<SendFiles.Entry> entries=SendFiles.folder(context,tree);assertEquals(1,entries.size());
+        DocumentSource nested=new DocumentSource(context,entries.get(0).uri,tree);
+        try(GuestTransfer guest=new GuestTransfer(context,java.util.Collections.singletonList(nested),java.util.Collections.singletonMap(nested.key(),entries.get(0).relative),false,true,null)){
+            java.net.HttpURLConnection connection=(java.net.HttpURLConnection)new java.net.URL(guest.url("127.0.0.1").split("/#")[0]+"/api/guest").openConnection(java.net.Proxy.NO_PROXY);connection.setRequestProperty("X-FQ-Guest",guest.token);
+            org.json.JSONObject entry;
+            try(InputStream input=connection.getInputStream()){entry=new org.json.JSONObject(new String(input.readAllBytes(),java.nio.charset.StandardCharsets.UTF_8)).getJSONArray("files").getJSONObject(0);assertEquals("文档.txt/文档.txt",entry.getString("relativePath"));}finally{connection.disconnect();}
+            connection=(java.net.HttpURLConnection)new java.net.URL("http://127.0.0.1:"+guest.port()+"/file?id="+entry.getString("id")).openConnection(java.net.Proxy.NO_PROXY);connection.setRequestProperty("X-FQ-Guest",guest.token);
+            try(InputStream input=connection.getInputStream()){assertArrayEquals(new byte[]{1,2,3,4},input.readAllBytes());}finally{connection.disconnect();}
+        }
+        context.getContentResolver().releasePersistableUriPermission(tree,Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        try{new DocumentSource(context,child,tree);fail("撤销目录授权仍允许新分享");}catch(IOException expected){}
         documents.modified++;try{source.open(0);fail("同大小、已改变的来源仍可读取");}catch(IOException expected){assertTrue(expected.getMessage().contains("改变"));}
     }
     @Test public void versionEightUpgradeAddsTransfersWithoutReplacingMessages()throws Exception{

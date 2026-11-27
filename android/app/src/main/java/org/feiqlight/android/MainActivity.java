@@ -2172,6 +2172,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         fileAction(content,actions,"复制文件名",()->copyText("文件名",item.file.name));
     }
     private String guestFileName(Uri uri) {
+        if(DocumentsContract.isTreeUri(uri)&&!DocumentsContract.isDocumentUri(this,uri))uri=DocumentsContract.buildDocumentUriUsingTree(uri,DocumentsContract.getTreeDocumentId(uri));
         try(android.database.Cursor cursor=getContentResolver().query(uri,
                 new String[]{android.provider.OpenableColumns.DISPLAY_NAME},null,null,null)) {
             if(cursor!=null&&cursor.moveToFirst()){
@@ -2266,7 +2267,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
             });
             return;
         }
-        String summaryText=guestFiles.isEmpty()?"未选择分享文件（可仅开启接收）":"已选 "+guestFiles.size()+" 个文件";
+        String summaryText=guestFiles.isEmpty()?"未选择分享文件（可仅开启接收）":"已选 "+guestFiles.size()+" 项（文件或文件夹）";
         TextView fileSummary=text(summaryText,14,INK);
         fileSummary.setTypeface(null,Typeface.BOLD);
         fileSummary.setPadding(0,dp(10),0,dp(4));
@@ -2278,7 +2279,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
                 if(i>0)preview.append('\n');
                 preview.append("· ").append(guestFileName(guestFiles.get(i)));
             }
-            if(guestFiles.size()>show)preview.append("\n等共 ").append(guestFiles.size()).append(" 个文件");
+            if(guestFiles.size()>show)preview.append("\n等共 ").append(guestFiles.size()).append(" 项");
             TextView listPreview=text(preview.toString(),12,MUTED);
             listPreview.setLineSpacing(dp(2),1);
             listPreview.setPadding(0,0,0,dp(8));
@@ -2292,6 +2293,8 @@ public final class MainActivity extends Activity implements ChatService.Observer
         LinearLayout.LayoutParams pickParams=weight();
         if(!guestFiles.isEmpty())pickParams.rightMargin=dp(8);
         pickRow.addView(pickBtn,pickParams);
+        Button folderBtn=button("添加文件夹",false);folderBtn.setMinHeight(dp(40));folderBtn.setPadding(dp(10),dp(6),dp(10),dp(6));
+        pickRow.addView(folderBtn,new LinearLayout.LayoutParams(-2,-2));
         Button clearBtn=null;
         if(!guestFiles.isEmpty()) {
             clearBtn=button("清空",false);clearBtn.setMinHeight(dp(40));clearBtn.setPadding(dp(14),dp(6),dp(14),dp(6));
@@ -2337,6 +2340,9 @@ public final class MainActivity extends Activity implements ChatService.Observer
                         27);
             }catch(ActivityNotFoundException e){error("系统文件选择器不可用");}
         });
+        folderBtn.setOnClickListener(v->{dialog.dismiss();try{
+            startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION|Intent.FLAG_GRANT_PREFIX_URI_PERMISSION),28);
+        }catch(ActivityNotFoundException e){error("系统没有目录选择器");}});
         if(clearBtn!=null)clearBtn.setOnClickListener(v->{dialog.dismiss();guestFiles.clear();showGuest();});
     }
     private boolean saveGuestLifetime(EditText input) {
@@ -3638,6 +3644,11 @@ public final class MainActivity extends Activity implements ChatService.Observer
         if(request==25&&(result!=RESULT_OK||data==null||data.getData()==null)){avatarImageRequest=null;return;}
         if(result!=RESULT_OK||data==null) return;
         if(request!=20&&request!=27&&data.getData()==null) return;
+        if(request==28){try{
+            Uri tree=data.getData();if(!DocumentsContract.isTreeUri(tree))throw new IllegalArgumentException("请选择系统授权的文件夹");
+            getContentResolver().takePersistableUriPermission(tree,Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            if(!guestFiles.contains(tree))guestFiles.add(tree);showGuest();
+        }catch(RuntimeException e){error("文件夹授权失败："+e.getMessage());}return;}
         if(request==27) {
             try {
                 List<Uri> chosen=selectedFiles(data);

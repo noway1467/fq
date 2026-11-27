@@ -86,8 +86,13 @@ public final class ChatService extends Service {
         if(!online()){showError("请先连接局域网");done.accept(false);return;}
         stopGuest();long epoch=guestEpoch;LanNetwork route=lanNetwork;
         queue(()->{try {
-            List<LanNode.Source> sources=new ArrayList<>();for(Uri uri:files)sources.add(new DocumentSource(this,uri));
-            GuestTransfer created=new GuestTransfer(this,sources,upload,false,route);created.received=()->main.post(this::changed);created.warning=this::showError;
+            List<LanNode.Source> sources=new ArrayList<>();Map<String,String> relatives=new HashMap<>();Set<String> selected=new HashSet<>();
+            for(Uri uri:files){
+                if(android.provider.DocumentsContract.isTreeUri(uri)&&!android.provider.DocumentsContract.isDocumentUri(this,uri)){
+                    for(SendFiles.Entry entry:SendFiles.folder(this,uri))if(selected.add(entry.uri.toString())){sources.add(new DocumentSource(this,entry.uri,uri));relatives.put(entry.uri.toString(),entry.relative);if(sources.size()>1000)throw new IOException("单次最多 1000 个文件");}
+                }else if(selected.add(uri.toString()))sources.add(new DocumentSource(this,uri));
+            }
+            GuestTransfer created=new GuestTransfer(this,sources,relatives,upload,false,route);created.received=()->main.post(this::changed);created.warning=this::showError;
             main.post(()->{if(stopped||epoch!=guestEpoch||!online()){created.close();done.accept(false);return;}guestTransfer=created;done.accept(true);});
         }catch(Exception e){fail(e);main.post(()->done.accept(false));}});
     }
@@ -212,10 +217,11 @@ public final class ChatService extends Service {
             for(Map.Entry<String,?> entry:guests.getAll().entrySet()) {
                 if(!entry.getKey().matches("[a-f0-9]{64}")||!(entry.getValue() instanceof String))continue;
                 File local=new File(new File(getFilesDir(),"received"),entry.getKey());
-                long size=local.length(),time=local.lastModified();String metadata=guests.getString("meta:"+entry.getKey(),"");
-                if(!metadata.isEmpty())try {org.json.JSONObject meta=new org.json.JSONObject(metadata);size=Math.max(0,meta.optLong("size",size));time=Math.max(0,meta.optLong("time",time));}
+                long size=local.length(),time=local.lastModified();String relative=null,metadata=guests.getString("meta:"+entry.getKey(),"");
+                if(!metadata.isEmpty())try {org.json.JSONObject meta=new org.json.JSONObject(metadata);size=Math.max(0,meta.optLong("size",size));time=Math.max(0,meta.optLong("time",time));String path=meta.optString("relativePath","");if(Protocol.safeRelativePath(path)&&path.endsWith("/"+entry.getValue()))relative=path;}
                 catch(org.json.JSONException e){showError("访客接收记录损坏，已使用本机文件信息："+entry.getValue());}
                 Protocol.Attachment file=new Protocol.Attachment(0,(String)entry.getValue(),size,0);
+                file.relativePath=relative;
                 LanNode.Message message=new LanNode.Message();message.number=Long.parseLong(entry.getKey().substring(0,15),16);message.outgoing=false;message.time=time;message.files=Collections.singletonList(file);message.text="[文件] "+file.name;message.state="已保存";
                 ChatStore.FileTask task=new ChatStore.FileTask("browser-guests",message,file);task.guestFile=local;task.stored=storage.exists(local);rows.add(task);
             }

@@ -8,6 +8,10 @@
   --line: #e2e8f0;
   --blue: #2580e8;
   --blue-strong: #1b68c4;
+  --action-ink: #1765b1;
+  --action-fill: #1765b1;
+  --action-hover: #135795;
+  --on-action: #ffffff;
   --tint: #e8f2fe;
   --tint-border: #c5defc;
   --danger: #cf343e;
@@ -32,6 +36,10 @@
     --line: #2a3a4c;
     --blue: #52a4ff;
     --blue-strong: #7bbbff;
+    --action-ink: #7bbbff;
+    --action-fill: #52a4ff;
+    --action-hover: #7bbbff;
+    --on-action: #102233;
     --tint: #1d3550;
     --tint-border: #2b4d74;
     --danger: #ff8a90;
@@ -161,11 +169,12 @@ button, .download {
   text-decoration: none;
   cursor: pointer;
   white-space: nowrap;
-  transition: background 0.16s ease, border-color 0.16s ease, color 0.16s ease, transform 0.08s ease;
+  /* 主题切换时底色与文字须同帧更新，否则浅色控件会短暂留在深色卡片上。 */
+  transition: transform 0.08s ease;
 }
 
 button:active, .download:active { transform: translateY(1px); }
-button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+button:disabled { cursor: not-allowed; transform: none; }
 :focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 
 .tool-btn {
@@ -176,25 +185,25 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 .tool-btn:hover, .tool-btn[aria-expanded="true"] {
   background: var(--tint);
   border-color: var(--tint-border);
-  color: var(--blue);
+  color: var(--action-ink);
 }
 
 button.primary {
-  background: var(--blue);
-  border-color: var(--blue);
-  color: #fff;
+  background: var(--action-fill);
+  border-color: var(--action-fill);
+  color: var(--on-action);
 }
-button.primary:hover { background: var(--blue-strong); border-color: var(--blue-strong); }
+button.primary:hover { background: var(--action-hover); border-color: var(--action-hover); }
 
 button.soft, .download {
   background: var(--tint);
   border-color: var(--tint-border);
-  color: var(--blue);
+  color: var(--action-ink);
 }
 button.soft:hover, .download:hover {
-  background: var(--blue);
-  border-color: var(--blue);
-  color: #fff;
+  background: var(--action-fill);
+  border-color: var(--action-fill);
+  color: var(--on-action);
 }
 
 button.danger {
@@ -213,6 +222,12 @@ button.danger:hover {
   border-color: var(--line);
   cursor: default;
   pointer-events: none;
+}
+
+button:disabled, button.primary:disabled, button.soft:disabled, button.tool-btn:disabled {
+  background: var(--card);
+  border-color: var(--line);
+  color: var(--muted);
 }
 
 .status-card {
@@ -373,7 +388,6 @@ h2 {
   gap: 14px;
   padding: 13px 16px;
   border-bottom: 1px solid var(--line);
-  transition: background 0.14s ease;
 }
 
 .file:last-child { border-bottom: 0; }
@@ -461,7 +475,6 @@ h2 {
   background: var(--card);
   cursor: pointer;
   text-align: center;
-  transition: background 0.16s ease, border-color 0.16s ease;
 }
 
 #drop:hover, #drop.over {
@@ -532,6 +545,7 @@ progress.done { accent-color: var(--green); }
   border-color: color-mix(in srgb, var(--green) 28%, var(--line));
 }
 
+#choose-folder { margin-top: 10px; }
 [hidden] { display: none !important; }
 
 @media (max-width: 640px) {

@@ -44,6 +44,7 @@ public final class PhoneRemoteTest {
             assertEquals(401,call(server.port(),"/api/clipboard","","{\"text\":\"test\"}",true).code);
             Reply session=login(server);JSONObject displays=call(server.port(),"/api/displays",session.session,null,false).json();
             assertTrue(displays.getBoolean("clipboardWrite"));assertFalse(displays.getBoolean("clipboardRead"));
+            assertFalse(call(server.port(),"/api/status",session.session,null,false).json().getBoolean("clipboardRead"));
             assertEquals(403,call(server.port(),"/api/clipboard",session.session,null,false).code);
             assertEquals(403,call(server.port(),"/api/clipboard",session.session,"{\"text\":\"test\"}",false).code);
             for(String data:new String[]{"{\"text\":\"\"}","{\"text\":1}","{\"text\":\"a\\u0000b\"}","{\"text\":\"\\ud800\"}",new JSONObject().put("text","x".repeat(4001)).toString()})assertEquals(data.substring(0,Math.min(40,data.length())),400,call(server.port(),"/api/clipboard",session.session,data,true).code);

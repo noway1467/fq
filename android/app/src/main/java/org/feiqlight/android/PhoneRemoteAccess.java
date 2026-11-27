@@ -84,7 +84,7 @@ final class PhoneRemoteAccess implements AutoCloseable {
         if(request.method.equals("GET")&&request.path.equals("/api/status")){
             synchronized(gate){
                 String remembered=cookie(request,pairName());boolean paired=!closed&&pairings.contains(remembered,request.pairScope("phone-remote"));
-                response.json(new JSONObject().put("remote",!closed).put("paired",paired).put("trusted",paired&&pairings.alwaysAllows(remembered,request.pairScope("phone-remote"))).put("platform","android").toString(),"");
+                response.json(new JSONObject().put("remote",!closed).put("paired",paired).put("trusted",paired&&pairings.alwaysAllows(remembered,request.pairScope("phone-remote"))).put("platform","android").put("clipboardWrite",true).put("clipboardRead",false).toString(),"");
             }
             return;
         }

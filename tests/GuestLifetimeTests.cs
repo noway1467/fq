@@ -48,6 +48,10 @@ namespace FeiqLight.Tests
                         main.Show();window.Show();Application.DoEvents();var input=Field<TextBox>(window,"lifetime");
                         Control defaultSave=Field<Button>(window,"saveLifetime");Check(defaultSave.Parent.ClientRectangle.Contains(defaultSave.Bounds),"默认窗口有效期按钮越界");
                         Check(input.Text=="60","UI 默认值");
+                        string folder=Path.Combine(root,"目录-"+(dark?"暗":"亮"));Directory.CreateDirectory(Path.Combine(folder,"子目录"));File.WriteAllText(Path.Combine(folder,"子目录","中文 English 长文件名.txt"),"folder");
+                        typeof(GuestWindow).GetMethod("AddFiles",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(window,new object[]{new[]{folder}});
+                        Check(Field<ListBox>(window,"files").Items.Count==1,"文件夹入口未展开文件");
+                        Check(Field<Button>(window,"chooseFolder").Visible,"文件夹按钮不可见");
                         foreach(string invalid in new[]{"","0","1441","-1","1.5","abc","99999999"}) {
                             input.Text=invalid;Click(window,"saveLifetime");
                             Check(store.LoadSettings().GuestLifetimeMinutes==60,"非法 UI 输入被保存");
@@ -65,11 +69,14 @@ namespace FeiqLight.Tests
                         Check((session.Until-DateTime.UtcNow).TotalMinutes>119.8&&(session.Until-DateTime.UtcNow).TotalMinutes<=120,"链接没有使用设置值");
                         Check(!input.Enabled&&!Field<Button>(window,"saveLifetime").Enabled,"当前会话允许修改有效期");
                         Check(Get(session,session.Token).Contains(session.Until.ToString("o")),"网页到期时间与会话不同");
+                        Check(Get(session,session.Token).Contains("relativePath"),"窗口到服务端丢失目录路径");
                         try{Get(session,new string('0',64));throw new Exception("接受无效令牌");}catch(WebException e){Check(((HttpWebResponse)e.Response).StatusCode==HttpStatusCode.Forbidden,"令牌错误状态");e.Response.Close();}
                         string suffix=dark?"dark":"light";
                         Snapshot(window,Path.Combine(output,"guest-active-"+suffix+".png"));
                         window.Size=window.MinimumSize;Application.DoEvents();Control save=Field<Button>(window,"saveLifetime");
                         Check(save.Parent.ClientRectangle.Contains(save.Bounds),"最小窗口有效期按钮越界："+save.Bounds+" parent="+save.Parent.ClientRectangle+" window="+window.Size);
+                        Button[] actions=new[]{"choose","chooseFolder","removeBtn","clearBtn"}.Select(name=>Field<Button>(window,name)).ToArray();
+                        for(int i=0;i<actions.Length;i++){Check(actions[i].Parent.ClientRectangle.Contains(actions[i].Bounds),"文件工具栏越界");for(int j=i+1;j<actions.Length;j++)Check(!actions[i].Bounds.IntersectsWith(actions[j].Bounds),"文件工具栏重叠");}
                         Snapshot(window,Path.Combine(output,"guest-min-"+suffix+".png"));
                         window.Stop();Check(!session.Active,"主动关闭未失效");
                         input.Text="1";Click(window,"start");session=Field<GuestTransfer>(window,"session");

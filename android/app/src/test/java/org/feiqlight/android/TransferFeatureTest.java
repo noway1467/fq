@@ -109,6 +109,25 @@ public final class TransferFeatureTest {
             assertEquals(200,post(server,"/api/cancel?id="+ids.get(1),new JSONObject()).code);assertEquals("取消后未释放有效文件名额",200,post(server,"/api/prepare",new JSONObject().put("name","new.txt").put("size",0)).code);
         }
     }
+    @Test public void guestRequestCancellationAndFolderPaths()throws Exception {
+        Context context=RuntimeEnvironment.getApplication();FileFeaturesTest.Docs docs=documents(context);ReceivedStorage storage=new ReceivedStorage(context);storage.choose(documentTree(),Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+        try(GuestTransfer server=new GuestTransfer(context,Collections.emptyList(),true,true)) {
+            String key="a".repeat(32);JSONObject data=new JSONObject().put("name","a.txt").put("size",7).put("requestId",key);
+            String first=post(server,"/api/prepare",data).json().getString("id");assertEquals(64,first.length());assertEquals(first,post(server,"/api/prepare",data).json().getString("id"));
+            assertEquals(409,post(server,"/api/prepare",new JSONObject(data.toString()).put("size",8)).code);
+            assertEquals(200,post(server,"/api/cancel?requestId="+key,new JSONObject()).code);assertEquals(200,post(server,"/api/cancel?requestId="+key,new JSONObject()).code);
+            assertEquals(410,post(server,"/api/prepare",data).code);assertEquals(0L,field(server,"reserved"));
+            String early="b".repeat(32);assertEquals(200,post(server,"/api/cancel?requestId="+early,new JSONObject()).code);assertEquals(410,post(server,"/api/prepare",data.put("requestId",early)).code);
+            assertEquals(400,post(server,"/api/cancel?requestId=bad",new JSONObject()).code);
+            for(String invalid:new String[]{"../a.txt","a/../../a.txt","x/other.txt","/a.txt","x\\a.txt"})assertEquals(400,post(server,"/api/prepare",new JSONObject().put("name","a.txt").put("size",0).put("relativePath",invalid)).code);
+            for(int i=0;i<2;i++){
+                String id=post(server,"/api/prepare",new JSONObject().put("name","a.txt").put("size",0).put("relativePath","资料/子目录/a.txt").put("requestId",String.format("%032x",i+1))).json().getString("id");
+                assertEquals(200,post(server,"/api/finish?id="+id,new JSONObject()).code);
+                assertEquals("资料/子目录/a.txt",new JSONObject(context.getSharedPreferences("guest_received",0).getString("meta:"+id,"")).getString("relativePath"));
+            }
+            assertEquals(2,docs.files.size());assertTrue(docs.names.containsValue("a.txt"));assertTrue(docs.names.containsValue("a (1).txt"));assertEquals(2,docs.directories.size());
+        }
+    }
     @Test public void guestCancelHistoryBound()throws Exception {
         try(GuestTransfer server=new GuestTransfer(RuntimeEnvironment.getApplication(),Collections.emptyList(),true,true)) {
             for(int i=0;i<4096;i++){Reply ready=post(server,"/api/prepare",new JSONObject().put("name","empty.txt").put("size",0));assertEquals(200,ready.code);assertEquals(200,post(server,"/api/cancel?id="+ready.json().getString("id"),new JSONObject()).code);}
