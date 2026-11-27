@@ -31,4 +31,4 @@
 
 Windows 使用 .NET Framework 4.8，Android 使用 JDK 17 与 Android SDK 36；PowerShell 7 执行 `./build.ps1 -Test`、`./build-android.ps1 -Test`，安全与互通回归见 `./tests/secure-upgrade.ps1`、`./tests/android-interop.ps1 -Secure -LargeFiles`。
 
-表情与头像素材来自 [Twemoji](https://github.com/jdecked/twemoji)（[CC BY 4.0](docs/Twemoji-LICENSE-GRAPHICS.txt)）；二维码使用内置 [Project Nayuki QR Code generator](https://www.nayuki.io/page/qr-code-generator-library)（MIT）。
+本项目源码以 [MIT 许可证](LICENSE) 发布。表情与头像素材来自 [Twemoji](https://github.com/jdecked/twemoji)（[CC BY 4.0](docs/Twemoji-LICENSE-GRAPHICS.txt)）；二维码使用内置 [Project Nayuki QR Code generator](https://www.nayuki.io/page/qr-code-generator-library)（MIT）。
