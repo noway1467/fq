@@ -32,6 +32,7 @@ public final class Protocol {
         public int command;
         public int replyPort;
         public boolean reverseConnections;
+        public boolean batchFiles;
         public String login, host, body, extra, deviceId, avatar, fingerprint;
         public int mode() { return command & 255; }
     }
@@ -151,6 +152,7 @@ public final class Protocol {
                 } catch(NumberFormatException overflow) { continue; }
             }
             for(int i=2;i<content.length;i++)if(content[i].equals("FQREV=1"))p.reverseConnections=true;
+            for(int i=2;i<content.length;i++)if(content[i].equals("FQBATCH=1"))p.batchFiles=true;
             return p;
         } catch (IllegalArgumentException | IndexOutOfBoundsException | CharacterCodingException e) { return null; }
     }

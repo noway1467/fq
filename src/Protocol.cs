@@ -15,6 +15,7 @@ namespace FeiqLight
         public string Avatar;
         public string Fingerprint;
         public bool ReverseConnections;
+        public bool BatchFiles;
         public int ReplyPort;
         public string Host;
         public uint Command;
@@ -145,6 +146,7 @@ namespace FeiqLight
                     && port >= 1024 && port <= 65535) packet.ReplyPort = port;
             }
             packet.ReverseConnections = body.Skip(2).Contains("FQREV=1");
+            packet.BatchFiles = body.Skip(2).Contains("FQBATCH=1");
             return packet.Login.Length <= MaxHeaderFieldChars && packet.Host.Length <= MaxHeaderFieldChars;
         }
         public static bool SafeFileName(string name)

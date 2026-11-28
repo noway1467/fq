@@ -101,7 +101,10 @@ public final class NetworkRecoveryTest {
             try(LanNode.Transfer transfer=new LanNode.Transfer()) {
                 local.receiveFile(remotePeer,offered.number,offered.files.get(0),destination,transfer,null);
                 assertTrue("安全文件接收未执行受限连接回退",route.retryChecks.get()>before);
-                Socket attached=(Socket)field(transfer,"socket");assertNotNull(attached);assertFalse("取消句柄仍指向第一次源绑定 socket",route.bound.contains(attached));assertTrue(attached.isClosed());
+                assertNull("完成的单项任务不能继续持有可复用连接的取消权",field(transfer,"socket"));
+                Object channel=field(local,"idleFileConnection");assertNotNull("新端直连应保留有界批量连接",channel);
+                Socket reusable=(Socket)field(channel,"raw");assertFalse("批量连接仍指向第一次源绑定 socket",route.bound.contains(reusable));
+                assertFalse(reusable.isClosed());transfer.close();assertFalse("关闭已完成任务不能取消下一件的连接",reusable.isClosed());
             }
             assertArrayEquals(payload,Files.readAllBytes(destination.toPath()));assertEquals(offered.files.get(0).sha256,SecureIdentity.hashFile(destination));
             assertTrue(localEvents.errors.toString(),localEvents.errors.isEmpty());assertTrue(remoteEvents.errors.toString(),remoteEvents.errors.isEmpty());

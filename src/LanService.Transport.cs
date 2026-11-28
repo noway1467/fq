@@ -15,7 +15,7 @@ namespace FeiqLight
 {
     public sealed partial class LanService
     {
-        private void CancelReverseRequests(){transportEpoch++;foreach(ReverseRequest request in reverseRequests.Values)request.Ready.Set();reverseRequests.Clear();}
+        private void CancelReverseRequests(){CloseFileBatches(null);FlushOfferCompletions();transportEpoch++;foreach(ReverseRequest request in reverseRequests.Values)request.Ready.Set();reverseRequests.Clear();}
 
         private void Send(byte[] bytes, IPEndPoint endpoint)
         {

@@ -15,6 +15,88 @@ namespace FeiqLight
 {
     public sealed partial class LanService
     {
+        private const int CompletedOfferFlushCount = 32, CompletedOfferFlushDelay = 250, CompletionJournalLimit = 256 * 1024;
+        private int unflushedOfferCompletions;
+        private Timer offerFlushTimer;
+        private sealed class StoredCompletion
+        {
+            internal string Sha256, DeviceId, Fingerprint;
+            internal long Expires;
+        }
+
+        private void FlushOfferCompletions()
+        {
+            lock (gate)
+            {
+                if (unflushedOfferCompletions == 0 || disposed) return;
+                try { SaveOffers(); }
+                catch (IOException error) { Report("文件完成快照保存失败，确认日志已保留：" + error.Message); }
+                catch (UnauthorizedAccessException error) { Report("文件完成快照保存失败，确认日志已保留：" + error.Message); }
+            }
+        }
+
+        private void StoreOfferCompletion(Offer offer)
+        {
+            lock (gate)
+            {
+                Offer current;
+                if (disposed || offer.Canceled || !offers.TryGetValue(offer.Record.Packet+":"+offer.FileId,out current) || current!=offer ||
+                    !Security.IsTrusted(offer.DeviceId, offer.Fingerprint)) return;
+                if (!offer.Stored)
+                {
+                    string journal = Path.Combine(dataRoot, "transfer-offer-completions.log");
+                    byte[] entry = System.Text.Encoding.ASCII.GetBytes(offer.Record.Packet.ToString(CultureInfo.InvariantCulture) + ":" +
+                        offer.FileId.ToString(CultureInfo.InvariantCulture) + ":" + offer.Expires.Ticks.ToString(CultureInfo.InvariantCulture) + ":" + offer.Sha256 + ":" +
+                        offer.DeviceId + ":" + offer.Fingerprint + "\n");
+                    if (File.Exists(journal) && new FileInfo(journal).Length + entry.Length > CompletionJournalLimit) SaveOffers();
+                    // 每件先同步确认日志；进程崩溃时，尚未合入快照的完成项仍不会重占待处理额度。
+                    using (FileStream output = new FileStream(journal, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read))
+                    {
+                        long end=output.Length;
+                        if(end>0) {
+                            output.Position=end-1;
+                            if(output.ReadByte()!='\n') {
+                                // 同一进程上次写入失败也可能留下半条，不能把下一条接到坏尾部上。
+                                while(end>0){output.Position=--end;if(output.ReadByte()=='\n'){end++;break;}}
+                                output.SetLength(end);
+                            }
+                        }
+                        output.Position=output.Length;
+                        output.Write(entry, 0, entry.Length); output.Flush(true);
+                    }
+                    offer.Stored = true;
+                    unflushedOfferCompletions++;
+                    if (offerFlushTimer == null) offerFlushTimer = new Timer(_ => FlushOfferCompletions(), null, Timeout.Infinite, Timeout.Infinite);
+                    if (unflushedOfferCompletions == 1) offerFlushTimer.Change(CompletedOfferFlushDelay, Timeout.Infinite);
+                }
+                Transfer(offer, offer.ProgressVersion, 100, "对方已校验保存");
+                if (unflushedOfferCompletions >= CompletedOfferFlushCount || offers.Values.All(IsOfferCompleted)) FlushOfferCompletions();
+            }
+        }
+
+        private Dictionary<string,StoredCompletion> ReadOfferCompletions()
+        {
+            string journal = Path.Combine(dataRoot, "transfer-offer-completions.log");
+            var completed = new Dictionary<string,StoredCompletion>();
+            if (!File.Exists(journal) || new FileInfo(journal).Length == 0) return completed;
+            if (new FileInfo(journal).Length > CompletionJournalLimit) throw new IOException("文件完成确认日志过大。");
+            byte[] bytes = File.ReadAllBytes(journal);
+            int complete = Array.LastIndexOf(bytes, (byte)'\n') + 1;
+            string text = System.Text.Encoding.ASCII.GetString(bytes, 0, complete);
+            string[] lines=text.Split('\n');
+            foreach (string line in lines.Take(lines.Length-1))
+            {
+                string[] fields = line.Split(':'); long packet, expires; int file;
+                if (fields.Length != 6 || !Int64.TryParse(fields[0], NumberStyles.None, CultureInfo.InvariantCulture, out packet) || packet < 0 ||
+                    !Int32.TryParse(fields[1], NumberStyles.None, CultureInfo.InvariantCulture, out file) || file < 0 ||
+                    !Int64.TryParse(fields[2], NumberStyles.None, CultureInfo.InvariantCulture, out expires) || expires > DateTime.MaxValue.Ticks ||
+                    !SecureIdentity.ValidFingerprint(fields[3]) || Protocol.NormalizeDeviceId(fields[4])==null || !SecureIdentity.ValidFingerprint(fields[5]))
+                    throw new IOException("文件完成确认日志损坏。");
+                completed[packet+":"+file] = new StoredCompletion { Sha256=fields[3], Expires=expires, DeviceId=Protocol.NormalizeDeviceId(fields[4]), Fingerprint=fields[5] };
+            }
+            return completed;
+        }
+
         private void SaveOffers(Dictionary<string,Offer> snapshot = null)
         {
             if(dataRoot==null)return;
@@ -25,7 +107,8 @@ namespace FeiqLight
                 var saved=(snapshot??offers).Select(o=>new StoredOffer{
                     Key=o.Key,Path=o.Value.Path,DeviceId=o.Value.DeviceId,Fingerprint=o.Value.Fingerprint,Sha256=o.Value.Sha256,Size=o.Value.Size,
                         ModifiedTicks=o.Value.Modified.Ticks,ExpiresTicks=o.Value.Expires.Ticks,FileId=o.Value.FileId,
-                        Record=records.Add(o.Value.Record.Packet)?o.Value.Record:null,TransferState=o.Value.TransferState,Percent=o.Value.Percent
+                        Record=records.Add(o.Value.Record.Packet)?o.Value.Record:null,
+                        TransferState=o.Value.Stored?"对方已校验保存":o.Value.TransferState,Percent=o.Value.Stored?100:o.Value.Percent
                 }).ToArray();
                 byte[] bytes=System.Text.Encoding.UTF8.GetBytes(new System.Web.Script.Serialization.JavaScriptSerializer{MaxJsonLength=OfferJsonLimit}.Serialize(saved));
                 if(bytes.Length>OfferJsonLimit)throw new IOException("文件邀请记录过大，请先处理待发送文件。");
@@ -39,6 +122,12 @@ namespace FeiqLight
                         Thread.Sleep(25*(attempt+1));
                     }
                 }
+                string journal=Path.Combine(dataRoot,"transfer-offer-completions.log");
+                if(File.Exists(journal)&&new FileInfo(journal).Length>0) {
+                    using(FileStream output=new FileStream(journal,FileMode.Create,FileAccess.Write,FileShare.Read))output.Flush(true);
+                }
+                unflushedOfferCompletions=0;
+                if(offerFlushTimer!=null)offerFlushTimer.Change(Timeout.Infinite,Timeout.Infinite);
             }
         }
         private void RestoreOffers()
@@ -47,6 +136,7 @@ namespace FeiqLight
             if(new FileInfo(path).Length>OfferJsonLimit)throw new IOException("文件任务记录过大。");
             var saved=new System.Web.Script.Serialization.JavaScriptSerializer{MaxJsonLength=OfferJsonLimit}.Deserialize<StoredOffer[]>(File.ReadAllText(path,System.Text.Encoding.UTF8));
             if(saved==null||saved.Length>MaxStoredOffers)throw new IOException("文件任务记录损坏。");
+            Dictionary<string,StoredCompletion> completed=ReadOfferCompletions();
             var records=saved.Where(item=>item!=null&&item.Record!=null).GroupBy(item=>item.Record.Packet).ToDictionary(group=>group.Key,group=>group.First().Record);
             foreach(StoredOffer item in saved) {
                 if(item!=null&&item.Record==null){
@@ -55,19 +145,29 @@ namespace FeiqLight
                     ChatRecord record;
                     if(key.Length==2&&Int64.TryParse(key[0],out packet)&&records.TryGetValue(packet,out record))item.Record=record;
                 }
-                if(item==null||item.Record==null||item.ExpiresTicks<=DateTime.UtcNow.Ticks||!Security.IsTrusted(item.DeviceId,item.Fingerprint)||!SecureIdentity.ValidFingerprint(item.Sha256))continue;
+                if(item==null||item.Record==null)continue;
+                StoredCompletion completion;
+                bool stored=completed.TryGetValue(item.Key??"",out completion)&&completion.Sha256==item.Sha256&&
+                    completion.DeviceId==item.DeviceId&&completion.Fingerprint==item.Fingerprint;
+                long expires=stored?Math.Max(item.ExpiresTicks,completion.Expires):item.ExpiresTicks;
+                // 下载会延长邀请有效期，先合入确认日志再判断过期，避免丢掉跨过原截止时刻的完成项。
+                if(expires<=DateTime.UtcNow.Ticks||!Security.IsTrusted(item.DeviceId,item.Fingerprint)||!SecureIdentity.ValidFingerprint(item.Sha256))continue;
                 FileInfo file=new FileInfo(item.Path);if(!file.Exists||file.Length!=item.Size||file.LastWriteTimeUtc.Ticks!=item.ModifiedTicks)continue;
                 if(item.Key!=item.Record.Packet+":"+item.FileId)throw new IOException("文件任务编号无效。");
                 FileTransferState previous=(item.Record.Transfers??new FileTransferState[0]).FirstOrDefault(transfer=>transfer.Id==item.FileId);
                 string transferState=item.TransferState??(previous==null?null:previous.Status);
                 int percent=item.TransferState==null?(previous==null?0:previous.Percent):item.Percent;
+                if(stored){transferState="对方已校验保存";percent=100;}
                 offers[item.Key]=new Offer{
-                    Path=file.FullName,Size=item.Size,Modified=file.LastWriteTimeUtc,Expires=new DateTime(item.ExpiresTicks,DateTimeKind.Utc),
+                    Path=file.FullName,Size=item.Size,Modified=file.LastWriteTimeUtc,Expires=new DateTime(expires,DateTimeKind.Utc),
                         DeviceId=item.DeviceId,Fingerprint=item.Fingerprint,Sha256=item.Sha256,Record=item.Record,FileId=item.FileId,TransferState=transferState,
-                        Percent=Math.Max(0,Math.Min(100,percent))
+                        Percent=Math.Max(0,Math.Min(100,percent)),Stored=transferState=="对方已校验保存"
                 };
                 sequence=Math.Max(sequence,item.Record.Packet);
             }
+            string journal=Path.Combine(dataRoot,"transfer-offer-completions.log");
+            // 只忽略崩溃截断的最后半条；完整但损坏的记录必须报错。先写新快照，再清日志。
+            if(File.Exists(journal)&&new FileInfo(journal).Length>0)SaveOffers();
         }
 
         public ChatRecord OutgoingRecord(string peer, long packet) {
@@ -77,7 +177,7 @@ namespace FeiqLight
             }
         }
 
-        private static bool IsOfferCompleted(Offer offer) { return offer!=null&&(offer.TransferState=="已发送（非保存确认）"||offer.TransferState=="对方已校验保存"); }
+        private static bool IsOfferCompleted(Offer offer) { return offer!=null&&(offer.Stored||offer.TransferState=="已发送（非保存确认）"||offer.TransferState=="对方已校验保存"); }
         private static bool IsUnconfirmedState(string state) { string s=state??"";return s=="等待确认"||s.Contains("未确认")||s.Contains("失败"); }
 
         private bool TryBeginOfferStream(string key,Func<Offer,bool> authorize,TcpClient client,out Offer offer,out long version)
@@ -121,7 +221,7 @@ namespace FeiqLight
         private void Transfer(Offer offer, long version, int percent, string status, double bytesPerSecond = 0)
         {
             lock(gate) {
-                if(version != offer.ProgressVersion) return; offer.Percent=percent; offer.TransferState=status;
+                if(version != offer.ProgressVersion || IsOfferCompleted(offer) && status != "对方已校验保存") return; offer.Percent=percent; offer.TransferState=status;
                 var handler = TransferChanged; if (!disposed && handler != null) handler(offer.Record, offer.FileId, percent, status, bytesPerSecond);
             }
         }
@@ -158,7 +258,11 @@ namespace FeiqLight
                     }
                 }
                 stream.Flush();Transfer(offer,version,100,"已发送，等待校验保存");
-                if(SecureIdentity.ReadText(stream,128)=="STORED\n"+offer.Sha256){Transfer(offer,version,100,"对方已校验保存");try{SaveOffers();}catch(IOException error){Report("文件完成状态保存失败："+error.Message);}}
+                if(SecureIdentity.ReadText(stream,128)=="STORED\n"+offer.Sha256){
+                    try{StoreOfferCompletion(offer);}
+                    catch(IOException error){Report("文件完成状态保存失败："+error.Message);}
+                    catch(UnauthorizedAccessException error){Report("文件完成状态保存失败："+error.Message);}
+                } else throw new IOException("文件保存确认边界无效。");
             }catch(IOException){Transfer(offer,version,offer.Percent,"传输中断或保存确认未送达");throw;}
             catch(ObjectDisposedException){Transfer(offer,version,offer.Percent,"传输中断或保存确认未送达");throw;}
             finally {EndOfferStream(offer,client);}

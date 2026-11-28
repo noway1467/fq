@@ -44,7 +44,7 @@ namespace FeiqLight
             public ChatRecord Record; public int FileId, Percent; public long ProgressVersion; public string TransferState;
             public string DeviceId, Fingerprint, Sha256;
             public int Pushing;
-            public bool Canceled;
+            public bool Canceled, Stored;
             public readonly HashSet<TcpClient> ActiveClients = new HashSet<TcpClient>();
         }
         private sealed class PendingDownload
@@ -194,7 +194,8 @@ namespace FeiqLight
                 foreach (Peer peer in Peers)
                     try { Send(Encode(Protocol.Exit, Settings.Nickname, null), peer.Endpoint); } catch (Exception) { }
             }
-            disposed = true;
+            lock(gate){FlushOfferCompletions();disposed = true;}
+            if (offerFlushTimer != null) offerFlushTimer.Dispose();
             if (Security != null) Security.CancelConfirmations();
             NetworkChange.NetworkAddressChanged -= OnNetworkChanged; NetworkChange.NetworkAvailabilityChanged -= OnNetworkChanged;
             if (timer != null) timer.Dispose();

@@ -529,7 +529,8 @@ namespace FeiqLight.Tests
                 Run("发送进度：真实多文件 TCP、中间百分比、空文件与 ACK 语义", () =>
                 {
                     string first=Path.Combine(root,"progress-large.bin"),empty=Path.Combine(root,"progress-empty.bin");
-                    File.WriteAllBytes(first,new byte[8*1024*1024+17]);File.WriteAllBytes(empty,new byte[0]);
+                    // 小文件可能完全进入系统 TCP 缓冲，无法保证产生中间进度；体积超过缓冲后再验证真实采样。
+                    File.WriteAllBytes(first,new byte[64*1024*1024+17]);File.WriteAllBytes(empty,new byte[0]);
                     List<Tuple<long,int,int,string>> progress=new List<Tuple<long,int,int,string>>();
                     List<double> rates=new List<double>();
                     Action<ChatRecord,int,int,string,double> handler=(r,id,p,s,rate)=>{lock(progress){progress.Add(Tuple.Create(r.Packet,id,p,s));rates.Add(rate);}if(s=="发送中")Thread.Sleep(10);};
@@ -622,15 +623,22 @@ namespace FeiqLight.Tests
                 {
                     TcpListener server = new TcpListener(IPAddress.Loopback, 0); server.Start();
                     using (ManualResetEventSlim release = new ManualResetEventSlim(false))
+                    using (ManualResetEventSlim entered = new ManualResetEventSlim(false))
                     using (CancellationTokenSource cancel = new CancellationTokenSource())
                     {
                         using(var source=new TlsFilePeer(Path.Combine(root,"cancel-peer"),(IPEndPoint)server.LocalEndpoint,b)){
                         var file=new Attachment{Id=0,Name="cancelled.bin",Size=1048576,Sha256=new string('a',64)};
-                        Task holder = Task.Run(() => { long offset;using (TcpClient connection = server.AcceptTcpClient())using(Stream stream=source.Open(connection,file,out offset)){stream.Write(new byte[32],0,32);release.Wait(5000);} });
+                        Task holder = Task.Run(() => { long offset;using (TcpClient connection = server.AcceptTcpClient())using(Stream stream=source.Open(connection,file,out offset)){stream.Write(new byte[65536],0,65536);entered.Set();release.Wait(15000);} });
                         string path = Path.Combine(root, "cancelled.bin"); Peer fake=source.Peer;
-                        cancel.CancelAfter(150);
-                        try { ExpectFailure(() => b.ReceiveFileAsync(fake, 1, file, path, null, cancel.Token).GetAwaiter().GetResult(), "取消没有中止接收"); }
-                        finally { release.Set(); holder.Wait(6000); server.Stop(); }
+                        Task<string> receiving=b.ReceiveFileAsync(fake, 1, file, path, null, cancel.Token);
+                        try {
+                            Assert(entered.Wait(5000),"TLS 尚未进入正文传输");
+                            string partial=LanService.PartialPath(fake,1,file,path);
+                            Wait(()=>File.Exists(partial)&&new FileInfo(partial).Length>0,"取消前没有实际断点",5000);
+                            cancel.Cancel();
+                            ExpectFailure(() => receiving.GetAwaiter().GetResult(), "取消没有中止接收");
+                        }
+                        finally { cancel.Cancel();release.Set();holder.Wait(6000);server.Stop(); }
                         Assert(!File.Exists(path) && !Directory.GetFiles(root, "*.part").Any(), "取消残留文件");}
                     }
                 });

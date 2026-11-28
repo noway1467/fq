@@ -105,6 +105,7 @@ public final class LanNode implements AutoCloseable {
         private synchronized void attach(Socket value) throws IOException {
             if (cancelled) { value.close(); throw new IOException("已取消传输"); } socket=value;
         }
+        private synchronized void detach(Socket value) {if(socket==value)socket=null;}
         @Override public synchronized void close() { cancelled=true; if (socket!=null) try { socket.close(); } catch (IOException ignored) { } }
     }
     private static final class Pending {
@@ -123,8 +124,8 @@ public final class LanNode implements AutoCloseable {
         File file; long size, modified, expires;
         Source source;
         Peer peer; Message message; long packet, id, progressVersion; int percent; String state;
-        String deviceId,fingerprint,sha256,storedMessageState;
-        boolean canceled;
+        String deviceId,fingerprint,sha256,storedMessageState,storedOrigin;
+        boolean canceled,stored;
         final Set<Socket> activeSockets=new HashSet<>();
         final AtomicBoolean pushing=new AtomicBoolean();
     }
@@ -153,6 +154,65 @@ public final class LanNode implements AutoCloseable {
     private final Map<String,Long> seen=new LinkedHashMap<>();
     private final Map<String,Offer> offers=new HashMap<>();
     private final List<PendingDownload> pendingDownloads=new ArrayList<>();
+    private static final int BATCH_FILE_LIMIT=64,BATCH_FILE_IDLE_MILLISECONDS=1500,BATCH_REQUEST_MILLISECONDS=3000;
+    private static final class FileConnection {
+        Socket raw;
+        SSLSocket tls;
+        String deviceId,fingerprint;
+        InetSocketAddress endpoint;
+        int epoch,files;
+        long idleSince;
+        ScheduledFuture<?> idleTimeout;
+    }
+    private FileConnection idleFileConnection;
+    private final Map<Socket,String> fileBatchPeers=new HashMap<>();
+    private FileConnection createFileConnection(Socket raw,SSLSocket tls,Peer peer) {
+        FileConnection channel=new FileConnection();channel.raw=raw;channel.tls=tls;channel.deviceId=peer.deviceId;channel.fingerprint=peer.fingerprint;
+        channel.endpoint=new InetSocketAddress(raw.getInetAddress(),raw.getPort());channel.epoch=transportEpoch();
+        synchronized(gate){fileBatchPeers.put(raw,peer.deviceId);}return channel;
+    }
+    private void closeFileConnection(FileConnection channel) {
+        if(channel==null)return;
+        synchronized(gate) {
+            if(idleFileConnection==channel)idleFileConnection=null;
+            if(channel.idleTimeout!=null)channel.idleTimeout.cancel(false);
+            closeSocket(channel.raw);closeSocket(channel.tls);
+            connections.remove(channel.raw);fileBatchPeers.remove(channel.raw);
+        }
+    }
+    private void closeFileBatches(String deviceId) {
+        synchronized(gate) {
+            List<Socket> sockets=new ArrayList<>();
+            for(Map.Entry<Socket,String> entry:fileBatchPeers.entrySet())if(deviceId==null||deviceId.equals(entry.getValue()))sockets.add(entry.getKey());
+            for(Socket socket:sockets)closeSocket(socket);
+            if(idleFileConnection!=null&&(deviceId==null||deviceId.equals(idleFileConnection.deviceId)))closeFileConnection(idleFileConnection);
+        }
+    }
+    /** 接收服务在 SAF 导出阶段取消时，网络步骤虽已完成，当前批量连接仍须立即丢弃。 */
+    public void discardFileBatch(Peer peer) {closeFileBatches(peer.deviceId);}
+    private FileConnection takeFileConnection(Peer peer) {
+        synchronized(gate) {
+            FileConnection channel=idleFileConnection;
+            if(channel==null)return null;
+            idleFileConnection=null;
+            if(closed||channel.epoch!=transportEpoch||!channel.deviceId.equals(peer.deviceId)||!channel.fingerprint.equals(peer.fingerprint)||
+                !channel.endpoint.equals(peer.endpoint)||channel.raw.isClosed()||channel.tls.isClosed()||!security.isTrusted(peer.deviceId,peer.fingerprint)) {
+                closeFileConnection(channel);return null;
+            }
+            channel.idleTimeout.cancel(false);return channel;
+        }
+    }
+    private void returnFileConnection(FileConnection channel,Transfer transfer) {
+        synchronized(gate) {
+            if(closed||transfer.isCancelled()||channel.files>=BATCH_FILE_LIMIT||channel.epoch!=transportEpoch||channel.raw.isClosed()||channel.tls.isClosed()||
+                !security.isTrusted(channel.deviceId,channel.fingerprint)) {closeFileConnection(channel);return;}
+            if(idleFileConnection!=null)closeFileConnection(idleFileConnection);
+            idleFileConnection=channel;
+            channel.idleSince=System.nanoTime();
+            channel.idleTimeout=timer.schedule(()->{synchronized(gate){if(idleFileConnection==channel&&System.nanoTime()-channel.idleSince>=
+                TimeUnit.MILLISECONDS.toNanos(BATCH_FILE_IDLE_MILLISECONDS))closeFileConnection(channel);}},BATCH_FILE_IDLE_MILLISECONDS,TimeUnit.MILLISECONDS);
+        }
+    }
     private final Set<String> activeSyncPeers=new HashSet<>();
     private static final class ReverseRequest {
         String deviceId,fingerprint;int port;Socket client,direct;
@@ -195,7 +255,7 @@ public final class LanNode implements AutoCloseable {
             }
         }
     }
-    private static boolean isOfferCompleted(Offer offer){return offer!=null&&StoredOffers.isCompletedState(offer.state);}
+    private static boolean isOfferCompleted(Offer offer){return offer!=null&&(offer.stored||StoredOffers.isCompletedState(offer.state));}
     public static boolean isUnconfirmedState(String state){String value=state==null?"":state;return "等待确认".equals(value)||value.contains("未确认")||value.contains("失败");}
     private boolean tryBeginOfferStream(String key,java.util.function.Predicate<Offer> authorize,Socket client,long[] version,Offer[] selected) {
         synchronized(gate){
@@ -265,6 +325,7 @@ public final class LanNode implements AutoCloseable {
             Map<String,Offer> next=new HashMap<>(offers);
             for(Map.Entry<String,Offer> entry:selected)next.remove(entry.getKey());
             if(!selected.isEmpty())saveOffers(next);
+            if(!selected.isEmpty())closeFileBatches(selected.get(0).getValue().deviceId);
             if(item!=null){item.canceled=true;pending.remove(packet);connecting=item.connectingSocket;item.connectingSocket=null;stateMessage=item.message;wasPending=true;}
             for(Map.Entry<String,Offer> entry:selected){
                 Offer offer=entry.getValue();
@@ -315,7 +376,7 @@ public final class LanNode implements AutoCloseable {
         }
         for(Map.Entry<Long,String> entry:messages)cancelUndeliveredOutgoing(peerId,entry.getKey(),entry.getValue(),false);
     }
-    private void cancelReverseRequests(){transportEpoch++;for(ReverseRequest request:reverseRequests.values())request.ready.countDown();reverseRequests.clear();}
+    private void cancelReverseRequests(){closeFileBatches(null);flushOfferCompletions();transportEpoch++;for(ReverseRequest request:reverseRequests.values())request.ready.countDown();reverseRequests.clear();}
     // 停止网络不能等待 gate 内尚未返回的系统绑定，连接集合支持独立关闭。
     private final Set<Socket> connections=ConcurrentHashMap.newKeySet();
     private final Set<Socket> probeSockets=ConcurrentHashMap.newKeySet();
@@ -360,6 +421,9 @@ public final class LanNode implements AutoCloseable {
         }
     }
     private File dataRoot;
+    private static final int COMPLETED_OFFER_FLUSH_COUNT=32,COMPLETED_OFFER_FLUSH_DELAY=250;
+    private int unflushedOfferCompletions;
+    private ScheduledFuture<?> offerFlush;
     public static final int MIN_FILE_LIMIT=100,MAX_FILE_LIMIT=50000;
     private volatile int pendingFileLimit=10000;
     public void setPendingFileLimit(int value){pendingFileLimit=value>=MIN_FILE_LIMIT&&value<=MAX_FILE_LIMIT?value:10000;}
@@ -412,16 +476,37 @@ public final class LanNode implements AutoCloseable {
             }
         }
     }
+    private void flushOfferCompletions() {
+        synchronized(gate) {
+            if(unflushedOfferCompletions==0)return;
+            try{saveOffers();}catch(IOException error){listener.error("文件完成快照保存失败，确认日志已保留："+error.getMessage());}
+        }
+    }
+    private void storeOfferCompletion(Offer offer)throws IOException {
+        synchronized(gate) {
+            if(closed||offer.canceled||offers.get(offer.packet+":"+offer.id)!=offer||!security.isTrusted(offer.deviceId,offer.fingerprint))return;
+            if(!offer.stored) {
+                if(new File(dataRoot,"transfer-offer-completions.log").length()+256>StoredOffers.COMPLETION_JOURNAL_LIMIT)saveOffers();
+                StoredOffers.appendCompletion(dataRoot,offer.packet,(int)offer.id,offer.sha256,
+                    System.currentTimeMillis()+TimeUnit.NANOSECONDS.toMillis(offer.expires-System.nanoTime()),offer.deviceId,offer.fingerprint);
+                offer.stored=true;unflushedOfferCompletions++;
+                if(unflushedOfferCompletions==1)offerFlush=timer.schedule(this::flushOfferCompletions,COMPLETED_OFFER_FLUSH_DELAY,TimeUnit.MILLISECONDS);
+            }
+            progress(offer,offer.progressVersion,100,"对方已校验保存");
+            if(unflushedOfferCompletions>=COMPLETED_OFFER_FLUSH_COUNT||offers.values().stream().allMatch(LanNode::isOfferCompleted))flushOfferCompletions();
+        }
+    }
     private void saveOffers()throws IOException {saveOffers(offers);}
     private void saveOffers(Map<String,Offer> snapshot)throws IOException {
         if(dataRoot==null)return;
         synchronized(gate){ByteArrayOutputStream buffer=new ByteArrayOutputStream();try(DataOutputStream out=new DataOutputStream(buffer)) {
-            if(closed)return;
+            if(closed&&unflushedOfferCompletions==0)return;
             out.writeInt(2);Collection<Offer> saved=snapshot.values();out.writeInt(saved.size());
             for(Offer o:saved){
                 out.writeLong(o.packet);
                 out.writeInt((int)o.id);
-                out.writeUTF(o.source==null?o.file.getCanonicalPath():"uri:"+o.source.key());
+                // 复用邀请发布时固定的来源标识，快照热路径不再对每件重复做文件系统路径解析。
+                out.writeUTF(o.storedOrigin);
                 out.writeLong(o.size);
                 out.writeLong(o.modified);
                 out.writeLong(System.currentTimeMillis()+TimeUnit.NANOSECONDS.toMillis(o.expires-System.nanoTime()));
@@ -439,12 +524,14 @@ public final class LanNode implements AutoCloseable {
             for(Offer offer:saved){
                 out.writeLong(offer.packet);
                 out.writeInt((int)offer.id);
-                out.writeUTF(offer.state==null?"":offer.state);
-                out.writeInt(offer.percent);
+                out.writeUTF(offer.stored?"对方已校验保存":offer.state==null?"":offer.state);
+                out.writeInt(offer.stored?100:offer.percent);
                 String state=offer.message==null?offer.storedMessageState:offer.message.state;
                 out.writeUTF(state==null?"":state);
             }
-        }if(buffer.size()>64*1024*1024)throw new IOException("文件邀请记录过大，请先处理待发送文件");StoredOffers.write(new File(dataRoot,"transfer-offers.dat"),buffer.toByteArray());}
+        }if(buffer.size()>64*1024*1024)throw new IOException("文件邀请记录过大，请先处理待发送文件");StoredOffers.write(new File(dataRoot,"transfer-offers.dat"),buffer.toByteArray());
+            unflushedOfferCompletions=0;if(offerFlush!=null){offerFlush.cancel(false);offerFlush=null;}
+        }
     }
     public static void cancelStoredOffers(File root,String peerId,Collection<Long> packets)throws IOException {
         StoredOffers.cancel(root,peerId,packets);
@@ -457,6 +544,7 @@ public final class LanNode implements AutoCloseable {
                 if((offer.state==null||offer.state.isEmpty())&&state!=null){
                     offer.state=state;
                     if(StoredOffers.isCompletedState(state))offer.percent=100;
+                    offer.stored="对方已校验保存".equals(state);
                     restored=true;
                 }
             }
@@ -466,6 +554,7 @@ public final class LanNode implements AutoCloseable {
     private void restoreOffers()throws IOException {
         byte[] bytes=StoredOffers.read(new File(dataRoot,"transfer-offers.dat"));
         if(bytes==null)return;
+        Map<String,StoredOffers.Completion> completed=StoredOffers.readCompletions(dataRoot);
         try(DataInputStream in=new DataInputStream(new ByteArrayInputStream(bytes))){
             int format=in.readInt();
             if(format!=1&&format!=2)throw new IOException("文件任务版本不支持");
@@ -475,13 +564,15 @@ public final class LanNode implements AutoCloseable {
                 Offer o=new Offer();
                 o.packet=in.readLong();
                 o.id=in.readInt();
-                String origin=in.readUTF();
+                String origin=in.readUTF();o.storedOrigin=origin;
                 o.size=in.readLong();
                 o.modified=in.readLong();
                 long until=in.readLong();
                 o.deviceId=in.readUTF();
                 o.fingerprint=in.readUTF();
                 o.sha256=in.readUTF();
+                StoredOffers.Completion completion=completed.get(o.packet+":"+o.id);
+                if(completion!=null&&o.sha256.equals(completion.sha256)&&o.deviceId.equals(completion.deviceId)&&o.fingerprint.equals(completion.fingerprint))until=Math.max(until,completion.expires);
                 o.peer=new Peer(endpoint(in.readUTF()),in.readUTF(),in.readUTF(),in.readUTF(),in.readUTF());
                 o.peer.conversationId=in.readUTF();
                 o.peer.deviceId=o.deviceId;
@@ -505,10 +596,19 @@ public final class LanNode implements AutoCloseable {
                     StoredOfferState state=entry.getValue();
                     offer.state=state.state;
                     offer.percent=state.percent;
+                    offer.stored="对方已校验保存".equals(state.state);
                     offer.storedMessageState=state.messageState;
                 }
             }
         }
+        for(Map.Entry<String,StoredOffers.Completion> entry:completed.entrySet()) {
+            Offer offer=offers.get(entry.getKey());StoredOffers.Completion completion=entry.getValue();
+            if(offer==null||!offer.sha256.equals(completion.sha256)||!offer.deviceId.equals(completion.deviceId)||!offer.fingerprint.equals(completion.fingerprint))continue;
+            offer.stored=true;offer.state="对方已校验保存";offer.percent=100;
+            long remaining=Math.min(TimeUnit.DAYS.toMillis(7),completion.expires-System.currentTimeMillis());
+            if(remaining>0)offer.expires=Math.max(offer.expires,System.nanoTime()+TimeUnit.MILLISECONDS.toNanos(remaining));
+        }
+        if(new File(dataRoot,"transfer-offer-completions.log").length()>0)saveOffers();
     }
     private volatile String avatar="default";
     public void setAvatar(String value) {String normalized=Protocol.normalizeAvatar(value);if(normalized==null)throw new IllegalArgumentException("头像数据无效");avatar=normalized;}
@@ -841,6 +941,7 @@ public final class LanNode implements AutoCloseable {
             m.localPaths.add("uri:"+source.key());
             Offer o=new Offer();
             o.source=source;
+            o.storedOrigin="uri:"+source.key();
             o.size=source.size();
             o.modified=source.modified();
             o.expires=System.nanoTime()+TimeUnit.DAYS.toNanos(7);
@@ -909,6 +1010,7 @@ public final class LanNode implements AutoCloseable {
             m.localPaths.add(file.getCanonicalPath());
             Offer o=new Offer();
             o.file=file;
+            o.storedOrigin=m.localPaths.get(m.localPaths.size()-1);
             o.size=file.length();
             o.modified=file.lastModified();
             o.expires=System.nanoTime()+TimeUnit.DAYS.toNanos(7);
@@ -1402,14 +1504,13 @@ public final class LanNode implements AutoCloseable {
             }
             socket.getOutputStream().flush();progress(offer,version,100,"已发送，等待校验保存");
             if(SecureIdentity.readText(socket.getInputStream(),128).equals("STORED\n"+offer.sha256)){
-                progress(offer,version,100,"对方已校验保存");
                 try{
-                    saveOffers();
+                    storeOfferCompletion(offer);
                 }
                 catch(IOException error){
                     listener.error("文件完成状态保存失败："+error.getMessage());
                 }
-            }
+            } else throw new IOException("文件保存确认边界无效");
         } catch(IOException e){progress(offer,version,offer.percent,"传输中断或保存确认未送达");throw e;}
         finally {deadline.cancel(false);endOfferStream(offer,socket);}
     }
@@ -1529,16 +1630,35 @@ public final class LanNode implements AutoCloseable {
             }
             if(!"F".equals(header[0])||packet.mode()!=Protocol.GET_FILE)throw new IOException("未知安全操作");
             upsertPeer(identity,endpoint);
-            String[] fields=packet.body.split(":");
-            if(fields.length<3)throw new IOException("文件请求无效");
-            long number=Long.parseLong(fields[0],16),offset=Long.parseLong(fields[2],16),id=Long.parseLong(fields[1],16);
-            streamOffer(socket,number+":"+id,offer->Objects.equals(offer.deviceId,packet.deviceId)&&fingerprint.equals(offer.fingerprint)&&offset>=0&&offset<=offer.size,offset);
+            if(identity.batchFiles)synchronized(gate){fileBatchPeers.put(client,identity.deviceId);}
+            try {
+                int limit=identity.batchFiles?BATCH_FILE_LIMIT:1;
+                for(int index=0;index<limit;index++) {
+                    if(!security.isTrusted(identity.deviceId,fingerprint))throw new IOException("设备信任已撤销");
+                    String[] fields=packet.body.split(":");
+                    if(fields.length<3)throw new IOException("文件请求无效");
+                    long number=Long.parseLong(fields[0],16),offset=Long.parseLong(fields[2],16),id=Long.parseLong(fields[1],16);
+                    if(number<0||offset<0||id<0||id>Integer.MAX_VALUE)throw new IOException("文件请求无效");
+                    socket.setSoTimeout(45000);
+                    streamOffer(socket,number+":"+id,offer->Objects.equals(offer.deviceId,identity.deviceId)&&fingerprint.equals(offer.fingerprint)&&offset<=offer.size,offset);
+                    if(!identity.batchFiles)break;
+                    SecureIdentity.writeText(socket.getOutputStream(),index+1==limit?"DONE":"NEXT");
+                    if(index+1==limit)break;
+                    input.begin(BATCH_REQUEST_MILLISECONDS);
+                    try{header=SecureIdentity.readText(input,128).split("\\n",-1);}
+                    catch(EOFException|SocketTimeoutException idle){return;}
+                    packet=Protocol.parse(SecureIdentity.readFrame(input,60000));
+                    if(header.length!=2||!"F".equals(header[0])||Integer.parseInt(header[1])!=senderPort||packet==null||packet.mode()!=Protocol.GET_FILE||
+                        !identity.deviceId.equals(packet.deviceId)||!identity.login.equals(packet.login)||!fingerprint.equals(packet.fingerprint))throw new IOException("批量文件报文身份或边界无效");
+                }
+            } finally {synchronized(gate){fileBatchPeers.remove(client);}if(identity.batchFiles)flushOfferCompletions();}
         }finally{socket.close();}
     }
     private void receiveSecureFile(Peer peer,long packet,Protocol.Attachment file,File destination,Transfer transfer,Progress progress)throws IOException {
         if(!Protocol.safeName(file.name)||file.size<0||!SecureIdentity.validFingerprint(file.sha256))throw new IOException("文件元数据或校验值无效");
         if(destination.exists())throw new IOException("目标已存在，不会覆盖");
-        File part=partialFile(peer,packet,file,destination);boolean owned=false,revoked=false;Socket raw=null;SSLSocket directTls=null;PendingDownload pd=null;ScheduledFuture<?> nudge=null;
+        File part=partialFile(peer,packet,file,destination);boolean owned=false,revoked=false,reuseConnection=false,borrowedConnection=false;
+        Socket raw=null;SSLSocket directTls=null;PendingDownload pd=null;ScheduledFuture<?> nudge=null;FileConnection channel=null;
         try {
             try(java.nio.channels.FileChannel output=java.nio.channels.FileChannel.open(part.toPath(),java.nio.file.StandardOpenOption.CREATE,
                 java.nio.file.StandardOpenOption.WRITE,java.nio.file.StandardOpenOption.READ,java.nio.file.LinkOption.NOFOLLOW_LINKS);
@@ -1547,16 +1667,22 @@ public final class LanNode implements AutoCloseable {
                 if(transfer.isCancelled())throw new IOException("已取消传输");
                 long offset=output.size();if(offset>file.size){output.truncate(0);offset=0;}output.position(offset);requireSpace(destination.getAbsoluteFile().getParentFile(),file.size-offset);
                 pd=new PendingDownload(peer.deviceId,peer.fingerprint,packet,file.id,offset);
-                synchronized(gate){pendingDownloads.add(pd);}
                 PendingDownload activePd=pd;
-                nudge=timer.schedule(()->{
-                    if(!activePd.claimed.get()&&!closed) {
-                        try{send(encode(Protocol.ENTRY|Protocol.CAP_UTF8|Protocol.FILE,Protocol.field(nickname),Protocol.field(group)),peer.endpoint);}catch(IOException ignored){}
-                    }
-                },150,TimeUnit.MILLISECONDS);
+                channel=takeFileConnection(peer);
+                borrowedConnection=channel!=null;
+                if(channel!=null) {
+                    raw=channel.raw;directTls=channel.tls;pd.directSocket=raw;pd.claimed.set(true);transfer.attach(raw);
+                } else {
+                    synchronized(gate){pendingDownloads.add(pd);}
+                    nudge=timer.schedule(()->{
+                        if(!activePd.claimed.get()&&!closed) {
+                            try{send(encode(Protocol.ENTRY|Protocol.CAP_UTF8|Protocol.FILE,Protocol.field(nickname),Protocol.field(group)),peer.endpoint);}catch(IOException ignored){}
+                        }
+                    },150,TimeUnit.MILLISECONDS);
+                }
                 long waitUntil=System.nanoTime()+TimeUnit.SECONDS.toNanos(8);
                 IOException connectError=null;
-                try {
+                if(channel==null)try {
                     raw=secureConnect(peer.endpoint,s->{
                         activePd.directSocket=s;
                         try{transfer.attach(s);}catch(IOException e){throw new UncheckedIOException(e);}
@@ -1567,9 +1693,9 @@ public final class LanNode implements AutoCloseable {
                     upsertPeer(remote,peer.endpoint);
                     if(pd.claimed.compareAndSet(false,true)) {
                         synchronized(gate){pendingDownloads.remove(pd);}
-                        SecureIdentity.writeText(directTls.getOutputStream(),"F\n"+port);
-                        SecureIdentity.writeFrame(directTls.getOutputStream(),Protocol.encode(sequence.incrementAndGet(),login,host,Protocol.GET_FILE|Protocol.UTF8,
-                            Long.toHexString(packet)+":"+Integer.toHexString(file.id)+":"+Long.toHexString(offset)+":",null,deviceId,null,security.fingerprint));
+                        if(remote.batchFiles) {
+                            channel=createFileConnection(raw,directTls,peer);
+                        }
                     } else {
                         try{directTls.close();}catch(IOException ignored){}directTls=null;
                     }
@@ -1595,8 +1721,29 @@ public final class LanNode implements AutoCloseable {
                     if(pd.pushedSocket==null)throw connectError!=null?connectError:new IOException("加密连接超时。");
                     transfer.attach(pd.pushedClient);
                 }
+                String[] response;
+                if(directTls==null)response=SecureIdentity.readText(pd.pushedSocket.getInputStream(),256).split("\\n",-1);
+                else {
+                    byte[] request=Protocol.encode(sequence.incrementAndGet(),login,host,Protocol.GET_FILE|Protocol.UTF8,
+                        Long.toHexString(packet)+":"+Integer.toHexString(file.id)+":"+Long.toHexString(offset)+":",null,deviceId,null,security.fingerprint);
+                    while(true) {
+                        if(transfer.isCancelled())throw new IOException("已取消传输");
+                        try {
+                            SecureIdentity.writeText(directTls.getOutputStream(),"F\n"+port);SecureIdentity.writeFrame(directTls.getOutputStream(),request);
+                            response=SecureIdentity.readText(directTls.getInputStream(),256).split("\\n",-1);break;
+                        } catch(IOException error) {
+                            if(!borrowedConnection||transfer.isCancelled()||channel.epoch!=transportEpoch()||!security.isTrusted(peer.deviceId,peer.fingerprint)||
+                                !(error instanceof EOFException||error instanceof SocketException))throw error;
+                            // 只对尚未收到正文的陈旧 F 连接重建一次；取消、撤信与帧内容错误不重放。
+                            borrowedConnection=false;closeFileConnection(channel);channel=null;
+                            Socket retryRaw=secureConnect(peer.endpoint,s->{activePd.directSocket=s;try{transfer.attach(s);}catch(IOException e){throw new UncheckedIOException(e);}});raw=retryRaw;
+                            SSLSocket retryTls=security.client(retryRaw,peer.fingerprint);directTls=retryTls;
+                            Protocol.Packet retryRemote=authenticateSecureClient(retryTls,peer.deviceId,peer.fingerprint,peer.name);
+                            if(retryRemote.batchFiles)channel=createFileConnection(retryRaw,retryTls,peer);
+                        }
+                    }
+                }
                 SSLSocket socket=directTls!=null?directTls:pd.pushedSocket;
-                String[] response=SecureIdentity.readText(socket.getInputStream(),256).split("\\n",-1);
                 if(response.length==1&&response[0].equals("REVOKED")){revoked=true;throw new OfferRevokedException();}
                 if(response.length!=3||!response[0].equals("OK")||!response[1].equals(Long.toString(file.size))||!response[2].equals(file.sha256))throw new IOException("发送方文件信息已变化");
                 if(progress!=null)progress.update((int)(offset*100.0/Math.max(1,file.size)),0);
@@ -1620,11 +1767,22 @@ public final class LanNode implements AutoCloseable {
             }
             if(transfer.isCancelled())throw new IOException("已取消传输");Files.move(part.toPath(),destination.toPath());
             SSLSocket socket=directTls!=null?directTls:pd.pushedSocket;
-            try{SecureIdentity.writeText(socket.getOutputStream(),"STORED\n"+file.sha256);}catch(IOException e){listener.error("文件已校验保存，但保存确认未送达");}
+            boolean confirmed=false;
+            try{SecureIdentity.writeText(socket.getOutputStream(),"STORED\n"+file.sha256);confirmed=true;}catch(IOException e){listener.error("文件已校验保存，但保存确认未送达");}
+            if(channel!=null&&confirmed) {
+                String boundary=SecureIdentity.readText(socket.getInputStream(),16);
+                if(!"NEXT".equals(boundary)&&!"DONE".equals(boundary))throw new IOException("批量文件边界确认无效，连接已丢弃");
+                channel.files++;reuseConnection="NEXT".equals(boundary);
+            }
             if(progress!=null)progress.update(100);
         } finally {
             if(nudge!=null)nudge.cancel(false);
             if(pd!=null){synchronized(gate){pendingDownloads.remove(pd);}pd.done.countDown();}
+            if(channel!=null&&reuseConnection)transfer.detach(raw);
+            if(channel!=null) {
+                if(reuseConnection)returnFileConnection(channel,transfer);else closeFileConnection(channel);
+                directTls=null;raw=null;
+            }
             if(directTls!=null)try{directTls.close();}catch(IOException ignored){}
             if(raw!=null){try{raw.close();}catch(IOException ignored){}synchronized(gate){connections.remove(raw);}}
             if(owned&&(revoked||transfer.isCancelled()&&!transfer.isPaused()||part.length()==0))Files.deleteIfExists(part.toPath());
@@ -1642,7 +1800,11 @@ public final class LanNode implements AutoCloseable {
             throw e;
         }
     }
-    private byte[] secureHello(){return Protocol.encode(0,login,host,Protocol.ENTRY|Protocol.UTF8,Protocol.field(nickname),Protocol.field(group),deviceId,null,security.fingerprint);}
+    private byte[] secureHello(){
+        byte[] hello=Protocol.encode(0,login,host,Protocol.ENTRY|Protocol.UTF8,Protocol.field(nickname),Protocol.field(group),deviceId,null,security.fingerprint),
+            suffix="FQBATCH=1\0".getBytes(java.nio.charset.StandardCharsets.US_ASCII),result=Arrays.copyOf(hello,hello.length+suffix.length);
+        System.arraycopy(suffix,0,result,hello.length,suffix.length);return result;
+    }
     private byte[] secureSyncHello(){
         byte[] hello=Protocol.encode(0,login,host,Protocol.ABSENCE|Protocol.UTF8,Protocol.field(nickname),Protocol.field(group),deviceId,null,security.fingerprint),
             suffix="FQREV=1\0".getBytes(java.nio.charset.StandardCharsets.US_ASCII),result=Arrays.copyOf(hello,hello.length+suffix.length);
@@ -1716,7 +1878,7 @@ public final class LanNode implements AutoCloseable {
     }
     private void progress(Offer offer,long version,int percent,String state,double bytesPerSecond) {
         synchronized(gate) {
-            if(version!=offer.progressVersion)return;
+            if(version!=offer.progressVersion||isOfferCompleted(offer)&&!"对方已校验保存".equals(state))return;
             offer.percent=percent;
             offer.state=state;
             if(!closed)listener.fileProgress(offer.peer,offer.packet,offer.id,percent,state,bytesPerSecond);
@@ -1725,6 +1887,7 @@ public final class LanNode implements AutoCloseable {
     private void endOffer(Offer offer,String state) {if(!"已发送（非保存确认）".equals(offer.state)&&!"对方已校验保存".equals(offer.state))progress(offer,++offer.progressVersion,offer.percent,state);}
     private void sendReleaseFiles(Peer peer,String body) throws IOException {
         requireSecurePeer(peer.deviceId,peer.fingerprint);
+        closeFileBatches(peer.deviceId);
         Socket raw=securePeerConnect(peer);
         try(SSLSocket tls=security.client(raw,peer.fingerprint)){
             Protocol.Packet remote=authenticateSecureClient(tls,peer.deviceId,peer.fingerprint,peer.name);
@@ -1790,11 +1953,13 @@ public final class LanNode implements AutoCloseable {
         ServerSocket listener=tcp;if(listener!=null)try{listener.close();}catch(IOException ignored){ }
         for(Socket socket:connections)closeSocket(socket);
         for(Socket socket:probeSockets)closeSocket(socket);
+        try{timer.execute(this::flushOfferCompletions);}catch(RejectedExecutionException ignored){ /* close() 仍会同步保存确认日志。 */ }
     }
     @Override public void close() {
         synchronized (gate) {
             if (cleanupStarted) return;
             cleanupStarted=true;
+            flushOfferCompletions();
             if(!closed)for (Peer p:peers.values()) try { send(encode(Protocol.EXIT,nickname,null),p.endpoint); } catch (IOException ignored) { }
             stopListening();
             for (Socket socket:connections) try { socket.close(); } catch (IOException ignored) { }

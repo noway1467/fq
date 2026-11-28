@@ -190,6 +190,9 @@ public final class ChatService extends Service {
         // 限频而非反复延后：连续的大文件进度也必须在传输途中画出来。
         if(!transferNotificationQueued){transferNotificationQueued=true;main.postDelayed(notifyTransfers,60);}
     }
+    private void discardReceiveBatch(ReceiveRequest request) {
+        LanNode current=node;if(current!=null&&request!=null)current.discardFileBatch(request.peer);
+    }
     void cancelFile(String peer,long packet,long file) {
         FileProgress p=progress(peer,packet,file,false);
         if(p!=null&&(wasStored(p.state)||p.state.equals("已拒绝")||p.state.equals("对方已取消发送")))return;
@@ -198,6 +201,7 @@ public final class ChatService extends Service {
         if(active!=null&&active.peer.id().equals(peer)&&active.packet==packet&&active.file.id==file) {
             LanNode.Transfer task=active.task==null?transfer:active.task;
             if(task!=null)task.close();
+            discardReceiveBatch(active);
             return;
         }
         if(p!=null&&p.task!=null&&p.task==transfer){p.task.close();return;}
@@ -224,6 +228,7 @@ public final class ChatService extends Service {
         if(active!=null&&active.peer.id().equals(peer)&&active.packet==packet&&active.file.id==file) {
             LanNode.Transfer task=active.task==null?transfer:active.task;
             if(task!=null)task.pause();
+            discardReceiveBatch(active);
         } else if(p!=null&&p.task!=null&&p.task==transfer) p.task.pause();
         else fileProgress(peer,packet,file,false,p==null?0:p.percent,"已暂停",null);
     }
@@ -944,7 +949,7 @@ public final class ChatService extends Service {
         if(cpuLock!=null&&cpuLock.isHeld())cpuLock.release();cpuLock=null;
         if(wifiLock!=null&&wifiLock.isHeld())wifiLock.release();wifiLock=null;
     }
-    void cancelTransfer() { LanNode.Transfer task=transfer; if (task!=null) task.close(); }
+    void cancelTransfer() { ReceiveRequest active=activeReceive;LanNode.Transfer task=transfer;if(task!=null)task.close();discardReceiveBatch(active); }
     private void transferJob(Throwing job) {
         transferJob(job,()->{});
     }
@@ -1399,7 +1404,7 @@ public final class ChatService extends Service {
         ReceiveRequest active=activeReceive;
         if(active!=null&&active.peer.id().equals(peer.id())&&active.packet==packet) {
             // 接收线程退出并释放句柄后，再在完成回调中清理断点和拒收，避免删除仍在写入的文件。
-            active.rejected=true;LanNode.Transfer task=active.task;if(task!=null)task.close();return;
+            active.rejected=true;LanNode.Transfer task=active.task;if(task!=null)task.close();discardReceiveBatch(active);return;
         }
         queue(()->rejectIncomingOffer(peer,packet));
     }
@@ -1421,6 +1426,7 @@ public final class ChatService extends Service {
         ReceiveRequest active=activeReceive;
         if(active!=null&&active.peer.id().equals(peer.id())&&active.packet==packet) {
             active.offerCanceled=true;LanNode.Transfer task=active.task;if(task!=null)task.close();
+            discardReceiveBatch(active);
         } else active=null;
         ReceiveRequest exiting=active;
         main.post(()->{if(!stopped){waiting.values().removeIf(r->r.peer.id().equals(peer.id())&&r.packet==packet);changed();}});

@@ -140,6 +140,7 @@ namespace FeiqLight
                 Dictionary<string,Offer> nextOffers=new Dictionary<string,Offer>(offers);
                 foreach(KeyValuePair<string,Offer> entry in selected)nextOffers.Remove(entry.Key);
                 if(selected.Count!=0)SaveOffers(nextOffers);
+                if(selected.Count!=0)CloseFileBatches(selected[0].Value.DeviceId);
                 if(item!=null) {
                     wasPending=true;item.Canceled=true;pending.Remove(packet);connectingToClose=item.ConnectingClient;item.ConnectingClient=null;stateRecord=item.Record;
                 }

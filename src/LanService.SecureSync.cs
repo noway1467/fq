@@ -333,16 +333,35 @@ namespace FeiqLight
                 }
                 if(header[0]!="F"||packet.Mode!=Protocol.GetFile)throw new IOException("未知安全操作。");
                 Upsert(identity,endpoint);
-                string[] fields=packet.Body.Split(':');long number,offset;int fileId;
-                if(fields.Length<3||!Int64.TryParse(fields[0],NumberStyles.HexNumber,CultureInfo.InvariantCulture,out number)
-                    ||!Int32.TryParse(fields[1],NumberStyles.HexNumber,CultureInfo.InvariantCulture,out fileId)
-                    ||!Int64.TryParse(fields[2],NumberStyles.HexNumber,CultureInfo.InvariantCulture,out offset))throw new IOException("文件请求无效。");
-                StreamOffer(client,stream,number+":"+fileId,o=>o.DeviceId==packet.DeviceId&&o.Fingerprint==fingerprint&&offset>=0&&offset<=o.Size,offset);
+                if(identity.BatchFiles)lock(gate)fileBatchPeers[client]=identity.DeviceId;
+                try {
+                    int limit=identity.BatchFiles?BatchFileLimit:1;
+                    for(int index=0;index<limit;index++) {
+                        if(!Security.IsTrusted(identity.DeviceId,fingerprint))throw new IOException("设备信任已撤销。");
+                        string[] fields=packet.Body.Split(':');long number,offset;int fileId;
+                        if(fields.Length<3||!Int64.TryParse(fields[0],NumberStyles.HexNumber,CultureInfo.InvariantCulture,out number)||number<0
+                            ||!Int32.TryParse(fields[1],NumberStyles.HexNumber,CultureInfo.InvariantCulture,out fileId)||fileId<0
+                            ||!Int64.TryParse(fields[2],NumberStyles.HexNumber,CultureInfo.InvariantCulture,out offset)||offset<0)throw new IOException("文件请求无效。");
+                        client.ReceiveTimeout=45000;stream.ReadTimeout=45000;
+                        StreamOffer(client,stream,number+":"+fileId,o=>o.DeviceId==identity.DeviceId&&o.Fingerprint==fingerprint&&offset<=o.Size,offset);
+                        if(!identity.BatchFiles)break;
+                        SecureIdentity.WriteText(stream,index+1==limit?"DONE":"NEXT");
+                        if(index+1==limit)break;
+                        input.Begin(BatchRequestMilliseconds);
+                        try{header=SecureIdentity.ReadText(input,128).Split('\n');}
+                        catch(EndOfStreamException){return;}
+                        catch(IOException error){if(error.GetBaseException() is SocketException||error.Message=="请求读取超时")return;throw;}
+                        int nextPort;
+                        if(header.Length!=2||header[0]!="F"||!Int32.TryParse(header[1],out nextPort)||nextPort!=senderPort
+                            ||!Protocol.TryParse(SecureIdentity.ReadFrame(input,60000),out packet)||packet.Mode!=Protocol.GetFile
+                            ||packet.DeviceId!=identity.DeviceId||packet.Fingerprint!=fingerprint||packet.Login!=identity.Login)throw new IOException("批量文件报文身份或边界无效。");
+                    }
+                } finally {lock(gate)fileBatchPeers.Remove(client);if(identity.BatchFiles)FlushOfferCompletions();}
             }
         }
         private byte[] SecureHello() {
             return Protocol.Encode(0,Login,Host,Protocol.Entry|Protocol.Utf8,Protocol.Field(Settings.Nickname),Protocol.Field(Settings.Group),Settings.DeviceId,null,
-                Security.Fingerprint);
+                Security.Fingerprint).Concat(System.Text.Encoding.ASCII.GetBytes("FQBATCH=1\0")).ToArray();
         }
         private byte[] SecureSyncHello() {
             return Protocol.Encode(0,Login,Host,Protocol.Absence|Protocol.Utf8,Protocol.Field(Settings.Nickname),Protocol.Field(Settings.Group),Settings.DeviceId,null,
