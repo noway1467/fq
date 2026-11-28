@@ -4,7 +4,9 @@ $root = Split-Path $PSScriptRoot -Parent
 $workspaceTemp=Join-Path $root 'build\tmp'; New-Item -ItemType Directory -Force -Path $workspaceTemp | Out-Null
 $env:TEMP=$workspaceTemp;$env:TMP=$workspaceTemp;$env:TMPDIR=$workspaceTemp
 $env:JAVA_TOOL_OPTIONS='-Djava.io.tmpdir="'+$workspaceTemp+'"'
-if(!$ExecutablePath) { $ExecutablePath=Join-Path $root 'dist\飞Q.exe' }
+. "$root/tools/windows-package.ps1"
+if(!$ExecutablePath) { $ExecutablePath=(Get-WindowsPackage -Directory (Join-Path $root 'dist')).Path }
+if(!$ExecutablePath){throw '未找到 Windows 安装包'}
 $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($ExecutablePath).ProductVersion
 $zip = if($ArchivePath) { [IO.Path]::GetFullPath($ArchivePath) } else { Join-Path $root "build\archives\飞Q-$version-portable.zip" }
 $sandbox = Join-Path $env:TEMP ('FeiqLight-package-' + [Guid]::NewGuid().ToString('N'))
@@ -13,11 +15,14 @@ $oldTestRoot=$env:FEIQ_TEST_DATA_ROOT
 $env:FEIQ_TEST_DATA_ROOT=Join-Path $root 'build\test-data'
 try {
     Expand-Archive -LiteralPath $zip -DestinationPath $sandbox
-    $extracted = Join-Path $sandbox '飞Q.exe'
+    $extracted = Join-Path $sandbox ([IO.Path]::GetFileName($ExecutablePath))
     $expected = (Get-FileHash -LiteralPath $ExecutablePath -Algorithm SHA256).Hash
     $actual = (Get-FileHash -LiteralPath $extracted -Algorithm SHA256).Hash
     if($actual -ne $expected){throw '绿色包中的 EXE 与构建结果不一致'}
     if(!(Test-Path -LiteralPath "$sandbox\README.md")){throw '绿色包缺少使用说明'}
+    # 交付文件名带版本，测试引用仍按程序集内部名称解析；副本仅存在于隔离测试目录。
+    $dependency=Join-Path $sandbox ([Reflection.AssemblyName]::GetAssemblyName($extracted).Name+'.exe')
+    if($dependency -ne $extracted){Copy-Item -LiteralPath $extracted -Destination $dependency}
     # 直接引用解压包里的 EXE，而非重新编译 src，防止源码通过但交付包仍带旧问题。
     $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
     $testExe = Join-Path $sandbox 'FeiqLight.PackageTests.exe'

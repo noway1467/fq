@@ -38,4 +38,6 @@ Windows 使用 .NET Framework 4.8，Android 使用 JDK 17 与 Android SDK 36；�
 
 执行 `pwsh -NoProfile -File build.ps1` 或 `pwsh -NoProfile -File build-android.ps1` 构建对应端，追加 `-Test` 运行回归。
 
+Windows 安装包命名为 `FeiQ-<版本号>.exe`，本地 `dist`、便携包和 Release 保持一致。
+
 本项目源码以 [MIT 许可证](LICENSE) 发布。表情与头像素材来自 [Twemoji](https://github.com/jdecked/twemoji)（[CC BY 4.0](docs/Twemoji-LICENSE-GRAPHICS.txt)）；二维码使用内置 [Project Nayuki QR Code generator](https://www.nayuki.io/page/qr-code-generator-library)（MIT）。

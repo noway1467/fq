@@ -4,7 +4,9 @@ $root = Split-Path $PSScriptRoot -Parent
 $workspaceTemp=Join-Path $root 'build\tmp'; New-Item -ItemType Directory -Force -Path $workspaceTemp | Out-Null
 $env:TEMP=$workspaceTemp;$env:TMP=$workspaceTemp;$env:TMPDIR=$workspaceTemp
 $env:JAVA_TOOL_OPTIONS='-Djava.io.tmpdir="'+$workspaceTemp+'"'
-$exe = if($ExecutablePath){[IO.Path]::GetFullPath($ExecutablePath)}else{Join-Path $root 'dist\飞Q.exe'}
+. "$root/tools/windows-package.ps1"
+$exe = if($ExecutablePath){[IO.Path]::GetFullPath($ExecutablePath)}else{(Get-WindowsPackage -Directory (Join-Path $root 'dist')).Path}
+if(!$exe){throw '未找到 Windows 安装包'}
 $profile = Join-Path $env:TEMP ('FeiqLight-benchmark-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $profile | Out-Null
 $probe = [System.Net.Sockets.UdpClient]::new([System.Net.IPEndPoint]::new([System.Net.IPAddress]::Loopback, 0))

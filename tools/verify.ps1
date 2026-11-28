@@ -2,6 +2,7 @@
 param([ValidateSet('Fast','Full','Release')][string]$Mode='Fast')
 $ErrorActionPreference='Stop'
 $root=Split-Path -Parent $PSScriptRoot
+. "$root/tools/windows-package.ps1"
 $id=[Guid]::NewGuid().ToString('N').Substring(0,6)
 $tmpBase=[IO.Path]::GetFullPath("$root/build/tmp")
 $work=Join-Path $tmpBase "v$id"
@@ -63,11 +64,11 @@ try {
         Invoke-Script 'commit-audit' 'tests/commit-audit.ps1' @('-TemporaryDirectory',"$work/ca") ($noCompiler ?? $noDesktop)
     }
     if($Mode -eq 'Release'){
-        if(!(Test-Path -LiteralPath "$root/dist/飞Q.exe") -or !@(Get-ChildItem -LiteralPath "$root/dist" -Filter '*.apk' -File -ErrorAction SilentlyContinue).Count){
+        if(!(Get-WindowsPackage -Directory (Join-Path $root 'dist')) -or !@(Get-ChildItem -LiteralPath "$root/dist" -Filter '*.apk' -File -ErrorAction SilentlyContinue).Count){
             Add-Result 'upgrade-baseline' 'BLOCKED' '缺少旧交付包，不能确认覆盖升级' $null
         }
-        $exe=Join-Path $packages '飞Q.exe';$apk=@(Get-ChildItem -LiteralPath $packages -Filter '*.apk' -File)
-        if(!(Test-Path -LiteralPath $exe) -or $apk.Count -ne 1){Add-Result 'candidate-digests' 'BLOCKED' '未取得本轮双端候选包' $null}
+        $windowsPackage=Get-WindowsPackage -Directory $packages;$exe=if($windowsPackage){$windowsPackage.Path}else{$null};$apk=@(Get-ChildItem -LiteralPath $packages -Filter '*.apk' -File)
+        if(!$exe -or $apk.Count -ne 1){Add-Result 'candidate-digests' 'BLOCKED' '未取得本轮双端候选包' $null}
         else{
             $manifest=Join-Path $report 'sha256.txt'
             Get-FileHash -LiteralPath $exe,$apk[0].FullName | ForEach-Object {"$($_.Hash)  $([IO.Path]::GetFileName($_.Path))"} | Set-Content -LiteralPath $manifest -Encoding utf8NoBOM
