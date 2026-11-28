@@ -242,6 +242,7 @@ namespace FeiqLight
         private readonly RoundedPanel linkFieldWrap = new RoundedPanel { Radius = 8, Border = Color.Empty };
         private readonly TextBox linkBox = new TextBox { ReadOnly = true, BorderStyle = BorderStyle.None };
         private readonly ToggleSwitch upload = new ToggleSwitch { Text = "允许对方向我发送文件", AccessibleName = "允许浏览器上传", Description = "保存至接收目录 · 限 1000 个文件 / 100 GiB", Checked = false };
+        private readonly ToggleSwitch allowText = new ToggleSwitch { Text = "允许文本互传", AccessibleName = "允许文本互传", Checked = false };
         private readonly Label netTitle = Theme.Label("局域网地址", Theme.Section, Theme.Ink);
         private readonly AddressPicker addressPicker;
         private readonly Label lifetimeTitle = Theme.Label("链接有效期（分钟，1–1440）", Theme.Small, Theme.Muted);
@@ -250,12 +251,13 @@ namespace FeiqLight
         private readonly Button saveLifetime;
         private readonly Panel footerBar = new BufferedCanvas();
         private readonly Label state = Theme.Label("就绪", Theme.Small, Theme.Muted);
-        private readonly Button choose, chooseFolder, removeBtn, clearBtn, refreshIp, copy, qr, openTasks, start;
+        private readonly Button choose, chooseFolder, removeBtn, clearBtn, refreshIp, copy, qr, openTasks, start, textTransfer;
         private readonly Timer timer = new Timer { Interval = 1000 };
         private readonly Timer copyReset = new Timer { Interval = 1800 };
         private readonly Timer windowSaveTimer = new Timer { Interval = 500 };
         private readonly ToolTip tips = new ToolTip();
-        private GuestTransfer session;
+        private volatile GuestTransfer session;
+        private GuestTextWindow textWindow;
         internal Func<FileInfo, FileAttributes> ReadAttributes = info => info.Attributes;
         private bool hasReceivedFiles;
         private bool stateError;
@@ -288,6 +290,7 @@ namespace FeiqLight
             headerHint.AutoEllipsis = true;
             headerHint.TextAlign = ContentAlignment.MiddleLeft;
             headerStrip.Controls.Add(statusChip);
+            headerStrip.Controls.Add(allowText);
             headerStrip.Controls.Add(headerHint);
 
             // 主体工作区卡片：白底/深卡衬于 Canvas 之上，突出核心文件操作区。
@@ -382,9 +385,12 @@ namespace FeiqLight
             state.TextAlign = ContentAlignment.MiddleLeft;
             openTasks = Theme.Button("查看已接收", delegate { main.OpenTransfers("browser-guests"); }, false);
             openTasks.Visible = false;
+            textTransfer = Theme.Button("文本互传…", delegate { OpenText(); }, false);
+            tips.SetToolTip(allowText,"仅本次会话开放；文本不进聊天历史，会话结束自动清空。");
             start = Theme.Button("开启临时传输", delegate { Toggle(); }, true);
             footerBar.Controls.Add(state);
             footerBar.Controls.Add(openTasks);
+            footerBar.Controls.Add(textTransfer);
             footerBar.Controls.Add(start);
 
             Surface.Controls.Add(headerStrip);
@@ -398,6 +404,7 @@ namespace FeiqLight
             Shown += delegate { ApplyColors(); Relayout(); UpdateActions(); };
             DpiChangedAfterParent += delegate { ApplyColors(); Relayout(); };
             Theme.Changed += ApplyColors;
+            network.NetworkReset += CloseNetworkSession;
             copyReset.Tick += delegate { copyReset.Stop(); if (!IsDisposed) copy.Text = "复制链接"; };
             timer.Tick += delegate
             {
@@ -448,7 +455,9 @@ namespace FeiqLight
                 headerStrip.Bounds = new Rectangle(0, 0, w, headerH);
                 statusChip.UpdateExtent();
                 statusChip.Location = new Point(outer, (headerH - statusChip.Height) / 2);
-                int hintX = statusChip.Right + (int)Math.Round(12 * s);
+                int textW = (int)Math.Round(160 * s), textH = allowText.PreferredHeightFor(textW);
+                allowText.Bounds = new Rectangle(statusChip.Right + (int)Math.Round(12 * s), Math.Max(0,(headerH-textH)/2), textW, textH);
+                int hintX = allowText.Right + (int)Math.Round(12 * s);
                 headerHint.Bounds = new Rectangle(hintX, 0, Math.Max(40, w - hintX - outer), headerH);
 
                 footerBar.Bounds = new Rectangle(0, Math.Max(headerH, h - footerH), w, footerH);
@@ -463,6 +472,9 @@ namespace FeiqLight
                     openTasks.Bounds = new Rectangle(start.Left - (int)Math.Round(10 * s) - tasksW, btnY, tasksW, btnH);
                     leftLimit = openTasks.Left - (int)Math.Round(12 * s);
                 }
+                int textButtonW = MeasureButtonWidth(textTransfer, s, 26, 94);
+                textTransfer.Bounds = new Rectangle(leftLimit - textButtonW, btnY, textButtonW, btnH);
+                leftLimit = textTransfer.Left - (int)Math.Round(12 * s);
                 state.Bounds = new Rectangle(outer, 0, Math.Max(40, leftLimit - outer), footerH);
 
                 int wsH = Math.Max(120, footerBar.Top - headerH);
@@ -553,7 +565,6 @@ namespace FeiqLight
             int toggleTop = linkBlock.Bottom + (int)Math.Round(10 * s);
             int toggleH = upload.PreferredHeightFor(pw);
             upload.Bounds = new Rectangle(0, toggleTop, pw, toggleH);
-
             int netTop = upload.Bottom + (int)Math.Round(8 * s);
             netTitle.Bounds = new Rectangle(0, netTop, pw, netTitle.PreferredHeight);
             int pickerH = (int)Math.Round(36 * s);
@@ -573,7 +584,6 @@ namespace FeiqLight
 
             int toggleH = upload.PreferredHeightFor(leftW);
             upload.Bounds = new Rectangle(0, (int)Math.Round(2 * s), leftW, toggleH);
-
             int netTop = upload.Bottom + (int)Math.Round(10 * s);
             netTitle.Bounds = new Rectangle(0, netTop, leftW, netTitle.PreferredHeight);
             int pickerH = (int)Math.Round(34 * s);
@@ -674,6 +684,7 @@ namespace FeiqLight
             files.ForeColor = Theme.Ink;
 
             upload.BackColor = Theme.Canvas;
+            allowText.BackColor = Theme.Canvas;
             netTitle.BackColor = Theme.Canvas;
             netTitle.ForeColor = Theme.Ink;
             lifetimeTitle.BackColor = Theme.Canvas;
@@ -702,6 +713,7 @@ namespace FeiqLight
             StyleActionButton(refreshIp, 0, 8);
             refreshIp.ForeColor = Theme.Muted;
             StyleActionButton(openTasks, 0, 8);
+            StyleActionButton(textTransfer, 0, 8);
             bool active = session != null && session.Active;
             StyleActionButton(start, active ? 3 : 4, 8);
 
@@ -976,7 +988,7 @@ namespace FeiqLight
                 ReloadAddresses();
                 if (addressPicker.SelectedItem == null) throw new IOException("没有可用的局域网，请先连接 Wi-Fi、热点或以太网。");
                 SaveLifetime();
-                session = new GuestTransfer(files.Items.Cast<ShareEntry>().Select(e => new SendBatch.Item{Path=e.FullPath,Relative=e.Relative}), network.Settings.ReceiveFolder, upload.Checked, network.LoopbackOnly, network.Settings.GuestLifetimeMinutes);
+                session = new GuestTransfer(files.Items.Cast<ShareEntry>().Select(e => new SendBatch.Item{Path=e.FullPath,Relative=e.Relative}), network.Settings.ReceiveFolder, upload.Checked, network.LoopbackOnly, network.Settings.GuestLifetimeMinutes, allowText.Checked);
                 session.Received = (path, name) => main.Ui(() =>
                 {
                     if (!IsDisposed) hasReceivedFiles = true;
@@ -1004,7 +1016,8 @@ namespace FeiqLight
 
             UpdateStatusChip();
             statusChip.Location = new Point(statusChip.Left, (headerStrip.Height - statusChip.Height) / 2);
-            int hintX = statusChip.Right + (int)Math.Round(12 * CurrentDpiScale());
+            allowText.Left = statusChip.Right + (int)Math.Round(12 * CurrentDpiScale());
+            int hintX = allowText.Right + (int)Math.Round(12 * CurrentDpiScale());
             headerHint.Bounds = new Rectangle(hintX, 0, Math.Max(40, headerStrip.Width - hintX - (int)Math.Round(18 * CurrentDpiScale())), headerStrip.Height);
 
             start.Text = active ? "结束临时传输" : "开启临时传输";
@@ -1014,7 +1027,8 @@ namespace FeiqLight
             choose.Enabled = chooseFolder.Enabled = !active;
             removeBtn.Enabled = !active && files.SelectedIndex >= 0;
             clearBtn.Enabled = !active && count > 0;
-            upload.Enabled = !active;
+            upload.Enabled = allowText.Enabled = !active;
+            textTransfer.Enabled = active && session.AllowText;
             lifetimeField.Enabled = saveLifetime.Enabled = !active;
             lifetime.ForeColor = active ? Theme.Muted : Theme.Ink;
             lifetimeField.Invalidate();
@@ -1029,6 +1043,7 @@ namespace FeiqLight
 
         internal void Stop()
         {
+            if(textWindow!=null){textWindow.ClearAndClose();textWindow=null;}
             copyReset.Stop();
             copy.Text = "复制链接";
             if (session != null)
@@ -1040,6 +1055,18 @@ namespace FeiqLight
             }
             ReloadAddresses();
             UpdateActions();
+        }
+        private void OpenText()
+        {
+            GuestTransfer current=session;
+            if(current==null||!current.Active||!current.AllowText)return;
+            if(textWindow==null||textWindow.IsDisposed)textWindow=new GuestTextWindow(current,()=>session==current&&current.Active);
+            textWindow.Show(this);textWindow.Activate();
+        }
+        private void CloseNetworkSession()
+        {
+            GuestTransfer current=session;
+            if(current!=null)current.Dispose();
         }
 
         protected override void OnLoad(EventArgs e)
@@ -1107,10 +1134,12 @@ namespace FeiqLight
                 if (placementPending && !main.IsDisposed && !main.Disposing) SaveWindowPlacement();
                 windowSaveTimer.Dispose();
                 Theme.Changed -= ApplyColors;
+                network.NetworkReset -= CloseNetworkSession;
                 timer.Stop(); timer.Dispose();
                 copyReset.Stop(); copyReset.Dispose();
                 tips.Dispose();
                 monoFont.Dispose();
+                if(textWindow!=null){textWindow.ClearAndClose();textWindow=null;}
                 if (session != null) { session.Dispose(); session = null; }
             }
             base.Dispose(disposing);

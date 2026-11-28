@@ -41,6 +41,75 @@ public final class TransferFeatureTest {
         }finally{connection.disconnect();}
     }
     private static Reply post(GuestTransfer server,String path,JSONObject data)throws Exception {return request(server,path,server.token,"POST",data.toString().getBytes(StandardCharsets.UTF_8),null);}
+    private static int sendText(GuestTransfer server,boolean published,String text)throws Exception {
+        if(!published)return post(server,"/api/text",new JSONObject().put("text",text)).code;
+        try{server.publishText(text);return 200;}catch(ToolsHttp.Failure error){return error.code;}
+    }
+    private static void resetTextRate(GuestTransfer server,boolean published)throws Exception {setField(server,published?"nextPublishedText":"nextReceivedText",0L);}
+    private static int textHeaderRequest(GuestTransfer server,String method,String host,String origin)throws Exception {
+        byte[] body=method.equals("POST")?"{\"text\":\"header check\"}".getBytes(StandardCharsets.UTF_8):new byte[0];
+        String headers=method+" /api/text HTTP/1.1\r\nHost: "+host+"\r\nX-FQ-Guest: "+server.token+"\r\nOrigin: "+origin+"\r\nContent-Type: application/json\r\nContent-Length: "+body.length+"\r\nConnection: close\r\n\r\n";
+        // HttpURLConnection 会过滤 Origin；回环攻击断言必须真实发出待校验的头。
+        try(Socket socket=new Socket("127.0.0.1",server.port())) {
+            socket.setSoTimeout(3000);OutputStream output=socket.getOutputStream();output.write(headers.getBytes(StandardCharsets.US_ASCII));output.write(body);output.flush();
+            String first=new BufferedReader(new InputStreamReader(socket.getInputStream(),StandardCharsets.US_ASCII)).readLine();return first==null?-1:Integer.parseInt(first.split(" ")[1]);
+        }
+    }
+    @Test public void guestTextPermissionsAndInboxPrivacy()throws Exception {
+        Context context=RuntimeEnvironment.getApplication();
+        Map<String,?> previousReceived=new HashMap<>(context.getSharedPreferences("guest_received",0).getAll());
+        try(GuestTransfer server=new GuestTransfer(context,Collections.emptyList(),false,true,true)) {
+            JSONObject status=request(server,"/api/guest",server.token,"GET",null,null).json();
+            assertTrue(server.active());assertTrue(status.getBoolean("text"));assertFalse(status.getBoolean("upload"));assertEquals(4096,status.getJSONObject("textLimits").getInt("maxBytes"));
+            assertEquals(403,request(server,"/api/text?token="+server.token,null,"GET",null,null).code);
+            assertEquals(403,request(server,"/api/text",null,"POST","{\"text\":\"private\"}".getBytes(StandardCharsets.UTF_8),null).code);
+            assertEquals(200,post(server,"/api/text",new JSONObject().put("text","访客 A 的私人投递")).code);
+            assertEquals("访客 A 的私人投递",server.texts(false).get(0).text);
+            assertEquals("访客 B 不能读取 A 的收件箱",0,request(server,"/api/text?after=0",server.token,"GET",null,null).json().getJSONArray("items").length());
+            String published="<img src=x onerror=alert(1)>\nhttps://example.invalid/?a=中文&b=😀";server.publishText(published);
+            JSONArray items=request(server,"/api/text?after=0",server.token,"GET",null,null).json().getJSONArray("items");assertEquals(1,items.length());assertEquals(published,items.getJSONObject(0).getString("text"));
+            assertEquals(0,request(server,"/api/text?after=1",server.token,"GET",null,null).json().getJSONArray("items").length());
+            for(String after:new String[]{"-1","abc","65","99999999999999999"})assertEquals(400,request(server,"/api/text?after="+after,server.token,"GET",null,null).code);
+            String host="127.0.0.1:"+server.port();
+            for(String method:new String[]{"GET","POST"}) {
+                assertEquals(403,textHeaderRequest(server,method,host,"http://evil.invalid"));
+                assertEquals(403,textHeaderRequest(server,method,"evil.invalid","http://"+host));
+            }
+            assertEquals(403,post(server,"/api/prepare",new JSONObject().put("name","blocked").put("size",0)).code);
+            assertEquals("文本不写访客文件记录",previousReceived,context.getSharedPreferences("guest_received",0).getAll());
+        }
+        try(GuestTransfer server=new GuestTransfer(context,Collections.emptyList(),true,true)) {
+            assertFalse(request(server,"/api/guest",server.token,"GET",null,null).json().getBoolean("text"));
+            assertEquals(403,request(server,"/api/text",server.token,"GET",null,null).code);assertEquals(403,sendText(server,false,"x"));assertEquals(403,sendText(server,true,"x"));
+        }
+    }
+    @Test public void guestTextBothDirectionsByteCountBudgetsAndRate()throws Exception {
+        Context context=RuntimeEnvironment.getApplication();
+        for(boolean published:new boolean[]{false,true}) {
+            try(GuestTransfer server=new GuestTransfer(context,Collections.emptyList(),false,true,true)) {
+                for(String empty:new String[]{"","\0\0"})assertEquals(400,sendText(server,published,empty));
+                String limit="😀".repeat(1024);assertEquals(4096,limit.getBytes(StandardCharsets.UTF_8).length);
+                assertEquals(413,sendText(server,published,limit+"a"));assertEquals(200,sendText(server,published,limit));
+                setField(server,published?"nextPublishedText":"nextReceivedText",Long.MAX_VALUE);assertEquals(429,sendText(server,published,"频控"));resetTextRate(server,published);
+                for(int i=1;i<32;i++){resetTextRate(server,published);assertEquals(200,sendText(server,published,limit));}
+                resetTextRate(server,published);assertEquals(409,sendText(server,published,"超累计字节"));assertEquals(32,server.texts(published).size());
+            }
+            try(GuestTransfer server=new GuestTransfer(context,Collections.emptyList(),false,true,true)) {
+                for(int i=0;i<64;i++){resetTextRate(server,published);assertEquals(200,sendText(server,published,"x"));}
+                resetTextRate(server,published);assertEquals(409,sendText(server,published,"第65条"));assertEquals(64,server.texts(published).size());
+            }
+        }
+    }
+    @Test public void guestTextStopAndExpiryClearMemoryAndRejectLatePublish()throws Exception {
+        Context context=RuntimeEnvironment.getApplication();
+        for(boolean expire:new boolean[]{false,true})try(GuestTransfer server=new GuestTransfer(context,Collections.emptyList(),false,true,true)) {
+            server.publishText("主机发布");assertEquals(200,sendText(server,false,"访客投递"));java.util.concurrent.atomic.AtomicInteger ended=new java.util.concurrent.atomic.AtomicInteger();server.textEnded=ended::incrementAndGet;
+            if(expire){setField(server,"deadline",System.nanoTime()-1);assertFalse(server.active());assertEquals(410,sendText(server,false,"迟到投递"));}
+            else server.close();
+            assertTrue(server.texts(true).isEmpty());assertTrue(server.texts(false).isEmpty());assertEquals(0,field(server,"publishedTextBytes"));assertEquals(0,field(server,"receivedTextBytes"));
+            assertEquals(410,sendText(server,true,"迟到发布"));server.close();assertEquals(1,ended.get());
+        }
+    }
     @Test public void guestUploadsResumeAndNeverExposeUnselectedFiles()throws Exception {
         Context context=RuntimeEnvironment.getApplication();byte[] original="浏览器发送的中文 😀".getBytes(StandardCharsets.UTF_8);
         try(GuestTransfer server=new GuestTransfer(context,Collections.emptyList(),true,true)) {

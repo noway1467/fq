@@ -25,6 +25,12 @@ final class GuestTransfer implements AutoCloseable {
         final String id,name,relative;final long size;final File partial,target;long offset,time;boolean canceled,moved,placed,saved;String warning="";
         Upload(String name,long size,File directory,String relative){this.name=name;this.size=size;this.relative=relative;id=SharedFiles.random(32);target=new File(directory,id);partial=new File(directory,".fq-guest-"+id+".part");}
     }
+    static final class TextEntry {
+        final int sequence;
+        final String text;
+        TextEntry(int sequence,String text){this.sequence=sequence;this.text=text;}
+    }
+    static final int TEXT_BYTE_LIMIT=4096,TEXT_COUNT_LIMIT=64,TEXT_SESSION_BYTE_LIMIT=128*1024,TEXT_INTERVAL_MILLISECONDS=250;
     static final long UPLOAD_QUOTA=100L*1024*1024*1024;
     static final int UPLOAD_FILE_LIMIT=1000, UPLOAD_TASK_LIMIT=4096;
     static final int DEFAULT_LIFETIME_MINUTES=60, MAX_LIFETIME_MINUTES=1440;
@@ -49,6 +55,12 @@ final class GuestTransfer implements AutoCloseable {
     private final Map<String,Upload> requests=new HashMap<>();
     private final File directory;
     private final boolean allowUpload;
+    final boolean allowText;
+    private final List<TextEntry> publishedTexts=new ArrayList<>(),receivedTexts=new ArrayList<>();
+    private int publishedTextBytes,receivedTextBytes;
+    private long nextPublishedText,nextReceivedText;
+    private boolean textsEnded;
+    volatile Runnable textEnded=()->{};
     private final ToolsHttp http;
     private final ScheduledExecutorService expiry=Executors.newSingleThreadScheduledExecutor(r->{Thread t=new Thread(r,"guest-expiry");t.setDaemon(true);return t;});
     private volatile boolean closed;
@@ -65,12 +77,19 @@ final class GuestTransfer implements AutoCloseable {
     GuestTransfer(Context context,List<LanNode.Source> sources,boolean allowUpload,boolean loopback)throws IOException {
         this(context,sources,allowUpload,loopback,loopback?null:new LanNetwork(context.getSystemService(android.net.ConnectivityManager.class)));
     }
+    GuestTransfer(Context context,List<LanNode.Source> sources,boolean allowUpload,boolean loopback,boolean allowText)throws IOException {
+        this(context,sources,Collections.emptyMap(),allowUpload,loopback,loopback?null:new LanNetwork(context.getSystemService(android.net.ConnectivityManager.class)),allowText);
+    }
     GuestTransfer(Context context,List<LanNode.Source> sources,boolean allowUpload,boolean loopback,LanNode.SocketBinding binding)throws IOException {
         this(context,sources,Collections.emptyMap(),allowUpload,loopback,binding);
     }
     GuestTransfer(Context context,List<LanNode.Source> sources,Map<String,String> relatives,boolean allowUpload,boolean loopback,LanNode.SocketBinding binding)throws IOException {
+        this(context,sources,relatives,allowUpload,loopback,binding,false);
+    }
+    GuestTransfer(Context context,List<LanNode.Source> sources,Map<String,String> relatives,boolean allowUpload,boolean loopback,LanNode.SocketBinding binding,boolean allowText)throws IOException {
         if(!loopback&&binding==null)throw new IOException("请先连接局域网");
-        this.context=context.getApplicationContext();this.allowUpload=allowUpload;directory=new File(context.getFilesDir(),"received");Files.createDirectories(directory.toPath());
+        this.context=context.getApplicationContext();this.allowUpload=allowUpload;this.allowText=allowText;directory=new File(context.getFilesDir(),"received");
+        if(allowUpload)Files.createDirectories(directory.toPath());
         if(sources.size()>1000)throw new IOException("单次最多 1000 个文件");
         Map<String,DownloadDirectory> directoryPaths=new HashMap<>();
         for(LanNode.Source source:sources){
@@ -94,7 +113,7 @@ final class GuestTransfer implements AutoCloseable {
                 DownloadDirectory directory=directoryPaths.get(path);if(directory!=null)directory.files.add(file);
             }
         }
-        if(downloads.isEmpty()&&!allowUpload)throw new IOException("请先选择文件或开启接收");
+        if(downloads.isEmpty()&&!allowUpload&&!allowText)throw new IOException("请先选择文件、开启接收或允许文本互传");
         int minutes=lifetimeMinutes(context);
         until=System.currentTimeMillis()+TimeUnit.MINUTES.toMillis(minutes);
         deadline=System.nanoTime()+TimeUnit.MINUTES.toNanos(minutes);
@@ -102,12 +121,12 @@ final class GuestTransfer implements AutoCloseable {
         expiry.schedule(this::close,minutes,TimeUnit.MINUTES);
     }
     int port(){return http.port();}
-    boolean active(){return !closed&&System.nanoTime()<deadline;}
+    boolean active(){boolean active=!closed&&System.nanoTime()<deadline;if(!active)clearTexts();return active;}
     long remainingMinutes(){return Math.max(0,(long)Math.ceil((deadline-System.nanoTime())/60000000000.0));}
     String url(String address){return "http://"+address+":"+port()+"/#"+token;}
     private void check()throws ToolsHttp.Failure{if(!active())throw new ToolsHttp.Failure(410,"临时传输已结束，请让对方重新开启");}
     private void authorize(ToolsHttp.Request request)throws IOException {
-        check();String supplied=request.header("X-FQ-Guest");if(supplied.isEmpty()&&(request.method.equals("GET")||request.method.equals("HEAD")))supplied=request.parameter("token");
+        check();String supplied=request.header("X-FQ-Guest");if(!request.path.equals("/api/text")&&supplied.isEmpty()&&(request.method.equals("GET")||request.method.equals("HEAD")))supplied=request.parameter("token");
         if(!token.equals(supplied))throw new ToolsHttp.Failure(403,"链接无效，请使用对方分享的完整链接");
     }
     private void handle(ToolsHttp.Request request,ToolsHttp.Response response)throws Exception {
@@ -126,10 +145,12 @@ final class GuestTransfer implements AutoCloseable {
                 folders.put(new JSONObject().put("id",directory.id).put("name",directory.name).put("relativePath",directory.path).put("count",directory.files.size()).put("size",size));
             }
             JSONObject archive=new JSONObject().put("enabled",true).put("maxEntries",StoreZipWriter.MAX_ENTRIES).put("maxBytes",StoreZipWriter.MAX_BYTES);
-            response.json(new JSONObject().put("files",list).put("directories",folders).put("archive",archive).put("upload",allowUpload).put("requestIds",true).put("folders",true).put("until",java.time.Instant.ofEpochMilli(until).toString()).put("remainingMilliseconds",Math.max(0,TimeUnit.NANOSECONDS.toMillis(deadline-System.nanoTime()))).put("limit",UPLOAD_QUOTA).put("countLimit",UPLOAD_FILE_LIMIT).toString(),"");return;
+            JSONObject textLimits=new JSONObject().put("maxBytes",TEXT_BYTE_LIMIT).put("maxEntries",TEXT_COUNT_LIMIT).put("maxTotalBytes",TEXT_SESSION_BYTE_LIMIT).put("intervalMilliseconds",TEXT_INTERVAL_MILLISECONDS);
+            response.json(new JSONObject().put("files",list).put("directories",folders).put("archive",archive).put("upload",allowUpload).put("text",allowText).put("textLimits",textLimits).put("requestIds",true).put("folders",true).put("until",java.time.Instant.ofEpochMilli(until).toString()).put("remainingMilliseconds",Math.max(0,TimeUnit.NANOSECONDS.toMillis(deadline-System.nanoTime()))).put("limit",UPLOAD_QUOTA).put("countLimit",UPLOAD_FILE_LIMIT).toString(),"");return;
         }
         if((request.method.equals("GET")||request.method.equals("HEAD"))&&request.path.equals("/file")){send(request,response);return;}
         if(request.method.equals("GET")&&request.path.equals("/archive")){archive(request,response);return;}
+        if(request.path.equals("/api/text")){handleText(request,response);return;}
         if(!allowUpload)throw new ToolsHttp.Failure(403,"对方未开启浏览器接收");
         if(request.method.equals("POST")&&request.path.equals("/api/prepare")) {
             if(!request.header("Content-Type").startsWith("application/json"))throw new ToolsHttp.Failure(400,"请求格式错误");
@@ -189,6 +210,67 @@ final class GuestTransfer implements AutoCloseable {
             }
             throw new ToolsHttp.Failure(404,"没有此操作");
         }
+    }
+    List<TextEntry> texts(boolean published) {
+        if(!active())return Collections.emptyList();
+        synchronized(this){return textsEnded?Collections.emptyList():new ArrayList<>(published?publishedTexts:receivedTexts);}
+    }
+    synchronized void publishText(String text)throws IOException {
+        checkText();addText(true,text);
+    }
+    private void checkText()throws ToolsHttp.Failure {
+        check();
+        if(textsEnded)throw new ToolsHttp.Failure(410,"临时传输已结束，请让对方重新开启");
+        if(!allowText)throw new ToolsHttp.Failure(403,"对方未开启文本互传");
+    }
+    private void addText(boolean published,String text)throws IOException {
+        if(text==null||text.isEmpty()||text.chars().allMatch(c->c==0))throw new ToolsHttp.Failure(400,"请输入非空的纯文本");
+        int bytes;
+        try{bytes=java.nio.charset.StandardCharsets.UTF_8.newEncoder().encode(java.nio.CharBuffer.wrap(text)).remaining();}
+        catch(java.nio.charset.CharacterCodingException error){throw new ToolsHttp.Failure(400,"文本包含无效的 Unicode 字符");}
+        if(bytes>TEXT_BYTE_LIMIT)throw new ToolsHttp.Failure(413,"单条文本最多 4096 UTF-8 字节");
+        List<TextEntry> entries=published?publishedTexts:receivedTexts;
+        int total=published?publishedTextBytes:receivedTextBytes;
+        if(entries.size()>=TEXT_COUNT_LIMIT||bytes>TEXT_SESSION_BYTE_LIMIT-total)throw new ToolsHttp.Failure(409,"本方向已达 64 条或 128 KiB 文本上限，请重新开启会话");
+        long now=System.nanoTime(),next=published?nextPublishedText:nextReceivedText;
+        if(now<next)throw new ToolsHttp.Failure(429,"发送过于频繁，请稍等片刻再发送（每 250 毫秒最多一条）");
+        entries.add(new TextEntry(entries.size()+1,text));
+        if(published){publishedTextBytes+=bytes;nextPublishedText=now+TimeUnit.MILLISECONDS.toNanos(TEXT_INTERVAL_MILLISECONDS);}
+        else{receivedTextBytes+=bytes;nextReceivedText=now+TimeUnit.MILLISECONDS.toNanos(TEXT_INTERVAL_MILLISECONDS);}
+    }
+    private void handleText(ToolsHttp.Request request,ToolsHttp.Response response)throws IOException {
+        checkText();
+        if(request.method.equals("GET")) {
+            String value=request.parameter("after");int after=0;
+            if(!value.isEmpty())try{if(!value.matches("[0-9]+"))throw new NumberFormatException();after=Integer.parseInt(value);if(after>TEXT_COUNT_LIMIT)throw new NumberFormatException();}
+            catch(NumberFormatException error){throw new ToolsHttp.Failure(400,"文本读取位置无效");}
+            try {
+                JSONArray items=new JSONArray();int last;
+                synchronized(this){checkText();for(TextEntry entry:publishedTexts)if(entry.sequence>after)items.put(new JSONObject().put("seq",entry.sequence).put("text",entry.text));last=publishedTexts.size();}
+                checkText();response.json(new JSONObject().put("items",items).put("last",last).toString(),"");return;
+            }catch(JSONException error){throw new IOException("文本响应无法生成",error);}
+        }
+        if(request.method.equals("POST")) {
+            if(!request.header("Content-Type").toLowerCase(Locale.ROOT).startsWith("application/json"))throw new ToolsHttp.Failure(400,"请使用 JSON 请求体发送纯文本");
+            if(request.body.length>32768)throw new ToolsHttp.Failure(413,"单条文本最多 4096 UTF-8 字节");
+            String text;
+            try {
+                String json=java.nio.charset.StandardCharsets.UTF_8.newDecoder().decode(java.nio.ByteBuffer.wrap(request.body)).toString();
+                Object value=new JSONObject(json).opt("text");if(!(value instanceof String))throw new ToolsHttp.Failure(400,"请输入非空的纯文本");text=(String)value;
+            }catch(JSONException|java.nio.charset.CharacterCodingException error){throw new ToolsHttp.Failure(400,"文本请求内容无效");}
+            synchronized(this){checkText();addText(false,text);}
+            response.json("{\"ok\":true}","");return;
+        }
+        throw new ToolsHttp.Failure(405,"文本互传仅支持读取或发送");
+    }
+    private void clearTexts() {
+        Runnable ended;
+        synchronized(this){
+            if(textsEnded)return;
+            textsEnded=true;publishedTexts.clear();receivedTexts.clear();publishedTextBytes=receivedTextBytes=0;nextPublishedText=nextReceivedText=0;
+            ended=textEnded;textEnded=()->{};
+        }
+        ended.run();
     }
     private void validateArchiveSource(Download file,InputStream input)throws IOException {
         check();
@@ -259,6 +341,7 @@ final class GuestTransfer implements AutoCloseable {
     }
     @Override public void close() {
         List<Upload> pending;InputStream input;synchronized(this){if(closed)return;closed=true;pending=new ArrayList<>(uploads.values());input=archiveInput;archiveInput=null;}
+        clearTexts();
         http.close();expiry.shutdownNow();
         if(input!=null)try{input.close();}catch(IOException error){cleanupError="打包读取关闭失败："+error.getMessage();}
         for(Upload upload:pending)synchronized(upload){if(!upload.saved)try{Files.deleteIfExists(upload.partial.toPath());}catch(IOException e){cleanupError="未完成文件清理失败："+e.getMessage();}}

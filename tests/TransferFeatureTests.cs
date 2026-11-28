@@ -31,10 +31,10 @@ namespace FeiqLight.Tests
         {
             internal int Code;internal byte[] Body;internal string Headers;
         }
-        private static Reply Request(int port,string path,string token=null,byte[] body=null,string method="GET",string extra="")
+        private static Reply Request(int port,string path,string token=null,byte[] body=null,string method="GET",string extra="",string host=null)
         {
             using(var client=new TcpClient("127.0.0.1",port)) {
-                client.ReceiveTimeout=10000;byte[] payload=body??new byte[0];string headers=method+" "+path+" HTTP/1.1\r\nHost: 127.0.0.1:"+port+"\r\nConnection: close\r\n"+extra;
+                client.ReceiveTimeout=10000;byte[] payload=body??new byte[0];string headers=method+" "+path+" HTTP/1.1\r\nHost: "+(host??"127.0.0.1:"+port)+"\r\nConnection: close\r\n"+extra;
                 if(token!=null)headers+="X-FQ-Guest: "+token+"\r\n";
                 headers+="Content-Length: "+payload.Length+"\r\n\r\n";Stream stream=client.GetStream();byte[] head=Encoding.ASCII.GetBytes(headers);stream.Write(head,0,head.Length);stream.Write(payload,0,payload.Length);
                 using(var data=new MemoryStream()){byte[] buffer=new byte[8192];int count;while((count=stream.Read(buffer,0,buffer.Length))>0)data.Write(buffer,0,count);byte[] bytes=data.ToArray();int split=-1;
@@ -380,10 +380,19 @@ namespace FeiqLight.Tests
                 string browserFolder=Path.Combine(root,"browser-source","分享资料 中文 English");Directory.CreateDirectory(Path.Combine(browserFolder,"子目录"));
                 File.WriteAllText(Path.Combine(browserFolder,"子目录","特殊 +&%#😀.txt"),"归档中文 English 😀",new UTF8Encoding(false));
                 File.WriteAllBytes(Path.Combine(browserFolder,"空文件.txt"),new byte[0]);
-                using(var server=new GuestTransfer(new[]{sample,browserFolder},Path.Combine(root,"browser-received"),true,true)){
+                using(var server=new GuestTransfer(new[]{sample,browserFolder},Path.Combine(root,"browser-received"),true,true,allowText:true)){
+                    server.PublishText("<img src=x onerror=window.fqTextXss=1>\n主机发布 中文 English 😀 https://example.invalid/");
                     File.WriteAllText(Path.Combine(output,"guest-url.txt"),server.Url("127.0.0.1"));Console.WriteLine("READY local guest test server");
-                    for(int i=0;i<1200&&!File.Exists(Path.Combine(output,"stop-server"));i++)Thread.Sleep(1000);
+                    for(int i=0;i<1200&&!File.Exists(Path.Combine(output,"stop-server"));i++) {
+                        File.WriteAllText(Path.Combine(output,"text-inbox-count.txt"),server.Texts(false).Length.ToString());
+                        Thread.Sleep(200);
+                    }
                 }return 0;
+            }
+            GuestTextRegressions();
+            if(args.Length>2&&args[2]=="guest-text"){
+                Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);WindowsFormsSynchronizationContext.AutoInstall=false;SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
+                GuestTextUiRegression();Console.WriteLine("TOTAL "+passed+" passed, "+failed+" failed");return failed==0?0:1;
             }
             StoreZipTests.RunAll(Run,Path.Combine(root,"zip"));
             if(args.Length>2&&args[2]=="zip"){Console.WriteLine("TOTAL "+passed+" passed, "+failed+" failed");return failed==0?0:1;}
@@ -493,6 +502,7 @@ namespace FeiqLight.Tests
                 for(int i=2;i<302;i++)store.Append(new ChatRecord{PeerId="test",Packet=i,Text="普通文字",Time=DateTime.Now});Check(store.AttachmentHistory("test").Count==1,"旧页附件遗漏");store.DeleteRecords("test",new[]{record});Check(store.AttachmentHistory("test").Count==0,"删除消息被任务页复活");
             });
             Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);WindowsFormsSynchronizationContext.AutoInstall=false;SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
+            GuestTextUiRegression();
             TransferSourceRegressions();
             Run("多选删除：入站文件统计、出站保护、断点保留、确认取消及重启状态",BatchDeleteRegression);
             Run("多选删除：父目录缺失、中途占用继续其余文件并可重试、文件名含环境变量写法",BatchDeleteFailureRegression);
@@ -793,12 +803,13 @@ namespace FeiqLight.Tests
                         Check(guest.ClientSize.Width>=880&&guest.ClientSize.Height>=580,"访客默认窗口过小："+guest.ClientSize);
                         RoundedPanel filesPane=Field<RoundedPanel>(guest,"filesPane");Panel inspectorPane=Field<Panel>(guest,"inspectorPane"),emptyPanel=Field<Panel>(guest,"emptyPanel");
                         Control picker=Controls(guest).Single(c=>c.AccessibleName=="临时传输网络地址");
+                        ToggleSwitch textToggle=Field<ToggleSwitch>(guest,"allowText");Check(textToggle.Parent.ClientRectangle.Contains(textToggle.Bounds),"文本开关越界："+textToggle.Bounds);
                         Check(picker.Text=="127.0.0.1"&&picker.Height>=30,"网络地址选择器文本或高度异常："+picker.Text+" "+picker.Height);
                         Check(!filesPane.Bounds.IntersectsWith(inspectorPane.Bounds),"双栏模式下文件区与控制栏重叠");
                         Check(inspectorPane.Left>filesPane.Right,"默认尺寸未启用左右双栏布局："+filesPane.Bounds+" / "+inspectorPane.Bounds);
                         Color filesFill=filesPane.Fill;Check(filesFill.ToArgb()!=inspectorPane.BackColor.ToArgb(),"主文件区与外层底色无层次差异");
                         Check(emptyPanel.Height>=140,"默认空状态高度不足："+emptyPanel.Height);
-                        foreach(Button b in Controls(guest).OfType<Button>().Where(b=>b.Visible))Check(b.Parent.ClientRectangle.Contains(b.Bounds),"访客按钮越界："+b.Text);
+                        foreach(Button b in Controls(guest).OfType<Button>().Where(b=>b.Visible))Check(b.Parent.ClientRectangle.Contains(b.Bounds),"访客按钮越界："+b.Text+" "+b.Bounds+" / "+b.Parent.ClientRectangle);
                         SaveSnapshot(guest,"guest-empty-"+theme+"-default");
 
                         guest.Size=guest.MinimumSize;Application.DoEvents();
@@ -806,6 +817,7 @@ namespace FeiqLight.Tests
                         Check(emptyPanel.Height>=110,"窄窗空状态高度过小导致文字裁切："+emptyPanel.Height);
                         Check(picker.Bounds.Right<=inspectorPane.Width&&picker.Height>=30,"窄窗地址栏异常："+picker.Bounds);
                         foreach(Control field in new Control[]{Field<Control>(guest,"lifetimeField"),Field<Control>(guest,"lifetimeTitle"),Field<Control>(guest,"saveLifetime")})Check(inspectorPane.ClientRectangle.Contains(field.Bounds),"窄窗有效期控件裁切："+field.Bounds+" / "+inspectorPane.ClientRectangle);
+                        Check(textToggle.Parent.ClientRectangle.Contains(textToggle.Bounds),"窄窗文本开关越界："+textToggle.Bounds);
                         foreach(Button b in Controls(guest).OfType<Button>().Where(b=>b.Visible))Check(b.Parent.ClientRectangle.Contains(b.Bounds),"窄窗按钮越界："+b.Text);
                         if(!dark)SaveSnapshot(guest,"guest-empty-light-min");
 

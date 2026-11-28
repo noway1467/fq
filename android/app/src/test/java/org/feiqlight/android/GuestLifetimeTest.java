@@ -34,6 +34,12 @@ public final class GuestLifetimeTest {
     private static EditText input(Dialog dialog){return (EditText)views(dialog.getWindow().getDecorView()).stream().filter(v->"链接有效期（分钟）".contentEquals(v.getContentDescription()==null?"":v.getContentDescription())).findFirst().orElseThrow();}
     private static void settle(ChatService service)throws Exception {for(int i=0;i<3;i++){((ExecutorService)field(service,"io")).submit(()->{}).get(5,TimeUnit.SECONDS);Shadows.shadowOf(Looper.getMainLooper()).idle();}}
     private static HttpURLConnection request(GuestTransfer server,String token)throws Exception {HttpURLConnection connection=(HttpURLConnection)new URL("http://127.0.0.1:"+server.port()+"/api/guest").openConnection(java.net.Proxy.NO_PROXY);connection.setConnectTimeout(3000);connection.setReadTimeout(3000);connection.setRequestProperty("X-FQ-Guest",token);return connection;}
+    private static void postText(GuestTransfer server,String text)throws Exception {
+        HttpURLConnection connection=(HttpURLConnection)new URL("http://127.0.0.1:"+server.port()+"/api/text").openConnection(java.net.Proxy.NO_PROXY);
+        connection.setConnectTimeout(3000);connection.setReadTimeout(3000);connection.setRequestMethod("POST");connection.setDoOutput(true);connection.setRequestProperty("X-FQ-Guest",server.token);connection.setRequestProperty("Content-Type","application/json");
+        byte[] body=new JSONObject().put("text",text).toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);connection.setFixedLengthStreamingMode(body.length);
+        try{try(OutputStream out=connection.getOutputStream()){out.write(body);}assertEquals(200,connection.getResponseCode());}finally{connection.disconnect();}
+    }
     private static void screenshot(Dialog dialog,String name)throws Exception {
         View view=dialog.getWindow().getDecorView();int width=786,height=1400;
         view.measure(View.MeasureSpec.makeMeasureSpec(width,View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(height,View.MeasureSpec.AT_MOST));view.layout(0,0,width,view.getMeasuredHeight());
@@ -52,11 +58,12 @@ public final class GuestLifetimeTest {
         String oldToken=null;
         for(int minutes:new int[]{1,60,120,1440}) {
             GuestTransfer.saveLifetime(context,Integer.toString(minutes));prefs.edit().putBoolean("notifications",false).commit();assertEquals(minutes,GuestTransfer.lifetimeMinutes(context.createPackageContext(context.getPackageName(),0)));
-            try(GuestTransfer server=new GuestTransfer(context,Collections.emptyList(),true,true)) {
+            try(GuestTransfer server=new GuestTransfer(context,Collections.emptyList(),true,true,true)) {
                 assertTrue(server.active());assertEquals(minutes,server.remainingMinutes());assertTrue(server.until-System.currentTimeMillis()>minutes*60000L-3000);assertTrue(server.until-System.currentTimeMillis()<=minutes*60000L);
                 HttpURLConnection connection=request(server,server.token);assertEquals(200,connection.getResponseCode());String body;try(InputStream stream=connection.getInputStream()){body=new String(stream.readAllBytes(),java.nio.charset.StandardCharsets.UTF_8);}connection.disconnect();assertEquals(server.until,java.time.Instant.parse(new JSONObject(body).getString("until")).toEpochMilli());
                 connection=request(server,oldToken==null?"0".repeat(64):oldToken);assertEquals(403,connection.getResponseCode());connection.disconnect();oldToken=server.token;
-                set(server,"deadline",System.nanoTime()-1);assertFalse(server.active());connection=request(server,server.token);assertEquals(410,connection.getResponseCode());connection.disconnect();
+                server.publishText("到期清空");postText(server,"收件也清空");
+                set(server,"deadline",System.nanoTime()-1);assertFalse(server.active());assertTrue(server.texts(true).isEmpty());assertTrue(server.texts(false).isEmpty());connection=request(server,server.token);assertEquals(410,connection.getResponseCode());connection.disconnect();
                 server.close();assertFalse(server.active());
             }
         }
@@ -74,19 +81,36 @@ public final class GuestLifetimeTest {
             try(LanNode node=new LanNode(port,true,"guest-ui","host","测试","",quiet);ActivityController<MainActivity> ac=Robolectric.buildActivity(MainActivity.class).setup()) {
                 settle(service);node.start();set(service,"node",node);MainActivity activity=ac.get();invoke(activity,"showGuest");Dialog dialog=ShadowDialog.getLatestDialog();
                 EditText input=input(dialog);assertEquals("60",input.getText().toString());input.setText("1441");button(dialog,"保存有效期").performClick();assertNotNull(input.getError());assertEquals(60,GuestTransfer.lifetimeMinutes(context));
+                Switch allowText=(Switch)views(dialog.getWindow().getDecorView()).stream().filter(v->v instanceof Switch&&"允许文本互传".contentEquals(((Switch)v).getText())).findFirst().orElseThrow();assertFalse(allowText.isChecked());
                 input.setText("120");button(dialog,"保存有效期").performClick();assertNull(input.getError());assertEquals(120,GuestTransfer.lifetimeMinutes(context));
                 screenshot(dialog,"android-guest-settings-"+(dark?"dark":"light"));
                 Button folderButton=button(dialog,"添加文件夹");assertTrue(folderButton.getWidth()>0);assertTrue(folderButton.getRight()<=((View)folderButton.getParent()).getWidth());
                 dialog.dismiss();
                 invoke(activity,"settings");Dialog settings=ShadowDialog.getLatestDialog();button(settings,"保存").performClick();settle(service);assertEquals(120,GuestTransfer.lifetimeMinutes(context));if(settings.isShowing())settings.dismiss();
                 invoke(activity,"showGuest");dialog=ShadowDialog.getLatestDialog();assertEquals("120",input(dialog).getText().toString());dialog.dismiss();
-                try(GuestTransfer server=new GuestTransfer(context,Collections.emptyList(),true,true)) {
+                try(GuestTransfer server=new GuestTransfer(context,Collections.emptyList(),true,true,true)) {
                     set(service,"guestTransfer",server);invoke(activity,"showGuest");dialog=ShadowDialog.getLatestDialog();screenshot(dialog,"android-guest-active-"+(dark?"dark":"light"));
-                    set(server,"deadline",System.nanoTime()+TimeUnit.MINUTES.toNanos(2));Shadows.shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(1));
+                    button(dialog,"文本互传").performClick();Dialog textDialog=ShadowDialog.getLatestDialog();
+                    EditText draft=(EditText)views(textDialog.getWindow().getDecorView()).stream().filter(v->"发送给访客的纯文本".contentEquals(v.getContentDescription()==null?"":v.getContentDescription())).findFirst().orElseThrow();
+                    ClipboardManager clipboard=context.getSystemService(ClipboardManager.class);ClipData oldClipboard=clipboard.getPrimaryClip();
+                    try {
+                        clipboard.setPrimaryClip(ClipData.newPlainText("guard","剪贴板保持原样"));draft.setText("主机 中文 English 😀\n<svg onload=alert(1)>");button(textDialog,"发布给访客").performClick();postText(server,"访客收件纯文本");
+                        Shadows.shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(300));assertEquals(1,server.texts(true).size());assertEquals(1,server.texts(false).size());assertEquals("",draft.getText().toString());
+                        assertEquals("剪贴板保持原样",clipboard.getPrimaryClip().getItemAt(0).getText().toString());
+                        assertTrue(views(textDialog.getWindow().getDecorView()).stream().anyMatch(v->v instanceof TextView&&"访客收件纯文本".contentEquals(((TextView)v).getText())));
+                        button(textDialog,"复制文本").performClick();assertEquals("访客收件纯文本",clipboard.getPrimaryClip().getItemAt(0).getText().toString());
+                        screenshot(textDialog,"android-guest-text-"+(dark?"dark":"light"));draft.setText("结束要清空的草稿");
+                        service.stopGuest();Shadows.shadowOf(Looper.getMainLooper()).idle();assertFalse(textDialog.isShowing());assertEquals("",draft.getText().toString());assertTrue(server.texts(true).isEmpty());assertTrue(server.texts(false).isEmpty());
+                        button(textDialog,"发布给访客").performClick();assertTrue("迟到点击不能发布",server.texts(true).isEmpty());
+                    } finally {if(oldClipboard!=null)clipboard.setPrimaryClip(oldClipboard);else clipboard.clearPrimaryClip();}
+                    GuestTransfer countdownServer=new GuestTransfer(context,Collections.emptyList(),true,true,true);set(service,"guestTransfer",countdownServer);invoke(activity,"showGuest");dialog=ShadowDialog.getLatestDialog();
+                    try {
+                    set(countdownServer,"deadline",System.nanoTime()+TimeUnit.MINUTES.toNanos(2));Shadows.shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(1));
                     StringBuilder captions=new StringBuilder();for(View view:views(dialog.getWindow().getDecorView()))if(view instanceof TextView)captions.append(((TextView)view).getText()).append('|');
-                    assertTrue("remaining="+server.remainingMinutes()+" showing="+dialog.isShowing()+" captions="+captions,captions.toString().contains("剩余约 2 分钟"));
-                    set(server,"deadline",System.nanoTime()-1);Shadows.shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(1));assertFalse("到期仍显示可用链接",dialog.isShowing());
+                    assertTrue("remaining="+countdownServer.remainingMinutes()+" showing="+dialog.isShowing()+" captions="+captions,captions.toString().contains("剩余约 2 分钟"));
+                    set(countdownServer,"deadline",System.nanoTime()-1);Shadows.shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(1));assertFalse("到期仍显示可用链接",dialog.isShowing());
                     assertTrue(org.robolectric.shadows.ShadowToast.getTextOfLatestToast().contains("已结束"));service.stopGuest();assertNull(service.guestTransfer());
+                    } finally {countdownServer.close();}
                 }
             }finally{sc.destroy();}
         }

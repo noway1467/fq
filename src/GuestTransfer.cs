@@ -32,6 +32,12 @@ namespace FeiqLight
         [return:MarshalAs(UnmanagedType.Bool)]
         private static extern bool GetFileInformationByHandle(SafeFileHandle file,out HandleInfo info);
         private sealed class Upload { internal string Id,Name,Partial,Saved,Relative; internal long Size,Offset; internal bool Canceled; }
+        internal sealed class TextEntry
+        {
+            internal readonly int Sequence;
+            internal readonly string Text;
+            internal TextEntry(int sequence,string text) { Sequence=sequence;Text=text; }
+        }
         private readonly Dictionary<string,Download> downloads=new Dictionary<string,Download>();
         private readonly Dictionary<string,DownloadDirectory> directories=new Dictionary<string,DownloadDirectory>();
         private readonly Dictionary<string,Upload> uploads=new Dictionary<string,Upload>();
@@ -42,6 +48,15 @@ namespace FeiqLight
         private readonly long lifetimeMilliseconds;
         private readonly string destination;
         private readonly bool allowUpload;
+        internal readonly bool AllowText;
+        private readonly List<TextEntry> publishedTexts=new List<TextEntry>();
+        private readonly List<TextEntry> receivedTexts=new List<TextEntry>();
+        private int publishedTextBytes,receivedTextBytes;
+        private long nextPublishedText,nextReceivedText;
+        private bool textsEnded;
+        internal event Action TextEnded;
+        internal const int TextByteLimit=4096,TextCountLimit=64,TextSessionByteLimit=128*1024;
+        internal const int TextIntervalMilliseconds=250;
         private long reserved;
         private int activeUploads;
         private bool archiveBusy;
@@ -53,16 +68,16 @@ namespace FeiqLight
         internal readonly DateTime Until;
         internal int Port { get { return http.Port; } }
         internal long RemainingMilliseconds { get { return closed ? 0 : Math.Max(0, lifetimeMilliseconds - lifetime.ElapsedMilliseconds); } }
-        internal bool Active { get { return RemainingMilliseconds > 0; } }
+        internal bool Active { get { bool active=RemainingMilliseconds>0;if(!active)ClearTexts();return active; } }
         internal string[] SavedFiles { get { lock(gate)return uploads.Values.Where(u=>u.Saved!=null).Select(u=>u.Saved).ToArray(); } }
         internal string CleanupError { get; private set; }
         internal Action<string,string> Received;
-        internal GuestTransfer(IEnumerable<string> files,string destination,bool allowUpload,bool loopback=false,int lifetimeMinutes=AppSettings.DefaultGuestLifetimeMinutes)
-            : this(files.Any()?SendBatch.Expand(files):new List<SendBatch.Item>(),destination,allowUpload,loopback,lifetimeMinutes) { }
-        internal GuestTransfer(IEnumerable<SendBatch.Item> files,string destination,bool allowUpload,bool loopback=false,int lifetimeMinutes=AppSettings.DefaultGuestLifetimeMinutes)
+        internal GuestTransfer(IEnumerable<string> files,string destination,bool allowUpload,bool loopback=false,int lifetimeMinutes=AppSettings.DefaultGuestLifetimeMinutes,bool allowText=false)
+            : this(files.Any()?SendBatch.Expand(files):new List<SendBatch.Item>(),destination,allowUpload,loopback,lifetimeMinutes,allowText) { }
+        internal GuestTransfer(IEnumerable<SendBatch.Item> files,string destination,bool allowUpload,bool loopback=false,int lifetimeMinutes=AppSettings.DefaultGuestLifetimeMinutes,bool allowText=false)
         {
             if(lifetimeMinutes<1||lifetimeMinutes>AppSettings.MaxGuestLifetimeMinutes)throw new ArgumentException("请输入 1–1440 的整数分钟数（最多 24 小时）。");
-            this.destination=ReceiveStorage.Folder(destination);this.allowUpload=allowUpload;
+            this.destination=ReceiveStorage.Folder(destination);this.allowUpload=allowUpload;AllowText=allowText;
             if(allowUpload)ReceiveStorage.ValidateWritable(this.destination);
             Token=ToolsService.RandomToken(32);
             var directoryPaths=new Dictionary<string,DownloadDirectory>(StringComparer.Ordinal);
@@ -95,7 +110,7 @@ namespace FeiqLight
                     DownloadDirectory directory;if(directoryPaths.TryGetValue(path,out directory))directory.Files.Add(file);
                 }
             }
-            if(downloads.Count==0&&!allowUpload)throw new IOException("请先选择文件或开启接收。");
+            if(downloads.Count==0&&!allowUpload&&!allowText)throw new IOException("请先选择文件、开启接收或允许文本互传。");
             Until=DateTime.UtcNow.AddMinutes(lifetimeMinutes);
             lifetimeMilliseconds=lifetimeMinutes*60000L;lifetime.Restart();
             http=new ToolsHttp(0,loopback,Handle,null,1048576);
@@ -106,7 +121,7 @@ namespace FeiqLight
         private void Authorize(ToolsHttp.Request request)
         {
             Check();string supplied=request.Header("X-FQ-Guest");
-            if(request.Method=="GET"||request.Method=="HEAD")if(supplied.Length==0)supplied=request.Parameter("token");
+            if(request.Path!="/api/text"&&(request.Method=="GET"||request.Method=="HEAD"))if(supplied.Length==0)supplied=request.Parameter("token");
             if(supplied!=Token)throw new ToolsHttp.HttpError(403,"链接无效，请使用对方分享的完整链接。");
         }
         private void Handle(ToolsHttp.Request request,ToolsHttp.Response response)
@@ -124,7 +139,8 @@ namespace FeiqLight
                 var status=new {
                     files=downloads.Values.Select(f=>new{id=f.Id,name=f.Name,relativePath=f.Relative,size=f.Size}),
                     directories=directories.Values.Select(d=>new{id=d.Id,name=d.Name,relativePath=d.Path,count=d.Files.Count,size=d.Files.Sum(f=>f.Size)}),
-                    archive=new{enabled=true,maxEntries=StoreZipStream.MaxEntries,maxBytes=StoreZipStream.MaxBytes},upload=allowUpload,requestIds=true,folders=true,
+                    archive=new{enabled=true,maxEntries=StoreZipStream.MaxEntries,maxBytes=StoreZipStream.MaxBytes},upload=allowUpload,text=AllowText,
+                    textLimits=new{maxBytes=TextByteLimit,maxEntries=TextCountLimit,maxTotalBytes=TextSessionByteLimit,intervalMilliseconds=TextIntervalMilliseconds},requestIds=true,folders=true,
                     until=Until.ToString("o"),remainingMilliseconds=RemainingMilliseconds,limit=UploadQuota,countLimit=UploadFileLimit
                 };
                 // 1000 个长路径及最多 2000 个入口允许超过默认约 200 万字符；JSON 转义也计入预算。
@@ -132,6 +148,7 @@ namespace FeiqLight
             }
             if((request.Method=="GET"||request.Method=="HEAD")&&request.Path=="/file"){Send(request,response);return;}
             if(request.Method=="GET"&&request.Path=="/archive"){Archive(request,response);return;}
+            if(request.Path=="/api/text"){HandleText(request,response);return;}
             if(!allowUpload)throw new ToolsHttp.HttpError(403,"对方未开启浏览器接收。");
             if(request.Method=="POST"&&request.Path=="/api/prepare") {
                 var data=request.Json();string name=Convert.ToString(data.ContainsKey("name")?data["name"]:null);long size;
@@ -190,6 +207,68 @@ namespace FeiqLight
                 }
                 throw new ToolsHttp.HttpError(404,"没有此操作。");
             }
+        }
+        internal TextEntry[] Texts(bool published)
+        {
+            if(!Active)return new TextEntry[0];
+            lock(gate)return textsEnded?new TextEntry[0]:(published?publishedTexts:receivedTexts).ToArray();
+        }
+        internal void PublishText(string text)
+        {
+            lock(gate){CheckText();AddText(publishedTexts,text,ref publishedTextBytes,ref nextPublishedText);}
+        }
+        private void CheckText()
+        {
+            Check();
+            if(textsEnded)throw new ToolsHttp.HttpError(410,"临时传输已结束，请让对方重新开启。");
+            if(!AllowText)throw new ToolsHttp.HttpError(403,"对方未开启文本互传。");
+        }
+        private void AddText(List<TextEntry> entries,string text,ref int total,ref long next)
+        {
+            if(string.IsNullOrEmpty(text)||text.All(c=>c=='\0'))throw new ToolsHttp.HttpError(400,"请输入非空的纯文本。");
+            int bytes;
+            try{bytes=new UTF8Encoding(false,true).GetByteCount(text);}
+            catch(EncoderFallbackException){throw new ToolsHttp.HttpError(400,"文本包含无效的 Unicode 字符。");}
+            if(bytes>TextByteLimit)throw new ToolsHttp.HttpError(413,"单条文本最多 4096 UTF-8 字节。");
+            if(entries.Count>=TextCountLimit||bytes>TextSessionByteLimit-total)throw new ToolsHttp.HttpError(409,"本方向已达 64 条或 128 KiB 文本上限，请重新开启会话。");
+            long now=lifetime.ElapsedMilliseconds;
+            if(now<next)throw new ToolsHttp.HttpError(429,"发送过于频繁，请稍等片刻再发送（每 250 毫秒最多一条）。");
+            entries.Add(new TextEntry(entries.Count+1,text));total+=bytes;next=now+TextIntervalMilliseconds;
+        }
+        private void HandleText(ToolsHttp.Request request,ToolsHttp.Response response)
+        {
+            CheckText();
+            if(request.Method=="GET") {
+                    string value=request.Parameter("after");int after=0;
+                    if(value.Length>0&&(!value.All(c=>c>='0'&&c<='9')||!Int32.TryParse(value,out after)||after>TextCountLimit))throw new ToolsHttp.HttpError(400,"文本读取位置无效。");
+                    // 收件箱只供本机界面读取，访客永远只能读取主机主动发布的队列。
+                    TextEntry[] entries;int last;
+                    lock(gate){CheckText();entries=publishedTexts.Where(t=>t.Sequence>after).ToArray();last=publishedTexts.Count;}
+                    CheckText();response.Json(new{items=entries.Select(t=>new{seq=t.Sequence,text=t.Text}),last=last});return;
+            }
+            if(request.Method=="POST") {
+                    if(!request.Header("Content-Type").StartsWith("application/json",StringComparison.OrdinalIgnoreCase))throw new ToolsHttp.HttpError(400,"请使用 JSON 请求体发送纯文本。");
+                    if(request.Body.Length>32768)throw new ToolsHttp.HttpError(413,"单条文本最多 4096 UTF-8 字节。");
+                    Dictionary<string,object> data;
+                    try{data=new JavaScriptSerializer{MaxJsonLength=32768,RecursionLimit=8}.Deserialize<Dictionary<string,object>>(new UTF8Encoding(false,true).GetString(request.Body));}
+                    catch(ArgumentException){throw new ToolsHttp.HttpError(400,"文本请求内容无效。");}
+                    catch(InvalidOperationException){throw new ToolsHttp.HttpError(400,"文本请求内容无效。");}
+                    object value;
+                    if(data==null||!data.TryGetValue("text",out value)||!(value is string))throw new ToolsHttp.HttpError(400,"请输入非空的纯文本。");
+                    lock(gate){CheckText();AddText(receivedTexts,(string)value,ref receivedTextBytes,ref nextReceivedText);}
+                    response.Json(new{ok=true});return;
+            }
+            throw new ToolsHttp.HttpError(405,"文本互传仅支持读取或发送。");
+        }
+        private void ClearTexts()
+        {
+            Action ended;
+            lock(gate) {
+                if(textsEnded)return;
+                textsEnded=true;publishedTexts.Clear();receivedTexts.Clear();publishedTextBytes=receivedTextBytes=0;nextPublishedText=nextReceivedText=0;
+                ended=TextEnded;TextEnded=null;
+            }
+            if(ended!=null)ended();
         }
         private static bool RequestId(string value) { return value.Length==32&&value.All(c=>c>='0'&&c<='9'||c>='a'&&c<='f'); }
         private static void CheckSource(Download file)
@@ -286,6 +365,7 @@ namespace FeiqLight
         public void Dispose()
         {
             Upload[] pending;FileStream input;lock(gate){if(closed)return;closed=true;pending=uploads.Values.ToArray();input=archiveInput;archiveInput=null;}
+            ClearTexts();
             http.Dispose();if(expiry!=null)expiry.Dispose();
             if(input!=null)input.Dispose();
             foreach(Upload upload in pending)lock(upload)if(upload.Saved==null&&upload.Partial!=null)try{File.Delete(upload.Partial);}catch(IOException e){CleanupError="未完成文件清理失败："+e.Message;}catch(UnauthorizedAccessException e){CleanupError="未完成文件清理失败："+e.Message;}

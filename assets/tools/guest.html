@@ -35,7 +35,7 @@
       </div>
       <p class="security">
         <svg class="inline-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/></svg>
-        <span>HTTP 局域网明文 · 仅传非敏感文件</span>
+        <span>HTTP 局域网明文 · 仅传非敏感内容</span>
       </p>
     </div>
 
@@ -61,6 +61,10 @@
         </div>
       </div>
       <p id="archive-hint" class="archive-hint" hidden>打包下载最多 1000 个文件、单包小于 4 GiB；较大内容请分目录或逐件下载。</p>
+      <div id="download-filter" class="download-filter" hidden>
+        <label for="download-search">搜索分享文件</label>
+        <input id="download-search" type="search" placeholder="按文件名或相对路径搜索" autocomplete="off">
+      </div>
       <div id="directory-downloads" class="directories" aria-label="可下载的文件夹" hidden></div>
       <div id="downloads" class="files">
         <p class="empty">正在读取文件…</p>
@@ -85,7 +89,36 @@
         </label>
         <button id="choose-folder" class="soft" type="button" hidden>选择文件夹（保留目录）</button>
         <input id="folder-picker" type="file" webkitdirectory multiple hidden>
+        <div id="upload-summary" class="upload-summary" hidden aria-live="polite">
+          <div class="summary-values">
+            <span id="upload-bytes">已传字节：0 B / 0 B</span>
+            <span id="upload-saved">已保存件数：0 / 0</span>
+          </div>
+          <progress id="upload-total" max="1" value="0" aria-label="服务端已确认的上传字节"></progress>
+          <button id="cancel-queued" class="danger" type="button" disabled>取消全部未开始</button>
+        </div>
         <div id="uploads" class="files upload-list"></div>
+      </div>
+    </section>
+
+    <section id="text-transfer" class="panel-card" hidden aria-labelledby="text-title">
+      <div class="section-title">
+        <h2 id="text-title">文本互传</h2>
+        <span class="section-sub">只保留本次会话，结束自动清空</span>
+      </div>
+      <div class="text-body">
+        <label for="text-draft">发送纯文本给对方</label>
+        <textarea id="text-draft" rows="3" autocomplete="off" spellcheck="false" placeholder="输入或手动粘贴文本"></textarea>
+        <div class="text-actions">
+          <span id="text-size" class="section-sub">0 / 4096 UTF-8 字节</span>
+          <button id="text-send" class="primary" type="button">发送文本</button>
+        </div>
+        <p id="text-status" role="status" aria-live="polite"></p>
+        <h3>对方发布的文本</h3>
+        <div id="text-received" class="text-list"><p class="text-empty">等待对方发布文本</p></div>
+        <h3>我已发送给对方</h3>
+        <div id="text-sent" class="text-list"><p class="text-empty">尚未发送文本</p></div>
+        <p class="section-sub">每方向最多 64 条 / 128 KiB；访客之间看不到彼此投递的文本。</p>
       </div>
     </section>
 

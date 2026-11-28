@@ -6,7 +6,7 @@
   --ink: #16202a;
   --muted: #607082;
   --line: #e2e8f0;
-  --blue: #2580e8;
+  --blue: #1b68c4;
   --blue-strong: #1b68c4;
   --action-ink: #1765b1;
   --action-fill: #1765b1;
@@ -16,7 +16,7 @@
   --tint-border: #c5defc;
   --danger: #cf343e;
   --danger-soft: #fdecec;
-  --green: #25944a;
+  --green: #187638;
   --green-soft: #e6f6ec;
   --warn: #b45309;
   --warn-soft: #fef6e7;
@@ -101,8 +101,8 @@ p, h1, h2 { margin: 0; }
   width: 44px;
   height: 44px;
   border-radius: 12px;
-  background: linear-gradient(135deg, var(--blue), var(--blue-strong));
-  color: #fff;
+  background: var(--action-fill);
+  color: var(--on-action);
   font-size: 16px;
   font-weight: 700;
   letter-spacing: 0.4px;
@@ -377,6 +377,27 @@ button:disabled, button.primary:disabled, button.soft:disabled, button.tool-btn:
 .directory .file-name { font-size: 13px; }
 .directory:last-child { border-bottom: 1px solid var(--line); }
 
+.download-filter { padding: 10px 16px; border-bottom: 1px solid var(--line); }
+.download-filter label, .text-body > label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 5px; }
+input[type="search"], textarea {
+  width: 100%;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--ink);
+  font: inherit;
+}
+input::placeholder, textarea::placeholder { color: var(--muted); opacity: 1; }
+textarea { display: block; resize: vertical; min-height: 88px; }
+.directory-group > .directory-children { padding-left: 14px; border-left: 2px solid var(--line); }
+.directory-children .directory-children .directory-children .directory-children { padding-left: 0; border-left: 0; }
+.directory-group .directory { gap: 8px; }
+button.tree-toggle { padding: 4px 7px; min-height: 32px; color: var(--ink); background: var(--card); border-color: var(--line); }
+.directory-group .directory .file-main { flex: 1; }
+.directory-group .file-icon { display: none; }
+.directory-group .directory-children .file { padding-left: 10px; }
+
 h2 {
   font-size: 15px;
   font-weight: 700;
@@ -481,6 +502,18 @@ h2 {
 .upload-body { padding: 14px 16px 16px; }
 .upload-list { margin-top: 12px; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
 .upload-list:empty { display: none; }
+.upload-summary { padding: 10px 12px; margin-top: 12px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; }
+.summary-values { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 6px 16px; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+#cancel-queued { margin-top: 10px; }
+.text-body { padding: 12px 16px 16px; }
+.text-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 8px; }
+.text-body h3 { margin: 14px 0 6px; font-size: 13px; }
+.text-empty { padding: 8px 0; color: var(--muted); font-size: 12px; }
+.text-entry { padding: 10px 12px; margin-bottom: 8px; background: var(--card); border: 1px solid var(--line); border-radius: 8px; }
+.text-entry pre { margin: 0 0 8px; font: inherit; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+.text-entry button { min-height: 32px; padding: 5px 10px; }
+#text-status { margin-top: 8px; font-size: 12px; color: var(--danger); }
+#text-status.info { color: var(--green); }
 
 #drop {
   display: flex;
@@ -584,6 +617,10 @@ progress.done { accent-color: var(--green); }
   .file { gap: 11px; padding: 12px 14px; }
   .file-icon { width: 36px; height: 36px; }
   .upload-body { padding: 12px; }
+  .directory .file-actions { width: auto; }
+  .directory-group > .directory-children { padding-left: 8px; }
+  .directory .download { padding: 6px 8px; font-size: 12px; }
+  .text-body { padding: 12px; }
   #drop { padding: 20px 14px; }
 }
 

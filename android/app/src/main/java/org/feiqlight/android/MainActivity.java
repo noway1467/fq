@@ -166,6 +166,8 @@ public final class MainActivity extends Activity implements ChatService.Observer
     private boolean loadingTasks,reloadTasksPending;
     private final List<Uri> guestFiles=new ArrayList<>();
     private boolean guestUpload;
+    private boolean guestText;
+    private Dialog guestTextDialog;
     private android.window.OnBackInvokedCallback backCallback;
     private ConversationAdapter adapter;
     private final java.util.concurrent.ExecutorService avatarLoader=java.util.concurrent.Executors.newSingleThreadExecutor();
@@ -246,6 +248,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         super.onStop();
     }
     @Override protected void onDestroy() {
+        if(guestTextDialog!=null)guestTextDialog.dismiss();
         if(tasksDialog!=null)tasksDialog.dismiss();
         avatarLoader.shutdownNow();
         avatarImageRequest=null;
@@ -2248,7 +2251,14 @@ public final class MainActivity extends Activity implements ChatService.Observer
             cp.bottomMargin=dp(8);
             box.addView(card,cp);
             Dialog dialog=sheet("临时浏览器传输",box,null,null);
-            fileAction(box,dialog,"查看已接收文件",()->showTasks("guest"));
+            LinearLayout sessionActions=row();
+            Button receivedFiles=button("查看已接收文件",false);receivedFiles.setMinHeight(dp(52));
+            receivedFiles.setOnClickListener(v->{dialog.dismiss();showTasks("guest");});sessionActions.addView(receivedFiles,weight());
+            if(active.allowText) {
+                Button textTransfer=button("文本互传",false);textTransfer.setMinHeight(dp(52));
+                textTransfer.setOnClickListener(v->{dialog.dismiss();showGuestText(source,active);});sessionActions.addView(textTransfer,weight());
+            }
+            box.addView(sessionActions);
             fileAction(box,dialog,"结束临时传输",()->{source.stopGuest();error("临时传输已结束，完整文件保留");});
             Handler countdownHandler=new Handler(Looper.getMainLooper());
             Runnable countdown=new Runnable() {
@@ -2270,7 +2280,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
             });
             return;
         }
-        String summaryText=guestFiles.isEmpty()?"未选择分享文件（可仅开启接收）":"已选 "+guestFiles.size()+" 项（文件或文件夹）";
+        String summaryText=guestFiles.isEmpty()?"未选择分享文件（可仅开启接收或文本互传）":"已选 "+guestFiles.size()+" 项（文件或文件夹）";
         TextView fileSummary=text(summaryText,14,INK);
         fileSummary.setTypeface(null,Typeface.BOLD);
         fileSummary.setPadding(0,dp(10),0,dp(4));
@@ -2316,6 +2326,9 @@ public final class MainActivity extends Activity implements ChatService.Observer
         uploadCard.addView(receive);
         receive.setOnCheckedChangeListener((button,checked)->guestUpload=checked);
         uploadCard.addView(text("保存至应用接收区 · 限 1000 个文件 / 100 GiB",12,MUTED));
+        Switch allowText=settingSwitch("允许文本互传",guestText);allowText.setContentDescription("允许文本互传");
+        allowText.setOnCheckedChangeListener((button,checked)->guestText=checked);uploadCard.addView(allowText);
+        uploadCard.addView(text("仅本次会话开放；文本不进聊天历史，结束自动清空。",12,MUTED));
         box.addView(uploadCard,new LinearLayout.LayoutParams(-1,-2));
 
         EditText lifetime=formField(box,"链接有效期（分钟，1–1440）",String.valueOf(GuestTransfer.lifetimeMinutes(this)));
@@ -2328,7 +2341,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
 
         Dialog dialog=sheet("临时浏览器传输",box,"开启临时传输",d->{
             if(!saveGuestLifetime(lifetime))return;
-            source.startGuest(new ArrayList<>(guestFiles),receive.isChecked(),success->{if(success&&!isDestroyed()&&
+            source.startGuest(new ArrayList<>(guestFiles),receive.isChecked(),allowText.isChecked(),success->{if(success&&!isDestroyed()&&
                     service==source){
                 d.dismiss();
                 showGuest();
@@ -2351,6 +2364,55 @@ public final class MainActivity extends Activity implements ChatService.Observer
     private boolean saveGuestLifetime(EditText input) {
         try { GuestTransfer.saveLifetime(this,input.getText().toString());input.setError(null);return true; }
         catch(IllegalArgumentException|java.io.IOException e) { input.setError(e.getMessage());input.requestFocus();return false; }
+    }
+    private void showGuestText(ChatService source,GuestTransfer active) {
+        if(service!=source||source.guestTransfer()!=active||!active.active()||!active.allowText)return;
+        if(guestTextDialog!=null&&guestTextDialog.isShowing())guestTextDialog.dismiss();
+        LinearLayout box=column();
+        box.addView(text("HTTP 局域网明文 · 仅传非敏感文字；会话结束自动清空",12,MUTED));
+        EditText draft=formField(box,"发布给本次会话的访客","");draft.setContentDescription("发送给访客的纯文本");
+        draft.setSingleLine(false);draft.setMinLines(3);draft.setMaxLines(6);draft.setGravity(Gravity.TOP);
+        draft.setInputType(android.text.InputType.TYPE_CLASS_TEXT|android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE|android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        draft.setImeOptions(android.view.inputmethod.EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING);
+        TextView status=text("每条最多 4096 UTF-8 字节；每方向最多 64 条 / 128 KiB",12,MUTED);box.addView(status);
+        Button send=button("发布给访客",true);box.addView(send,new LinearLayout.LayoutParams(-1,-2));
+        TextView summary=text("收到 0 条 · 已发布 0 条",12,MUTED);summary.setPadding(0,dp(12),0,dp(6));box.addView(summary);
+        box.addView(text("收到的文本",14,INK));LinearLayout received=column();box.addView(received);
+        box.addView(text("已发布给访客",14,INK));LinearLayout published=column();box.addView(published);
+        Dialog dialog=sheet("文本互传",box,null,null);guestTextDialog=dialog;
+        Handler handler=new Handler(Looper.getMainLooper());int[] shown={0,0};
+        Runnable clear=()->{draft.setText("");received.removeAllViews();published.removeAllViews();summary.setText("会话已结束");status.setText("");};
+        java.util.function.BiConsumer<LinearLayout,GuestTransfer.TextEntry> append=(list,entry)->{
+            LinearLayout card=column();card.setPadding(dp(10),dp(8),dp(10),dp(8));card.setBackground(shape(PALE,CONTROL_RADIUS));
+            TextView content=text(entry.text,14,INK);content.setTextIsSelectable(true);card.addView(content);
+            Button copy=button("复制文本",false);copy.setOnClickListener(v->{
+                if(guestTextDialog!=dialog||service!=source||source.guestTransfer()!=active||!active.active()){clear.run();dialog.dismiss();return;}
+                copyText("文本",entry.text);
+            });card.addView(copy);
+            LinearLayout.LayoutParams params=new LinearLayout.LayoutParams(-1,-2);params.topMargin=dp(6);list.addView(card,params);
+        };
+        Runnable refresh=new Runnable() {
+            @Override public void run() {
+                if(!dialog.isShowing()||isDestroyed())return;
+                if(guestTextDialog!=dialog||service!=source||source.guestTransfer()!=active||!active.active()){clear.run();dialog.dismiss();return;}
+                List<GuestTransfer.TextEntry> inbox=active.texts(false),outbox=active.texts(true);
+                for(int i=shown[0];i<inbox.size();i++)append.accept(received,inbox.get(i));
+                for(int i=shown[1];i<outbox.size();i++)append.accept(published,outbox.get(i));
+                shown[0]=inbox.size();shown[1]=outbox.size();summary.setText("收到 "+shown[0]+" / 64 条 · 已发布 "+shown[1]+" / 64 条");
+                handler.postDelayed(this,250);
+            }
+        };
+        Runnable ended=()->handler.post(()->{clear.run();if(dialog.isShowing())dialog.dismiss();});active.textEnded=ended;
+        send.setOnClickListener(v->{
+            if(guestTextDialog!=dialog||service!=source||source.guestTransfer()!=active||!active.active()){clear.run();dialog.dismiss();return;}
+            try{active.publishText(draft.getText().toString());draft.setText("");status.setText("已发布给本次会话的访客");status.setTextColor(MUTED);}
+            catch(java.io.IOException error){status.setText(error.getMessage());status.setTextColor(0xffd24e54);}
+        });
+        draft.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
+            @Override public void onViewAttachedToWindow(View view) { }
+            @Override public void onViewDetachedFromWindow(View view) {handler.removeCallbacks(refresh);if(active.textEnded==ended)active.textEnded=()->{};clear.run();if(guestTextDialog==dialog)guestTextDialog=null;}
+        });
+        handler.post(refresh);
     }
     private void sharing() {
         if(service==null||!service.online()){error("请先连接局域网");return;}

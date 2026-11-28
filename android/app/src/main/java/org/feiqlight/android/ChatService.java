@@ -100,11 +100,14 @@ public final class ChatService extends Service {
     private void closeGateways(){for(ToolsGateway gateway:gateways)if(gateways.remove(gateway))gateway.close();}
     volatile SecureIdentity.Confirmation securityConfirmation;
     private SharedFiles sharedFiles;
-    private GuestTransfer guestTransfer;
+    private volatile GuestTransfer guestTransfer;
     private long guestEpoch;
     GuestTransfer guestTransfer(){return guestTransfer;}
     void stopGuest(){guestEpoch++;if(guestTransfer!=null){guestTransfer.close();if(!guestTransfer.cleanupError.isEmpty())showError(guestTransfer.cleanupError);guestTransfer=null;}}
     void startGuest(List<Uri> files,boolean upload,Consumer<Boolean> done) {
+        startGuest(files,upload,false,done);
+    }
+    void startGuest(List<Uri> files,boolean upload,boolean text,Consumer<Boolean> done) {
         if(!online()){showError("请先连接局域网");done.accept(false);return;}
         stopGuest();long epoch=guestEpoch;LanNetwork route=lanNetwork;
         queue(()->{try {
@@ -118,7 +121,7 @@ public final class ChatService extends Service {
                     }
                 }else if(selected.add(uri.toString()))sources.add(new DocumentSource(this,uri));
             }
-            GuestTransfer created=new GuestTransfer(this,sources,relatives,upload,false,route);created.received=()->main.post(this::changed);created.warning=this::showError;
+            GuestTransfer created=new GuestTransfer(this,sources,relatives,upload,false,route,text);created.received=()->main.post(this::changed);created.warning=this::showError;
             main.post(()->{if(stopped||epoch!=guestEpoch||!online()){created.close();done.accept(false);return;}guestTransfer=created;done.accept(true);});
         }catch(Exception e){fail(e);main.post(()->done.accept(false));}});
     }
@@ -421,7 +424,10 @@ public final class ChatService extends Service {
                         main.post(()->{if(currentConnection(epoch))updateNetworkStatus(available,reason);});
                     }
                     @Override public void networkReset(){
-                        if(currentConnection(epoch)){closeGateways();PhoneRemoteService.stopActive();}
+                        if(currentConnection(epoch)){
+                            GuestTransfer guest=guestTransfer;if(guest!=null)guest.close();
+                            closeGateways();PhoneRemoteService.stopActive();
+                        }
                         main.post(()->{
                             if(currentConnection(epoch)){
                                 cancelQueuedTransfers();

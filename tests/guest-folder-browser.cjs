@@ -70,6 +70,20 @@ function archiveEntries(file){
     const nestedZip=await download(`[data-directory="${nested.id}"] .download`,'nested-folder');
     check('download nested directory keeps selected directory name',nestedZip.size===1&&sha(nestedZip.get('子目录/特殊 +&%#😀.txt'))===sha(expected.get('分享资料 中文 English/子目录/特殊 +&%#😀.txt')));
     check('archive downloads use native links without fetch or xhr',archiveRequests.every(type=>!['fetch','xhr'].includes(type))&&await page.evaluate(()=>window.fqArchiveFetches.length===0));
+    check('text transfer panel visible and host text rendered safely without XSS',await page.locator('#text-transfer').isVisible()&&await page.waitForFunction(()=>document.querySelectorAll('#text-received .text-entry').length===1).then(()=>true)&&await page.evaluate(()=>!window.fqTextXss&&document.querySelector('#text-received pre').textContent.includes('<img src=x onerror=window.fqTextXss=1>')));
+    await page.locator('#text-draft').fill('访客网页发送 <script>window.fqTextXss=2</script> 中文 😀');
+    await page.locator('#text-send').click();
+    await page.waitForFunction(()=>document.querySelectorAll('#text-sent .text-entry').length===1);
+    check('guest text posted to host inbox and shown as plain text',await page.evaluate(()=>!window.fqTextXss&&document.querySelector('#text-sent pre').textContent.includes('<script>window.fqTextXss=2</script>')));
+    const treeGroup=page.locator('.directory-group').first();
+    const treeToggle=treeGroup.locator('> .directory .tree-toggle');
+    const treeChildren=treeGroup.locator('> .directory-children');
+    await treeToggle.click();check('directory tree collapses on toggle',await treeChildren.isHidden());
+    await page.locator('#download-search').fill('特殊 +&%#');
+    check('download search expands matching ancestor temporarily',await treeChildren.isVisible()&&await page.locator('[data-file]').count()===1);
+    await page.locator('#download-search').fill('');
+    check('clearing download search restores previous collapsed directory state',await treeChildren.isHidden());
+    await treeToggle.click();check('directory tree expands again',await treeChildren.isVisible());
     const folder=path.join(temp,'资料 中文 English');fs.mkdirSync(path.join(folder,'子目录'),{recursive:true});
     fs.writeFileSync(path.join(folder,'同名.txt'),'root 😀');fs.writeFileSync(path.join(folder,'子目录','同名.txt'),'nested 中文');
     fs.writeFileSync(path.join(folder,'子目录','空文件.txt'),'');
@@ -90,8 +104,16 @@ function archiveEntries(file){
     })));
     check('dark theme switches all control surfaces in one frame',firstDarkFrame.every(item=>item.background===(item.id==='choose-folder'?'rgb(29, 53, 80)':'rgb(28, 40, 54)')));
     const contrast=async selector=>page.locator(selector).first().evaluate(node=>{
-      const luminance=value=>value.match(/[\d.]+/g).slice(0,3).map(Number).map(n=>{n/=255;return n<=.04045?n/12.92:((n+.055)/1.055)**2.4;}).reduce((sum,n,i)=>sum+n*[.2126,.7152,.0722][i],0);
-      const style=getComputedStyle(node),a=luminance(style.color),b=luminance(style.backgroundColor);return (Math.max(a,b)+.05)/(Math.min(a,b)+.05);
+      const parse=value=>value.match(/[\d.]+/g).map(Number);
+      const effectiveBg=el=>{
+        for(let cur=el;cur;cur=cur.parentElement){
+          const c=parse(getComputedStyle(cur).backgroundColor);
+          if(c.length<4||c[3]>0)return c.slice(0,3);
+        }
+        return [255,255,255];
+      };
+      const luminance=rgb=>rgb.map(n=>{n/=255;return n<=.04045?n/12.92:((n+.055)/1.055)**2.4;}).reduce((sum,n,i)=>sum+n*[.2126,.7152,.0722][i],0);
+      const style=getComputedStyle(node),a=luminance(parse(style.color).slice(0,3)),b=luminance(effectiveBg(node));return (Math.max(a,b)+.05)/(Math.min(a,b)+.05);
     });
     for(const dark of [true,false]){
       await page.emulateMedia({colorScheme:dark?'dark':'light'});
@@ -99,6 +121,12 @@ function archiveEntries(file){
         await page.mouse.move(0,0);check(`readable resting control ${selector}/${dark}`,await contrast(selector)>=4.5);
         await page.locator(selector).first().hover();check(`readable hovered control ${selector}/${dark}`,await contrast(selector)>=4.5);
       }
+      await page.mouse.move(0,0);
+      check(`readable saved meta status ${dark}`,await contrast('#uploads .meta.done')>=4.5);
+      check(`readable upload summary bytes ${dark}`,await contrast('#upload-bytes')>=4.5);
+      check(`readable text success status ${dark}`,await contrast('#text-status.info')>=4.5);
+      await page.evaluate(()=>{const el=document.getElementById('message');el.textContent='链接已复制到剪贴板';el.className='info';});
+      check(`readable success info banner ${dark}`,await contrast('#message.info')>=4.5);
       await page.locator('#qr-toggle').click();
       check(`readable copy button ${dark}`,await contrast('#copy')>=4.5);
       await page.locator('#copy').hover();check(`readable hovered copy button ${dark}`,await contrast('#copy')>=4.5);

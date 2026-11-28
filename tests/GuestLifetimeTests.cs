@@ -48,6 +48,7 @@ namespace FeiqLight.Tests
                         main.Show();window.Show();Application.DoEvents();var input=Field<TextBox>(window,"lifetime");
                         Control defaultSave=Field<Button>(window,"saveLifetime");Check(defaultSave.Parent.ClientRectangle.Contains(defaultSave.Bounds),"默认窗口有效期按钮越界");
                         Check(input.Text=="60","UI 默认值");
+                        Check(!Field<ToggleSwitch>(window,"allowText").Checked,"文本互传不是默认关闭");
                         Check(input.BorderStyle==BorderStyle.None&&input.Parent is RoundedInput,"有效期仍使用原生方框");
                         Check(input.Parent.Top==defaultSave.Top&&input.Parent.Height==defaultSave.Height,"有效期与按钮未对齐");
                         input.Focus();Application.DoEvents();Snapshot(window,Path.Combine(output,"guest-lifetime-focused-"+(dark?"dark":"light")+".png"));
@@ -67,6 +68,7 @@ namespace FeiqLight.Tests
                         }
                         Check(node.Settings.GuestLifetimeMinutes==120&&store.LoadSettings().GuestLifetimeMinutes==120,"保存普通设置覆盖有效期");
                         Field<ToggleSwitch>(window,"upload").Checked=true;
+                        Field<ToggleSwitch>(window,"allowText").Checked=true;
                         Click(window,"start");var session=Field<GuestTransfer>(window,"session");
                         Check(session!=null&&session.Active,"创建链接失败");
                         Check((session.Until-DateTime.UtcNow).TotalMinutes>119.8&&(session.Until-DateTime.UtcNow).TotalMinutes<=120,"链接没有使用设置值");
@@ -85,10 +87,13 @@ namespace FeiqLight.Tests
                         Snapshot(window,Path.Combine(output,"guest-min-"+suffix+".png"));
                         window.Stop();Check(!session.Active,"主动关闭未失效");
                         input.Text="1";Click(window,"start");session=Field<GuestTransfer>(window,"session");
+                        session.PublishText("到期后必须清空的文本");Click(window,"textTransfer");
+                        GuestTextWindow textWindow=Field<GuestTextWindow>(window,"textWindow");ChatEditor textDraft=Field<ChatEditor>(textWindow,"draft");textDraft.Text="未发送草稿";
                         typeof(GuestTransfer).GetField("Until",BindingFlags.Instance|BindingFlags.NonPublic).SetValue(session,DateTime.UtcNow.AddSeconds(-1));
                         Check(session.Active,"显示时刻变化不应改变实际会话有效期");
                         typeof(GuestTransfer).GetField("lifetimeMilliseconds",BindingFlags.Instance|BindingFlags.NonPublic).SetValue(session,0L);
                         Check(!session.Active,"到期仍活跃");
+                        Application.DoEvents();Check(session.Texts(true).Length==0&&!textWindow.Visible&&textDraft.Text.Length==0,"到期没有清空文本队列、小窗和草稿");
                         try{Get(session,session.Token);throw new Exception("到期链接仍授权");}catch(WebException e){Check(((HttpWebResponse)e.Response).StatusCode==HttpStatusCode.Gone,"到期状态");e.Response.Close();}
                         typeof(Timer).GetMethod("OnTick",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(Field<Timer>(window,"timer"),new object[]{EventArgs.Empty});
                         Check(Field<GuestTransfer>(window,"session")==null&&Field<Label>(window,"state").Text.Contains("到期"),"界面没有结束并提示到期");
