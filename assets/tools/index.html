@@ -39,12 +39,15 @@
       <div class="files-header-card">
         <div class="file-toolbar">
           <nav id="breadcrumbs" aria-label="目录位置"></nav>
+          <a id="download-folder" class="btn-download" hidden>下载此目录 ZIP</a>
           <div class="toolbar-controls">
             <div class="search-wrap">
-              <label class="sr-only" for="search">筛选当前文件夹</label>
+              <label class="sr-only" for="search">搜索当前文件夹</label>
               <svg class="search-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5L20 20"/></svg>
-              <input id="search" type="search" placeholder="筛选当前文件夹…" autocomplete="off">
+              <input id="search" type="search" placeholder="搜索当前文件夹…" autocomplete="off" maxlength="256">
             </div>
+            <select id="sort" aria-label="排序依据"><option value="name">名称</option><option value="size">大小</option><option value="mtime">修改时间</option></select>
+            <select id="order" aria-label="排序方向"><option value="asc">正序</option><option value="desc">倒序</option></select>
             <button id="refresh" type="button" title="刷新当前目录"><svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v5h-5"/></svg><span>刷新</span></button>
           </div>
         </div>
@@ -52,6 +55,10 @@
       <div class="files-card">
         <div class="list-heading"><span id="count">正在加载</span><span class="readonly-pill">只读共享 · 双击目录进入</span></div>
         <div id="file-list"></div>
+        <div id="list-footer" hidden>
+          <p id="list-warning" role="status" hidden></p>
+          <button id="load-more" type="button" hidden>加载更多</button>
+        </div>
       </div>
     </section>
     <section id="remote" hidden>

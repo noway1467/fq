@@ -17,6 +17,8 @@
   let recoveryAttempts=0;
   let capabilityTimer=0, statusChecking=false;
   let shareTimer=0, shareRevision=null;
+  let listPaging=false,directoryArchive=false,nextCursor=null,listTruncated=false,directoryId='';
+  let searchTimer=0,listAbort=null;
   const status = (text, error = false) => {
     const activeRemote=mode==='remote'&&Boolean(token);
     $('status').textContent=text;$('status').hidden=!text||activeRemote;$('status').classList.toggle('error',error);
@@ -32,8 +34,8 @@
     const digits = $('code').value.replace(/\D/g, '').slice(0, 6);
     if ($('code').value !== digits) $('code').value = digits;
   });
-  async function request(path, data, timeout = 10000, currentToken = token) {
-    const abort = new AbortController(), timer = setTimeout(() => abort.abort(), timeout);
+  async function request(path, data, timeout = 10000, currentToken = token, controller = null) {
+    const abort = controller || new AbortController(), timer = setTimeout(() => abort.abort(), timeout);
     if(path.startsWith('/api/screen?'))frameAbort=abort;
     try {
       const options = {signal: abort.signal, cache: 'no-store', credentials: 'same-origin', headers: {}};
@@ -85,6 +87,9 @@
     const previousToken = token; token = ''; generation++; listing++; clearTimeout(frameTimer); pending = []; drag = false;
     clearTimeout(capabilityTimer);
     clearTimeout(shareTimer);shareRevision=null;
+    clearTimeout(searchTimer);nextCursor=null;directoryId='';
+    if(listAbort){listAbort.abort();listAbort=null;}
+    $('file-list').setAttribute('aria-busy','false');$('load-more').hidden=true;$('download-folder').hidden=true;
     frameFailures=0;
     if(frameAbort){frameAbort.abort();frameAbort=null;}
     $('drag').setAttribute('aria-pressed', 'false'); $('disconnect').hidden = true; $('remote').hidden = true; $('files').hidden = true; $('login').hidden = false;
@@ -140,7 +145,11 @@
           if(version===generation&&token)capabilityTimer=setTimeout(checkCapabilities,3000);
         };
         capabilityTimer=setTimeout(checkCapabilities,3000);
-      } else { trail = [{id: '', name: '共享文件夹'}]; await loadDirectory();watchSharing(version); }
+      } else {
+        const capabilities=await request('/api/status');if(version!==generation)return;
+        listPaging=capabilities.listPaging===true;directoryArchive=capabilities.directoryArchive===true;
+        trail = [{id: '', name: '共享文件夹'}];$('search').value='';await loadDirectory();watchSharing(version);
+      }
     } catch (error) {
       if(version===generation) {
         if(recovery&&(error.retryable||error.status===401||error.status===409)&&recoveryAttempts<4) {
@@ -169,8 +178,8 @@
     try {
       const data=await request('/api/share-status');
       if(version!==generation||!token)return;
-      if(shareRevision!==null&&data.revision!==shareRevision)await loadDirectory();
-      shareRevision=data.revision;
+      if(shareRevision!==null&&data.revision>shareRevision){trail=[{id:'',name:'共享文件夹'}];$('search').value='';await loadDirectory();}
+      if(shareRevision===null||data.revision>shareRevision)shareRevision=data.revision;
     }catch(error){
       if(version!==generation||!token)return;
       if(error.status===404)return;
@@ -178,17 +187,28 @@
     }
     if(version===generation&&token)shareTimer=setTimeout(()=>watchSharing(version),3000);
   }
-  async function loadDirectory() {
-    const version = ++listing; $('refresh').disabled = true; $('file-list').textContent = '正在加载目录…';
+  async function loadDirectory(more=false,reset=false) {
+    if(more&&!nextCursor)return;
+    clearTimeout(searchTimer);
+    const version = ++listing,selectedCursor=more?nextCursor:null;
+    if(listAbort)listAbort.abort();
+    const controller=new AbortController();listAbort=controller;
+    $('refresh').disabled=true;$('load-more').disabled=true;$('load-more').textContent='正在加载…';
+    $('file-list').setAttribute('aria-busy','true');
+    if(!more){items=[];nextCursor=null;listTruncated=false;$('file-list').textContent='正在加载目录…';$('count').textContent='正在加载';$('list-footer').hidden=true;$('download-folder').hidden=true;}
     try {
-      const data = await request('/api/list?id=' + encodeURIComponent(trail[trail.length - 1].id));
+      let url='/api/list?id='+encodeURIComponent(trail[trail.length-1].id);
+      if(listPaging)url+='&limit=100&q='+encodeURIComponent($('search').value)+'&sort='+$('sort').value+'&order='+$('order').value+(selectedCursor?'&cursor='+encodeURIComponent(selectedCursor):'');
+      const data = await request(url,undefined,10000,token,controller);
       if (version !== listing || !token) return;
-      items = data.items;if(typeof data.revision==='number')shareRevision=data.revision; renderFiles(); breadcrumbs(); status('');
+      items=more?items.concat(data.items):data.items;nextCursor=data.nextCursor||null;listTruncated=data.truncated===true;directoryId=data.id||trail[trail.length-1].id;
+      if(typeof data.revision==='number')shareRevision=data.revision;renderFiles();breadcrumbs();status('');
     } catch (error) { if (version === listing) {
-      if(error.status===404&&trail.length>1){trail=[{id:'',name:'共享文件夹'}];await loadDirectory();return;}
-      $('file-list').textContent = '目录读取失败，可以返回上级或刷新重试。'; status(error.message, true); breadcrumbs();
+      if(!reset&&((error.status===404&&trail.length>1)||(listPaging&&(error.status===409||error.status===410)))){trail=[{id:'',name:'共享文件夹'}];$('search').value='';await loadDirectory(false,true);return;}
+      if(error.status===401||error.status===403){end(error.message,true);return;}
+      if(!more)$('file-list').textContent = '目录读取失败，可以返回上级或刷新重试。';status(error.message,true);breadcrumbs();
     } }
-    finally { if (version === listing) $('refresh').disabled = false; }
+    finally { if (version === listing){$('refresh').disabled=false;$('load-more').disabled=false;$('load-more').textContent='加载更多';$('file-list').setAttribute('aria-busy','false');if(listAbort===controller)listAbort=null;} }
   }
   function breadcrumbs() {
     $('breadcrumbs').replaceChildren();
@@ -227,8 +247,8 @@
     $('search').value = '';
     loadDirectory();
   }
-  function fileUrl(id, dl) {
-    let u = '/file?id=' + encodeURIComponent(id) + (dl ? '&download=1' : '');
+  function fileUrl(id, dl, archive=false) {
+    let u = '/file?id=' + encodeURIComponent(id) + (dl ? '&download=1' : '') + (archive ? '&archive=store' : '');
     if (token) u += '&token=' + encodeURIComponent(token);
     if (gatewayAccess) u += '&gateway=' + encodeURIComponent(gatewayAccess);
     return u;
@@ -243,9 +263,25 @@
     file: '<path d="M13.5 3.5H7L5.5 5v14L7 20.5h10l1.5-1.5V8.5z"/><path d="M13.5 3.5v5h5"/>'
   };
   function renderFiles() {
-    const filter = $('search').value.toLocaleLowerCase(), list = items.filter(item => item.name.toLocaleLowerCase().includes(filter)).sort((a,b) => Number(b.dir) - Number(a.dir) || a.name.localeCompare(b.name));
-    $('count').textContent = filter ? `匹配 ${list.length} / ${items.length} 项` : `共 ${list.length} 项`; $('file-list').replaceChildren();
-    if (!list.length) { const empty = document.createElement('p'); empty.className = 'empty'; empty.textContent = filter ? '没有匹配的文件' : '这个文件夹是空的'; $('file-list').append(empty); }
+    const filter=$('search').value.toLocaleLowerCase();
+    const list=listPaging?items:items.filter(item=>item.name.toLocaleLowerCase().includes(filter)).sort((a,b)=>{
+      if(a.dir!==b.dir)return Number(b.dir)-Number(a.dir);
+      const sort=$('sort').value,order=$('order').value==='desc'?-1:1;
+      if(sort!=='name'){
+        const first=sort==='size'?a.size:a.mtime,second=sort==='size'?b.size:b.mtime;
+        const knownFirst=Number.isFinite(first)&&first>=0,knownSecond=Number.isFinite(second)&&second>=0;
+        if(knownFirst!==knownSecond)return knownFirst?-1:1;
+        if(knownFirst&&first!==second)return (first-second)*order;
+      }else {const compared=a.name.localeCompare(b.name);if(compared)return compared*order;}
+      return a.name.localeCompare(b.name)||a.id.localeCompare(b.id);
+    });
+    $('count').textContent=listPaging&&(nextCursor||listTruncated)?`已加载 ${list.length} ${filter?'条匹配结果':'项'}`:filter?`匹配 ${list.length} 项`:`共 ${list.length} 项`;
+    $('load-more').hidden=!nextCursor;$('list-warning').hidden=!listTruncated;$('list-footer').hidden=!nextCursor&&!listTruncated;
+    $('list-warning').textContent=listTruncated?'此目录结果不完整，搜索和排序仅覆盖已扫描内容。可进入子目录，或请对方共享更小的文件夹。':'';
+    const folderDownload=$('download-folder');folderDownload.hidden=!directoryArchive||!directoryId;
+    if(!folderDownload.hidden){folderDownload.href=fileUrl(directoryId,true,true);folderDownload.download=trail[trail.length-1].name+'.zip';}
+    $('file-list').replaceChildren();
+    if (!list.length) { const empty = document.createElement('p'); empty.className = 'empty'; empty.textContent = listTruncated?'已扫描内容中没有匹配的文件':filter?'没有匹配的文件':'这个文件夹是空的'; $('file-list').append(empty); }
     list.forEach(item => {
       const meta = classifyItem(item);
       const row = document.createElement('div'); row.className = 'file-row';
@@ -257,12 +293,15 @@
       const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); icon.setAttribute('viewBox', '0 0 24 24'); icon.innerHTML = kindIcons[meta.kind] || kindIcons.file; kind.append(icon); row.append(kind);
       const detail = document.createElement('div'); detail.className = 'file-detail';
       const name = document.createElement('div'); name.className = 'file-name'; name.textContent = item.name; name.title = item.name;
-      const info = document.createElement('div'); info.className = 'file-size'; info.textContent = item.dir ? '文件夹 · 双击进入' : `${meta.label} · ${size(item.size)}`; detail.append(name, info); row.append(detail);
+      const info = document.createElement('div'); info.className = 'file-size';
+      const modified=Number.isFinite(item.mtime)&&item.mtime>0?new Date(item.mtime).toLocaleString():'时间未知';
+      info.textContent=(item.dir?'文件夹 · 双击进入':`${meta.label} · ${size(item.size)}`)+' · '+modified;info.title=info.textContent;detail.append(name,info);row.append(detail);
       const actions = document.createElement('div'); actions.className = 'file-actions';
       if (item.dir) {
         const open = document.createElement('button'); open.type = 'button'; open.className = 'btn-enter';
         open.textContent = '进入'; open.setAttribute('aria-label', '进入 ' + item.name);
         open.onclick = () => enterDirectory(item); actions.append(open);
+        if(directoryArchive){const download=document.createElement('a');download.className='btn-download';download.textContent='下载 ZIP';download.href=fileUrl(item.id,true,true);download.download=item.name+'.zip';download.setAttribute('aria-label','下载目录 '+item.name+' ZIP');actions.append(download);}
       }
       if(meta.media||meta.preview){
         const open=document.createElement('a');open.className='btn-play';open.textContent=meta.media?'播放':'查看';open.setAttribute('aria-label',open.textContent+' '+item.name);
@@ -275,7 +314,14 @@
       row.append(actions); $('file-list').append(row);
     });
   }
-  $('refresh').onclick = loadDirectory; $('search').oninput = renderFiles;
+  $('refresh').onclick=()=>loadDirectory();$('load-more').onclick=()=>loadDirectory(true);
+  $('sort').onchange=$('order').onchange=()=>{if(listPaging)loadDirectory();else renderFiles();};
+  $('search').oninput=()=>{
+    if(!listPaging){renderFiles();return;}
+    clearTimeout(searchTimer);listing++;if(listAbort){listAbort.abort();listAbort=null;}
+    nextCursor=null;$('load-more').hidden=true;$('file-list').setAttribute('aria-busy','true');$('count').textContent='正在搜索…';
+    searchTimer=setTimeout(()=>loadDirectory(),250);
+  };
   async function decodeImage(blob) {
     if (typeof createImageBitmap === 'function') return createImageBitmap(blob);
     const url=URL.createObjectURL(blob), image=new Image();

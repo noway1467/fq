@@ -32,11 +32,13 @@ public final class ToolsHttp implements AutoCloseable {
         private final AtomicLong progress;
         private boolean keepAlive;
         private final Socket socket;
+        private final Socket disconnect;
         private long connectionCheck;
         private long remaining;
         boolean started;
         Response(OutputStream output,boolean head,AtomicLong progress,boolean keepAlive) {this(output,head,progress,keepAlive,null);}
-        Response(OutputStream output,boolean head,AtomicLong progress,boolean keepAlive,Socket socket) {this.output=output;this.head=head;this.progress=progress;this.keepAlive=keepAlive;this.socket=socket;}
+        Response(OutputStream output,boolean head,AtomicLong progress,boolean keepAlive,Socket socket) {this(output,head,progress,keepAlive,socket,socket);}
+        Response(OutputStream output,boolean head,AtomicLong progress,boolean keepAlive,Socket socket,Socket disconnect) {this.output=output;this.head=head;this.progress=progress;this.keepAlive=keepAlive;this.socket=socket;this.disconnect=disconnect;}
         public void begin(int code,String type,long length,String extra) throws IOException {
             if(code>=300)keepAlive=false;
             String header="HTTP/1.1 "+code+" "+(code==200?"OK":code==206?"Partial Content":"Error")+"\r\nContent-Type: "+type+"\r\nContent-Length: "+length+"\r\nConnection: "+(keepAlive?"keep-alive\r\nKeep-Alive: timeout=3, max=16":"close")+"\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; media-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'\r\n"+extra+"\r\n";
@@ -48,6 +50,8 @@ public final class ToolsHttp implements AutoCloseable {
         public void waitingForUser(){progress.set(System.nanoTime()+TimeUnit.SECONDS.toNanos(20));}
         // CRC 预检还未发送响应头，用实际读取进度避免被误判为空闲连接。
         public void processing()throws IOException{checkConnection();progress.set(System.nanoTime());}
+        public void disableReuse(){keepAlive=false;}
+        public void abort()throws IOException{if(disconnect!=null)disconnect.close();}
         public void checkConnection()throws IOException {
             if(socket==null)return;
             if(socket.isClosed())throw new IOException("下载连接已关闭");
@@ -72,13 +76,14 @@ public final class ToolsHttp implements AutoCloseable {
     private final Handler handler;
     private final Set<Socket> clients=new HashSet<>();
     private final Map<Socket,String> remoteClients=new HashMap<>();
+    private final Map<Socket,String> fingerprints=new HashMap<>();
     private final ScheduledExecutorService timeouts=Executors.newSingleThreadScheduledExecutor(r->{Thread t=new Thread(r,"shared-files-timeouts");t.setDaemon(true);return t;});
     private final ExecutorService workers=Executors.newFixedThreadPool(12,r->{Thread t=new Thread(r,"shared-files-http");t.setDaemon(true);return t;});
     private boolean closed;
     private final SecureIdentity security;
     private final LanNode.SocketBinding binding;
     private final int bodyLimit;
-    private final java.util.function.Consumer<String> revoked=fingerprint->disconnectClients();
+    private final java.util.function.Consumer<String> revoked=this::disconnectFingerprint;
     public ToolsHttp(int port,boolean loopback,Handler handler) throws IOException {
         this(port,loopback,handler,null);
     }
@@ -115,6 +120,7 @@ public final class ToolsHttp implements AutoCloseable {
             socket.setSoTimeout(5000);socket.setTcpNoDelay(true);socket.setSendBufferSize(262144);
             Socket transport=security==null?socket:security.server(socket,true);
             String fingerprint=security==null?null:SecureIdentity.remoteFingerprint((javax.net.ssl.SSLSocket)transport);
+            synchronized(clients){fingerprints.put(socket,fingerprint);}
             if(security!=null&&!security.isTrustedFingerprint(fingerprint))throw new IOException("请先从联系人核对设备身份");
             // 将请求头批量读入内存，避免每个字节都跨一次系统调用。
             RequestInput deadline=new RequestInput(transport);InputStream input=new BufferedInputStream(deadline,8192);
@@ -125,7 +131,7 @@ public final class ToolsHttp implements AutoCloseable {
             boolean fileReuse=requestedReuse&&request.path.equals("/file")&&(request.method.equals("GET")||request.method.equals("HEAD"));
             boolean remoteReuse=requestedReuse&&((request.path.equals("/api/screen")&&request.method.equals("GET"))||(request.path.equals("/api/input")&&request.method.equals("POST")));
             request.fingerprint=fingerprint;if(security!=null&&!security.isTrustedFingerprint(fingerprint))throw new IOException("设备信任已撤销");
-            response=new Response(transport.getOutputStream(),request.method.equals("HEAD"),progress,fileReuse,transport);
+            response=new Response(transport.getOutputStream(),request.method.equals("HEAD"),progress,fileReuse,transport,socket);
             Response currentResponse=response;
             request.remoteAuthorized=token->{
                 synchronized(clients){
@@ -146,7 +152,7 @@ public final class ToolsHttp implements AutoCloseable {
                 String text=e instanceof Failure?e.getMessage():"文件不可用或连接已关闭";
                 response.bytes(e instanceof Failure?((Failure)e).code:500,"application/json; charset=utf-8",("{\"error\":\""+text.replace("\\","\\\\").replace("\"","\\\"").replace("\n"," ").replace("\r"," ")+"\"}").getBytes(StandardCharsets.UTF_8),"");
             }catch(IOException ignored){/* 对端已经关闭，不能再发送错误响应。 */}
-        } finally {if(timeout!=null)timeout.cancel(false);try{socket.close();}catch(IOException ignored){}synchronized(clients){clients.remove(socket);remoteClients.remove(socket);}}
+        } finally {if(timeout!=null)timeout.cancel(false);try{socket.close();}catch(IOException ignored){}synchronized(clients){clients.remove(socket);remoteClients.remove(socket);fingerprints.remove(socket);}}
     }
     private static Request read(InputStream input,int bodyLimit) throws IOException {
         ByteArrayOutputStream header=new ByteArrayOutputStream();int last=0;
@@ -183,6 +189,7 @@ public final class ToolsHttp implements AutoCloseable {
         }
     }
     public void disconnectClients(){synchronized(clients){for(Socket socket:clients)try{socket.close();}catch(IOException ignored){}}}
+    private void disconnectFingerprint(String fingerprint){synchronized(clients){for(Map.Entry<Socket,String> item:fingerprints.entrySet())if(fingerprint.equals(item.getValue()))try{item.getKey().close();}catch(IOException ignored){}}}
     public void disconnectRemoteClients(){disconnectRemoteClients(null);}
     public void disconnectRemoteClients(String token){
         synchronized(clients){for(Map.Entry<Socket,String> item:remoteClients.entrySet())

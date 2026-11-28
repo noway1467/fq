@@ -8,17 +8,21 @@ import android.os.*;
 import android.provider.DocumentsContract;
 import android.provider.DocumentsProvider;
 import org.feiqlight.android.core.ToolsHttp;
+import org.feiqlight.android.core.SecureIdentity;
 import org.json.*;
 import org.junit.*;
 import org.junit.runner.RunWith;
 import org.robolectric.*;
 import org.robolectric.annotation.Config;
+import org.robolectric.annotation.ConscryptMode;
 import org.robolectric.shadows.ShadowContentResolver;
 import java.io.*;
 import java.net.*;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.*;
+import java.util.concurrent.*;
+import java.util.zip.*;
 import static org.junit.Assert.*;
 
 @RunWith(RobolectricTestRunner.class)
@@ -33,26 +37,56 @@ public final class SharedFilesTest {
     }
     public static final class Docs extends DocumentsProvider {
         File file;volatile boolean denied;volatile String openedMode="";
+        final Map<String,Doc> documents=new HashMap<>();
+        final Map<String,List<String>> children=new HashMap<>();
+        final Map<String,Integer> opens=new ConcurrentHashMap<>();
+        volatile String sortOrder="unset",slowParent="";
+        volatile int delay;
+        volatile Runnable afterOpen;
+        volatile String triggerDocument="";
+        volatile int triggerOpen;
         @Override public boolean onCreate(){return true;}
         private Cursor row(String id,String[] columns){
             if(denied)throw new SecurityException("权限已撤销");
             String[] names=columns==null?new String[]{DocumentsContract.Document.COLUMN_DOCUMENT_ID}:columns;MatrixCursor cursor=new MatrixCursor(names);Object[] values=new Object[names.length];
+            Doc doc=documents.get(id);
             for(int i=0;i<names.length;i++){
                 if(names[i].equals(DocumentsContract.Document.COLUMN_DOCUMENT_ID))values[i]=id;
-                if(names[i].equals(DocumentsContract.Document.COLUMN_DISPLAY_NAME))values[i]=id.equals("root")?"共享根目录":id.equals("folder")?"空目录":"视频 English 😀.mp4";
-                if(names[i].equals(DocumentsContract.Document.COLUMN_MIME_TYPE))values[i]=id.equals("video")?"video/mp4":DocumentsContract.Document.MIME_TYPE_DIR;
-                if(names[i].equals(DocumentsContract.Document.COLUMN_SIZE))values[i]=id.equals("video")?file.length():0;
+                if(names[i].equals(DocumentsContract.Document.COLUMN_DISPLAY_NAME))values[i]=doc!=null?doc.name:id.equals("root")?"共享根目录":id.equals("folder")?"空目录":"视频 English 😀.mp4";
+                if(names[i].equals(DocumentsContract.Document.COLUMN_MIME_TYPE))values[i]=doc!=null?(doc.directory?DocumentsContract.Document.MIME_TYPE_DIR:"application/octet-stream"):id.equals("video")?"video/mp4":DocumentsContract.Document.MIME_TYPE_DIR;
+                if(names[i].equals(DocumentsContract.Document.COLUMN_SIZE)){if(doc!=null)values[i]=doc.size;else values[i]=id.equals("video")?file.length():0;}
+                if(names[i].equals(DocumentsContract.Document.COLUMN_LAST_MODIFIED)){if(doc!=null)values[i]=doc.modified;else values[i]=id.equals("video")?file.lastModified():null;}
             }
             cursor.addRow(values);return cursor;
         }
         @Override public Cursor queryRoots(String[] columns){return new MatrixCursor(new String[]{DocumentsContract.Root.COLUMN_ROOT_ID});}
         @Override public Cursor queryDocument(String id,String[] columns){return row(id,columns);}
         @Override public Cursor queryChildDocuments(String parent,String[] columns,String sort){
-            if(denied)throw new SecurityException("权限已撤销");MatrixCursor result=new MatrixCursor(columns);
-            if(parent.equals("root"))for(String id:new String[]{"video","folder"})try(Cursor row=row(id,columns)){row.moveToFirst();Object[] values=new Object[columns.length];for(int i=0;i<values.length;i++)values[i]=row.getType(i)==Cursor.FIELD_TYPE_INTEGER?row.getLong(i):row.getString(i);result.addRow(values);}return result;
+            if(denied)throw new SecurityException("权限已撤销");sortOrder=sort;
+            if(parent.equals(slowParent))try{Thread.sleep(delay);}catch(InterruptedException error){Thread.currentThread().interrupt();throw new OperationCanceledException();}
+            MatrixCursor result=new MatrixCursor(columns);
+            List<String> selected=children.getOrDefault(parent,parent.equals("root")?Arrays.asList("video","folder"):Collections.emptyList());
+            for(String id:selected)try(Cursor row=row(id,columns)){row.moveToFirst();Object[] values=new Object[columns.length];for(int i=0;i<values.length;i++)values[i]=row.getType(i)==Cursor.FIELD_TYPE_INTEGER?row.getLong(i):row.getString(i);result.addRow(values);}return result;
         }
-        @Override public boolean isChildDocument(String parent,String child){return parent.equals("root")&&(child.equals("video")||child.equals("folder"));}
-        @Override public ParcelFileDescriptor openDocument(String id,String mode,CancellationSignal signal)throws FileNotFoundException{if(denied)throw new SecurityException("权限已撤销");if(!id.equals("video"))throw new FileNotFoundException();openedMode=mode;return ParcelFileDescriptor.open(file,ParcelFileDescriptor.MODE_READ_ONLY);}
+        @Override public boolean isChildDocument(String parent,String child) {
+            if(parent.equals("root")&&(child.equals("video")||child.equals("folder")))return true;
+            Set<String> visited=new HashSet<>();Deque<String> pending=new ArrayDeque<>();pending.add(parent);
+            while(!pending.isEmpty()){String current=pending.removeFirst();if(!visited.add(current))continue;for(String id:children.getOrDefault(current,Collections.emptyList())){if(id.equals(child))return true;if(documents.containsKey(id)&&documents.get(id).directory)pending.addLast(id);}}
+            return false;
+        }
+        @Override public ParcelFileDescriptor openDocument(String id,String mode,CancellationSignal signal)throws FileNotFoundException {
+            if(denied)throw new SecurityException("权限已撤销");Doc doc=documents.get(id);if(!id.equals("video")&&(doc==null||doc.directory))throw new FileNotFoundException();openedMode=mode;
+            int count=opens.merge(id,1,Integer::sum);if(id.equals(triggerDocument)&&count==triggerOpen&&afterOpen!=null)afterOpen.run();
+            return ParcelFileDescriptor.open(doc!=null&&doc.file!=null?doc.file:file,ParcelFileDescriptor.MODE_READ_ONLY);
+        }
+    }
+    private static final class Doc {
+        final String id,name;
+        final boolean directory;
+        final Long size;
+        volatile Long modified;
+        File file;
+        Doc(String id,String name,boolean directory,Long size,Long modified){this.id=id;this.name=name;this.directory=directory;this.size=size;this.modified=modified;}
     }
     private static final class Reply {
         int code;String headers;byte[] body;
@@ -277,5 +311,196 @@ public final class SharedFilesTest {
         assertEquals(Collections.singletonList(TREE),settings.trees());settings.save(Arrays.asList(TREE,second,TREE),true);
         assertEquals(Arrays.asList(TREE,second),new SharedFolderSettings(context).trees());settings.stop();assertFalse(settings.enabled());assertEquals(2,settings.trees().size());
         settings.save(Collections.singletonList(second),false);assertEquals(Collections.singletonList(second),settings.trees());assertEquals(2,context.getContentResolver().getPersistedUriPermissions().size());
+    }
+    private Doc add(String parent,String id,String name,boolean directory,Long size,Long modified) {
+        Doc doc=new Doc(id,name,directory,size,modified);docs.documents.put(id,doc);docs.children.computeIfAbsent(parent,key->new ArrayList<>()).add(id);return doc;
+    }
+    private static Object field(Object value,String name)throws Exception{java.lang.reflect.Field field=value.getClass().getDeclaredField(name);field.setAccessible(true);return field.get(value);}
+    private static void setField(Object value,String name,Object data)throws Exception{java.lang.reflect.Field field=value.getClass().getDeclaredField(name);field.setAccessible(true);field.set(value,data);}
+    private static List<String> names(JSONArray items)throws JSONException{List<String> names=new ArrayList<>();for(int index=0;index<items.length();index++)names.add(items.getJSONObject(index).getString("name"));return names;}
+    private static boolean eocd(byte[] bytes){return bytes.length>=22&&(bytes[bytes.length-22]&255)==0x50&&(bytes[bytes.length-21]&255)==0x4b&&(bytes[bytes.length-20]&255)==5&&(bytes[bytes.length-19]&255)==6;}
+    private static long contentLength(Reply reply){return Long.parseLong(Arrays.stream(reply.headers.split("\r\n")).filter(line->line.startsWith("Content-Length:")).findFirst().orElseThrow().substring(15).trim());}
+    private static final class ArchiveConnection implements AutoCloseable {
+        final Socket socket=new Socket(),transport;
+        final Reply reply=new Reply();
+        ArchiveConnection(SharedFiles server,String id,String cookie)throws Exception{this(server,id,cookie,null,null);}
+        ArchiveConnection(SharedFiles server,String id,String cookie,SecureIdentity identity,String fingerprint)throws Exception {
+            socket.setReceiveBufferSize(65536);socket.connect(new InetSocketAddress("127.0.0.1",server.port()));socket.setSoTimeout(15000);
+            transport=identity==null?socket:identity.client(socket,fingerprint);transport.setSoTimeout(15000);
+            String header="GET /file?id="+id+"&archive=store HTTP/1.1\r\nHost: 127.0.0.1:"+server.port()+"\r\nCookie: "+cookie+"\r\nConnection: close\r\n\r\n";transport.getOutputStream().write(header.getBytes(StandardCharsets.US_ASCII));
+            ByteArrayOutputStream bytes=new ByteArrayOutputStream();int last=0;
+            while(last!=0x0d0a0d0a){int value=transport.getInputStream().read();if(value<0)throw new EOFException("归档响应头提前关闭");bytes.write(value);last=(last<<8)|value;}
+            reply.headers=bytes.toString("US-ASCII");reply.code=Integer.parseInt(reply.headers.split(" ")[1]);
+        }
+        byte[] readBody()throws IOException {
+            ByteArrayOutputStream bytes=new ByteArrayOutputStream();byte[] buffer=new byte[262144];
+            try{int count;while((count=transport.getInputStream().read(buffer))>=0)bytes.write(buffer,0,count);}catch(SocketException expected){/* 保留实际断流字节，下面仍校验长度和 EOCD。 */}
+            return bytes.toByteArray();
+        }
+        @Override public void close()throws IOException{transport.close();socket.close();}
+    }
+    private static InputStream archiveInput(SharedFiles server,String cookie)throws Exception {
+        synchronized(server){for(Object archive:(List<?>)field(server,"archives"))if(field(field(archive,"session"),"token").equals(cookie.substring(9)))return (InputStream)field(archive,"input");}
+        return null;
+    }
+    private static boolean open(InputStream input){return input instanceof FileInputStream&&((FileInputStream)input).getChannel().isOpen();}
+    private static InputStream awaitArchive(SharedFiles server,String cookie)throws Exception {
+        long until=System.nanoTime()+TimeUnit.SECONDS.toNanos(3);InputStream input;
+        do{input=archiveInput(server,cookie);if(open(input))return input;Thread.sleep(5);}while(System.nanoTime()<until);
+        fail("没有进入活跃归档读取");return null;
+    }
+    private Doc large(String parent,String id)throws Exception {
+        File file=new File(context.getCacheDir(),id+".bin");try(RandomAccessFile output=new RandomAccessFile(file,"rw")){output.setLength(16*1024*1024);}
+        Doc doc=add(parent,id,id+".bin",false,file.length(),file.lastModified());doc.file=file;return doc;
+    }
+    @Test public void largeDirectoryKeepsLegacy409AndPagesWithoutDuplicatesOrMissingSearchHits()throws Exception {
+        for(int index=0;index<1123;index++)add("root","file-"+index,String.format(Locale.ROOT,"item-%04d.txt",index),false,(long)(index%5),1000L+index);
+        try(SharedFiles server=new SharedFiles(context,TREE,0,true)) {
+            assertTrue(get(server,"/api/status","").json().getBoolean("listPaging"));String cookie=login(server);
+            assertEquals(409,get(server,"/api/list",cookie).code);assertEquals(409,get(server,"/api/files",cookie).code);
+            Reply page=get(server,"/api/files?limit=200&sort=name&order=asc",cookie);assertEquals(201,((Map<?,?>)field(server,"entries")).size());
+            add("root","new-file","added-after-snapshot.txt",false,0L,null);
+            Set<String> ids=new HashSet<>(),names=new HashSet<>();int pages=0;
+            while(true) {
+                assertEquals(200,page.code);JSONObject result=page.json();assertFalse(result.getBoolean("truncated"));JSONArray items=result.getJSONArray("items");
+                for(int index=0;index<items.length();index++){JSONObject item=items.getJSONObject(index);assertTrue(ids.add(item.getString("id")));assertTrue(names.add(item.getString("name")));assertTrue(item.has("mtime"));}
+                String cursor=result.isNull("nextCursor")?"":result.getString("nextCursor");if(cursor.isEmpty())break;assertTrue(++pages<10);page=get(server,"/api/files?limit=200&sort=name&order=asc&cursor="+cursor,cookie);
+            }
+            assertEquals(1123,ids.size());assertEquals(1123,names.size());assertFalse(names.contains("added-after-snapshot.txt"));
+            JSONArray found=get(server,"/api/list?limit=100&q=ITEM-1122",cookie).json().getJSONArray("items");assertEquals(1,found.length());assertEquals("item-1122.txt",found.getJSONObject(0).getString("name"));
+            assertEquals(100,get(server,"/api/list?sort=name",cookie).json().getJSONArray("items").length());assertEquals(200,get(server,"/api/list?limit=999",cookie).json().getJSONArray("items").length());assertNull(docs.sortOrder);
+        }
+    }
+    @Test public void serverSortsAllFieldsWithDirectoriesFirstUnknownLastAndStableSourceTies()throws Exception {
+        add("root","dir","z-dir",true,0L,null);add("root","a","a-known",false,1L,1000L);add("root","z","z-known",false,9L,3000L);add("root","unknown","unknown",false,null,null);
+        add("root","dup-1","dup",false,1L,1000L);add("root","dup-2","dup",false,1L,1000L);add("root","e-1","é",false,1L,1000L);add("root","e-2","e\u0301",false,1L,1000L);
+        try(SharedFiles server=new SharedFiles(context,TREE,0,true)) {
+            String cookie=login(server);List<String> ties=null;
+            for(String sort:Arrays.asList("name","size","mtime"))for(String order:Arrays.asList("asc","desc")) {
+                JSONArray items=get(server,"/api/list?limit=100&sort="+sort+"&order="+order,cookie).json().getJSONArray("items");assertEquals("z-dir",items.getJSONObject(0).getString("name"));
+                if(!sort.equals("name")) {
+                    assertEquals("unknown",items.getJSONObject(items.length()-1).getString("name"));assertTrue(items.getJSONObject(items.length()-1).isNull("mtime"));
+                    List<String> current=new ArrayList<>();for(int index=0;index<items.length();index++)if(items.getJSONObject(index).getString("name").equals("dup"))current.add(items.getJSONObject(index).getString("id"));
+                    if(ties==null)ties=current;else assertEquals(ties,current);
+                }
+                if(order.equals("desc")&&!sort.equals("name"))assertEquals("z-known",items.getJSONObject(1).getString("name"));
+            }
+            assertEquals(Arrays.asList("z-dir","é","e\u0301","z-known","unknown","dup","dup","a-known"),names(get(server,"/api/list?sort=name&order=desc",cookie).json().getJSONArray("items")));
+            Set<String> legacyFields=new HashSet<>();get(server,"/api/files",cookie).json().keys().forEachRemaining(legacyFields::add);assertEquals(new HashSet<>(Arrays.asList("name","revision","items")),legacyFields);
+        }
+    }
+    @Test public void opaqueCursorsBindSessionDirectoryConditionsRevisionTtlAndSnapshotBudget()throws Exception {
+        Uri second=DocumentsContract.buildTreeDocumentUri("feiq.shared.test","folder");
+        try(SharedFiles server=new SharedFiles(context,TREE,0,true)) {
+            String cookie=login(server),other=login(server);JSONObject page=get(server,"/api/list?limit=1",cookie).json();String cursor=page.getString("nextCursor");assertTrue(cursor.matches("[0-9a-f]{64}"));
+            assertEquals(410,get(server,"/api/list?limit=1&cursor="+cursor,other).code);
+            for(String extra:Arrays.asList("&q=video","&sort=size","&order=desc","&id="+page.getString("id")))assertEquals(409,get(server,"/api/list?limit=1&cursor="+cursor+extra,cookie).code);
+            for(String value:Arrays.asList("0","-1","abc"))assertEquals(400,get(server,"/api/list?limit="+value,cookie).code);
+            Object session=((List<?>)field(server,"sessions")).get(0);List<?> snapshots=(List<?>)field(session,"snapshots");setField(snapshots.get(0),"created",-SharedFiles.SNAPSHOT_LIFETIME);assertEquals(410,get(server,"/api/list?limit=1&cursor="+cursor,cookie).code);
+            String first=get(server,"/api/list?limit=1",cookie).json().getString("nextCursor");for(int index=0;index<4;index++)get(server,"/api/list?limit=1",cookie);assertEquals(4,snapshots.size());assertEquals(410,get(server,"/api/list?limit=1&cursor="+first,cookie).code);
+            cursor=get(server,"/api/list?limit=1",cookie).json().getString("nextCursor");server.updateFolders(Arrays.asList(TREE,second));assertEquals(409,get(server,"/api/list?limit=1&cursor="+cursor,cookie).code);
+            JSONArray roots=get(server,"/api/list?limit=100",cookie).json().getJSONArray("items");String removed=roots.getJSONObject(0).getString("id");server.updateFolders(Collections.singletonList(second));assertEquals(404,get(server,"/api/list?limit=100&id="+removed,cookie).code);
+            assertEquals(((Map<?,?>)field(server,"entries")).size(),((Map<?,?>)field(server,"entryIds")).size());
+        }
+    }
+    @Test public void scanAndIdBudgetsBoundLargeDirectoriesAndReportIncompleteResults()throws Exception {
+        for(int index=0;index<=SharedFiles.LIST_SCAN_LIMIT;index++)add("root","f"+index,String.format(Locale.ROOT,"file-%05d",index),false,0L,null);
+        try(SharedFiles server=new SharedFiles(context,TREE,0,true)) {
+            String cookie=login(server);Reply page=get(server,"/api/list?limit=200",cookie);assertTrue(page.json().getBoolean("truncated"));Set<String> names=new HashSet<>();
+            while(true) {
+                JSONArray items=page.json().getJSONArray("items");for(int index=0;index<items.length();index++)assertTrue(names.add(items.getJSONObject(index).getString("name")));
+                assertTrue(((Map<?,?>)field(server,"entries")).size()<=10000);assertEquals(((Map<?,?>)field(server,"entries")).size(),((Map<?,?>)field(server,"entryIds")).size());
+                if(page.json().isNull("nextCursor"))break;page=get(server,"/api/list?limit=200&cursor="+page.json().getString("nextCursor"),cookie);
+            }
+            assertTrue(names.size()>1000);assertTrue(names.size()<=SharedFiles.LIST_SCAN_LIMIT);assertEquals(10000,((Map<?,?>)field(server,"entries")).size());
+        }
+    }
+    @Test public void slowSafProviderHasTimeBudgetAndDoesNotHoldAuthorizationLock()throws Exception {
+        docs.slowParent="root";docs.delay=2500;Uri second=DocumentsContract.buildTreeDocumentUri("feiq.shared.test","folder");
+        try(SharedFiles server=new SharedFiles(context,TREE,0,true)) {
+            String cookie=login(server);long start=System.nanoTime();Reply limited=get(server,"/api/list?limit=100",cookie);assertEquals(200,limited.code);assertTrue(limited.json().getBoolean("truncated"));assertTrue(System.nanoTime()-start<TimeUnit.SECONDS.toNanos(4));
+            ExecutorService worker=Executors.newSingleThreadExecutor();
+            try {
+                Future<Reply> listing=worker.submit(()->get(server,"/api/list?limit=100",cookie));long until=System.nanoTime()+TimeUnit.SECONDS.toNanos(2);
+                while(!(boolean)field(((List<?>)field(server,"sessions")).get(0),"listing")&&System.nanoTime()<until)Thread.sleep(5);
+                start=System.nanoTime();server.updateFolders(Collections.singletonList(second));assertTrue("目录读取占用了授权锁",System.nanoTime()-start<TimeUnit.MILLISECONDS.toNanos(500));assertEquals(409,listing.get(5,TimeUnit.SECONDS).code);
+            }finally{worker.shutdownNow();assertTrue(worker.awaitTermination(5,TimeUnit.SECONDS));}
+        }
+    }
+    @Test public void sharedZipUsesRealIdsAndExistingAuthorizationAndStoreUtf8Contracts()throws Exception {
+        Doc content=add("root","text","中文 +%#😀.txt",false,(long)docs.file.length(),docs.file.lastModified());content.file=docs.file;
+        Doc zero=add("root","zero","empty.txt",false,0L,null);zero.file=new File(context.getCacheDir(),"zip-empty");Files.write(zero.file.toPath(),new byte[0]);
+        try(SharedFiles server=new SharedFiles(context,TREE,0,true)) {
+            String cookie=login(server),id=get(server,"/api/list?limit=100",cookie).json().getString("id"),path="/file?id="+id+"&archive=store";
+            assertEquals(401,get(server,path,"").code);assertEquals(401,request(server.port(),path,"",null,"X-FQ-Guest: fake\r\n","GET").code);assertEquals(404,get(server,"/file?archive=store",cookie).code);assertEquals(404,get(server,"/file?id="+id,cookie).code);
+            assertEquals(403,request(server.port(),path,cookie,null,"Origin: https://evil.invalid\r\n","GET").code);assertEquals(416,request(server.port(),path,cookie,null,"Range: bytes=0-5\r\n","GET").code);
+            Reply reply=get(server,path,cookie);assertEquals(new String(reply.body,StandardCharsets.UTF_8),200,reply.code);assertTrue(eocd(reply.body));assertEquals(reply.body.length,contentLength(reply));assertTrue(reply.headers.contains("application/zip"));assertTrue(reply.headers.contains("Content-Disposition: attachment"));
+            try(ZipInputStream zip=new ZipInputStream(new ByteArrayInputStream(reply.body))) {
+                ZipEntry entry=zip.getNextEntry();assertEquals("中文 +%#😀.txt",entry.getName());assertEquals(ZipEntry.STORED,entry.getMethod());assertArrayEquals(Files.readAllBytes(docs.file.toPath()),zip.readAllBytes());assertEquals("empty.txt",zip.getNextEntry().getName());assertEquals(0,zip.readAllBytes().length);assertNull(zip.getNextEntry());
+            }
+            Reply head=request(server.port(),path,cookie,null,"","HEAD");assertEquals(200,head.code);assertEquals(0,head.body.length);assertEquals(reply.body.length,contentLength(head));
+        }
+    }
+    @Test public void zipBoundsRejectFileCountDirectoryCountDepthCyclesAndUnsafeNames()throws Exception {
+        for(String mode:Arrays.asList("files","directories","depth","cycle","unsafe")) {
+            docs.documents.clear();docs.children.clear();
+            if(mode.equals("files")||mode.equals("directories"))for(int index=0;index<1001;index++)add("root","n"+index,"n"+index,mode.equals("directories"),0L,null);
+            else if(mode.equals("depth")){String parent="root";for(int index=0;index<33;index++){add(parent,"d"+index,"d",true,0L,null);parent="d"+index;}}
+            else if(mode.equals("cycle"))docs.children.put("root",Collections.singletonList("root"));else add("root","unsafe","../outside.txt",false,0L,null);
+            try(SharedFiles server=new SharedFiles(context,TREE,0,true)){String cookie=login(server),id=get(server,"/api/list?limit=1",cookie).json().getString("id");assertEquals(mode,409,get(server,"/file?id="+id+"&archive=store",cookie).code);}
+        }
+    }
+    @Test public void removingRootClosesItsSocketAndFileHandleButOtherArchiveCompletes()throws Exception {
+        Uri second=DocumentsContract.buildTreeDocumentUri("feiq.shared.test","folder");large("root","first");large("folder","second");
+        try(SharedFiles server=new SharedFiles(context,Arrays.asList(TREE,second),0,true)) {
+            String a=login(server),b=login(server);JSONArray roots=get(server,"/api/list?limit=100",a).json().getJSONArray("items");String first=roots.getJSONObject(0).getString("id"),other=roots.getJSONObject(1).getString("id");
+            try(ArchiveConnection downloadA=new ArchiveConnection(server,first,a);ArchiveConnection downloadB=new ArchiveConnection(server,other,b)) {
+                assertEquals(200,downloadA.reply.code);assertEquals(200,downloadB.reply.code);InputStream inputA=awaitArchive(server,a),inputB=awaitArchive(server,b);
+                long start=System.nanoTime();server.updateFolders(Collections.singletonList(second));assertTrue(System.nanoTime()-start<TimeUnit.MILLISECONDS.toNanos(500));assertFalse(open(inputA));assertTrue(open(inputB));
+                byte[] partial=downloadA.readBody();assertTrue(partial.length<contentLength(downloadA.reply));assertFalse(eocd(partial));byte[] complete=downloadB.readBody();assertEquals(contentLength(downloadB.reply),complete.length);assertTrue(eocd(complete));assertEquals(200,get(server,"/api/list?limit=100",b).code);
+            }
+        }
+    }
+    @Test public void sourceNotificationMetadataChangeStopAndLogoutInterruptArchivesWithoutEocd()throws Exception {
+        for(String mode:Arrays.asList("notification","metadata","close","logout")) {
+            docs.documents.clear();docs.children.clear();Doc large=large("root",mode);
+            try(SharedFiles server=new SharedFiles(context,TREE,0,true)) {
+                String cookie=login(server),id=get(server,"/api/list?limit=1",cookie).json().getString("id");
+                try(ArchiveConnection download=new ArchiveConnection(server,id,cookie)) {
+                    assertEquals(200,download.reply.code);InputStream input=awaitArchive(server,cookie);long start=System.nanoTime();
+                    if(mode.equals("notification")){large.modified++;context.getContentResolver().notifyChange(TREE,null);}
+                    else if(mode.equals("metadata"))large.modified++;else if(mode.equals("close"))server.close();else assertEquals(200,request(server.port(),"/api/logout",cookie,"{\"mode\":\"share\"}","X-FQ-Token: "+cookie.substring(9)+"\r\n","POST").code);
+                    byte[] partial=download.readBody();assertTrue(partial.length<contentLength(download.reply));assertFalse(eocd(partial));assertFalse(open(input));assertTrue(mode,System.nanoTime()-start<TimeUnit.SECONDS.toNanos(2));
+                }
+            }
+        }
+    }
+    @Test public void crcDetectsSameLengthSourceContentChangeEvenWithUnknownMtime()throws Exception {
+        Doc source=add("root","crc","crc.bin",false,256L,null);source.file=docs.file;docs.triggerDocument="crc";docs.triggerOpen=4;
+        docs.afterOpen=()->{try{byte[] bytes=Files.readAllBytes(docs.file.toPath());bytes[0]^=1;Files.write(docs.file.toPath(),bytes);}catch(IOException error){throw new UncheckedIOException(error);}};
+        try(SharedFiles server=new SharedFiles(context,TREE,0,true)) {
+            String cookie=login(server),id=get(server,"/api/list?limit=1",cookie).json().getString("id");Reply zip=get(server,"/file?id="+id+"&archive=store",cookie);assertEquals(200,zip.code);assertFalse(eocd(zip.body));assertTrue(zip.body.length<contentLength(zip));
+        }
+    }
+    private static Reply secureRequest(SharedFiles server,SecureIdentity client,String fingerprint,String path,String cookie,String data)throws Exception {
+        try(Socket socket=new Socket("127.0.0.1",server.port());Socket tls=client.client(socket,fingerprint)) {
+            tls.setSoTimeout(15000);byte[] body=data==null?new byte[0]:data.getBytes(StandardCharsets.UTF_8);String header=(data==null?"GET":"POST")+" "+path+" HTTP/1.1\r\nHost: 127.0.0.1:"+server.port()+"\r\nCookie: "+cookie+"\r\n";
+            if(data!=null)header+="Content-Type: application/json\r\nContent-Length: "+body.length+"\r\n";
+            tls.getOutputStream().write((header+"Connection: close\r\n\r\n").getBytes(StandardCharsets.US_ASCII));tls.getOutputStream().write(body);byte[] bytes=tls.getInputStream().readAllBytes();int split=-1;
+            for(int index=0;index+3<bytes.length;index++)if(bytes[index]==13&&bytes[index+1]==10&&bytes[index+2]==13&&bytes[index+3]==10){split=index;break;}assertTrue(split>=0);Reply reply=new Reply();reply.headers=new String(bytes,0,split,StandardCharsets.US_ASCII);reply.code=Integer.parseInt(reply.headers.split(" ")[1]);reply.body=Arrays.copyOfRange(bytes,split+4,bytes.length);return reply;
+        }
+    }
+    @Test @ConscryptMode(ConscryptMode.Mode.OFF) public void tlsTrustRevocationClosesOnlyThatClientsArchiveAndOpenDescriptor()throws Exception {
+        large("root","tls-large");String hostId="dddddddddddddddddddddddddddddddd",idA="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",idB="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        SecureIdentity host=new SecureIdentity(new File(context.getFilesDir(),"wp3-host")),a=new SecureIdentity(new File(context.getFilesDir(),"wp3-a")),b=new SecureIdentity(new File(context.getFilesDir(),"wp3-b"));host.confirmation=a.confirmation=b.confirmation=(name,code)->true;
+        assertTrue(host.ensureTrusted(idA,a.fingerprint,"A"));assertTrue(host.ensureTrusted(idB,b.fingerprint,"B"));assertTrue(a.ensureTrusted(hostId,host.fingerprint,"host"));assertTrue(b.ensureTrusted(hostId,host.fingerprint,"host"));
+        try(SharedFiles server=new SharedFiles(context,Collections.singletonList(TREE),0,true,null,host)) {
+            String data=new JSONObject().put("mode","share").put("code",server.code()).toString();Reply loginA=secureRequest(server,a,host.fingerprint,"/api/login","",data),loginB=secureRequest(server,b,host.fingerprint,"/api/login","",data);
+            String cookieA="fq_share="+loginA.json().getString("token"),cookieB="fq_share="+loginB.json().getString("token"),id=secureRequest(server,a,host.fingerprint,"/api/list?limit=1",cookieA,null).json().getString("id");
+            try(ArchiveConnection first=new ArchiveConnection(server,id,cookieA,a,host.fingerprint);ArchiveConnection second=new ArchiveConnection(server,id,cookieB,b,host.fingerprint)) {
+                assertEquals(200,first.reply.code);assertEquals(200,second.reply.code);InputStream inputA=awaitArchive(server,cookieA),inputB=awaitArchive(server,cookieB);long start=System.nanoTime();host.forget(idA);assertTrue(System.nanoTime()-start<TimeUnit.MILLISECONDS.toNanos(500));assertFalse(open(inputA));assertTrue(open(inputB));
+                byte[] partial=first.readBody();assertTrue(partial.length<contentLength(first.reply));assertFalse(eocd(partial));byte[] complete=second.readBody();assertEquals(contentLength(second.reply),complete.length);assertTrue(eocd(complete));assertEquals(200,secureRequest(server,b,host.fingerprint,"/api/list?limit=1",cookieB,null).code);
+            }
+        }
     }
 }

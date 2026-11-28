@@ -25,7 +25,7 @@ namespace FeiqLight
             internal string Header(string key) { string value; return Headers.TryGetValue(key, out value) ? value : ""; }
             internal string Parameter(string key)
             {
-                foreach (string item in Query.Split('&')) { string[] pair = item.Split(new[] { '=' }, 2); if (pair[0] == key) return Uri.UnescapeDataString(pair.Length == 2 ? pair[1] : ""); }
+                foreach (string item in Query.Split('&')) { string[] pair = item.Split(new[] { '=' }, 2); if (pair[0] == key) return Uri.UnescapeDataString((pair.Length == 2 ? pair[1] : "").Replace("+", " ")); }
                 return "";
             }
             internal Dictionary<string, object> Json()
@@ -41,11 +41,13 @@ namespace FeiqLight
             private readonly bool head;
             internal bool KeepAlive;
             private readonly Func<bool> connected;
+            private readonly Action disconnect;
             private long remaining;
             internal bool Complete { get { return Started && remaining == 0; } }
             internal bool Started;
-            internal Response(Stream stream, bool head, bool keepAlive = false, Func<bool> connected = null) { this.stream = stream; this.head = head; KeepAlive = keepAlive; this.connected = connected; }
+            internal Response(Stream stream, bool head, bool keepAlive = false, Func<bool> connected = null, Action disconnect = null) { this.stream = stream; this.head = head; KeepAlive = keepAlive; this.connected = connected; this.disconnect = disconnect; }
             internal void CheckConnection() { if (connected != null && !connected()) throw new IOException("下载连接已关闭。"); }
+            internal void Abort() { if (disconnect != null) disconnect(); }
             internal void Begin(int code, string type, long size, string extra)
             {
                 if (code >= 300) KeepAlive = false;
@@ -66,6 +68,7 @@ namespace FeiqLight
         private readonly Action<Request, Response> handler;
         private readonly HashSet<TcpClient> clients = new HashSet<TcpClient>();
         private readonly Dictionary<TcpClient, string> remoteClients = new Dictionary<TcpClient, string>();
+        private readonly Dictionary<TcpClient, string> fingerprints = new Dictionary<TcpClient, string>();
         private readonly object gate = new object();
         private bool closed;
         private readonly SecureIdentity security;
@@ -84,8 +87,9 @@ namespace FeiqLight
             lock(gate){if(closed||clients.Count>=12){client.Close();return;}clients.Add(client);}
             Handle(client);
         }
-        private void OnTrustRevoked(string fingerprint){DisconnectClients();}
+        private void OnTrustRevoked(string fingerprint){DisconnectClients(fingerprint);}
         internal void DisconnectClients(){lock(gate)foreach(TcpClient client in clients)client.Close();}
+        private void DisconnectClients(string fingerprint){lock(gate)foreach(KeyValuePair<TcpClient,string> client in fingerprints)if(client.Value==fingerprint)client.Key.Close();}
         internal void DisconnectRemoteClients(string token = null)
         {
             lock (gate) foreach (KeyValuePair<TcpClient, string> item in remoteClients)
@@ -108,6 +112,7 @@ namespace FeiqLight
                 client.ReceiveTimeout = 5000; client.SendTimeout = 10000; client.NoDelay = true; client.SendBufferSize = 262144;
                 Stream stream = transport = security==null?(Stream)client.GetStream():security.Server(client,true);
                 string fingerprint=security==null?null:SecureIdentity.RemoteFingerprint((System.Net.Security.SslStream)stream);
+                lock(gate)fingerprints[client]=fingerprint;
                 if(security!=null&&!security.IsTrustedFingerprint(fingerprint))throw new IOException("请先从联系人核对设备身份。");
                 // 请求头逐字解析，但不再为每个字节调用一次 socket 读取。
                 RequestInput deadline = new RequestInput(client,stream);
@@ -121,7 +126,7 @@ namespace FeiqLight
                     bool requestedReuse = index < 15 && request.Header("Connection").Equals("keep-alive", StringComparison.OrdinalIgnoreCase);
                     bool fileReuse = requestedReuse && request.Path == "/file" && (request.Method == "GET" || request.Method == "HEAD");
                     bool remoteReuse = requestedReuse && ((request.Path == "/api/screen" && request.Method == "GET") || (request.Path == "/api/input" && request.Method == "POST"));
-                    response = new Response(stream, request.Method == "HEAD", fileReuse, () => !client.Client.Poll(0, SelectMode.SelectRead) || client.Available > 0);
+                    response = new Response(stream, request.Method == "HEAD", fileReuse, () => !client.Client.Poll(0, SelectMode.SelectRead) || client.Available > 0, client.Close);
                     Response currentResponse = response;
                     request.RemoteAuthorized = token => {
                         // 业务授权锁先于连接登记锁，停止与登记不会留下漏关的连接。
@@ -155,7 +160,7 @@ namespace FeiqLight
                 catch (IOException) { }
                 catch (ObjectDisposedException) { }
             }
-            finally { try { if (transport != null) transport.Dispose(); } finally { client.Close(); lock (gate) { clients.Remove(client); remoteClients.Remove(client); } } }
+            finally { try { if (transport != null) transport.Dispose(); } finally { client.Close(); lock (gate) { clients.Remove(client); remoteClients.Remove(client); fingerprints.Remove(client); } } }
         }
         private static Request Read(Stream stream,int bodyLimit)
         {

@@ -14,7 +14,7 @@ using System.Windows.Forms;
 
 namespace FeiqLight.Tests
 {
-    internal static class ToolsTests
+    internal static partial class ToolsTests
     {
         [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
         [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern IntPtr WindowFromPoint(Point point);
@@ -79,8 +79,10 @@ namespace FeiqLight.Tests
             if (args.Length > 2 && args[0] == "upgrade") { try { Upgrade(root, Path.GetFullPath(args[2]), args.Length > 3 ? Path.GetFullPath(args[3]) : Path.GetFullPath(args[2])); return 0; } catch(Exception error) { Console.WriteLine("UPGRADE FAIL: " + error.GetType().Name + " " + error.Message); return 1; } }
             int passed = 0, failed = 0;
             Action<string, Action> run = (name, test) => { try { test(); Console.WriteLine("PASS " + name); passed++; } catch (Exception e) { Console.WriteLine("FAIL " + name + ": " + e); failed++; } };
+            if(args.Length>0&&args[0]=="shared-files"){RunSharedFiles(run,root,args.Length>2?args[2]:"");Console.WriteLine("RESULT "+passed+" passed, "+failed+" failed");return failed==0?0:1;}
             RemoteReuseTests.Run(run, root);
             if(args.Length>0&&args[0]=="remote-reuse"){Console.WriteLine(passed+" passed, "+failed+" failed");return failed==0?0:1;}
+            RunSharedFiles(run,root);
             string folder = Path.Combine(root, "shared"); Directory.CreateDirectory(folder); Directory.CreateDirectory(Path.Combine(folder, "子目录"));
             File.WriteAllBytes(Path.Combine(folder, "视频 sample.mp4"), Enumerable.Range(0, 256).Select(i => (byte)i).ToArray()); File.WriteAllBytes(Path.Combine(folder, "empty.bin"), new byte[0]);
             run("FQF1：首帧、静止、128像素脏块、整帧回退及基线恢复", () => {

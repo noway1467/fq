@@ -1,4 +1,4 @@
-param([switch]$Desktop,[string]$TemporaryDirectory)
+param([switch]$Desktop,[switch]$FilesOnly,[string]$TestFilter,[string]$TemporaryDirectory)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $out = if($TemporaryDirectory){[IO.Path]::GetFullPath($TemporaryDirectory)}else{Join-Path $root 'build/tmp/shared-remote'}
@@ -7,11 +7,15 @@ New-Item -ItemType Directory -Force -Path $out | Out-Null
 $env:TEMP=$out; $env:TMP=$out; $env:TMPDIR=$out
 $compiler = Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
 $sources = @(Get-ChildItem -LiteralPath (Join-Path $root 'src') -Filter '*.cs' | ForEach-Object FullName)
-$arguments = @('/nologo','/utf8output','/warn:4','/warnaserror+','/target:exe','/main:FeiqLight.Tests.ToolsTests','/r:System.dll','/r:System.Core.dll','/r:System.Drawing.dll','/r:System.Windows.Forms.dll','/r:System.Web.Extensions.dll',"/win32manifest:$root\src\app.manifest","/out:$out\ToolsTests.exe")
+$arguments = @('/nologo','/utf8output','/warn:4','/warnaserror+','/target:exe','/main:FeiqLight.Tests.ToolsTests','/r:System.dll','/r:System.Core.dll','/r:System.Drawing.dll','/r:System.Windows.Forms.dll','/r:System.Web.Extensions.dll','/r:System.IO.Compression.dll',"/win32manifest:$root\src\app.manifest","/out:$out\ToolsTests.exe")
 foreach ($asset in @('index.html','app.css','app.js')) { $arguments += "/resource:$root\assets\tools\$asset,FeiqLight.Tools.$asset" }
-& $compiler @arguments @sources "$root\tests\LoopbackPorts.cs" "$root\tests\ToolsTests.cs" "$root\tests\RemoteReuseTests.cs"
+& $compiler @arguments @sources "$root\tests\LoopbackPorts.cs" "$root\tests\ToolsTests.cs" "$root\tests\ToolsTests.SharedFiles.cs" "$root\tests\RemoteReuseTests.cs"
 if ($LASTEXITCODE -ne 0) { throw '共享与远控测试编译失败' }
 $data = if($TemporaryDirectory){Join-Path $out 'data'}else{Join-Path $root 'build/test-data/shared-remote'}
-$mode = if ($Desktop) { 'desktop' } else { 'test' }
-& "$out/ToolsTests.exe" $mode $data
+if(!$Desktop){
+    New-Item -ItemType Directory -Force -Path "$data/zip-links","$data/zip-outside" | Out-Null
+    if(!(Test-Path -LiteralPath "$data/zip-links/link")){New-Item -ItemType Junction -Path "$data/zip-links/link" -Value "$data/zip-outside" | Out-Null}
+}
+$mode = if ($Desktop) { 'desktop' } elseif($FilesOnly){'shared-files'}else { 'test' }
+& "$out/ToolsTests.exe" $mode $data $TestFilter
 if ($LASTEXITCODE -ne 0) { throw '共享与远控测试失败' }
