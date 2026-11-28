@@ -10,7 +10,7 @@ import java.util.*;
 import java.util.concurrent.*;
 
 public final class CoreTest {
-    @Test public void legacyDatagramsDoNotReplaceUpgradedIdentityAndAckStillWorks() throws Exception {
+    @Test public void legacyDiscoveryPreservesHistoryKeyButCannotEnableBusinessFrames() throws Exception {
         int port=port();Inbox inbox=new Inbox();
         try(DatagramSocket raw=new DatagramSocket(0,InetAddress.getLoopbackAddress());LanNode local=new LanNode(port,true,"local","host","local","组",inbox)) {
             LanNode.Peer peer=new LanNode.Peer(new InetSocketAddress(InetAddress.getLoopbackAddress(),raw.getLocalPort()),"old","host","设备","组");
@@ -19,18 +19,18 @@ public final class CoreTest {
             handle.invoke(local,Protocol.parse(Protocol.encode(1,"old","host",Protocol.ANSWER|Protocol.UTF8,"设备","组",id)),peer.endpoint);
             handle.invoke(local,Protocol.parse(Protocol.encode(2,"old","host",Protocol.ANSWER|Protocol.UTF8,"设备","组")),peer.endpoint);
             assertEquals(1,local.peers().size());assertSame(peer,local.peers().get(0));assertEquals(key,peer.id());assertEquals(id,peer.deviceId);
-            LanNode.Message sent=local.sendMessage(peer,"旧 ACK",Collections.emptyList());byte[] ack=Protocol.encode(3,"old","host",Protocol.ACK|Protocol.UTF8,Long.toString(sent.number),null);
-            raw.send(new DatagramPacket(ack,ack.length,InetAddress.getLoopbackAddress(),port));assertEquals("已送达",inbox.updates.poll(3,TimeUnit.SECONDS).state);
+            assertTrue(assertThrows(IOException.class,()->local.sendMessage(peer,"消息",Collections.emptyList())).getMessage().contains("升级至 0.8"));
+            for(int mode:new int[]{Protocol.MESSAGE,Protocol.ACK,Protocol.RELEASE})handle.invoke(local,Protocol.parse(Protocol.encode(3,"old","host",mode,"1",null)),peer.endpoint);
+            assertTrue(inbox.updates.isEmpty());assertTrue(inbox.messages.isEmpty());assertTrue(inbox.canceled.isEmpty());
         }
     }
-    @Test public void tcpRequestWithStableIdentityStopsAtFirstNul() throws Exception {
+    @Test public void secureFileRequestCarriesIdentityInsideFrame() throws Exception {
         int port=port();
         try(LanNode node=new LanNode(port,true,"id","host","name","group",new Inbox())) {
-            node.setDeviceId("0123456789abcdef0123456789abcdef");
+            TlsFilePeer.enable(node);node.setDeviceId("0123456789abcdef0123456789abcdef");
             java.lang.reflect.Method encode=LanNode.class.getDeclaredMethod("encode",int.class,String.class,String.class);encode.setAccessible(true);
             byte[] tcp=(byte[])encode.invoke(node,Protocol.GET_FILE,"1:0:0:",null);
-            for(int i=0;i<tcp.length-1;i++)assertNotEquals("TCP 请求尾随身份扩展",0,tcp[i]);assertEquals(0,tcp[tcp.length-1]);
-            assertNotNull(Protocol.parse((byte[])encode.invoke(node,Protocol.ACK,"1",null)).deviceId);
+            Protocol.Packet request=Protocol.parse(tcp);assertEquals(96,request.mode());assertEquals("0123456789abcdef0123456789abcdef",request.deviceId);assertEquals(node.security().fingerprint,request.fingerprint);
         }
     }
     @Test public void stableIdentitySurvivesEndpointAndLoginChangesWithoutMergingNames() throws Exception {
@@ -64,16 +64,16 @@ public final class CoreTest {
     }
     @Test public void outgoingZeroDoesNotWaitForAndroidStyleReceiveMonitor() throws Exception {
         ExecutorService workers=Executors.newFixedThreadPool(2);CountDownLatch entered=new CountDownLatch(1),release=new CountDownLatch(1);
-        try(LanNode sender=node(new Inbox(),port(),"idle-sender");DatagramSocket remote=new DatagramSocket(0,InetAddress.getLoopbackAddress())) {
+        Inbox received=new Inbox();try(LanNode sender=node(new Inbox(),port(),"idle-sender");LanNode remote=node(received,port(),"target")) {
+            sender.probe(bEndpoint(remote));LanNode.Peer peer=waitPeer(sender,"target");sender.verifyPeer(peer);
             java.lang.reflect.Field field=LanNode.class.getDeclaredField("udp");field.setAccessible(true);DatagramSocket socket=(DatagramSocket)field.get(sender);
             // JDK 17 的 DatagramSocket 与 Android 实现不同，固定模拟 Android 接收持锁以免宿主测试漏报。
             workers.submit(()->{synchronized(socket){entered.countDown();try{release.await(5,TimeUnit.SECONDS);}catch(InterruptedException e){Thread.currentThread().interrupt();}}});
-            assertTrue(entered.await(2,TimeUnit.SECONDS));LanNode.Peer peer=new LanNode.Peer(new InetSocketAddress(InetAddress.getLoopbackAddress(),remote.getLocalPort()),"target","host","target","");
+            assertTrue(entered.await(2,TimeUnit.SECONDS));
             try {
                 Future<LanNode.Message> sent=workers.submit(()->sender.sendMessage(peer,"0",Collections.emptyList()));
                 LanNode.Message message=sent.get(1,TimeUnit.SECONDS);assertEquals("0",message.text);assertEquals(1,release.getCount());
-                remote.setSoTimeout(1000);DatagramPacket packet=new DatagramPacket(new byte[2048],2048);remote.receive(packet);
-                assertEquals("0",Protocol.parse(Arrays.copyOf(packet.getData(),packet.getLength())).body);
+                assertEquals("0",received.messages.poll(1,TimeUnit.SECONDS).text);
             } finally {release.countDown();}
         } finally {release.countDown();workers.shutdownNow();assertTrue(workers.awaitTermination(5,TimeUnit.SECONDS));}
     }
@@ -94,7 +94,7 @@ public final class CoreTest {
         throw new IOException("未找到同时空闲的 TCP/UDP 回环端口");
     }
     private static LanNode node(Inbox inbox,int port,String login) throws IOException {
-        LanNode node=new LanNode(port,true,login,"host",login,"测试",inbox); node.start(); return node;
+        LanNode node=new LanNode(port,true,login,"host",login,"测试",inbox);TlsFilePeer.enable(node);node.start();return node;
     }
     private static LanNode.Peer waitPeer(LanNode n,String login) throws Exception {
         long until=System.nanoTime()+TimeUnit.SECONDS.toNanos(4);
@@ -180,9 +180,10 @@ public final class CoreTest {
         Path dir=Files.createTempDirectory("feiq-duplicate-");ExecutorService workers=Executors.newFixedThreadPool(2);CountDownLatch reading=new CountDownLatch(1),release=new CountDownLatch(1);
         try(ServerSocket server=new ServerSocket(0,2,InetAddress.getLoopbackAddress());LanNode receiver=node(new Inbox(),port(),"b")) {
             server.setSoTimeout(5000);Protocol.Attachment file=new Protocol.Attachment(0,"same.bin",200000,1);File target=dir.resolve("same.bin").toFile();
-            LanNode.Peer peer=new LanNode.Peer(new InetSocketAddress(InetAddress.getLoopbackAddress(),server.getLocalPort()),"source","host","source","");LanNode.Transfer transfer=new LanNode.Transfer();
-            Future<?> serving=workers.submit(()->{try(Socket socket=server.accept()){requestedOffset(socket);socket.getOutputStream().write(new byte[65536]);release.await(5,TimeUnit.SECONDS);}return null;});
-            Future<?> receiving=workers.submit(()->{receiver.receiveFile(peer,7,file,target,transfer,p->{if(p>0)reading.countDown();});return null;});
+            TlsFilePeer sender=new TlsFilePeer(server);sender.authorize(receiver);LanNode.Peer peer=sender.peer;LanNode.Transfer transfer=new LanNode.Transfer();file.sha256=SecureIdentity.hash(new byte[200000]);
+            Future<?> serving=workers.submit(()->{try(Socket socket=server.accept();Socket tls=sender.open(socket,file)){tls.getOutputStream().write(new byte[65536]);release.await(5,TimeUnit.SECONDS);}return null;});
+            Future<?> receiving=workers.submit(()->{receiver.receiveFile(peer,7,file,target,transfer,null);return null;});
+            long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(5);while(LanNode.partialFile(peer,7,file,target).length()==0&&System.nanoTime()<deadline)Thread.sleep(5);if(LanNode.partialFile(peer,7,file,target).length()>0)reading.countDown();
             assertTrue(reading.await(5,TimeUnit.SECONDS));File part=LanNode.partialFile(peer,7,file,target);long length=part.length();assertTrue(length>0);
             try {receiver.receiveFile(peer,7,file,target,new LanNode.Transfer(),null);fail();}catch(IOException expected){assertTrue(expected.getMessage().contains("同一目标"));}
             assertEquals(length,part.length());transfer.close();release.countDown();
@@ -221,23 +222,23 @@ public final class CoreTest {
             } finally { a.heartbeatIdle=idle; a.heartbeatRetry=retry; a.idleMisses=misses; }
         }
     }
-    @Test public void duplicateMessageIsAckedButDeliveredOnce() throws Exception {
+    @Test public void repeatedPlaintextMessagesAreNotDeliveredOrAcknowledged() throws Exception {
         Inbox inbox=new Inbox(); int p=port();
         try(LanNode n=node(inbox,p,"receiver"); DatagramSocket raw=new DatagramSocket(0,InetAddress.getLoopbackAddress())) {
             raw.setSoTimeout(3000); byte[] bytes=Protocol.encode(88,"raw","host",Protocol.MESSAGE|Protocol.CHECK|Protocol.UTF8,"一次",null);
-            for(int i=0;i<2;i++) { raw.send(new DatagramPacket(bytes,bytes.length,InetAddress.getLoopbackAddress(),p)); byte[] buffer=new byte[1000]; DatagramPacket d=new DatagramPacket(buffer,buffer.length); raw.receive(d); assertEquals(Protocol.ACK,Protocol.parse(Arrays.copyOf(buffer,d.getLength())).mode()); }
-            assertNotNull(inbox.messages.poll(2,TimeUnit.SECONDS)); assertNull(inbox.messages.poll(250,TimeUnit.MILLISECONDS));
+            for(int i=0;i<2;i++)raw.send(new DatagramPacket(bytes,bytes.length,InetAddress.getLoopbackAddress(),p));
+            raw.setSoTimeout(250);assertThrows(SocketTimeoutException.class,()->raw.receive(new DatagramPacket(new byte[1000],1000)));assertTrue(inbox.messages.isEmpty());
         }
     }
-    @Test public void forgedAckCannotConfirmAndRetriesStop() throws Exception {
+    @Test public void plaintextAckCannotConfirmAnOfflineTlsMessageAndRetriesStop() throws Exception {
         Inbox inbox=new Inbox(); int p=port();
-        try(LanNode n=node(inbox,p,"sender"); DatagramSocket target=new DatagramSocket(0,InetAddress.getLoopbackAddress()); DatagramSocket impostor=new DatagramSocket(0,InetAddress.getLoopbackAddress())) {
-            LanNode.Peer peer=new LanNode.Peer(new InetSocketAddress(InetAddress.getLoopbackAddress(),target.getLocalPort()),"target","host","target","");
-            LanNode.Message m=n.sendMessage(peer,"不应确认",Collections.emptyList()); byte[] ack=Protocol.encode(5,"target","host",Protocol.ACK,Long.toString(m.number),null);
-            impostor.send(new DatagramPacket(ack,ack.length,InetAddress.getLoopbackAddress(),p)); assertNull(inbox.updates.poll(300,TimeUnit.MILLISECONDS));
-            target.setSoTimeout(12000); for(int i=0;i<4;i++) { DatagramPacket d=new DatagramPacket(new byte[1000],1000); target.receive(d); }
-            assertTrue(inbox.updates.poll(5,TimeUnit.SECONDS).state.startsWith("未确认送达"));
-            target.setSoTimeout(1300); try { target.receive(new DatagramPacket(new byte[1000],1000)); fail("发送超过四次"); } catch(SocketTimeoutException expected) { }
+        try(LanNode n=node(inbox,p,"sender")) {
+            n.heartbeatRetry=TimeUnit.MILLISECONDS.toNanos(200);LanNode.Peer peer;
+            try(LanNode remote=node(new Inbox(),port(),"target")){n.probe(bEndpoint(remote));peer=waitPeer(n,"target");n.verifyPeer(peer);}
+            LanNode.Message m=n.sendMessage(peer,"不应确认",Collections.emptyList());
+            var handle=LanNode.class.getDeclaredMethod("handle",Protocol.Packet.class,InetSocketAddress.class);handle.setAccessible(true);
+            handle.invoke(n,Protocol.parse(Protocol.encode(5,"target","host",Protocol.ACK,Long.toString(m.number),null)),peer.endpoint);
+            assertNull(inbox.updates.poll(300,TimeUnit.MILLISECONDS));assertTrue(inbox.updates.poll(18,TimeUnit.SECONDS).state.startsWith("未确认送达"));assertFalse(n.canCancelOutgoing(peer.id(),m.number));
         }
     }
     @Test public void realTcpFilesAndZeroBytes() throws Exception {
@@ -250,13 +251,13 @@ public final class CoreTest {
                 byte[] payload=new byte[size]; new Random(42).nextBytes(payload); File source=dir.resolve("源"+size+".bin").toFile(); Files.write(source.toPath(),payload);
                 a.sendMessage(ab,"文件",Collections.singletonList(source)); LanNode.Message received=ib.messages.poll(3,TimeUnit.SECONDS); File target=dir.resolve("接收"+size+".bin").toFile();
                 assertNotNull(ia.updates.poll(3,TimeUnit.SECONDS));assertTrue("ACK 不能成为文件进度",ia.progress.isEmpty());
-                b.receiveFile(ba,received.number,received.files.get(0),target,new LanNode.Transfer(),null); assertArrayEquals(payload,Files.readAllBytes(target.toPath()));
+                b.receiveFile(ba,received.number,received.files.get(0),target,new LanNode.Transfer(),percent->{if(percent==0)try{Thread.sleep(450);}catch(InterruptedException interrupted){throw new AssertionError(interrupted);}});assertArrayEquals(payload,Files.readAllBytes(target.toPath()));
                 boolean intermediate=false;int last=-1;
                 while(true) {
                     String event=ia.progress.poll(3,TimeUnit.SECONDS);assertNotNull("缺少发送进度",event);String[] fields=event.split("/");
                     assertEquals(received.number,Long.parseLong(fields[0]));assertEquals(0,Integer.parseInt(fields[1]));int percent=Integer.parseInt(fields[2]);
                     assertTrue(percent>=last&&percent<=100);last=percent;intermediate|=percent>0&&percent<100;
-                    if(fields[3].equals("已发送（非保存确认）")){assertEquals(100,percent);break;}
+                    if(fields[3].equals("对方已校验保存")){assertEquals(100,percent);break;}
                 }
                 if(size>0)assertTrue("大文件只有开始/完成，没有中间进度",intermediate);
                 try { b.receiveFile(ba,received.number,received.files.get(0),target,new LanNode.Transfer(),null); fail("覆盖已有文件"); } catch(IOException expected) { }
@@ -279,30 +280,25 @@ public final class CoreTest {
             assertFalse(target.exists()); assertEquals(1,Objects.requireNonNull(dir.toFile().listFiles()).length);
         } finally { try(java.util.stream.Stream<Path> paths=Files.walk(dir)) { paths.sorted(Comparator.reverseOrder()).forEach(path->{ try { Files.delete(path); } catch(IOException e) { throw new UncheckedIOException(e); } }); } }
     }
-    private static long requestedOffset(Socket socket) throws Exception {
-        ByteArrayOutputStream wire=new ByteArrayOutputStream(); int b;
-        while((b=socket.getInputStream().read())>0) wire.write(b);
-        Protocol.Packet request=Protocol.parse(wire.toByteArray());
-        return Long.parseLong(request.body.split(":")[2],16);
-    }
     @Test public void interruptedDownloadResumesAfterReceiverRestart() throws Exception {
         Path dir=Files.createTempDirectory("feiq-resume-"); byte[] bytes=new byte[1024*1024+7]; new Random(7).nextBytes(bytes);
         ExecutorService worker=Executors.newSingleThreadExecutor();
         try(ServerSocket server=new ServerSocket(0,2,InetAddress.getLoopbackAddress())) {
             server.setSoTimeout(8000);
-            LanNode.Peer peer=new LanNode.Peer(new InetSocketAddress(InetAddress.getLoopbackAddress(),server.getLocalPort()),"sender","host","sender","");
-            Protocol.Attachment file=new Protocol.Attachment(0,"large.bin",bytes.length,123); File target=dir.resolve("target.bin").toFile();
+            TlsFilePeer source=new TlsFilePeer(server);LanNode.Peer peer=source.peer;
+            Protocol.Attachment file=new Protocol.Attachment(0,"large.bin",bytes.length,123);file.sha256=SecureIdentity.hash(bytes);File target=dir.resolve("target.bin").toFile();
             Future<Long> sent=worker.submit(()->{
-                try(Socket socket=server.accept()) { assertEquals(0,requestedOffset(socket)); socket.getOutputStream().write(bytes,0,80000); }
-                try(Socket socket=server.accept()) { long offset=requestedOffset(socket); socket.getOutputStream().write(bytes,(int)offset,bytes.length-(int)offset); return offset; }
+                try(Socket socket=server.accept();Socket tls=source.open(socket,file)) { assertEquals(0,source.offset);tls.getOutputStream().write(bytes,0,80000); }
+                try(Socket socket=server.accept();Socket tls=source.open(socket,file)) { long offset=source.offset;tls.getOutputStream().write(bytes,(int)offset,bytes.length-(int)offset);assertEquals("STORED\n"+file.sha256,SecureIdentity.readText(tls.getInputStream(),128));return offset; }
             });
             try(LanNode receiver=node(new Inbox(),port(),"b")) {
+                source.authorize(receiver);
                 try { receiver.receiveFile(peer,77,file,target,new LanNode.Transfer(),null); fail(); } catch(IOException expected) { }
             }
             File part=LanNode.partialFile(peer,77,file,target); assertEquals(80000,part.length()); assertFalse(target.exists());
             assertNotEquals(part,LanNode.partialFile(peer,78,file,target));
             List<Integer> progress=new ArrayList<>();
-            try(LanNode receiver=node(new Inbox(),port(),"b")) { receiver.receiveFile(peer,77,file,target,new LanNode.Transfer(),progress::add); }
+            try(LanNode receiver=node(new Inbox(),port(),"b")) { source.authorize(receiver);receiver.receiveFile(peer,77,file,target,new LanNode.Transfer(),progress::add); }
             assertEquals(80000L,(long)sent.get(8,TimeUnit.SECONDS)); assertTrue(progress.get(0)>0);
             assertArrayEquals(bytes,Files.readAllBytes(target.toPath())); assertFalse(part.exists());
         } finally { worker.shutdownNow(); try(java.util.stream.Stream<Path> paths=Files.walk(dir)) { paths.sorted(Comparator.reverseOrder()).forEach(p->{try{Files.delete(p);}catch(IOException e){throw new UncheckedIOException(e);}}); } }
@@ -389,7 +385,7 @@ public final class CoreTest {
             handle.invoke(receiver,Protocol.parse(Protocol.encode(13,"sender","host",Protocol.RELEASE|Protocol.UTF8,"cancel:12",null,sender.deviceId,null,"a".repeat(64))),sender.endpoint,false);
             assertTrue("无效或冒用报文触发了取消",inbox.canceled.isEmpty());
             handle.invoke(receiver,Protocol.parse(Protocol.encode(14,"sender","host",Protocol.RELEASE|Protocol.UTF8,"cancel:12",null,sender.deviceId)),sender.endpoint,false);
-            assertEquals(sender.id()+"/12",inbox.canceled.poll(1,TimeUnit.SECONDS));assertTrue(inbox.canceled.isEmpty());
+            assertTrue("明文取消不能产生状态变化",inbox.canceled.isEmpty());
             sender.fingerprint="b".repeat(64);
             handle.invoke(receiver,Protocol.parse(Protocol.encode(15,"sender","host",Protocol.RELEASE|Protocol.UTF8,"cancel:12",null,sender.deviceId)),sender.endpoint,false);
             assertTrue("明文取消进入了已具备证书的会话",inbox.canceled.isEmpty());
@@ -405,7 +401,7 @@ public final class CoreTest {
             try {Long.parseLong("cancel:"+sent.number);fail("旧版纯数字分支不应解析新取消编码");}catch(NumberFormatException expected){ }
         } finally {Files.deleteIfExists(dir.resolve("source.bin"));Files.delete(dir);}
     }
-    @Test public void plaintextCompletionClearsActiveStreamAndActiveTransferAbortsCleanlyOnCancel() throws Exception {
+    @Test public void tlsCompletionClearsActiveStreamAndPlaintextCannotReopenOrCancelIt() throws Exception {
         Path dir=Files.createTempDirectory("feiq-java-active-cancel-");
         File small=dir.resolve("small.bin").toFile(), large=dir.resolve("large.bin").toFile();
         byte[] smallBytes=new byte[1024], largeBytes=new byte[4*1024*1024];
@@ -434,10 +430,8 @@ public final class CoreTest {
                 stall.setReceiveBufferSize(4096);
                 stall.connect(new InetSocketAddress(InetAddress.getLoopbackAddress(),pa),3000);
                 stall.getOutputStream().write(Protocol.encode(77,"receiver","host",Protocol.GET_FILE|Protocol.UTF8,Long.toHexString(mLarge.number)+":0:0:",null));
-                assertTrue(stall.getInputStream().read()>=0);
-                long activeDeadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(3);
-                while(!sender.hasActiveOutgoingTransfer(target.id(),mLarge.number)&&System.nanoTime()<activeDeadline)Thread.sleep(10);
-                assertTrue("活动发送流未登记",sender.hasActiveOutgoingTransfer(target.id(),mLarge.number));
+                try{assertEquals(-1,stall.getInputStream().read());}catch(SocketException reset){assertFalse(stall.isClosed());}
+                assertFalse("明文不能打开已经配对的邀请",sender.hasActiveOutgoingTransfer(target.id(),mLarge.number));
                 assertTrue(sender.cancelOutgoing(target.id(),mLarge.number,"已送达",true));
                 long stopDeadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(3);
                 while(sender.hasActiveOutgoingTransfer(target.id(),mLarge.number)&&System.nanoTime()<stopDeadline)Thread.sleep(10);

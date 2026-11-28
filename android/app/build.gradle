@@ -1,4 +1,5 @@
 plugins { id 'com.android.application' }
+if (project.hasProperty('feiqBuildDir')) layout.buildDirectory.set(file(project.property('feiqBuildDir')))
 android {
     namespace 'org.feiqlight.android'
     compileSdk 36
@@ -7,8 +8,8 @@ android {
         applicationId 'org.feiqlight.android'
         minSdk 26
         targetSdk 36
-        versionCode 97
-        versionName '0.8.22'
+        versionCode 98
+        versionName '0.8.23'
     }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
@@ -16,7 +17,7 @@ android {
     }
     buildFeatures { buildConfig true }
     // 固定使用项目既有签名，避免构建账户或环境变化后无法保留数据覆盖安装。
-    signingConfigs.debug.storeFile = file('../../build/android-home/debug.keystore')
+    signingConfigs.debug.storeFile = file(findProperty('feiqSigningStore') ?: '../../build/android-home/debug.keystore')
     sourceSets.main.assets.srcDirs += ['../../assets/avatars']
     sourceSets.main.assets.srcDirs += ['../../assets/tools']
     buildTypes {

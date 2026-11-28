@@ -90,23 +90,32 @@ namespace FeiqLight.Tests
             }
             Equal(expected, Execute(test), Text(test,"name"));
         }
-        private static void Constants(Dictionary<string, object> constants, string root)
+        private static void Constants(Dictionary<string, object> constants)
         {
             Equal(constants["commands"], new Dictionary<string,object> {{"entry",Protocol.Entry},{"exit",Protocol.Exit},{"answer",Protocol.AnswerEntry},{"absence",Protocol.Absence},{"sendMessage",Protocol.SendMessage},{"receiveMessage",Protocol.ReceiveMessage},{"getFile",Protocol.GetFile},{"releaseFiles",Protocol.ReleaseFiles}}, "命令常量");
             Equal(constants["flags"],new Dictionary<string,object> {{"sendCheck",Protocol.SendCheck},{"fileAttach",Protocol.FileAttach},{"utf8",Protocol.Utf8},{"capUtf8",Protocol.CapUtf8}},"标志常量");
             Equal(constants["textAsFileUtf8Bytes"],MessageText.FileThreshold,"文本转附件阈值");
-            // 未导出为常量的边界按当前生产条件核对；真实输入行为另由向量执行。
-            string protocol = File.ReadAllText(Path.Combine(root,"src/Protocol.cs"));
-            var checks = new Dictionary<string,string> {
-                {"maxPacketBytes","bytes.Length > {0}"},{"maxHeaderColonOffset","colon[4] > {0}"},
-                {"maxHeaderFieldChars","packet.Login.Length <= {0}"},{"maxFileNameUtf8Bytes","StrictUtf8.GetByteCount(name) > {0}"},
-                {"maxFileNameChars","name.Length > {0}"},{"maxRelativePathChars","value.Length<={0}"},
-                {"maxRelativePathSegments","value.Split('/').Length<={0}"},{"maxParsedAttachments",".Take({0})"},{"maxAvatarJpegBytes","bytes.Length > {0}"}
-            };
-            foreach(var item in checks) if(!protocol.Contains(String.Format(item.Value,constants[item.Key]))) throw new Exception("生产边界与常量不一致："+item.Key);
+            Equal(constants["maxPacketBytes"],Protocol.MaxPacketBytes,"MaxPacketBytes");
+            Equal(constants["maxHeaderColonOffset"],Protocol.MaxHeaderColonOffset,"MaxHeaderColonOffset");
+            Equal(constants["maxHeaderFieldChars"],Protocol.MaxHeaderFieldChars,"MaxHeaderFieldChars");
+            Equal(constants["maxFileNameUtf8Bytes"],Protocol.MaxFileNameUtf8Bytes,"MaxFileNameUtf8Bytes");
+            Equal(constants["maxFileNameChars"],Protocol.MaxFileNameChars,"MaxFileNameChars");
+            Equal(constants["maxRelativePathChars"],Protocol.MaxRelativePathChars,"MaxRelativePathChars");
+            Equal(constants["maxRelativePathSegments"],Protocol.MaxRelativePathSegments,"MaxRelativePathSegments");
+            Equal(constants["maxParsedAttachments"],Protocol.MaxParsedAttachments,"MaxParsedAttachments");
+            Equal(constants["maxAvatarJpegBytes"],Protocol.MaxAvatarJpegBytes,"MaxAvatarJpegBytes");
+            Equal(constants["maxAttachmentsPerMessage"],Protocol.MaxAttachmentsPerMessage,"MaxAttachmentsPerMessage");
+            Equal(constants["helloFrameBytes"],Protocol.HelloFrameBytes,"HelloFrameBytes");
             Equal(Number(constants,"defaultChatPort"),(long)new AppSettings().Port,"默认端口不同");
-            string lan=File.ReadAllText(Path.Combine(root,"src/LanService.cs"));
-            if(!lan.Contains("paths.Count > "+constants["maxAttachmentsPerMessage"])||!lan.Contains("5000),"+constants["helloFrameBytes"]))throw new Exception("邀请/Hello 上限不同");
+            int hello=(int)Number(constants,"helloFrameBytes");
+            foreach (int length in new[] {hello,hello+1}) {
+                using(var frame=new MemoryStream()) {
+                    SecureIdentity.WriteFrame(frame,new byte[length]); frame.Position=0;
+                    try { Equal(hello,SecureIdentity.ReadFrame(frame,Protocol.HelloFrameBytes).Length,"Hello 边界"); }
+                    catch(IOException) { if(length==hello)throw; continue; }
+                    if(length!=hello)throw new Exception("超限 Hello 未拒绝");
+                }
+            }
             using(var output=new MemoryStream()) {
                 int size=(int)Number(constants,"maxFrameBytes"); SecureIdentity.WriteFrame(output,new byte[size]);
                 try { SecureIdentity.WriteFrame(output,new byte[size+1]); } catch(IOException) { return; }
@@ -119,11 +128,11 @@ namespace FeiqLight.Tests
             while(directory!=null&&!File.Exists(Path.Combine(directory.FullName,"tests/protocol-vectors.json")))directory=directory.Parent;
             if(directory==null)throw new FileNotFoundException("未找到共用协议向量文件 tests/protocol-vectors.json");
             var data=Map(Json.DeserializeObject(File.ReadAllText(Path.Combine(directory.FullName,"tests/protocol-vectors.json"),new UTF8Encoding(false,true))));
-            Equal(1,data["version"],"向量版本"); Constants(Map(data["constants"]),directory.FullName);
+            Equal(2,data["version"],"向量版本"); Constants(Map(data["constants"]));
             int count=0;
-            foreach(string group in new[]{"fieldCases","prefixCases","deviceIdAndPairCodeCases","avatarCases","fileNameAndRelativePathCases","packetCases","attachmentListCases","frameCases","knownPlatformDivergences"}) {
+            foreach(string group in new[]{"fieldCases","prefixCases","deviceIdAndPairCodeCases","avatarCases","fileNameAndRelativePathCases","packetCases","attachmentListCases","frameCases","wireValidationCases","historyCases"}) {
                 object[] tests=(object[])data[group]; if(tests.Length==0)throw new Exception("向量组不能为空："+group);
-                foreach(object entry in tests) {var test=Map(entry);Case(test,test[group=="knownPlatformDivergences"?"windows":"expected"]);count++;}
+                foreach(object entry in tests) {var test=Map(entry);Case(test,test["expected"]);count++;}
                 Console.WriteLine("PASS protocol "+group+" "+tests.Length);
             }
             Console.WriteLine("PASS 共用协议向量 "+count+" 项 + 常量核对");

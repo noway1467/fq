@@ -561,7 +561,7 @@ namespace FeiqLight.Tests
         private static void Upgrade(string root,string executable,string previousExecutable)
         {
             string profile=Path.Combine(root,"profile"),folder=Path.Combine(root,"shared");Directory.CreateDirectory(folder);File.WriteAllText(Path.Combine(folder,"测试文件.txt"),"shared after replacement",new UTF8Encoding(false));
-            int port=UpgradePort();
+            int port=LoopbackPorts.WithTools(36000)+1;
             new LocalStore(profile).SaveSettings(new AppSettings {Port=port-1,Nickname="隔离升级验证",CloseToTray=false,Notifications=false,ReceiveFolder=Path.Combine(root,"received")});
             string pair,remotePair;
             // 由旧成品的实际实现写出配置，不能用新源码生成数据冒充跨版本升级。
@@ -586,9 +586,9 @@ namespace FeiqLight.Tests
                 {
                     try
                     {
-                        bool ready=false;Stopwatch clock=Stopwatch.StartNew();
-                        while(clock.ElapsedMilliseconds<12000&&!ready){Assert(!process.HasExited,"交付程序提前退出");try{Reply status=Request(port,"/api/status");ready=status.Code==200&&(bool)status.Json()["share"]&&(bool)status.Json()["remote"];}catch(SocketException){}if(!ready)Thread.Sleep(100);}
-                        Assert(ready,"正式程序未恢复设置");Reply login=Request(port,"/api/reconnect",pair,"{\"mode\":\"share\"}","X-FQ-Reconnect: 1\r\n");Assert(login.Code==200,"换包后共享需重新配对");
+                        bool ready=false;string observed="尚未收到响应";Stopwatch clock=Stopwatch.StartNew();
+                        while(clock.ElapsedMilliseconds<12000&&!ready){Assert(!process.HasExited,"交付程序提前退出");try{Reply status=Request(port,"/api/status");observed="HTTP "+status.Code;if(status.Code==200){var flags=status.Json();ready=(bool)flags["share"]&&(bool)flags["remote"];observed+=", share="+flags["share"]+", remote="+flags["remote"];}}catch(SocketException error){observed=error.SocketErrorCode.ToString();}if(!ready)Thread.Sleep(100);}
+                        Assert(ready,"正式程序未恢复设置："+FileVersionInfo.GetVersionInfo(copy).FileVersion+"，"+observed);Reply login=Request(port,"/api/reconnect",pair,"{\"mode\":\"share\"}","X-FQ-Reconnect: 1\r\n");Assert(login.Code==200,"换包后共享需重新配对");
                         Reply list=Request(port,"/api/list","fq_share="+login.Json()["token"]);Assert(list.Code==200&&Encoding.UTF8.GetString(list.Body).Contains("测试文件.txt"),"换包后目录丢失");
                         Reply control=Request(port,"/api/reconnect",remotePair,"{\"mode\":\"remote\"}","X-FQ-Reconnect: 1\r\n");Assert(control.Code==200,"换包后丢失始终允许");
                         string session="fq_remote="+control.Json()["token"];Request(port,"/api/logout",session,"{\"mode\":\"remote\"}",TokenHeader(session));
@@ -599,23 +599,6 @@ namespace FeiqLight.Tests
                 Assert(File.ReadAllBytes(Path.Combine(profile,"tools-pairings.json")).SequenceEqual(pairings),"启动或升级重写了原配对记录");
             }
             Console.WriteLine("PASS packaged EXE upgrade "+FileVersionInfo.GetVersionInfo(previousExecutable).ProductVersion+" -> "+FileVersionInfo.GetVersionInfo(executable).ProductVersion+": shared directory, enabled switches and trusted pairings preserved; no desktop input injected");
-        }
-        private static int UpgradePort()
-        {
-            // 成品同时绑定聊天 UDP/TCP 和相邻 HTTP 端口，不能只检查 HTTP 是否空闲。
-            for(int attempt=0;attempt<20;attempt++)
-            {
-                TcpListener http=new TcpListener(IPAddress.Loopback,0),chat=null;UdpClient udp=null;
-                try
-                {
-                    http.Start();int port=((IPEndPoint)http.LocalEndpoint).Port;
-                    chat=new TcpListener(IPAddress.Loopback,port-1);chat.Start();
-                    udp=new UdpClient(new IPEndPoint(IPAddress.Loopback,port-1));return port;
-                }
-                catch(SocketException){if(attempt==19)throw;}
-                finally{if(udp!=null)udp.Close();if(chat!=null)chat.Stop();http.Stop();}
-            }
-            throw new IOException("无法分配升级验证端口");
         }
         private static void Desktop(string root)
         {

@@ -107,16 +107,16 @@ public final class NetworkRecoveryTest {
             assertTrue(localEvents.errors.toString(),localEvents.errors.isEmpty());assertTrue(remoteEvents.errors.toString(),remoteEvents.errors.isEmpty());
         }
     }
-    @Test public void legacyReceiveRetriesOnceReattachesCancellationAndRejectsDisabledOrOutsideRetry()throws Exception {
+    @Test public void secureReceiveRetriesOnceReattachesCancellationAndRejectsDisabledOrOutsideRetry()throws Exception {
         Path directory=Files.createTempDirectory("source-file-");byte[] payload={1,2,3,4,5};ExecutorService worker=Executors.newSingleThreadExecutor();
         try {
             for(boolean enabled:new boolean[]{true,false}) {
                 SourceBoundRoute route=new SourceBoundRoute(enabled);
                 try(ServerSocket server=new ServerSocket(0,1,route.target);LanNode local=new LanNode(port(),false,"local","phone","手机","",new Events());LanNode.Transfer transfer=new LanNode.Transfer()) {
-                    local.setSocketBinding(route);LanNode.Peer peer=new LanNode.Peer(new InetSocketAddress(route.target,server.getLocalPort()),"remote","pc","电脑","");
-                    Protocol.Attachment file=new Protocol.Attachment(0,"file.bin",payload.length,1);File destination=directory.resolve("received-"+enabled+".bin").toFile();
+                    local.setSocketBinding(route);TlsFilePeer source=new TlsFilePeer(server);source.authorize(local);LanNode.Peer peer=source.peer;local.heartbeatRetry=TimeUnit.MILLISECONDS.toNanos(200);
+                    Protocol.Attachment file=new Protocol.Attachment(0,"file.bin",payload.length,1);file.sha256=SecureIdentity.hash(payload);File destination=directory.resolve("received-"+enabled+".bin").toFile();
                     if(enabled) {
-                        Future<?> response=worker.submit(()->{try(Socket client=server.accept()){client.setSoTimeout(2000);int value;while((value=client.getInputStream().read())!=0)if(value<0)throw new EOFException("文件请求提前结束");client.getOutputStream().write(payload);}return null;});
+                        Future<?> response=worker.submit(()->{try(Socket client=server.accept();Socket tls=source.open(client,file)){tls.getOutputStream().write(payload);assertEquals("STORED\n"+file.sha256,SecureIdentity.readText(tls.getInputStream(),128));}return null;});
                         local.receiveFile(peer,1,file,destination,transfer,null);response.get(3,TimeUnit.SECONDS);
                         assertArrayEquals(payload,Files.readAllBytes(destination.toPath()));Socket attached=(Socket)field(transfer,"socket");assertFalse(route.bound.contains(attached));assertTrue(attached.isClosed());
                     } else {
@@ -124,6 +124,7 @@ public final class NetworkRecoveryTest {
                     }
                     assertEquals(1,route.bound.size());assertEquals(1,route.retryChecks.get());assertTrue(route.bound.get(0).isClosed());assertTrue(((Set<?>)field(local,"connections")).isEmpty());
                     LanNode.Peer outside=new LanNode.Peer(new InetSocketAddress("192.168.99.42",server.getLocalPort()),"outside","host","子网外","");
+                    outside.deviceId=peer.deviceId;outside.fingerprint=peer.fingerprint;
                     try(LanNode.Transfer denied=new LanNode.Transfer()) {assertThrows(IOException.class,()->local.receiveFile(outside,2,file,directory.resolve("outside-"+enabled+".bin").toFile(),denied,null));}
                     assertEquals("子网外目标不应进入 connect 或默认路由重试",1,route.retryChecks.get());assertEquals(1,route.bound.size());
                 }
@@ -136,7 +137,7 @@ public final class NetworkRecoveryTest {
             SourceBoundRoute route=new SourceBoundRoute(true);
             try(ServerSocket server=new ServerSocket(0,1,route.target);LanNode local=new LanNode(port(),false,"local","phone","手机","",new Events());LanNode.Transfer transfer=new LanNode.Transfer()) {
                 local.setSocketBinding(route);route.beforeRetry=stop?local::stopListening:transfer::close;
-                LanNode.Peer peer=new LanNode.Peer(new InetSocketAddress(route.target,server.getLocalPort()),"remote","pc","电脑","");Protocol.Attachment file=new Protocol.Attachment(0,"cancel.bin",3,1);
+                TlsFilePeer source=new TlsFilePeer(server);source.authorize(local);LanNode.Peer peer=source.peer;local.heartbeatRetry=TimeUnit.MILLISECONDS.toNanos(200);Protocol.Attachment file=new Protocol.Attachment(0,"cancel.bin",3,1);file.sha256=SecureIdentity.hash(new byte[3]);
                 assertThrows(IOException.class,()->local.receiveFile(peer,1,file,directory.resolve("cancel-"+stop+".bin").toFile(),transfer,null));
                 server.setSoTimeout(120);assertThrows(SocketTimeoutException.class,server::accept);assertEquals(1,route.bound.size());assertTrue(route.bound.get(0).isClosed());assertTrue(((Set<?>)field(local,"connections")).isEmpty());
             }
@@ -152,20 +153,20 @@ public final class NetworkRecoveryTest {
             for(boolean retry:new boolean[]{false,true}) {
                 SourceBoundRoute route=new SourceBoundRoute(retry);route.failBinding=true;
                 try(ServerSocket server=new ServerSocket(0,1,route.target);LanNode local=new LanNode(port(),false,"local","phone","手机","",new Events());LanNode.Transfer transfer=new LanNode.Transfer()) {
-                    local.setSocketBinding(route);LanNode.Peer peer=new LanNode.Peer(new InetSocketAddress(route.target,server.getLocalPort()),"remote","pc","电脑","");Protocol.Attachment file=new Protocol.Attachment(0,"bind.bin",bytes.length,1);File target=directory.resolve("received-"+retry+".bin").toFile();
+                    local.setSocketBinding(route);TlsFilePeer source=new TlsFilePeer(server);source.authorize(local);LanNode.Peer peer=source.peer;local.heartbeatRetry=TimeUnit.MILLISECONDS.toNanos(200);Protocol.Attachment file=new Protocol.Attachment(0,"bind.bin",bytes.length,1);file.sha256=SecureIdentity.hash(bytes);File target=directory.resolve("received-"+retry+".bin").toFile();
                     if(retry) {
-                        Future<?> serving=worker.submit(()->{try(Socket socket=server.accept()){socket.setSoTimeout(2000);int value;while((value=socket.getInputStream().read())!=0)if(value<0)throw new EOFException();socket.getOutputStream().write(bytes);}return null;});
+                        Future<?> serving=worker.submit(()->{try(Socket socket=server.accept();Socket tls=source.open(socket,file)){tls.getOutputStream().write(bytes);assertEquals("STORED\n"+file.sha256,SecureIdentity.readText(tls.getInputStream(),128));}return null;});
                         local.receiveFile(peer,1,file,target,transfer,null);serving.get(3,TimeUnit.SECONDS);assertArrayEquals(bytes,Files.readAllBytes(target.toPath()));Socket attached=(Socket)field(transfer,"socket");assertFalse("取消句柄仍指向绑定失败的socket",route.bound.contains(attached));assertTrue(attached.isClosed());
                     } else {IOException error=assertThrows(IOException.class,()->local.receiveFile(peer,1,file,target,transfer,null));assertTrue(error.getMessage().contains("源地址绑定"));server.setSoTimeout(120);assertThrows(SocketTimeoutException.class,server::accept);assertFalse(target.exists());}
                     assertEquals(1,route.retryChecks.get());assertEquals(1,route.bound.size());assertTrue(route.bound.get(0).isClosed());assertTrue(((Set<?>)field(local,"connections")).isEmpty());
-                    LanNode.Peer outside=new LanNode.Peer(new InetSocketAddress("192.168.99.42",server.getLocalPort()),"outside","host","子网外","");IOException denied=assertThrows(IOException.class,()->local.receiveFile(outside,2,file,directory.resolve("denied-"+retry).toFile(),transfer,null));assertTrue(denied.getMessage().contains("子网"));assertEquals(1,route.retryChecks.get());assertEquals(1,route.bound.size());assertTrue(((Set<?>)field(local,"connections")).isEmpty());
+                    LanNode.Peer outside=new LanNode.Peer(new InetSocketAddress("192.168.99.42",server.getLocalPort()),"outside","host","子网外","");outside.deviceId=peer.deviceId;outside.fingerprint=peer.fingerprint;IOException denied=assertThrows(IOException.class,()->local.receiveFile(outside,2,file,directory.resolve("denied-"+retry).toFile(),transfer,null));assertTrue(denied.getMessage().contains("子网"));assertEquals(1,route.retryChecks.get());assertEquals(1,route.bound.size());assertTrue(((Set<?>)field(local,"connections")).isEmpty());
                 }
             }
             for(boolean stop:new boolean[]{false,true}) {
                 SourceBoundRoute route=new SourceBoundRoute(true);route.failBinding=true;
                 try(ServerSocket server=new ServerSocket(0,1,route.target);LanNode local=new LanNode(port(),false,"local","phone","手机","",new Events());LanNode.Transfer transfer=new LanNode.Transfer()) {
-                    local.setSocketBinding(route);route.beforeRetry=stop?local::stopListening:transfer::close;LanNode.Peer peer=new LanNode.Peer(new InetSocketAddress(route.target,server.getLocalPort()),"remote","pc","电脑","");
-                    assertThrows(IOException.class,()->local.receiveFile(peer,1,new Protocol.Attachment(0,"cancel.bin",1,1),directory.resolve("cancel-"+stop).toFile(),transfer,null));server.setSoTimeout(120);assertThrows(SocketTimeoutException.class,server::accept);assertEquals(1,route.bound.size());assertTrue(route.bound.get(0).isClosed());assertTrue(((Set<?>)field(local,"connections")).isEmpty());
+                    local.setSocketBinding(route);route.beforeRetry=stop?local::stopListening:transfer::close;TlsFilePeer source=new TlsFilePeer(server);source.authorize(local);local.heartbeatRetry=TimeUnit.MILLISECONDS.toNanos(200);
+                    Protocol.Attachment file=new Protocol.Attachment(0,"cancel.bin",1,1);file.sha256=SecureIdentity.hash(new byte[1]);assertThrows(IOException.class,()->local.receiveFile(source.peer,1,file,directory.resolve("cancel-"+stop).toFile(),transfer,null));server.setSoTimeout(120);assertThrows(SocketTimeoutException.class,server::accept);assertEquals(1,route.bound.size());assertTrue(route.bound.get(0).isClosed());assertTrue(((Set<?>)field(local,"connections")).isEmpty());
                 }
             }
         }finally{worker.shutdownNow();assertTrue(worker.awaitTermination(3,TimeUnit.SECONDS));}
@@ -281,8 +282,9 @@ public final class NetworkRecoveryTest {
         Events events=new Events();int port=port();ExecutorService worker=Executors.newSingleThreadExecutor();
         CountDownLatch locked=new CountDownLatch(1),release=new CountDownLatch(1);
         try(LanNode node=new LanNode(port,true,"local","host","local","组",events);DatagramSocket raw=new DatagramSocket(0,InetAddress.getLoopbackAddress())) {
-            node.start();((ScheduledExecutorService)field(node,"timer")).shutdownNow();
+            TlsFilePeer.enable(node);node.start();
             announce(raw,port);await(()->!node.peers().isEmpty());LanNode.Peer peer=node.peers().get(0);
+            peer.deviceId="7".repeat(32);peer.fingerprint="c".repeat(64);
             node.sendMessage(peer,"尚未确认",Collections.emptyList());
             DatagramSocket old=(DatagramSocket)field(node,"udp");
             Future<?> holding=worker.submit(()->{synchronized(old){locked.countDown();try{release.await(5,TimeUnit.SECONDS);}catch(InterruptedException e){Thread.currentThread().interrupt();}}});
@@ -318,19 +320,19 @@ public final class NetworkRecoveryTest {
             assertFalse("连续刷新一直重置心跳时钟",peer.online);
         }
     }
-    @Test public void leavingNetworkRevokesOldFileAuthorizationButKeepsSourceFile()throws Exception {
+    @Test public void leavingNetworkCannotRevivePlaintextOffersAndKeepsSourceFile()throws Exception {
         Events events=new Events();int port=port();Path source=Files.createTempFile("network-offer-",".bin");Files.write(source,new byte[]{1,2,3});
         try(LanNode node=new LanNode(port,true,"local","host","local","组",events);DatagramSocket raw=new DatagramSocket(0,InetAddress.getLoopbackAddress());Socket fileClient=new Socket()) {
             node.start();((ScheduledExecutorService)field(node,"timer")).shutdownNow();announce(raw,port);await(()->!node.peers().isEmpty());
-            LanNode.Peer peer=node.peers().get(0);LanNode.Message message=node.sendMessage(peer,"附件",Collections.singletonList(source.toFile()));
-            assertTrue(node.offering(peer.id(),message.number,0));
+            LanNode.Peer peer=node.peers().get(0);assertThrows(IOException.class,()->node.sendMessage(peer,"附件",Collections.singletonList(source.toFile())));
+            assertFalse(node.isOffered(source.toFile()));
             fileClient.connect(new InetSocketAddress(InetAddress.getLoopbackAddress(),port));fileClient.setSoTimeout(3000);
             @SuppressWarnings("unchecked") Set<Socket> active=(Set<Socket>)field(node,"connections");Object gate=field(node,"gate");
             await(()->{synchronized(gate){return !active.isEmpty();}});
             switchTo(node,null);
-            assertFalse(node.networkAvailable());assertFalse(peer.online);assertFalse(node.offering(peer.id(),message.number,0));
+            assertFalse(node.networkAvailable());assertFalse(peer.online);assertFalse(node.isOffered(source.toFile()));
             assertEquals("切网应终止旧文件连接",-1,fileClient.getInputStream().read());assertArrayEquals(new byte[]{1,2,3},Files.readAllBytes(source));
-            node.refresh();assertTrue(node.networkAvailable());assertFalse("重连不能复活旧地址的文件授权",node.offering(peer.id(),message.number,0));
+            node.refresh();assertTrue(node.networkAvailable());assertFalse("重连不能复活旧地址的文件授权",node.isOffered(source.toFile()));
         } finally {Files.deleteIfExists(source);}
     }
     @Test public void offlinePeerAutoRecoversWhenReachableWithoutManualRefresh()throws Exception {
@@ -376,7 +378,8 @@ public final class NetworkRecoveryTest {
             remote.setSoTimeout(120);
             try {remote.receive(packet);fail("被拒绝的发现包泄露到 socket");}catch(SocketTimeoutException expected){ }
             LanNode.Peer peer=new LanNode.Peer(endpoint,"remote","host","远端","");
-            Protocol.Attachment attachment=new Protocol.Attachment(0,"safe.bin",3,0);
+            TlsFilePeer.enable(node);peer.deviceId="9".repeat(32);peer.fingerprint="c".repeat(64);
+            Protocol.Attachment attachment=new Protocol.Attachment(0,"safe.bin",3,0);attachment.sha256=SecureIdentity.hash(new byte[3]);
             File destination=directory.resolve("received.bin").toFile();
             try(LanNode.Transfer transfer=new LanNode.Transfer()) {
                 try {node.receiveFile(peer,1,attachment,destination,transfer,null);fail("拒绝的 TCP 请求仍连接");}

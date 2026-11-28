@@ -1694,8 +1694,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
         if(c.peer.group!=null&&!c.peer.group.trim().isEmpty())profileField(infoCard,"部门",c.peer.group,"联系人资料部门");
         profileField(infoCard,"IP 地址",c.peer.endpoint.getAddress().getHostAddress()+":"+c.peer.endpoint.getPort(),
                 "联系人资料地址");
-        profileField(infoCard,"传输安全",c.peer.fingerprint==null?(ChatService.allowLegacy(getSharedPreferences("settings",
-                MODE_PRIVATE))?"旧版设备 · 明文兼容":"旧版设备 · 明文已关"):"TLS 加密","联系人安全状态");
+        profileField(infoCard,"传输安全",c.peer.fingerprint==null?"旧版不支持":"TLS 加密","联系人安全状态");
         LinearLayout.LayoutParams cardParams=new LinearLayout.LayoutParams(-1,-2);
         cardParams.topMargin=dp(12);
         content.addView(infoCard,cardParams);
@@ -2773,9 +2772,6 @@ public final class MainActivity extends Activity implements ChatService.Observer
             Intent intent=new Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS);
             try{startActivity(intent);}catch(ActivityNotFoundException e){startActivity(new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,Uri.parse("package:"+getPackageName())));}
         });
-        Switch legacy=settingSwitch("允许旧版明文协议",ChatService.allowLegacy(prefs));
-        box.addView(legacy,new LinearLayout.LayoutParams(-1,-2));
-        box.addView(text("兼容旧设备明文；已配对设备与共享远控始终加密",12,MUTED));
         settingHeading(box,"文件接收");
         EditText batchLimit=formField(box,"单批文件上限（100–50000）",Integer.toString(SendFiles.batchLimit(this)));
         EditText pendingLimit=formField(box,"待处理文件上限（已完成不计，100–50000）",Integer.toString(SendFiles.limit(prefs,"pending_file_limit",10000)));
@@ -3016,9 +3012,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
             int nextSize=fontSize.getProgress()+14;
             boolean nextDark=follow.isChecked()?systemDark():dark.isChecked();
             String nextBgImage=prefs.getString("background_image","");
-            boolean saved=prefs.edit().putInt("batch_file_limit",batchCount).putInt("pending_file_limit",pendingCount).putBoolean("allow_legacy_protocol",
-                    legacy.isChecked()).putInt("legacy_protocol_policy",
-                    ChatService.LEGACY_POLICY_VERSION).putString("avatar",avatarValue[0]).putString("name",
+            boolean saved=prefs.edit().putInt("batch_file_limit",batchCount).putInt("pending_file_limit",pendingCount).putString("avatar",avatarValue[0]).putString("name",
                     n).putString("group",g).putInt("port",p).putBoolean("auto_connect",
                     autoConnect.isChecked()).putBoolean("keep_background",keepBackground.isChecked()).putBoolean("diagnostics",
                     diagnosticSwitch.isChecked()).putBoolean(ReceivedStorage.AUTO,

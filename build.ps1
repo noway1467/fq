@@ -12,7 +12,7 @@ New-Item -ItemType Directory -Force -Path $out | Out-Null
 $previous = Join-Path $root 'dist/飞Q.exe'
 $candidate = Join-Path $temporary ('windows-candidate-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $candidate | Out-Null
-$testOut = Join-Path $root 'build'
+$testOut = if($TemporaryDirectory){Join-Path $temporary 'bin'}else{Join-Path $root 'build'}
 New-Item -ItemType Directory -Force -Path $testOut | Out-Null
 $sources = @(Get-ChildItem -LiteralPath (Join-Path $root 'src') -Filter '*.cs' | ForEach-Object FullName)
 $common = @('/nologo','/utf8output','/optimize+','/warn:4','/warnaserror+','/platform:anycpu','/r:System.dll','/r:System.Core.dll','/r:System.Drawing.dll','/r:System.Windows.Forms.dll','/r:System.Web.Extensions.dll')
@@ -27,16 +27,25 @@ foreach ($asset in @('index.html','app.css','app.js','guest.html','guest.css','g
 if ($LASTEXITCODE -ne 0) { throw '应用编译失败' }
 # 先验证旧成品写出的目录、开关和配对，再替换交付文件。
 if (Test-Path -LiteralPath $previous) {
-    & "$root/tests/upgrade-settings.ps1" -ExecutablePath "$candidate/飞Q.exe" -PreviousExecutablePath $previous
+    $extra=@()
+    if($TemporaryDirectory){
+        $baseline=Join-Path $temporary 'previous.exe'
+        Copy-Item -LiteralPath $previous -Destination $baseline
+        $previous=$baseline
+        $extra=@('-TemporaryDirectory',(Join-Path $temporary 'up'))
+    }
+    & pwsh -NoProfile -File "$root/tests/upgrade-settings.ps1" -ExecutablePath "$candidate/飞Q.exe" -PreviousExecutablePath $previous @extra
+    if($LASTEXITCODE){throw 'Windows 配置升级验证失败'}
 } else { Write-Warning '未找到 dist 中的旧 EXE，本次无法验证跨版本配置保留。' }
 if ($Test) {
-    $testOut = Join-Path $root 'build'
     New-Item -ItemType Directory -Force -Path $testOut | Out-Null
-    & $compiler @common '/target:exe' '/main:FeiqLight.Tests.SelfTests' "/win32manifest:$root\src\app.manifest" "/out:$testOut\FeiqLight.Tests.exe" @sources "$root\tests\SelfTests.cs" "$root\tests\UiSmokeTests.cs" "$root\tests\ProtocolVectorTests.cs"
+    & $compiler @common '/target:exe' '/main:FeiqLight.Tests.SelfTests' "/win32manifest:$root\src\app.manifest" "/out:$testOut\FeiqLight.Tests.exe" @sources "$root\tests\SelfTests.cs" "$root\tests\UiSmokeTests.cs" "$root\tests\ProtocolVectorTests.cs" "$root\tests\TlsFilePeer.cs"
     if ($LASTEXITCODE -ne 0) { throw '测试编译失败' }
     & "$testOut\FeiqLight.Tests.exe"
     if ($LASTEXITCODE -ne 0) { throw '测试未通过' }
-    & "$root\tests\shared-remote.ps1"
+    $extra=if($TemporaryDirectory){@('-TemporaryDirectory',(Join-Path $temporary 'shared'))}else{@()}
+    & pwsh -NoProfile -File "$root/tests/shared-remote.ps1" @extra
+    if($LASTEXITCODE){throw '共享与远控测试失败'}
 }
 Copy-Item -LiteralPath "$candidate/飞Q.exe" -Destination "$out/飞Q.exe" -Force
 Remove-Item -LiteralPath "$candidate/飞Q.exe"

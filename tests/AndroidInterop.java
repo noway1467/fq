@@ -18,16 +18,17 @@ public final class AndroidInterop {
         };
         try(LanNode node=new LanNode(port,true,"android-test","JVM-Android-Core","安卓测试😀","互通验证",listener)) {
             node.setDeviceId("0123456789abcdef0123456789abcdef");
-            if(args.length>4&&args[4].equals("secure"))node.configureSecurity(root.resolve("android-security").toFile(),(name,code)->{System.out.println("PAIR "+code);return true;});
+            node.configureSecurity(root.resolve("android-security").toFile(),(name,code)->true);
             node.setAvatar("builtin:5");
-            node.start(); node.probe(LanNode.endpoint("127.0.0.1:"+windows)); LanNode.Peer peer=null;
+            node.start();verifyPlaintextBoundary(node);if(!incoming.isEmpty()||!updates.isEmpty())throw new AssertionError("明文业务进入消息状态");
+            node.probe(LanNode.endpoint("127.0.0.1:"+windows)); LanNode.Peer peer=null;
             for(int i=0;i<500&&peer==null;i++) { for(LanNode.Peer p:node.peers()) if(p.login.equals("windows-test")) peer=p; Thread.sleep(10); }
             if(peer==null) throw new AssertionError("Windows 发现失败");
             if(peer.deviceId==null || !peer.id().startsWith("device:"))throw new AssertionError("Windows 稳定身份未互通");
             if(!peer.name.equals("Windows 测试👩🏽‍💻")) throw new AssertionError("Windows 昵称乱码");
             if(!"builtin:15".equals(peer.avatar))throw new AssertionError("Windows 内置头像未同步");
             // 人工身份核对不属于已连接后的空闲消息延迟；先完成首次 TLS 配对。
-            if(args.length>4&&args[4].equals("secure"))node.verifyPeer(peer);
+            node.verifyPeer(peer);
             for(int i=0;i<5;i++) {
                 Thread.sleep(150);long started=System.nanoTime();node.sendMessage(peer,"0",Collections.emptyList());
                 LanNode.Message echo=incoming.poll(2,TimeUnit.SECONDS),confirm=updates.poll(2,TimeUnit.SECONDS);
@@ -75,6 +76,27 @@ public final class AndroidInterop {
             LanNode.Message done=incoming.poll(10,TimeUnit.SECONDS); if(done==null||!done.text.equals("WINDOWS_COMPLETE")) throw new AssertionError("Android→Windows 文件验证未完成");
             System.out.println("INTEROP PASS: 发现、双向中文/表情/换行、ACK、Android 多附件同条邀请、双向 "+size+" 字节文件非零偏移续传，SHA-256 一致");
         }
+    }
+    @SuppressWarnings("unchecked") static void verifyPlaintextBoundary(LanNode node)throws Exception {
+        java.net.InetSocketAddress endpoint=LanNode.endpoint("127.0.0.1:"+node.port());
+        java.lang.reflect.Method handle=LanNode.class.getDeclaredMethod("handle",Protocol.Packet.class,java.net.InetSocketAddress.class);handle.setAccessible(true);
+        var gate=LanNode.class.getDeclaredField("gate");gate.setAccessible(true);var queue=LanNode.class.getDeclaredField("pending");queue.setAccessible(true);
+        Map<Long,Object> pending=(Map<Long,Object>)queue.get(node);Class<?> type=Class.forName(LanNode.class.getName()+"$Pending");
+        var create=type.getDeclaredConstructor(LanNode.Peer.class);create.setAccessible(true);Object item=create.newInstance(new LanNode.Peer(endpoint,"old-fixture","test","旧端",""));
+        LanNode.Message waiting=new LanNode.Message();waiting.number=1;waiting.state="等待确认";var record=type.getDeclaredField("message");record.setAccessible(true);record.set(item,waiting);
+        synchronized(gate.get(node)){
+            pending.put(1L,item);
+            try{
+                for(int mode:new int[]{Protocol.MESSAGE,Protocol.ACK,Protocol.RELEASE})handle.invoke(node,Protocol.parse(Protocol.encode(1,"old-fixture","test",mode,"1",null)),endpoint);
+                if(!pending.containsKey(1L)||!"等待确认".equals(waiting.state))throw new AssertionError("明文 ACK 修改了待确认消息");
+            }finally{pending.remove(1L);}
+        }
+        if(node.peers().stream().anyMatch(peer->peer.login.equals("old-fixture")))throw new AssertionError("明文业务进入联系人状态");
+        for(byte[] request:new byte[][]{new byte[]{'1'},Protocol.encode(1,"old-fixture","test",Protocol.GET_FILE,"1:0:0:",null)})try(java.net.Socket socket=new java.net.Socket(endpoint.getAddress(),endpoint.getPort())) {
+            socket.setSoTimeout(1500);socket.getOutputStream().write(request);
+            try{if(socket.getInputStream().read()!=-1)throw new AssertionError("明文文件入口返回了内容");}catch(java.net.SocketException closed){if(socket.isClosed())throw closed;}
+        }
+        System.out.println("PASS Android 拒绝明文 SENDMSG / ACK / RELEASE / GET_FILE");
     }
     private static byte[] hash(File file)throws Exception {
         java.security.MessageDigest digest=java.security.MessageDigest.getInstance("SHA-256");

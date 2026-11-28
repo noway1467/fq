@@ -12,7 +12,7 @@ $arguments += @("/resource:$projectRoot/src/emoji-atlas.png,FeiqLight.EmojiAtlas
 $arguments += @("/resource:$projectRoot/assets/avatars/atlas.png,FeiqLight.Avatars.png","/resource:$projectRoot/assets/avatars/catalog.txt,FeiqLight.Avatars.txt")
 foreach ($asset in @('index.html','app.css','app.js')) { $arguments += "/resource:$projectRoot/assets/tools/$asset,FeiqLight.Tools.$asset" }
 $auditSource = Join-Path $projectRoot 'tests\CommitAuditTests.cs'
-& $compiler @arguments @sources $auditSource
+& $compiler @arguments @sources "$PSScriptRoot\LoopbackPorts.cs" $auditSource
 if ($LASTEXITCODE -ne 0) { throw '提交审计定向回归编译失败' }
 $data = if($TemporaryDirectory){Join-Path $out ('data-' + [Guid]::NewGuid().ToString('N'))}else{Join-Path $projectRoot ('build/test-data/commit-audit-' + [Guid]::NewGuid().ToString('N'))}
 Write-Output "DATA $data"

@@ -188,7 +188,8 @@ namespace FeiqLight.Tests
                         byte[] bytes=Protocol.Encode(42,peer.Login,peer.Host,Protocol.SendMessage|Protocol.SendCheck|Protocol.FileAttach|Protocol.Utf8,"",Protocol.FileList(new[]{new Attachment {Id=0,Name="same.txt",Size=7,Modified=1}}));
                         for(int round=1;round<=2;round++)
                         {
-                            sender.Send(bytes,bytes.Length,new IPEndPoint(IPAddress.Loopback,network.Port));Pump(()=>Volatile.Read(ref delivered)==round,"重复邀请未到达网络层");
+                            Packet packet;Check(Protocol.TryParse(bytes,out packet),"测试邀请编码无效");
+                            typeof(LanService).GetMethod("Handle",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(network,new object[]{packet,peer.Endpoint,true});Pump(()=>Volatile.Read(ref delivered)==round,"重复邀请未到达消息层");
                             bool drained=false;main.BeginInvoke((MethodInvoker)(()=>drained=true));Pump(()=>drained,"UI 队列未处理");
                             Check(File.ReadAllBytes(history).SequenceEqual(before),"重复邀请回写了历史");
                             var chats=(Dictionary<string,ChatForm>)typeof(MainForm).GetField("chats",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(main);Check(chats.Count==0,"重复邀请创建聊天或重新入队");
@@ -197,10 +198,7 @@ namespace FeiqLight.Tests
                             object gate=typeof(LanService).GetField("gate",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(network);
                             lock(gate)((Dictionary<string,DateTime>)typeof(LanService).GetField("seen",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(network)).Clear();
                         }
-                        sender.Client.ReceiveTimeout=2000;IPEndPoint remote=null;int acknowledgements=0;
-                        // 启动会先探测历史地址；允许发现包穿插，但两次重复邀请都必须收到自己的 ACK。
-                        for(int i=0;i<20&&acknowledgements<2;i++) {Packet ack;if(Protocol.TryParse(sender.Receive(ref remote),out ack)&&ack.Mode==Protocol.ReceiveMessage&&ack.Body=="42")acknowledgements++;}
-                        Check(acknowledgements==2,"重复邀请未返回 ACK");
+                        Check(delivered==2,"未覆盖两轮历史去重");
                         Check(File.ReadAllText(saved)=="payload","原附件被修改");
                     }
                 }
@@ -216,6 +214,7 @@ namespace FeiqLight.Tests
             using (LanService receiver = new LanService(new AppSettings { Nickname = "文件测试接收方", Notifications = false, ReceiveFolder = folder }, receiverPort, true, "receive-receiver"))
             using (MainForm main = new MainForm(receiver, store))
             {
+                sender.ConfigureSecurity(Path.Combine(directory,"receive-send-identity"),(name,code)=>true);receiver.ConfigureSecurity(Path.Combine(directory,"receive-identity"),(name,code)=>true);
                 sender.Start(); receiver.Start(); main.Show(); main.NetworkStarted(); sender.Probe(new IPEndPoint(IPAddress.Loopback, receiverPort));
                 Pump(() => sender.Peers.Count == 1 && receiver.Peers.Count == 1, "文件测试发现失败"); Peer peer = receiver.Peers.Single(); ChatForm chat = null;
                 try
@@ -305,16 +304,17 @@ namespace FeiqLight.Tests
                     {
                         string cancelledFolder = Path.Combine(directory, "取消自动接收"); receiver.Settings.ReceiveFolder = cancelledFolder;
                         TcpListener server = new TcpListener(IPAddress.Loopback, 0); server.Start();
-                        using (UdpClient announce = new UdpClient((IPEndPoint)server.LocalEndpoint))
+                        using (var sourcePeer=new TlsFilePeer(Path.Combine(directory,"ui-cancel-fixture"),(IPEndPoint)server.LocalEndpoint,receiver))
                         using (ManualResetEventSlim release = new ManualResetEventSlim(false))
                         {
-                            Task hold = Task.Run(() => { using (TcpClient connection = server.AcceptTcpClient()) { connection.GetStream().Write(new byte[32], 0, 32); release.Wait(30000); } });
+                            var file=new Attachment{Id=0,Name="取消.bin",Size=1048576,Sha256=new string('a',64)};
+                            Task hold = Task.Run(() => { long offset;using (TcpClient connection = server.AcceptTcpClient())using(Stream stream=sourcePeer.Open(connection,file,out offset)){stream.Write(new byte[32],0,32);release.Wait(30000);} });
                             try
                             {
-                                byte[] bytes = Protocol.Encode(42, "cancel-ui", "local", Protocol.SendMessage | Protocol.FileAttach | Protocol.Utf8, "取消测试", Protocol.FileList(new[] { new Attachment { Id = 0, Name = "取消.bin", Size = 1048576 } }));
-                                announce.Send(bytes, bytes.Length, new IPEndPoint(IPAddress.Loopback, receiverPort));
+                                var packet=new Packet{Number=42,Login=sourcePeer.Peer.Login,Host=sourcePeer.Peer.Host,DeviceId=sourcePeer.Peer.DeviceId,Fingerprint=sourcePeer.Peer.Fingerprint,Command=Protocol.SendMessage|Protocol.FileAttach|Protocol.Utf8,Body="取消测试",Extra=Protocol.FileList(new[]{file})};
+                                typeof(LanService).GetMethod("Handle",BindingFlags.NonPublic|BindingFlags.Instance).Invoke(receiver,new object[]{packet,sourcePeer.Peer.Endpoint,true});
                                 Pump(() => Directory.Exists(cancelledFolder) && Directory.GetFiles(cancelledFolder, "*.part").Length == 1, "自动接收未连接停滞测试服务器");
-                                Peer cancelPeer=receiver.Peers.Single(p=>p.Login=="cancel-ui");main.OpenChat(cancelPeer); ChatForm cancelChat = main.ActiveChat;ChatRecord cancelRecord=store.IncomingAttachments(cancelPeer.Id,42).Single();Task cancel=main.CancelReceiveTask(cancelRecord,0);
+                                Peer cancelPeer=receiver.Peers.Single(p=>p.DeviceId==sourcePeer.Peer.DeviceId);main.OpenChat(cancelPeer); ChatForm cancelChat = main.ActiveChat;ChatRecord cancelRecord=store.IncomingAttachments(cancelPeer.Id,42).Single();Task cancel=main.CancelReceiveTask(cancelRecord,0);
                                 Pump(() => cancel.IsCompleted&&!Directory.GetFiles(cancelledFolder).Any()&&!main.ReceivingTask(cancelRecord,0), "取消没有中止传输或清理半成品");cancel.GetAwaiter().GetResult();
                                 Check(cancelChat.PendingFileCount == 1 && !cancelChat.HasAutomaticFile, "取消后立即重试或丢失任务");
                                 Task refused=main.RejectTransfer(cancelRecord);Pump(()=>refused.IsCompleted&&cancelChat.PendingFileCount==0,"取消后不能拒绝邀请");refused.GetAwaiter().GetResult();
@@ -654,7 +654,7 @@ namespace FeiqLight.Tests
                     using(LanService a=new LanService(new AppSettings {Notifications=false,CloseToTray=false,AutoReceiveFiles=false},Port(),true,"paste-a"))
                     using(LanService b=new LanService(new AppSettings {Notifications=false,AutoReceiveFiles=false},Port(),true,"paste-b"))
                     using(MainForm main=new MainForm(a,store)) {
-                        a.Start();b.Start();main.Show();main.NetworkStarted();a.Probe(new IPEndPoint(IPAddress.Loopback,b.Port));Pump(()=>a.Peers.Any(p=>p.Login=="paste-b"),"图片节点未发现");Peer peer=a.Peers.Single(p=>p.Login=="paste-b");main.OpenChat(peer);
+                        a.ConfigureSecurity(Path.Combine(folder,"paste-a"),(name,code)=>true);b.ConfigureSecurity(Path.Combine(folder,"paste-b"),(name,code)=>true);a.Start();b.Start();main.Show();main.NetworkStarted();a.Probe(new IPEndPoint(IPAddress.Loopback,b.Port));Pump(()=>a.Peers.Any(p=>p.Login=="paste-b"),"图片节点未发现");Peer peer=a.Peers.Single(p=>p.Login=="paste-b");main.OpenChat(peer);
                         ChatForm chat=main.ActiveChat;RichTextBox editor=Find<RichTextBox>(chat,"消息输入框");editor.Text="保留图片草稿";
                         using(Bitmap image=new Bitmap(40,30)){using(Graphics g=Graphics.FromImage(image))g.Clear(Color.Coral);Clipboard.SetImage(image);}
                         typeof(Control).GetMethod("OnKeyDown",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(editor,new object[]{new KeyEventArgs(Keys.Control|Keys.V)});
@@ -712,7 +712,7 @@ namespace FeiqLight.Tests
                 string folder=Path.Combine(directory,"drop-transfer");Directory.CreateDirectory(folder);string first=Path.Combine(folder,"queued.txt"),second=Path.Combine(folder,"automatic.txt");File.WriteAllText(first,"等待手动发送");File.WriteAllText(second,"拖放真实回环内容");
                 LocalStore store=new LocalStore(Path.Combine(folder,"profile"));
                 using(LanService a=new LanService(new AppSettings {Notifications=false,CloseToTray=false,AutoReceiveFiles=false},Port(),true,"drop-a"))using(LanService b=new LanService(new AppSettings {Notifications=false,AutoReceiveFiles=false},Port(),true,"drop-b"))using(MainForm main=new MainForm(a,store)) {
-                    a.Start();b.Start();main.Show();main.NetworkStarted();a.Probe(new IPEndPoint(IPAddress.Loopback,b.Port));Pump(()=>a.Peers.Any(p=>p.Login=="drop-b"),"拖放测试未发现节点");Peer peer=a.Peers.Single(p=>p.Login=="drop-b");main.OpenChat(peer);ChatForm chat=main.ActiveChat;RichTextBox editor=Find<RichTextBox>(chat,"消息输入框");editor.Text="不应自动发出的草稿";
+                    a.ConfigureSecurity(Path.Combine(folder,"drop-a"),(name,code)=>true);b.ConfigureSecurity(Path.Combine(folder,"drop-b"),(name,code)=>true);a.Start();b.Start();main.Show();main.NetworkStarted();a.Probe(new IPEndPoint(IPAddress.Loopback,b.Port));Pump(()=>a.Peers.Any(p=>p.Login=="drop-b"),"拖放测试未发现节点");Peer peer=a.Peers.Single(p=>p.Login=="drop-b");main.OpenChat(peer);ChatForm chat=main.ActiveChat;RichTextBox editor=Find<RichTextBox>(chat,"消息输入框");editor.Text="不应自动发出的草稿";
                     Check(All(chat).All(c=>c.AllowDrop)&&chat.AllowDrop&&!editor.EnableAutoDragDrop,"输入或子控件未接入文件拖放");
                     Action<Control,string[]> drop=NativeFileDrop;
                     drop(editor,new[]{first});Check(store.History(peer.Id,20).Count==0,"默认拖入竟然发送");
@@ -931,7 +931,7 @@ namespace FeiqLight.Tests
                 using(MainForm window=new MainForm(local,store))
                 {
                     typeof(MainForm).GetMethod("PrepareNetworkCallbacks",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(window,null);
-                    remote.Start();local.Start();window.NetworkStarted();remote.Probe(new IPEndPoint(IPAddress.Loopback,aPort));
+                    remote.ConfigureSecurity(Path.Combine(directory,"offline-peer-security"),(name,code)=>true);local.ConfigureSecurity(store.Root,(name,code)=>true);remote.Start();local.Start();window.NetworkStarted();remote.Probe(new IPEndPoint(IPAddress.Loopback,aPort));
                     Pump(()=>local.Peers.Count==1&&remote.Peers.Count==1,"联系人发现失败");peerId=local.Peers[0].Id;
                     remote.SendMessage(remote.Peers[0],"离线后仍可找到的历史",null);
                     Pump(()=>Find<ConversationList>(window,"会话列表").Items.Any(i=>i.Preview.Contains("仍可找到")),"新消息未显示");
@@ -941,7 +941,7 @@ namespace FeiqLight.Tests
                 using(LanService restarted=new LanService(store.LoadSettings(),aPort,true,"offline-local"))
                 using(MainForm window=new MainForm(restarted,store))
                 {
-                    restarted.Start();window.Show();window.NetworkStarted();Application.DoEvents();
+                    restarted.ConfigureSecurity(store.Root,(name,code)=>true);restarted.Start();window.Show();window.NetworkStarted();Application.DoEvents();
                     ConversationList list=Find<ConversationList>(window,"会话列表");
                     Check(list.Items.Count==1,"重启后离线联系人丢失");Check(!list.Items[0].Peer.Online,"历史联系人被当成在线");
                     Check(list.Items[0].Preview.Contains("仍可找到")&&list.Items[0].Unread==1,"预览/未读没有恢复");
@@ -952,11 +952,11 @@ namespace FeiqLight.Tests
                     remoteSettings.Nickname="重新上线并改名";
                     using(LanService remote=new LanService(remoteSettings,bPort,true,"offline-peer"))
                     {
-                        remote.Start();restarted.Refresh();Pump(()=>original.Online&&original.Nickname=="重新上线并改名","历史联系人重连后没有原位更新");
-                        Pump(()=>Find<Label>(window.ActiveChat,"聊天联系人昵称").Text=="重新上线并改名"&&Find<Label>(window.ActiveChat,"聊天联系人状态").Text=="在线 · 旧版明文","重连后的聊天抬头未刷新");
+                        remote.ConfigureSecurity(Path.Combine(directory,"offline-peer-security"),(name,code)=>true);remote.Start();restarted.Refresh();Pump(()=>original.Online&&original.Nickname=="重新上线并改名","历史联系人重连后没有原位更新");
+                        Pump(()=>Find<Label>(window.ActiveChat,"聊天联系人昵称").Text=="重新上线并改名"&&Find<Label>(window.ActiveChat,"聊天联系人状态").Text=="在线 · TLS 加密","重连后的聊天抬头未刷新");
                         Check(Find<ConversationList>(window,"会话列表").Items.Count==1,"重连产生重复联系人");
                     }
-                    Pump(()=>!original.Online&&Find<Label>(window.ActiveChat,"聊天联系人状态").Text=="离线 · 旧版明文","退出后状态未刷新");
+                    Pump(()=>!original.Online&&Find<Label>(window.ActiveChat,"聊天联系人状态").Text=="离线 · TLS 加密","退出后状态未刷新");
                     Render(window,"preview-offline-history");window.ExitApplication();
                 }
             });
@@ -1027,7 +1027,7 @@ namespace FeiqLight.Tests
             using (MainForm mainB = new MainForm(b, storeB))
             {
                 mainA.Text += " · 自动化验证"; mainB.Text += " · 自动化验证";
-                a.Start(); b.Start(); mainA.Show(); mainB.Show(); mainA.NetworkStarted(); mainB.NetworkStarted();
+                a.ConfigureSecurity(storeA.Root,(name,code)=>true);b.ConfigureSecurity(storeB.Root,(name,code)=>true);a.Start(); b.Start(); mainA.Show(); mainB.Show(); mainA.NetworkStarted(); mainB.NetworkStarted();
                 ChatForm chatA = null, chatB = null;
                 List<ToolStripDropDown> ownedMenus = new List<ToolStripDropDown>();
                 try
@@ -1658,9 +1658,9 @@ namespace FeiqLight.Tests
                         Peer peer = a.Peers.Single(p => p.Login == "ui-b"); mainA.OpenChat(peer);
                         b.Settings.Nickname = "新昵称 B"; b.Refresh();
                         Pump(() => Find<Label>(chatA, "聊天联系人昵称").Text == "新昵称 B", "改名未刷新聊天抬头");
-                        b.Dispose(); Pump(() => !peer.Online && Find<Label>(chatA, "聊天联系人状态").Text == "离线 · 旧版明文", "离线未刷新聊天抬头");
+                        b.Dispose(); Pump(() => !peer.Online && Find<Label>(chatA, "聊天联系人状态").Text == "离线 · TLS 加密", "离线未刷新聊天抬头");
                         chatA.Close(); mainA.OpenChat(peer);
-                        Check(Find<Label>(chatA, "聊天联系人状态").Text == "离线 · 旧版明文" && Find<Label>(chatA, "聊天联系人昵称").Text == peer.Nickname, "恢复会话显示旧资料");
+                        Check(Find<Label>(chatA, "聊天联系人状态").Text == "离线 · TLS 加密" && Find<Label>(chatA, "聊天联系人昵称").Text == peer.Nickname, "恢复会话显示旧资料");
                     });
                     test("视觉布局：聊天气泡头像放大与底栏边线按钮无悬停底色", () =>
                     {

@@ -137,9 +137,35 @@ public final class SecurityAudit {
     }
     public static void main(String[] args)throws Exception {
         root=Paths.get(args[0]).toAbsolutePath();Files.createDirectories(root);baseline=args.length>1&&args[1].equals("baseline");
+        if(!baseline){
+            run("无本机身份也不接收明文业务",()->{
+                Inbox inbox=new Inbox();try(LanNode node=new LanNode(org.feiqlight.android.TestPorts.chat(),true,"contract","host","测试","",inbox)){
+                    node.start();AndroidInterop.verifyPlaintextBoundary(node);check(inbox.states.isEmpty(),"状态被明文改动");
+                }
+            });
+            run("无指纹不能发送或建立附件授权",()->{
+                try(LanNode node=new LanNode(org.feiqlight.android.TestPorts.chat(),true,"contract","host","测试","",new Inbox())){
+                    node.setDeviceId("1".repeat(32));node.configureSecurity(root.toFile(),(name,code)->true);
+                    LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:2425"),"old","host","旧设备","");
+                    try{node.sendMessage(peer,"test",Collections.emptyList());throw new AssertionError("没有拒绝");}catch(IOException error){check(error.getMessage().contains("升级至 0.8"),"无升级提示");}
+                    try{node.reject(peer,1);throw new AssertionError("没有拒绝");}catch(IOException error){check(error.getMessage().contains("升级至 0.8"),"无升级提示");}
+                }
+            });
+            run("请求总期限到达后不读取剩余数据",()->{
+                Class<?> type=Class.forName("org.feiqlight.android.core.RequestInput");var ctor=type.getDeclaredConstructor(Socket.class,InputStream.class);ctor.setAccessible(true);
+                var begin=type.getDeclaredMethod("begin",int.class);begin.setAccessible(true);
+                try(Socket socket=new Socket();ByteArrayInputStream source=new ByteArrayInputStream(new byte[]{1,2})){
+                    InputStream input=(InputStream)ctor.newInstance(socket,source);begin.invoke(input,1000);check(input.read()==1,"正常读取失败");begin.invoke(input,0);
+                    try{input.read();throw new AssertionError("过期后仍然读取");}catch(SocketTimeoutException expected){check(source.available()==1,"过期请求消耗了数据");}
+                }
+            });
+            if(args.length>1&&args[1].equals("contracts")){System.out.println("RESULT Android contracts passed="+passed+" failed="+failed);if(failed!=0)System.exit(1);return;}
+        }
         local=InetAddress.getByName("127.0.0.1");receiver=InetAddress.getByName("127.0.0.2");attacker=InetAddress.getByName("127.0.0.3");
-        run("冒用设备 ID 的重发截获、ACK 与附件权限",SecurityAudit::spoofRetry);
-        run("8 个未认证慢附件请求与合法下载",SecurityAudit::slowFile);
+        if(baseline){
+            run("历史基线：冒用设备 ID 的重发截获、ACK 与附件权限",SecurityAudit::spoofRetry);
+            run("历史基线：8 个未认证慢附件请求与合法下载",SecurityAudit::slowFile);
+        }
         run("12 个慢 HTTP 请求头/正文与合法请求",SecurityAudit::slowHttp);
         System.out.println("RESULT Android mode="+(baseline?"baseline":"fixed")+" passed="+passed+" failed="+failed);
         if(failed>0)System.exit(1);

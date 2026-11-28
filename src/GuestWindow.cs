@@ -483,14 +483,15 @@ namespace FeiqLight
                 }
                 else
                 {
-                    int leftColW = Math.Max(180, (w - outer * 2 - gap) / 2);
+                    int leftColW = Math.Max(180, (w - outer * 2 - (int)Math.Round(16 * s)) / 2);
                     int toggleH = upload.PreferredHeightFor(leftColW);
                     int pickerH = (int)Math.Round(34 * s);
-                    int settingsNeeded = (int)Math.Round(2 * s) + toggleH + (int)Math.Round(10 * s) + netTitle.PreferredHeight + (int)Math.Round(6 * s) + pickerH + (int)Math.Round(76 * s);
+                    int settingsNeeded = (int)Math.Round(2 * s) + toggleH + (int)Math.Round(10 * s) + netTitle.PreferredHeight + (int)Math.Round(6 * s) + pickerH;
                     int fieldH = Math.Max((int)Math.Round(36 * s), linkBox.PreferredHeight + (int)Math.Round(14 * s));
                     int linkNeeded = (int)Math.Round(12 * s) + (int)Math.Round(20 * s) + (int)Math.Round(8 * s) + fieldH + (int)Math.Round(10 * s) + (int)Math.Round(34 * s) + (int)Math.Round(14 * s);
-                    int inspH = Math.Min(Math.Max(110, wsH - (int)Math.Round(120 * s)), Math.Max(settingsNeeded, linkNeeded));
-                    int filesH = Math.Max(110, wsH - inspH - gap);
+                    int filesMinimum = (int)Math.Round(42 * s) + 2 * (int)Math.Round(6 * s) + 110;
+                    int inspectorNeeded = Math.Max(settingsNeeded, linkNeeded) + (int)(8 * s) + (int)(32 * s);
+                    int filesH = Math.Max(filesMinimum, wsH - inspectorNeeded - gap);
                     filesPane.Bounds = new Rectangle(outer, 0, Math.Max(200, w - outer * 2), filesH);
                     inspectorPane.Bounds = new Rectangle(outer, filesPane.Bottom + gap, Math.Max(200, w - outer * 2), Math.Max(80, wsH - filesH - gap));
                     LayoutFilesPane(filesPane.Width, filesH, s);
@@ -526,7 +527,7 @@ namespace FeiqLight
             listHost.Bounds = new Rectangle(padX, filesHeader.Bottom, innerW, Math.Max(40, ph - filesHeader.Bottom - padY));
         }
 
-        private void LayoutLinkCard(int x, int y, int cw, float s)
+        private void LayoutLinkCard(int x, int y, int cw, float s, bool compact = false)
         {
             int cardPad = (int)Math.Round(14 * s);
             int innerW = Math.Max(80, cw - cardPad * 2);
@@ -536,13 +537,13 @@ namespace FeiqLight
             int gap = (int)Math.Round(8 * s);
             int btnW = Math.Max(60, (innerW - gap) / 2);
 
-            linkCaption.Bounds = new Rectangle(cardPad, (int)Math.Round(12 * s), innerW, capH);
-            linkFieldWrap.Bounds = new Rectangle(cardPad, linkCaption.Bottom + (int)Math.Round(8 * s), innerW, fieldH);
+            linkCaption.Bounds = new Rectangle(cardPad, (int)Math.Round((compact ? 4 : 12) * s), innerW, capH);
+            linkFieldWrap.Bounds = new Rectangle(cardPad, linkCaption.Bottom + (int)Math.Round((compact ? 2 : 8) * s), innerW, fieldH);
             LayoutLinkBox();
-            int btnY = linkFieldWrap.Bottom + (int)Math.Round(10 * s);
+            int btnY = linkFieldWrap.Bottom + (int)Math.Round((compact ? 3 : 10) * s);
             copy.Bounds = new Rectangle(cardPad, btnY, btnW, btnH);
             qr.Bounds = new Rectangle(copy.Right + gap, btnY, Math.Max(60, innerW - btnW - gap), btnH);
-            linkBlock.Bounds = new Rectangle(x, y, cw, qr.Bottom + (int)Math.Round(14 * s));
+            linkBlock.Bounds = new Rectangle(x, y, cw, qr.Bottom + (int)Math.Round((compact ? 4 : 14) * s));
         }
 
         private void LayoutInspectorVertical(int pw, int ph, float s)
@@ -582,6 +583,16 @@ namespace FeiqLight
             addressPicker.Bounds = new Rectangle(0, pickerTop, Math.Max(80, leftW - refreshSize - (int)Math.Round(8 * s)), pickerH);
 
             LayoutLinkCard(rightX, 0, rightW, s);
+            if (Math.Max(addressPicker.Bottom, linkBlock.Bottom) + (int)(8 * s) + (int)(32 * s) > ph)
+            {
+                LayoutLinkCard(rightX, 0, rightW, s, true);
+                int rowTop = upload.Bottom + (int)Math.Round(4 * s);
+                int labelWidth = netTitle.PreferredWidth;
+                int pickerX = labelWidth + (int)Math.Round(4 * s);
+                netTitle.Bounds = new Rectangle(0, rowTop, labelWidth, pickerH);
+                refreshIp.Top = rowTop;
+                addressPicker.Bounds = new Rectangle(pickerX, rowTop, refreshIp.Left - (int)Math.Round(4 * s) - pickerX, pickerH);
+            }
             int lifetimeTop = Math.Max(addressPicker.Bottom, linkBlock.Bottom) + (int)(8 * s);
             int buttonWidth = (int)(110 * s), inputWidth = (int)(72 * s), inputGap = (int)(10 * s);
             saveLifetime.Bounds = new Rectangle(pw - buttonWidth, lifetimeTop, buttonWidth, (int)(32 * s));

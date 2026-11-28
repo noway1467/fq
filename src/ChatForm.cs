@@ -204,7 +204,7 @@ namespace FeiqLight
         {
             history.SetAvatars(peer.Id, peer.Avatar, "device:" + network.Settings.DeviceId, network.Settings.Avatar);
             Text = peer.DisplayName; peerName.Text = peer.DisplayName;
-            peerStatus.Text = (peer.Online ? "在线" : "离线") + (peer.Fingerprint==null?" · 旧版明文":" · TLS 加密") + (peer.DuplicateName ? peer.NameSuffix+" · "+peer.Endpoint : "");
+            peerStatus.Text = (peer.Online ? "在线" : "离线") + (peer.Fingerprint==null?" · 旧版不支持":" · TLS 加密") + (peer.DuplicateName ? peer.NameSuffix+" · "+peer.Endpoint : "");
             peerStatus.ForeColor = peer.Online ? Theme.Online : Theme.Muted;
             peerName.AccessibleDescription=peer.DisplayName+" · "+peer.Id;
             avatar.AccessibleDescription = peer.Online ? "在线" : "离线";

@@ -170,10 +170,10 @@ public final class LineCancelTest {
     @Test public void cancelText()throws Exception {
         LanNode.Peer peer;long packet;
         try(Session s=new Session();DatagramSocket offline=new DatagramSocket(0,InetAddress.getLoopbackAddress())) {
-            int local;try(ServerSocket port=new ServerSocket(0,1,InetAddress.getLoopbackAddress())){local=port.getLocalPort();}
-            peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:"+offline.getLocalPort()),"offline-text","host","离线文本","");peer.utf8=true;
+            int local=TestPorts.chat();
+            peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:"+offline.getLocalPort()),"offline-text","host","离线文本","");peer.utf8=true;peer.deviceId="1".repeat(32);peer.fingerprint="a".repeat(64);
             try(LanNode node=new LanNode(local,true,"text-cancel","host","本机","",new LanNode.Listener(){public void peersChanged(){}public void error(String text){}public void message(LanNode.Peer p,LanNode.Message m,boolean update){s.service.incoming(p,m,update);}})) {
-                node.start();set(s.service,"node",node);
+                org.feiqlight.android.core.TlsFilePeer.enable(node);node.start();set(s.service,"node",node);
                 List<Boolean> sent=new ArrayList<>();s.service.send(peer,"0",sent::add);s.settle();
                 assertEquals(Collections.singletonList(true),sent);
                 LanNode.Message message=s.store().history(peer.id()).get(0);packet=message.number;

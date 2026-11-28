@@ -51,7 +51,7 @@ namespace FeiqLight
             Fingerprint = Hash(certificate.RawData);
             string trustPath = Path.Combine(this.root, "trusted-devices.json");
             trusted = File.Exists(trustPath) ? new JavaScriptSerializer().Deserialize<Dictionary<string, string>>(File.ReadAllText(trustPath, Encoding.UTF8)) : new Dictionary<string, string>();
-            if (trusted == null || trusted.Any(p => Protocol.NormalizeDeviceId(p.Key) == null || !ValidFingerprint(p.Value))) throw new IOException("可信设备记录损坏，未自动重置信任。");
+            if (trusted == null || trusted.Any(p => Protocol.NormalizeStoredDeviceId(p.Key) == null || !ValidFingerprint(p.Value))) throw new IOException("可信设备记录损坏，未自动重置信任。");
         }
         public static bool ValidFingerprint(string value) { return value != null && value.Length == 64 && value.All(c => (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')); }
         public static string Hash(byte[] bytes) { using (SHA256 sha = SHA256.Create()) return Hex(sha.ComputeHash(bytes)); }

@@ -196,7 +196,7 @@ public final class SharedFilesTest {
         SharedFolderSettings settings=new SharedFolderSettings(context);settings.acquire(TREE,Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);settings.save(TREE);
         for(int generation=0;generation<3;generation++){
             org.robolectric.android.controller.ServiceController<ChatService> controller=Robolectric.buildService(ChatService.class).create();ChatService service=controller.get();
-            final int chatPort;try(ServerSocket probe=new ServerSocket(0,1,InetAddress.getLoopbackAddress())){chatPort=probe.getLocalPort();}
+            final int chatPort=TestPorts.withTools();
             service.connectionFactory=(prefs,listener)->new org.feiqlight.android.core.LanNode(chatPort,true,"restore-test","Android","恢复测试","test",listener);
             service.sharedFactory=(tree,port)->new SharedFiles(context,tree,0,true);
             try{

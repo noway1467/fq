@@ -8,9 +8,8 @@ $exe = if($ExecutablePath){[IO.Path]::GetFullPath($ExecutablePath)}else{Join-Pat
 $profile = Join-Path $env:TEMP ('FeiqLight-benchmark-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $profile | Out-Null
 $probe = [System.Net.Sockets.UdpClient]::new([System.Net.IPEndPoint]::new([System.Net.IPAddress]::Loopback, 0))
-$portProbe = [System.Net.Sockets.UdpClient]::new([System.Net.IPEndPoint]::new([System.Net.IPAddress]::Loopback, 0))
-$port = $portProbe.Client.LocalEndPoint.Port
-$portProbe.Dispose()
+Add-Type -Path "$PSScriptRoot/LoopbackPorts.cs"
+$port = [FeiqLight.Tests.LoopbackPorts]::Chat()
 $process = $null
 try {
     @{Nickname='性能测试';Group='回环验证';Signature='测试';CloseToTray=$true;Notifications=$false} | ConvertTo-Json | Set-Content -LiteralPath "$profile\settings.json" -Encoding utf8

@@ -13,7 +13,7 @@ internal static class IdentityEdgeTests
 {
     private static void Check(bool value,string text) { if(!value)throw new Exception(text); }
     private static object Field(object target,string name) { return target.GetType().GetField(name,BindingFlags.Instance|BindingFlags.NonPublic).GetValue(target); }
-    private static int Port() { var listener=new TcpListener(IPAddress.Loopback,0);listener.Start();try{return ((IPEndPoint)listener.LocalEndpoint).Port;}finally{listener.Stop();} }
+    private static int Port() { return FeiqLight.Tests.LoopbackPorts.Chat(); }
     [STAThread] public static int Main(string[] args)
     {
         string parent=Path.GetFullPath(args[0]),root=Path.Combine(parent,"identity-edge-"+Guid.NewGuid().ToString("N"));
@@ -28,9 +28,7 @@ internal static class IdentityEdgeTests
                     var upsert=typeof(LanService).GetMethod("Upsert",BindingFlags.Instance|BindingFlags.NonPublic);
                     Func<string,Peer> receive=device=>(Peer)upsert.Invoke(node,new object[]{new Packet {DeviceId=device,Login="old",Host="host",Body="设备",Extra="组",Command=Protocol.AnswerEntry|Protocol.Utf8},endpoint});
                     Peer peer=receive(id);Check(receive(null)==peer&&node.Peers.Count==1&&peer.Id==key&&peer.DeviceId==id&&peer.Note=="备注","旧报文覆盖身份/旧会话");
-                    ChatRecord record=node.SendMessage(peer,"兼容旧 ACK",null);
-                    byte[] ack=Protocol.Encode(9,"old","host",Protocol.ReceiveMessage|Protocol.Utf8,record.Packet.ToString(),null);raw.Send(ack,ack.Length,new IPEndPoint(IPAddress.Loopback,node.Port));
-                    for(int i=0;i<200&&record.State!="已送达";i++)Thread.Sleep(10);Check(record.State=="已送达","旧 ACK 未确认");
+                    try{node.SendMessage(peer,"无指纹联系人",null);throw new Exception("无指纹仍可发送");}catch(IOException error){Check(error.Message.Contains("升级至 0.8"),"无升级提示");}
                     var store=new LocalStore(root);
                     using(var window=new MainForm(node,store)) {
                         window.NetworkStarted();var search=(Control)Field(window,"search");var contacts=(ConversationList)Field(window,"contacts");
@@ -39,7 +37,7 @@ internal static class IdentityEdgeTests
                         typeof(MainForm).GetMethod("RefreshPeers",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(window,null);
                         Check(contacts.Items.Count==0,"地址改变未刷新搜索结果");
                     }
-                    Console.WriteLine("PASS: legacy identity + ACK compatibility; stable history key; endpoint search invalidation");
+                    Console.WriteLine("PASS: 历史会话主键保留、无指纹只能发现、地址搜索更新");
                 }
             }
             return 0;

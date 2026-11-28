@@ -89,19 +89,17 @@ public final class LanNetworkTest {
         assertNull("不应更改进程/系统默认路由",cm.getBoundNetworkForProcess());
     }
     @Test public void loopbackNodesNeverInvokePlatformBinding() throws Exception {
-        try(java.net.ServerSocket server=new java.net.ServerSocket(0,1,InetAddress.getLoopbackAddress())) {
-            int port=server.getLocalPort();server.close();
-            org.feiqlight.android.core.LanNode.Listener listener=new org.feiqlight.android.core.LanNode.Listener(){public void peersChanged(){}public void message(org.feiqlight.android.core.LanNode.Peer p,org.feiqlight.android.core.LanNode.Message m,boolean update){}public void error(String text){}};
-            try(org.feiqlight.android.core.LanNode node=new org.feiqlight.android.core.LanNode(port,true,"test","test","test","test",listener)) {
-                node.setSocketBinding(new org.feiqlight.android.core.LanNode.SocketBinding(){public void bind(DatagramSocket s){fail("回环测试碰到真实网络");}public void bind(Socket s){fail("回环测试碰到真实网络");}});node.start();node.refresh();
-            }
+        int port=TestPorts.chat();
+        org.feiqlight.android.core.LanNode.Listener listener=new org.feiqlight.android.core.LanNode.Listener(){public void peersChanged(){}public void message(org.feiqlight.android.core.LanNode.Peer p,org.feiqlight.android.core.LanNode.Message m,boolean update){}public void error(String text){}};
+        try(org.feiqlight.android.core.LanNode node=new org.feiqlight.android.core.LanNode(port,true,"test","test","test","test",listener)) {
+            node.setSocketBinding(new org.feiqlight.android.core.LanNode.SocketBinding(){public void bind(DatagramSocket s){fail("回环测试碰到真实网络");}public void bind(Socket s){fail("回环测试碰到真实网络");}});node.start();node.refresh();
         }
     }
     @Test public void ipv6VpnCallbacksKeepCurrentWifiTcpAndUdpListeners() throws Exception {
         ConnectivityManager cm=RuntimeEnvironment.getApplication().getSystemService(ConnectivityManager.class);shadowOf(cm).clearAllNetworks();
         // 注入回环 /32，执行正式绑定路径但不向宿主真实局域网广播。
         Network wifi=add(cm,906,NetworkCapabilities.TRANSPORT_WIFI,"127.0.0.1",32);LanNetwork route=new LanNetwork(cm,NO_LOCAL);
-        int port;try(ServerSocket free=new ServerSocket(0,1,InetAddress.getLoopbackAddress())){port=free.getLocalPort();}
+        int port=TestPorts.chat();
         org.feiqlight.android.core.LanNode.Listener listener=new org.feiqlight.android.core.LanNode.Listener() {
             public void peersChanged(){}public void message(org.feiqlight.android.core.LanNode.Peer peer,org.feiqlight.android.core.LanNode.Message message,boolean update){}public void error(String text){fail(text);}
         };

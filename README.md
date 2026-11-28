@@ -19,7 +19,7 @@
 - **系统集成与清理**：支持 Windows 拖拽/右键“发送到飞Q”与 Android 系统分享；安卓接收仅落盘单份正式文件，双端「设置 → 文件」可清理已登记的接收文件。
 - **共享文件夹**：双端均可共享最多 20 个本地目录，凭 6 位连接码只读浏览；图片、音视频、PDF 与文本可在浏览器新页直接打开，支持断点下载；增减目录保持连接并自动刷新。
 - **远程控制**：凭 6 位连接码和本机确认控制 Windows 桌面或 Android 手机，支持增量画面、缩放、多屏切换、断线恢复与信任设备；Windows 支持组合键，双端支持手动推送剪贴板文字，读取电脑剪贴板需另行开启权限。
-- **安全与网络**：新版默认 TLS 1.2 并核对配对码，适配热点、USB 共享与单向 VPN；默认兼容旧版 IPMSG 明文，可在设置关闭。
+- **安全与网络**：聊天和文件传输仅使用 TLS 1.2，首次连接核对配对码。旧设备仍可被发现，但必须升级后才能通信。支持热点、USB 共享与单向 VPN。
 - **个性外观**：双端统一浅色/深色（可跟随系统）、6 套配色、8 组预设、聊天背景、字号与 24 枚内置/本地头像。
 
 ## 使用
@@ -35,5 +35,7 @@
 ## 开发
 
 Windows 使用 .NET Framework 4.8，Android 使用 JDK 17 与 Android SDK 36；PowerShell 7 执行 `./build.ps1 -Test`、`./build-android.ps1 -Test`，安全与互通回归见 `./tests/secure-upgrade.ps1`、`./tests/android-interop.ps1 -Secure -LargeFiles`。
+
+本机验证：`pwsh -NoProfile -File tools/verify.ps1 -Mode Fast` 检查协议和 TLS 互通；`Full` 增加隔离构建、单测、lint、安全契约及定向回归，`Release` 另查候选包摘要与访客浏览器。三种模式均不发布；报告写入 `build/verify`，候选包仅在 `build/tmp`。退出码 0/1/2 分别表示通过、失败、环境阻塞。
 
 本项目源码以 [MIT 许可证](LICENSE) 发布。表情与头像素材来自 [Twemoji](https://github.com/jdecked/twemoji)（[CC BY 4.0](docs/Twemoji-LICENSE-GRAPHICS.txt)）；二维码使用内置 [Project Nayuki QR Code generator](https://www.nayuki.io/page/qr-code-generator-library)（MIT）。

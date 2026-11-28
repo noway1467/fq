@@ -663,7 +663,6 @@ namespace FeiqLight
             ToggleSwitch autoDrop=new ToggleSwitch {Text="拖入文件自动发送",AccessibleName="拖入文件自动发送",Description="仅发本次拖入文件，不夹带草稿或已排队附件",Checked=current.AutoSendDroppedFiles,BackColor=Theme.Surface};autoDrop.SetBounds(26,520,458,52);body.Controls.Add(autoDrop);
             TextBox batchLimit=Input("单批文件上限（100–50000）",current.BatchFileLimit.ToString(),521,5);
             TextBox pendingLimit=Input("待处理文件上限（100–50000）",current.PendingFileLimit.ToString(),580,5);
-            ToggleSwitch legacy=new ToggleSwitch {Text="允许旧版明文协议",AccessibleName="允许旧版明文协议",Description="兼容旧设备明文；已配对设备与共享远控始终加密",Checked=current.AllowLegacyProtocol,BackColor=Theme.Surface};legacy.SetBounds(26,280,458,52);body.Controls.Add(legacy);
             TextBox folder = Input("文件保存文件夹", current.ReceiveFolder ?? AppSettings.DefaultReceiveFolder, 404, 240); folder.Parent.Width = 350;
             Button browse = Theme.Button("选择文件夹", delegate
             {
@@ -772,7 +771,7 @@ namespace FeiqLight
                 try
                 {
                     string path = ReceiveStorage.Folder(folder.Text); ReceiveStorage.ValidateWritable(path);
-                    Value = new AppSettings { Port = selectedPort, Avatar = avatarValue, Nickname = Protocol.Field(name.Text.Trim()), Group = String.IsNullOrWhiteSpace(group.Text) ? "我的局域网" : Protocol.Field(group.Text.Trim()), Signature = current.Signature, CloseToTray = close.Checked, StartWithWindows = startup.Checked, Notifications = notifications.Checked,DiagnosticsEnabled = diagnostics.Checked, AutoSendDroppedFiles=autoDrop.Checked, AllowLegacyProtocol=legacy.Checked, AutoReceiveFiles = auto.Checked, ReceiveFolder = path, ChatFontSize=messageSize,ChatBackground=backgroundMode,BackgroundImage=backgroundPath,DarkMode=dark.Checked, FollowSystemTheme=follow.Checked, Accent=accentKeys[accentIndex] };
+                    Value = new AppSettings { Port = selectedPort, Avatar = avatarValue, Nickname = Protocol.Field(name.Text.Trim()), Group = String.IsNullOrWhiteSpace(group.Text) ? "我的局域网" : Protocol.Field(group.Text.Trim()), Signature = current.Signature, CloseToTray = close.Checked, StartWithWindows = startup.Checked, Notifications = notifications.Checked,DiagnosticsEnabled = diagnostics.Checked, AutoSendDroppedFiles=autoDrop.Checked, AutoReceiveFiles = auto.Checked, ReceiveFolder = path, ChatFontSize=messageSize,ChatBackground=backgroundMode,BackgroundImage=backgroundPath,DarkMode=dark.Checked, FollowSystemTheme=follow.Checked, Accent=accentKeys[accentIndex] };
                     DialogResult = DialogResult.OK;
                     Value.BatchFileLimit=selectedBatch;Value.PendingFileLimit=selectedPending;
                 }

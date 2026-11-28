@@ -26,6 +26,7 @@ import static org.robolectric.Shadows.shadowOf;
 
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk=35,qualifiers="w393dp-h852dp-xhdpi")
+@org.robolectric.annotation.ConscryptMode(org.robolectric.annotation.ConscryptMode.Mode.OFF)
 public final class ReliabilityTest {
     @Test public void backgroundConnectionRestartsAndManualDisconnectReleasesLocks()throws Exception {
         ServiceController<ChatService> controller=Robolectric.buildService(ChatService.class).create();ChatService service=controller.get();
@@ -62,13 +63,13 @@ public final class ReliabilityTest {
     }
     @Test public void delayedDiscoveryQueueDoesNotDelayRealTextSend() throws Exception {
         ServiceController<ChatService> controller=Robolectric.buildService(ChatService.class).create();ChatService service=controller.get();CountDownLatch release=new CountDownLatch(1),entered=new CountDownLatch(1);
-        try(DatagramSocket target=new DatagramSocket(0,InetAddress.getLoopbackAddress());LanNode node=node()) {
-            settle(service);set(service,"node",node);LanNode.Peer peer=peer(target.getLocalPort());
+        try(TlsInbox target=new TlsInbox();LanNode node=node()) {
+            settle(service);set(service,"node",node);LanNode.Peer peer=target.peer;
             block((ExecutorService)field(service,"discovery"),entered,release);assertTrue(entered.await(3,TimeUnit.SECONDS));
             for(int i=0;i<200;i++)service.refresh();
             List<Boolean> result=new ArrayList<>();new DraftStore(service).save(peer.id(),"不等发现扫描");service.send(peer,"不等发现扫描",result::add);
             io(service).submit(()->{}).get(2,TimeUnit.SECONDS);shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(100));
-            assertEquals(Collections.singletonList(true),result);assertEquals("不等发现扫描",forwardedPacket(target).body);assertEquals(1,release.getCount());
+            assertEquals(Collections.singletonList(true),result);assertEquals("不等发现扫描",target.next().text);assertEquals(1,release.getCount());
         } finally {release.countDown();controller.destroy();}
     }
     @Test public void stagingReportsActualBytesBeforeSendingAndKeepsSpaceChecks() throws Exception {
@@ -141,7 +142,7 @@ public final class ReliabilityTest {
         throw new IOException("没有空闲的 TCP/UDP 测试端口");
     }
     private static LanNode node()throws Exception {
-        LanNode n=new LanNode(freePort(),true,"android-regression","host","测试","测试",new LanNode.Listener() { public void peersChanged(){} public void message(LanNode.Peer p,LanNode.Message m,boolean update){} public void error(String text){} }); n.start(); return n;
+        LanNode n=new LanNode(freePort(),true,"android-regression","host","测试","测试",new LanNode.Listener() { public void peersChanged(){} public void message(LanNode.Peer p,LanNode.Message m,boolean update){} public void error(String text){} });TlsFilePeer.enable(n);n.start();return n;
     }
     private static void block(ExecutorService io,CountDownLatch blocked,CountDownLatch release) {
         io.execute(()->{ blocked.countDown(); try { if(!release.await(20,TimeUnit.SECONDS)) throw new AssertionError("队列未释放"); } catch(InterruptedException e) { Thread.currentThread().interrupt(); } });
@@ -317,8 +318,8 @@ public final class ReliabilityTest {
     }
     private void rotateWhileSending(boolean editNext)throws Exception {
         ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create(); ChatService s=sc.get(); ActivityController<MainActivity> ac=null; CountDownLatch release=new CountDownLatch(1);
-        try(DatagramSocket target=new DatagramSocket(0,InetAddress.getLoopbackAddress()); LanNode n=node()) {
-            settle(s); set(s,"node",n); LanNode.Peer p=peer(target.getLocalPort()); ChatStore store=store(s);
+        try(TlsInbox target=new TlsInbox(); LanNode n=node()) {
+            settle(s); set(s,"node",n); LanNode.Peer p=target.peer; ChatStore store=store(s);
             io(s).submit(()->store.message(p,message(),false,true)).get(5,TimeUnit.SECONDS); s.active(p.id()); settle(s);
             shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(s,ChatService.class),s.onBind(new Intent()));
             ac=Robolectric.buildActivity(MainActivity.class).create().start().resume().visible(); MainActivity old=ac.get(); settle(s); open(old,p.id()); settle(s);
@@ -347,36 +348,31 @@ public final class ReliabilityTest {
         try { settle(s); LanNode.Peer p=peer(32425); DraftStore drafts=new DraftStore(s); drafts.save(p.id(),"未连接时保留"); List<Boolean> result=new ArrayList<>(); s.send(p,"未连接时保留",result::add); settle(s); assertEquals(Collections.singletonList(false),result); assertEquals("未连接时保留",drafts.read(p.id())); }
         finally { sc.destroy(); }
     }
-    private static Protocol.Packet forwardedPacket(DatagramSocket socket)throws Exception {
-        socket.setSoTimeout(5000);
-        for(int i=0;i<10;i++){byte[] data=new byte[65536];DatagramPacket packet=new DatagramPacket(data,data.length);socket.receive(packet);Protocol.Packet parsed=Protocol.parse(Arrays.copyOf(data,packet.getLength()));if(parsed!=null&&parsed.mode()==Protocol.MESSAGE)return parsed;}
-        throw new AssertionError("没有收到转发消息");
-    }
     @Test public void forwardTextUsesNewPacketAndPreservesDraft()throws Exception {
         ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService s=sc.get();
-        try(DatagramSocket socket=new DatagramSocket(0,InetAddress.getLoopbackAddress());LanNode n=node()){
-            settle(s);set(s,"node",n);LanNode.Peer target=peer(socket.getLocalPort());DraftStore drafts=new DraftStore(s);drafts.save(target.id(),"不能清空的草稿");
+        try(TlsInbox remote=new TlsInbox();LanNode n=node()){
+            settle(s);set(s,"node",n);LanNode.Peer target=remote.peer;DraftStore drafts=new DraftStore(s);drafts.save(target.id(),"不能清空的草稿");
             LanNode.Message original=message();original.text="转发中文 😊\n第二行";List<Boolean> result=new ArrayList<>();
-            s.forward(peer(32425),original,target,result::add);settle(s);Protocol.Packet packet=forwardedPacket(socket);
-            assertEquals(original.text,packet.body);assertNotEquals(original.number,packet.number);assertEquals(Collections.singletonList(true),result);assertEquals("不能清空的草稿",drafts.read(target.id()));assertEquals("已收到",original.state);
+            s.forward(peer(32425),original,target,result::add);settle(s);LanNode.Message packet=remote.next();
+            assertEquals(original.text,packet.text);assertNotEquals(original.number,packet.number);assertEquals(Collections.singletonList(true),result);assertEquals("不能清空的草稿",drafts.read(target.id()));assertEquals("已收到",original.state);
         }finally{sc.destroy();}
     }
     @Test public void forwardReceivedAttachmentPreservesNameBytesAndRejectsMissing()throws Exception {
         ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService s=sc.get();
-        try(DatagramSocket socket=new DatagramSocket(0,InetAddress.getLoopbackAddress());LanNode n=node()){
-            settle(s);set(s,"node",n);LanNode.Peer source=peer(32425),target=peer(socket.getLocalPort());LanNode.Message original=message();
+        try(TlsInbox remote=new TlsInbox();LanNode n=node()){
+            settle(s);set(s,"node",n);LanNode.Peer source=peer(32425),target=remote.peer;LanNode.Message original=message();
             byte[] content="转发文件内容 😊".getBytes(java.nio.charset.StandardCharsets.UTF_8);Protocol.Attachment file=new Protocol.Attachment(0,"原文件名.txt",content.length,0);original.files.add(file);
             File local=s.receivedFile(source,original.number,file);assertTrue(local.getParentFile().isDirectory()||local.getParentFile().mkdirs());Files.write(local.toPath(),content);
             List<Boolean> result=new ArrayList<>();s.forward(source,original,target,result::add);transferDone(s);assertEquals(Collections.singletonList(true),result);
-            Protocol.Packet packet=forwardedPacket(socket);Protocol.Attachment offered=Protocol.parseFiles(packet.extra).get(0);assertEquals("原文件名.txt",offered.name);assertEquals(original.text,packet.body);
-            File downloaded=new File(s.getCacheDir(),"forward-download.txt");n.receiveFile(peer((Integer)field(n,"port")),packet.number,offered,downloaded,new LanNode.Transfer(),percent->{});assertArrayEquals(content,Files.readAllBytes(downloaded.toPath()));
+            LanNode.Message packet=remote.next();Protocol.Attachment offered=packet.files.get(0);assertEquals("原文件名.txt",offered.name);assertEquals(original.text,packet.text);
+            File downloaded=new File(s.getCacheDir(),"forward-download.txt");remote.node.receiveFile(remote.sender,packet.number,offered,downloaded,new LanNode.Transfer(),percent->{});assertArrayEquals(content,Files.readAllBytes(downloaded.toPath()));
             Files.delete(local.toPath());result.clear();s.forward(source,original,target,result::add);transferDone(s);assertEquals(Collections.singletonList(false),result);
         }finally{sc.destroy();}
     }
     @Test public void forwardSameNameReceivedAndOutgoingAttachmentsKeepsNamesBytesAndSeparateOffers()throws Exception {
         ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService s=sc.get();
-        try(DatagramSocket socket=new DatagramSocket(0,InetAddress.getLoopbackAddress());LanNode n=node()) {
-            settle(s);set(s,"node",n);LanNode.Peer source=peer(32425),target=peer(socket.getLocalPort());
+        try(TlsInbox remote=new TlsInbox();LanNode n=node()) {
+            settle(s);set(s,"node",n);LanNode.Peer source=peer(32425),target=remote.peer;
             for(boolean outgoing:new boolean[]{false,true}) {
                 LanNode.Message original=message();original.outgoing=outgoing;original.number=outgoing?44:42;
                 List<byte[]> contents=Arrays.asList(new byte[]{1,2,3},new byte[]{4,5});
@@ -386,10 +382,10 @@ public final class ReliabilityTest {
                 }
                 DraftStore drafts=new DraftStore(s);drafts.save(target.id(),"保留目标草稿");List<Boolean> result=new ArrayList<>();
                 s.forward(source,original,target,result::add);transferDone(s);assertEquals(Collections.singletonList(true),result);
-                Protocol.Packet packet=forwardedPacket(socket);List<Protocol.Attachment> files=Protocol.parseFiles(packet.extra);assertEquals(2,files.size());assertNotEquals(files.get(0).id,files.get(1).id);assertNotEquals(original.number,packet.number);
+                LanNode.Message packet=remote.next();List<Protocol.Attachment> files=packet.files;assertEquals(2,files.size());assertNotEquals(files.get(0).id,files.get(1).id);assertNotEquals(original.number,packet.number);
                 for(int i=0;i<2;i++) {
                     assertEquals("same.txt",files.get(i).name);File download=new File(s.getCacheDir(),"forward-"+outgoing+"-"+i);
-                    n.receiveFile(peer((Integer)field(n,"port")),packet.number,files.get(i),download,new LanNode.Transfer(),percent->{});
+                    remote.node.receiveFile(remote.sender,packet.number,files.get(i),download,new LanNode.Transfer(),percent->{});
                     assertArrayEquals(contents.get(i),Files.readAllBytes(download.toPath()));assertArrayEquals(contents.get(i),Files.readAllBytes(new File(original.localPaths.get(i)).toPath()));
                 }
                 assertEquals("保留目标草稿",drafts.read(target.id()));
@@ -398,33 +394,33 @@ public final class ReliabilityTest {
     }
     @Test public void failedMultiAttachmentForwardRemovesOnlyItsStagedCopies()throws Exception {
         ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService s=sc.get();
-        try(DatagramSocket socket=new DatagramSocket(0,InetAddress.getLoopbackAddress());LanNode n=node()) {
+        try(TlsInbox remote=new TlsInbox();LanNode n=node()) {
             settle(s);set(s,"node",n);File keep=cache(s,3);LanNode.Peer source=peer(32425);LanNode.Message original=message();
             original.files.add(new Protocol.Attachment(0,"same.txt",1,1));original.files.add(new Protocol.Attachment(1,"same.txt",1,1));
             File local=s.receivedFile(source,original.number,original.files.get(0));assertTrue(local.getParentFile().isDirectory()||local.getParentFile().mkdirs());Files.write(local.toPath(),new byte[]{7});
-            List<Boolean> result=new ArrayList<>();s.forward(source,original,peer(socket.getLocalPort()),result::add);transferDone(s);
+            List<Boolean> result=new ArrayList<>();s.forward(source,original,remote.peer,result::add);transferDone(s);
             assertEquals(Collections.singletonList(false),result);assertEquals(1,new File(s.getFilesDir(),"offers").list().length);assertTrue(keep.isFile());assertArrayEquals(new byte[]{7},Files.readAllBytes(local.toPath()));assertTrue(((Map<?,?>)field(n,"offers")).isEmpty());
         }finally {sc.destroy();}
     }
     @Test public void cancellingForwardDuringAuthorizedReadCleansItsFolder()throws Exception {
         ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService s=sc.get();CountDownLatch release=new CountDownLatch(1);
-        try(DatagramSocket socket=new DatagramSocket(0,InetAddress.getLoopbackAddress());LanNode n=node()) {
+        try(TlsInbox remote=new TlsInbox();LanNode n=node()) {
             settle(s);set(s,"node",n);FileFeaturesTest.Docs docs=FileFeaturesTest.provider(s);ReceivedStorage storage=new ReceivedStorage(s);storage.choose(Uri.parse("content://feiq.documents/tree/root"),Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
             LanNode.Peer source=peer(32425);LanNode.Message original=message();Protocol.Attachment a=new Protocol.Attachment(0,"saved.txt",1,1);original.files.add(a);
             File local=s.receivedFile(source,original.number,a);Files.write(local.toPath(),new byte[]{1});Uri saved=storage.save(local,a.name,new LanNode.Transfer());File document=docs.files.get(android.provider.DocumentsContract.getDocumentId(saved));assertFalse(local.exists());docs.openedGate=new CountDownLatch(1);docs.releaseGate=release;
-            List<Boolean> result=new ArrayList<>();s.forward(source,original,peer(socket.getLocalPort()),result::add);assertTrue(docs.openedGate.await(5,TimeUnit.SECONDS));
+            List<Boolean> result=new ArrayList<>();s.forward(source,original,remote.peer,result::add);assertTrue(docs.openedGate.await(5,TimeUnit.SECONDS));
             s.cancelTransfer();release.countDown();transferDone(s);assertEquals(Collections.singletonList(false),result);
             assertEquals(0,new File(s.getFilesDir(),"offers").list().length);assertTrue(document.isFile());assertEquals(saved,storage.existingSaved(local));assertTrue(((Map<?,?>)field(n,"offers")).isEmpty());
         }finally {release.countDown();sc.destroy();}
     }
     @Test public void outgoingAttachmentPathsSurviveStoreAndAckCopy()throws Exception {
         ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService s=sc.get();
-        try(DatagramSocket socket=new DatagramSocket(0,InetAddress.getLoopbackAddress());LanNode n=node()){
-            settle(s);set(s,"node",n);LanNode.Peer target=peer(socket.getLocalPort());File local=new File(s.getCacheDir(),"发送原文件.txt");Files.write(local.toPath(),new byte[]{1,2,3});
-            LanNode.Message sent=n.sendMessage(target,"附件说明",Collections.singletonList(local));forwardedPacket(socket);
+        try(TlsInbox remote=new TlsInbox();LanNode n=node()){
+            settle(s);set(s,"node",n);LanNode.Peer target=remote.peer;File local=new File(s.getCacheDir(),"发送原文件.txt");Files.write(local.toPath(),new byte[]{1,2,3});
+            LanNode.Message sent=n.sendMessage(target,"附件说明",Collections.singletonList(local));remote.next();
             io(s).submit(()->store(s).message(target,sent,false,true)).get(5,TimeUnit.SECONDS);
             LanNode.Message restored=io(s).submit(()->store(s).history(target.id()).get(0)).get(5,TimeUnit.SECONDS);assertEquals(Collections.singletonList(local.getCanonicalPath()),restored.localPaths);assertEquals(restored.localPaths,restored.copy().localPaths);
-            List<Boolean> result=new ArrayList<>();s.forward(target,restored,target,result::add);transferDone(s);assertEquals(Collections.singletonList(true),result);assertEquals("发送原文件.txt",Protocol.parseFiles(forwardedPacket(socket).extra).get(0).name);
+            List<Boolean> result=new ArrayList<>();s.forward(target,restored,target,result::add);transferDone(s);assertEquals(Collections.singletonList(true),result);assertEquals("发送原文件.txt",remote.next().files.get(0).name);
         }finally{sc.destroy();}
     }
     public static final class TestProvider extends ContentProvider {
@@ -452,11 +448,22 @@ public final class ReliabilityTest {
     }
     @Test public void knownAndUnknownSmallFilesFitAbove256MiBCache()throws Exception {
         ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create(); ChatService s=sc.get(); List<String> errors=new ArrayList<>();
-        try(DatagramSocket target=new DatagramSocket(0,InetAddress.getLoopbackAddress()); LanNode n=node()) {
+        try(TlsInbox target=new TlsInbox(); LanNode n=node()) {
             settle(s); set(s,"node",n); s.observe(new ChatService.Observer(){public void changed(){}public void error(String e){errors.add(e);}});
-            cache(s,257L*1024*1024); TestProvider p=provider(s,1L,1); LanNode.Peer peer=peer(target.getLocalPort());
+            cache(s,257L*1024*1024); TestProvider p=provider(s,1L,1); LanNode.Peer peer=target.peer;
+            set(n,"heartbeatRetry",TimeUnit.MILLISECONDS.toNanos(200));set(target.node,"heartbeatRetry",TimeUnit.MILLISECONDS.toNanos(200));
             for(Long declared:new Long[]{1L,null}) { p.declared=declared; s.sendFile(peer,Uri.parse("content://feiq.test/file")); transferDone(s); }
             assertTrue(errors.toString(),errors.isEmpty()); assertEquals(2,p.opened); assertEquals(2,((Map<?,?>)field(n,"offers")).size());
+            assertEquals(1,target.next().files.size());assertEquals(1,target.next().files.size());
+            Object gate=field(n,"gate");Map<?,?> pending=(Map<?,?>)field(n,"pending");Set<?> connections=(Set<?>)field(n,"connections");
+            long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(8);
+            while(true){
+                synchronized(gate){
+                    if(pending.isEmpty()&&connections.isEmpty())break;
+                    if(System.nanoTime()>=deadline)fail("TLS 尚未空闲：pending="+pending.size()+"，connections="+connections.size());
+                }
+                java.util.concurrent.locks.LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(10));
+            }
             List<ChatService.Usage> cleared=new ArrayList<>(); s.clearOffers(cleared::add); transferDone(s); assertTrue(errors.toString(),errors.isEmpty()); assertEquals(0,new File(s.getFilesDir(),"offers").list().length); assertTrue(p.source.isFile()); assertTrue(((Map<?,?>)field(n,"offers")).isEmpty());
             assertEquals(1,cleared.size()); assertEquals(3,cleared.get(0).files); assertTrue(cleared.get(0).bytes>=257L*1024*1024); assertEquals("",s.transferStatus());
             s.sendFile(peer,Uri.parse("content://feiq.test/file")); transferDone(s); assertEquals(1,((Map<?,?>)field(n,"offers")).size());
@@ -464,22 +471,22 @@ public final class ReliabilityTest {
     }
     @Test public void old512MiBCacheDoesNotRejectUnknownOrMisreportedFiles()throws Exception {
         ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create(); ChatService s=sc.get(); List<String> errors=new ArrayList<>();
-        try(DatagramSocket target=new DatagramSocket(0,InetAddress.getLoopbackAddress()); LanNode n=node()) {
+        try(TlsInbox target=new TlsInbox(); LanNode n=node()) {
             settle(s); set(s,"node",n); s.observe(new ChatService.Observer(){public void changed(){}public void error(String e){errors.add(e);}});
             cache(s,512L*1024*1024-1); TestProvider p=provider(s,null,2);
-            for(Long declared:new Long[]{null,1L,2L}) { errors.clear(); p.declared=declared; s.sendFile(peer(target.getLocalPort()),Uri.parse("content://feiq.test/file")); transferDone(s);
+            for(Long declared:new Long[]{null,1L,2L}) { errors.clear(); p.declared=declared; s.sendFile(target.peer,Uri.parse("content://feiq.test/file")); transferDone(s);
                 assertTrue(errors.toString(),errors.isEmpty()); }
             assertEquals(3,p.opened); assertEquals(3,((Map<?,?>)field(n,"offers")).size());
-            p.declared=Long.MAX_VALUE; s.sendFile(peer(target.getLocalPort()),Uri.parse("content://feiq.test/file")); transferDone(s);
+            p.declared=Long.MAX_VALUE; s.sendFile(target.peer,Uri.parse("content://feiq.test/file")); transferDone(s);
             assertEquals("超出实际可用空间时不应打开",3,p.opened); assertTrue(errors.toString(),errors.stream().anyMatch(e->e.contains("空间不足")));
         } finally { sc.destroy(); }
     }
     @Test public void exactLimitAndZeroByteAtFullCacheAreAllowed()throws Exception {
         ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create(); ChatService s=sc.get(); List<String> errors=new ArrayList<>();
-        try(DatagramSocket target=new DatagramSocket(0,InetAddress.getLoopbackAddress()); LanNode n=node()) {
+        try(TlsInbox target=new TlsInbox(); LanNode n=node()) {
             settle(s); set(s,"node",n); s.observe(new ChatService.Observer(){public void changed(){}public void error(String e){errors.add(e);}});
-            cache(s,512L*1024*1024-2); provider(s,2L,2); s.sendFile(peer(target.getLocalPort()),Uri.parse("content://feiq.test/file")); transferDone(s);
-            assertTrue(errors.toString(),errors.isEmpty()); provider(s,0L,0); s.sendFile(peer(target.getLocalPort()),Uri.parse("content://feiq.test/file")); transferDone(s);
+            cache(s,512L*1024*1024-2); provider(s,2L,2); s.sendFile(target.peer,Uri.parse("content://feiq.test/file")); transferDone(s);
+            assertTrue(errors.toString(),errors.isEmpty()); provider(s,0L,0); s.sendFile(target.peer,Uri.parse("content://feiq.test/file")); transferDone(s);
             assertTrue(errors.toString(),errors.isEmpty()); assertEquals(2,((Map<?,?>)field(n,"offers")).size());
         } finally { sc.destroy(); }
     }
@@ -499,8 +506,8 @@ public final class ReliabilityTest {
     }
     @Test public void keyboardImageCopyKeepsBytesAndReleasesOnSuccessFailureAndBusy()throws Exception {
         ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService s=sc.get();java.util.concurrent.atomic.AtomicInteger released=new java.util.concurrent.atomic.AtomicInteger();
-        try(DatagramSocket target=new DatagramSocket(0,InetAddress.getLoopbackAddress());LanNode n=node()) {
-            settle(s);set(s,"node",n);LanNode.Peer p=peer(target.getLocalPort());TestProvider provider=provider(s,null,73);
+        try(TlsInbox target=new TlsInbox();LanNode n=node()) {
+            settle(s);set(s,"node",n);LanNode.Peer p=target.peer;TestProvider provider=provider(s,null,73);
             byte[] bytes=Base64.getDecoder().decode("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7");Files.write(provider.source.toPath(),bytes);
             assertTrue(s.sendKeyboardImage(p,Uri.parse("content://feiq.test/file"),"image/gif",released::incrementAndGet));transferDone(s);assertEquals(1,released.get());
             File[] folders=new File(s.getFilesDir(),"offers").listFiles();assertEquals(1,folders.length);File[] copies=folders[0].listFiles();assertEquals(1,copies.length);assertTrue(copies[0].getName().endsWith(".gif"));assertArrayEquals(bytes,Files.readAllBytes(copies[0].toPath()));
@@ -516,9 +523,9 @@ public final class ReliabilityTest {
     @Test public void keyboardGrantReleasedWhenDestroyedBeforeCopyStarts()throws Exception {
         ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService s=sc.get();CountDownLatch release=new CountDownLatch(1),blocked=new CountDownLatch(1);java.util.concurrent.atomic.AtomicInteger released=new java.util.concurrent.atomic.AtomicInteger();
         boolean destroyed=false;
-        try(DatagramSocket target=new DatagramSocket(0,InetAddress.getLoopbackAddress());LanNode n=node()) {
+        try(TlsInbox target=new TlsInbox();LanNode n=node()) {
             settle(s);set(s,"node",n);provider(s,null,1);block((ExecutorService)field(s,"transferWorker"),blocked,release);assertTrue(blocked.await(5,TimeUnit.SECONDS));
-            assertTrue(s.sendKeyboardImage(peer(target.getLocalPort()),Uri.parse("content://feiq.test/file"),"image/png",released::incrementAndGet));assertEquals(0,released.get());
+            assertTrue(s.sendKeyboardImage(target.peer,Uri.parse("content://feiq.test/file"),"image/png",released::incrementAndGet));assertEquals(0,released.get());
             sc.destroy();destroyed=true;assertEquals(1,released.get());
         } finally {release.countDown();if(!destroyed)sc.destroy();}
     }
@@ -555,8 +562,8 @@ public final class ReliabilityTest {
     }
     @Test public void duplicateRejectedInvitationDoesNotReturnToReceiveQueue()throws Exception {
         ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService s=sc.get();
-        try(DatagramSocket target=new DatagramSocket(0,InetAddress.getLoopbackAddress());LanNode n=node()) {
-            settle(s);set(s,"node",n);s.getSharedPreferences("settings",0).edit().putBoolean(ReceivedStorage.AUTO,false).commit();LanNode.Peer p=peer(target.getLocalPort());
+        try(TlsInbox target=new TlsInbox();LanNode n=node()) {
+            settle(s);set(s,"node",n);s.getSharedPreferences("settings",0).edit().putBoolean(ReceivedStorage.AUTO,false).commit();LanNode.Peer p=target.peer;
             LanNode.Message invitation=message();invitation.files=Collections.singletonList(new org.feiqlight.android.core.Protocol.Attachment(0,"rejected.bin",12,1));
             s.incoming(p,invitation,false);settle(s);assertEquals(1,((Map<?,?>)field(s,"waiting")).size());
             s.reject(p,invitation.number);settle(s);assertTrue(((Map<?,?>)field(s,"waiting")).isEmpty());
@@ -575,9 +582,9 @@ public final class ReliabilityTest {
     }
     @Test public void fileJobsQueueAndRunAfterActiveCopy()throws Exception {
         ServiceController<ChatService> controller=Robolectric.buildService(ChatService.class).create();ChatService service=controller.get();CountDownLatch release=new CountDownLatch(1);
-        try(DatagramSocket destination=new DatagramSocket(0,InetAddress.getLoopbackAddress());LanNode node=node()) {
+        try(TlsInbox destination=new TlsInbox();LanNode node=node()) {
             settle(service);set(service,"node",node);TestProvider provider=provider(service,8L,8);provider.openedGate=new CountDownLatch(1);provider.releaseGate=release;
-            LanNode.Peer peer=peer(destination.getLocalPort());Uri uri=Uri.parse("content://feiq.test/file");service.sendFile(peer,uri);assertTrue(provider.openedGate.await(3,TimeUnit.SECONDS));
+            LanNode.Peer peer=destination.peer;Uri uri=Uri.parse("content://feiq.test/file");service.sendFile(peer,uri);assertTrue(provider.openedGate.await(3,TimeUnit.SECONDS));
             service.sendFile(peer,uri);assertEquals(1,service.queuedTransfers());release.countDown();
             long until=System.nanoTime()+TimeUnit.SECONDS.toNanos(8);
             while((service.busy()||service.queuedTransfers()>0)&&System.nanoTime()<until){shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(100));Thread.sleep(10);}

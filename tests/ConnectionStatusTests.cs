@@ -31,9 +31,7 @@ namespace FeiqLight.Tests
         }
         private static int FreePort()
         {
-            TcpListener tcp = new TcpListener(IPAddress.Loopback, 0); tcp.Start();
-            try { int port = ((IPEndPoint)tcp.LocalEndpoint).Port; using (UdpClient udp = new UdpClient(new IPEndPoint(IPAddress.Loopback, port))) return port; }
-            finally { tcp.Stop(); }
+            return LoopbackPorts.Chat();
         }
         private static LanService Node(string folder, string name)
         {

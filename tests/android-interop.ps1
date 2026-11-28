@@ -17,23 +17,23 @@ $core = @(Get-ChildItem -LiteralPath "$root\android\app\src\main\java\org\feiqli
 & $javac -encoding UTF-8 -d $out @core "$PSScriptRoot\AndroidInterop.java"
 if ($LASTEXITCODE -ne 0) { throw '安卓通信核心编译失败' }
 $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
-& $csc /nologo /utf8output /target:exe /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Web.Extensions.dll "/out:$out\InteropHost.exe" "$root\src\Protocol.cs" "$root\src\Models.cs" "$root\src\MessageText.cs" "$root\src\RequestInput.cs" "$root\src\LanService.cs" "$root\src\SecureIdentity.cs" "$root\src\LanNetwork.cs" "$root\src\SendBatch.cs" "$PSScriptRoot\AndroidInterop.cs"
+$service = @(Get-ChildItem -LiteralPath "$root/src" -Filter 'LanService*.cs' -File | ForEach-Object FullName)
+& $csc /nologo /utf8output /target:exe /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Web.Extensions.dll "/out:$out\InteropHost.exe" "$root\src\Protocol.cs" "$root\src\Models.cs" "$root\src\MessageText.cs" "$root\src\RequestInput.cs" @service "$root\src\SecureIdentity.cs" "$root\src\LanNetwork.cs" "$root\src\SendBatch.cs" "$PSScriptRoot\AndroidInterop.cs"
 if ($LASTEXITCODE -ne 0) { throw '桌面互通测试入口编译失败' }
 $temp = Join-Path ([IO.Path]::GetTempPath()) ('FeiqLight-interop-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $temp | Out-Null
-function FreePort { $socket = [Net.Sockets.UdpClient]::new([Net.IPEndPoint]::new([Net.IPAddress]::Loopback,0)); try { $socket.Client.LocalEndPoint.Port } finally { $socket.Dispose() } }
-$a=FreePort; do { $b=FreePort } while ($a -eq $b)
+Add-Type -Path "$PSScriptRoot/LoopbackPorts.cs"
+$a=[FeiqLight.Tests.LoopbackPorts]::Chat(); do { $b=[FeiqLight.Tests.LoopbackPorts]::Chat() } while ($a -eq $b)
 $process=$null
 $size = if ($LargeFiles) { 273L*1024*1024+7 } else { 3L*1024*1024+7 }
 try {
-    $securityMode=if($Secure){'secure'}else{'legacy'}
-    $process=Start-Process -FilePath "$out\InteropHost.exe" -ArgumentList @($a,('"'+$temp+'"'),$size,$securityMode) -PassThru -WindowStyle Hidden -RedirectStandardOutput "$out\windows.log" -RedirectStandardError "$out\windows-errors.log"
+    $process=Start-Process -FilePath "$out\InteropHost.exe" -ArgumentList @($a,('"'+$temp+'"'),$size) -PassThru -WindowStyle Hidden -RedirectStandardOutput "$out\windows.log" -RedirectStandardError "$out\windows-errors.log"
     # PowerShell 5.1 必须在进程退出前保留句柄，否则已退出进程的 ExitCode 可能为 null，误判真实互通失败。
     $null=$process.Handle
     $ready=$false
     for($i=0;$i -lt 100;$i++) { if ((Test-Path -LiteralPath "$out\windows.log") -and ((Get-Content -LiteralPath "$out\windows.log" -Raw) -match 'READY')) { $ready=$true; break }; if($process.HasExited) { break }; Start-Sleep -Milliseconds 50 }
     if(!$ready) { throw '桌面测试节点未就绪' }
-    & $java '-Dfile.encoding=UTF-8' -cp $out AndroidInterop $b $a $temp $size $securityMode
+    & $java '-Dfile.encoding=UTF-8' -cp $out AndroidInterop $b $a $temp $size
     if ($LASTEXITCODE -ne 0) { throw '安卓与 Windows 互通失败' }
     if(!$process.WaitForExit(10000)) { throw '桌面测试节点未退出' }
     Get-Content -LiteralPath "$out\windows.log"

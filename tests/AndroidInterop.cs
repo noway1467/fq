@@ -1,6 +1,8 @@
 using System;
 using System.IO;
 using System.Linq;
+using System.Net;
+using System.Net.Sockets;
 using System.Threading;
 using System.Text;
 using FeiqLight;
@@ -36,7 +38,7 @@ public static class AndroidInteropHost
         {
             int outgoingRate=0;node.TransferChanged+=(record,id,percent,state,rate)=>{if(rate>0)Interlocked.Exchange(ref outgoingRate,1);};
             node.Error+=text=>Console.Error.WriteLine("NOTICE "+text);
-            if(args.Length>3&&args[3]=="secure")node.ConfigureSecurity(Path.Combine(args[1],"windows-security"),(name,code)=>{Console.WriteLine("PAIR "+code);return true;});
+            node.ConfigureSecurity(Path.Combine(args[1],"windows-security"),(name,code)=>true);
             node.MessageReceived += async message =>
             {
                 try
@@ -77,10 +79,41 @@ public static class AndroidInteropHost
                 }
                 catch (Exception e) { error = e; complete.Set(); }
             };
-            node.Start(); Console.WriteLine("READY");
+            node.Start(); VerifyPlaintextBoundary(node); Console.WriteLine("READY");
             if (!complete.WaitOne(180000)) { Console.WriteLine("FAIL: 等待安卓超时"); return 1; }
             if (error != null) { Console.WriteLine(error); return 1; }
             Thread.Sleep(500); Console.WriteLine("WINDOWS INTEROP PASS"); return 0;
         }
+    }
+    internal static void VerifyPlaintextBoundary(LanService node)
+    {
+        var endpoint=new IPEndPoint(IPAddress.Loopback,node.Port);
+        int deliveries=0;Action<ChatRecord> delivery=record=>Interlocked.Increment(ref deliveries);
+        Action<IncomingMessage> incoming=message=>Interlocked.Increment(ref deliveries);
+        node.DeliveryChanged+=delivery;node.MessageReceived+=incoming;
+        try {
+            var handle=typeof(LanService).GetMethod("Handle",System.Reflection.BindingFlags.NonPublic|System.Reflection.BindingFlags.Instance);
+            var flags=System.Reflection.BindingFlags.NonPublic|System.Reflection.BindingFlags.Instance;
+            var pending=(System.Collections.IDictionary)typeof(LanService).GetField("pending",flags).GetValue(node);
+            var itemType=typeof(LanService).GetNestedType("Pending",System.Reflection.BindingFlags.NonPublic);
+            var item=Activator.CreateInstance(itemType,new object[]{new Peer{Endpoint=endpoint,Login="old-fixture"}});
+            var waiting=new ChatRecord{Packet=1,State="等待确认"};itemType.GetField("Record").SetValue(item,waiting);
+            lock(typeof(LanService).GetField("gate",flags).GetValue(node)){
+                pending.Add(1L,item);
+                try{
+                    foreach(uint mode in new[]{Protocol.SendMessage,Protocol.ReceiveMessage,Protocol.ReleaseFiles})
+                        handle.Invoke(node,new object[]{new Packet{Command=mode,Number=1,Body="1",Login="old-fixture",Host="test"},endpoint,false});
+                    if(!pending.Contains(1L)||waiting.State!="等待确认")throw new Exception("明文 ACK 修改了待确认消息");
+                }finally{pending.Remove(1L);}
+            }
+            if(deliveries!=0||node.Peers.Any(peer=>peer.Login=="old-fixture"))throw new Exception("明文业务进入消息或联系人状态");
+            foreach(byte[] request in new[]{new byte[]{(byte)'1'},Protocol.Encode(1,"old-fixture","test",Protocol.GetFile,"1:0:0:",null)})using(var client=new TcpClient()) {
+                client.Connect(endpoint);client.ReceiveTimeout=1500;
+                NetworkStream stream=client.GetStream();stream.Write(request,0,request.Length);
+                try {if(stream.ReadByte()!=-1)throw new Exception("明文文件入口返回了内容");}
+                catch(IOException error){var socket=error.InnerException as SocketException;if(socket==null||socket.SocketErrorCode!=SocketError.ConnectionReset)throw;}
+            }
+        } finally {node.DeliveryChanged-=delivery;node.MessageReceived-=incoming;}
+        Console.WriteLine("PASS Windows 拒绝明文 SENDMSG / ACK / RELEASE / GET_FILE");
     }
 }

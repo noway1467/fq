@@ -113,10 +113,14 @@ public final class PartialInterop {
                         node.receiveFile(peer,offer.number,offer.files.get(1),destination,new LanNode.Transfer(),null);
                         check(SecureIdentity.hashFile(destination).equals(offer.files.get(1).sha256),"Windows→Android 续传 SHA-256 不一致");
                         System.out.println("DETAIL Windows→Android 续传偏移="+offset);
-                    } else check(invitation.transfer.isCancelled(),"取消通知没有终止活跃下载");
+                    } else {
+                        check(invitation.transfer.isCancelled(),"取消通知没有终止活跃下载");
+                        LanNode.discardPartial(remotePeer,offer.number,offer.files.get(1),destination);
+                    }
                     System.out.println("DETAIL Windows→Android 中途操作起点="+startedOffset);
                 }
-                check(failure.get()==null&&!part.exists()&&Files.readString(saved.toPath()).equals("已保存正式文件"),"Windows→Android 清理失败："+failure.get());
+                check(failure.get()==null&&!part.exists()&&Files.readString(saved.toPath()).equals("已保存正式文件"),"Windows→Android 清理失败："+failure.get()+"，剩余断点="+part.length());
+                check(destination.exists()==interrupted,"取消后出现正式文件，或续传完成后缺少正式文件");
                 node.sendMessage(peer,mode+"_OK",Collections.emptyList());System.out.println("PASS Windows→Android TLS "+mode+"，正式文件保留");
             }
             File small=root.resolve("android-saved.txt").toFile();Files.writeString(small.toPath(),"Android 正式文件");

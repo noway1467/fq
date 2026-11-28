@@ -13,7 +13,7 @@ $arguments = @('/nologo','/utf8output','/optimize+','/warn:4','/warnaserror+','/
 $arguments += @("/resource:$root/src/emoji-atlas.png,FeiqLight.EmojiAtlas.png","/resource:$root/src/emoji-atlas.txt,FeiqLight.EmojiAtlas.txt","/resource:$root/docs/Twemoji-LICENSE-GRAPHICS.txt,FeiqLight.Twemoji-LICENSE-GRAPHICS.txt","/resource:$root/assets/avatars/atlas.png,FeiqLight.Avatars.png","/resource:$root/assets/avatars/catalog.txt,FeiqLight.Avatars.txt")
 foreach ($asset in @('index.html','app.css','app.js','guest.html','guest.css','guest.js','qrcodegen.js')) { $arguments += "/resource:$root/assets/tools/$asset,FeiqLight.Tools.$asset" }
 $testSource = Join-Path $root 'tests\ConnectionStatusTests.cs'
-& $compiler @arguments @sources $testSource
+& $compiler @arguments @sources $testSource (Join-Path $root 'tests/LoopbackPorts.cs')
 if($LASTEXITCODE -ne 0){throw '连接状态定向回归编译失败'}
 $data = Join-Path $temporary ('data-' + [Guid]::NewGuid().ToString('N'))
 Write-Output "DATA $data"

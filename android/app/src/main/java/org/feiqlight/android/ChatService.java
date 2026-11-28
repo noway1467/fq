@@ -26,7 +26,6 @@ public final class ChatService extends Service {
         if(current==null)throw new IOException("请先连接局域网，再开启手机远控");
         return PhoneRemoteAccess.portFor(current.requireNode().port());
     }
-    static final int LEGACY_POLICY_VERSION=1;
     public interface Observer { void changed(); void error(String text); default void transfersChanged() { changed(); } default void sent(String peer) { } }
     public final class LocalBinder extends Binder { ChatService service() { return ChatService.this; } }
     private final Handler main=new Handler(Looper.getMainLooper());
@@ -80,7 +79,23 @@ public final class ChatService extends Service {
         LanNetwork route=lanNetwork;
         return (route!=null?route:networkFactory.apply(getSystemService(ConnectivityManager.class))).addresses();
     }
-    void forgetSecurity(LanNode.Peer peer){queue(()->{try{requireNode().forgetSecurity(peer);new ToolsPairings(this).forgetFingerprint(peer.fingerprint);main.post(()->{closeGateways();closeSharing();PhoneRemoteService.stopActive();});showError("已撤销设备信任，下次连接需重新核对");}catch(Exception e){fail(e);}});}
+    void forgetSecurity(LanNode.Peer peer){
+        queue(()->{
+            try{
+                requireNode().forgetSecurity(peer);
+                new ToolsPairings(this).forgetFingerprint(peer.fingerprint);
+                main.post(()->{
+                    closeGateways();
+                    closeSharing();
+                    PhoneRemoteService.stopActive();
+                });
+                showError("已撤销设备信任，下次连接需重新核对");
+            }
+            catch(Exception e){
+                fail(e);
+            }
+        });
+    }
     private void closeGateways(){for(ToolsGateway gateway:gateways)gateway.close();gateways.clear();}
     volatile SecureIdentity.Confirmation securityConfirmation;
     private SharedFiles sharedFiles;
@@ -95,7 +110,11 @@ public final class ChatService extends Service {
             List<LanNode.Source> sources=new ArrayList<>();Map<String,String> relatives=new HashMap<>();Set<String> selected=new HashSet<>();
             for(Uri uri:files){
                 if(android.provider.DocumentsContract.isTreeUri(uri)&&!android.provider.DocumentsContract.isDocumentUri(this,uri)){
-                    for(SendFiles.Entry entry:SendFiles.folder(this,uri))if(selected.add(entry.uri.toString())){sources.add(new DocumentSource(this,entry.uri,uri));relatives.put(entry.uri.toString(),entry.relative);if(sources.size()>1000)throw new IOException("单次最多 1000 个文件");}
+                    for(SendFiles.Entry entry:SendFiles.folder(this,uri))if(selected.add(entry.uri.toString())){
+                        sources.add(new DocumentSource(this,entry.uri,uri));
+                        relatives.put(entry.uri.toString(),entry.relative);
+                        if(sources.size()>1000)throw new IOException("单次最多 1000 个文件");
+                    }
                 }else if(selected.add(uri.toString()))sources.add(new DocumentSource(this,uri));
             }
             GuestTransfer created=new GuestTransfer(this,sources,relatives,upload,false,route);created.received=()->main.post(this::changed);created.warning=this::showError;
@@ -110,7 +129,8 @@ public final class ChatService extends Service {
     private final Object connectionLock=new Object();
     private volatile long connectionEpoch;
     // 工厂不接受外部 Intent 参数；回归测试可替换为真实回环节点，避免接触用户局域网。
-    java.util.function.BiFunction<SharedPreferences,LanNode.Listener,LanNode> connectionFactory=(prefs,listener)->new LanNode(prefs.getInt("port",2425),false,prefs.getString("login",""),"Android",prefs.getString("name",Build.MODEL),prefs.getString("group","我的局域网"),listener);
+    java.util.function.BiFunction<SharedPreferences,LanNode.Listener,LanNode> connectionFactory=(prefs,listener)->new LanNode(prefs.getInt("port",2425),false,
+        prefs.getString("login",""),"Android",prefs.getString("name",Build.MODEL),prefs.getString("group","我的局域网"),listener);
     java.util.function.Function<ConnectivityManager,LanNetwork> networkFactory=LanNetwork::new;
     private volatile String activePeer="";
     private volatile LanNode.Transfer transfer;
@@ -133,7 +153,13 @@ public final class ChatService extends Service {
         final boolean live;
         FileProgress(int percent,String state,LanNode.Transfer task) {this(percent,state,0,task,false);}
         FileProgress(int percent,String state,double bytesPerSecond,LanNode.Transfer task) {this(percent,state,bytesPerSecond,task,true);}
-        private FileProgress(int percent,String state,double bytesPerSecond,LanNode.Transfer task,boolean live) {this.percent=percent;this.state=state;this.bytesPerSecond=bytesPerSecond;this.task=task;this.live=live;}
+        private FileProgress(int percent,String state,double bytesPerSecond,LanNode.Transfer task,boolean live) {
+            this.percent=percent;
+            this.state=state;
+            this.bytesPerSecond=bytesPerSecond;
+            this.task=task;
+            this.live=live;
+        }
     }
     private final LinkedHashMap<String,FileProgress> fileProgress=new LinkedHashMap<>();
     private boolean transferNotificationQueued;
@@ -155,7 +181,8 @@ public final class ChatService extends Service {
     private void fileProgress(String peer,long packet,long file,boolean outgoing,int percent,String state,double bytesPerSecond,LanNode.Transfer task) {
         String key=fileKey(peer,packet,file,outgoing);
         FileProgress previous=fileProgress.get(key);
-        if(!outgoing&&previous!=null&&(previous.state.equals("对方已取消发送")||previous.state.equals("已拒绝"))&&!state.equals(previous.state)&&!state.equals("已保存")&&!state.startsWith("已接收")&&!state.equals("本机文件已删除"))return;
+        if(!outgoing&&previous!=null&&(previous.state.equals("对方已取消发送")||previous.state.equals("已拒绝"))&&!state.equals(previous.state)&&!state.equals("已保存")
+            &&!state.startsWith("已接收")&&!state.equals("本机文件已删除"))return;
         fileProgress.remove(key);fileProgress.put(key,new FileProgress(Math.max(0,Math.min(100,percent)),state,bytesPerSecond,task));
         if(previous==null||!previous.state.equals(state)||previous.percent/10!=percent/10)queue(()->store.transfer(key,peer,packet,percent,state));
         while(fileProgress.size()>2000)fileProgress.remove(fileProgress.keySet().iterator().next());
@@ -229,14 +256,31 @@ public final class ChatService extends Service {
                 if(!entry.getKey().matches("[a-f0-9]{64}")||!(entry.getValue() instanceof String))continue;
                 File local=new File(new File(getFilesDir(),"received"),entry.getKey());
                 long size=local.length(),time=local.lastModified();String relative=null,metadata=guests.getString("meta:"+entry.getKey(),"");
-                if(!metadata.isEmpty())try {org.json.JSONObject meta=new org.json.JSONObject(metadata);size=Math.max(0,meta.optLong("size",size));time=Math.max(0,meta.optLong("time",time));String path=meta.optString("relativePath","");if(Protocol.safeRelativePath(path)&&path.endsWith("/"+entry.getValue()))relative=path;}
+                if(!metadata.isEmpty())try {
+                    org.json.JSONObject meta=new org.json.JSONObject(metadata);
+                    size=Math.max(0,meta.optLong("size",size));
+                    time=Math.max(0,meta.optLong("time",time));
+                    String path=meta.optString("relativePath","");
+                    if(Protocol.safeRelativePath(path)&&path.endsWith("/"+entry.getValue()))relative=path;
+                }
                 catch(org.json.JSONException e){showError("访客接收记录损坏，已使用本机文件信息："+entry.getValue());}
                 Protocol.Attachment file=new Protocol.Attachment(0,(String)entry.getValue(),size,0);
                 file.relativePath=relative;
-                LanNode.Message message=new LanNode.Message();message.number=Long.parseLong(entry.getKey().substring(0,15),16);message.outgoing=false;message.time=time;message.files=Collections.singletonList(file);message.text="[文件] "+file.name;message.state="已保存";
-                ChatStore.FileTask task=new ChatStore.FileTask("browser-guests",message,file);task.guestFile=local;task.stored=storage.exists(local);task.unavailable=!task.stored&&storage.saved(local)!=null;rows.add(task);
+                LanNode.Message message=new LanNode.Message();
+                message.number=Long.parseLong(entry.getKey().substring(0,15),16);
+                message.outgoing=false;
+                message.time=time;
+                message.files=Collections.singletonList(file);
+                message.text="[文件] "+file.name;
+                message.state="已保存";
+                ChatStore.FileTask task=new ChatStore.FileTask("browser-guests",message,file);
+                task.guestFile=local;
+                task.stored=storage.exists(local);
+                task.unavailable=!task.stored&&storage.saved(local)!=null;
+                rows.add(task);
             }
-            rows.sort(Comparator.comparingLong((ChatStore.FileTask task)->task.message.time).reversed().thenComparing(Comparator.comparingLong((ChatStore.FileTask task)->task.message.number).reversed()).thenComparing(task->task.peer));
+            rows.sort(Comparator.comparingLong((ChatStore.FileTask task)->task.message.time).reversed().thenComparing(Comparator.comparingLong((ChatStore.FileTask task)
+                ->task.message.number).reversed()).thenComparing(task->task.peer));
             main.post(()->{if(stopped)return;
                 for(ChatStore.FileTask task:rows)if(task.guestFile==null&&!task.message.outgoing) {
                     FileProgress previous=progress(task.peer,task.message.number,task.file.id,false);
@@ -293,12 +337,29 @@ public final class ChatService extends Service {
     private boolean networkReady;
     private final Runnable notifyChanges=()->{notificationQueued=false;for (Observer observer:new ArrayList<>(observers)) observer.changed();};
     @Override public void onCreate() {
-        super.onCreate(); store=new ChatStore(this); storage=new ReceivedStorage(this);diagnostics=new Diagnostics(this);receivedBefore.addAll(getSharedPreferences("received_before",MODE_PRIVATE).getAll().keySet());
+        super.onCreate();
+        store=new ChatStore(this);
+        storage=new ReceivedStorage(this);
+        diagnostics=new Diagnostics(this);
+        receivedBefore.addAll(getSharedPreferences("received_before",MODE_PRIVATE).getAll().keySet());
         instance=this;
         NotificationManager manager=getSystemService(NotificationManager.class);
         manager.createNotificationChannel(new NotificationChannel("connection","局域网连接",NotificationManager.IMPORTANCE_LOW));
         manager.createNotificationChannel(new NotificationChannel("messages","新消息",NotificationManager.IMPORTANCE_DEFAULT));
-        io.execute(()->{ try { store.recoverPending();List<ChatStore.TransferState> saved=store.transfers(null,2000);main.post(()->{for(ChatStore.TransferState item:saved)fileProgress.putIfAbsent(item.key,new FileProgress(item.percent,item.state,null));});cleanStaging(); publish(); } catch (Exception e) { fail(e); } });
+        io.execute(()->{
+            try {
+                store.recoverPending();
+                List<ChatStore.TransferState> saved=store.transfers(null,2000);
+                main.post(()->{
+                    for(ChatStore.TransferState item:saved)fileProgress.putIfAbsent(item.key,new FileProgress(item.percent,item.state,null));
+                });
+                cleanStaging();
+                publish();
+            }
+            catch (Exception e) {
+                fail(e);
+            }
+        });
     }
     @Override public IBinder onBind(Intent intent) { return binder; }
     static boolean shouldRestoreConnection(Context context) {
@@ -321,8 +382,11 @@ public final class ChatService extends Service {
     }
     private Notification notification(String channel,String title,String text,boolean ongoing) {
         PendingIntent open=PendingIntent.getActivity(this,0,new Intent(this,MainActivity.class),PendingIntent.FLAG_IMMUTABLE|PendingIntent.FLAG_UPDATE_CURRENT);
-        Notification.Builder b=new Notification.Builder(this,channel).setSmallIcon(R.drawable.ic_notify).setContentTitle(title).setContentText(text).setContentIntent(open).setOngoing(ongoing).setAutoCancel(!ongoing).setVisibility(Notification.VISIBILITY_PRIVATE);
-        if (ongoing) b.addAction(new Notification.Action.Builder(null,"断开",PendingIntent.getService(this,1,new Intent(this,ChatService.class).setAction("stop"),PendingIntent.FLAG_IMMUTABLE|PendingIntent.FLAG_UPDATE_CURRENT)).build());
+        Notification.Builder b=new Notification.Builder(this,
+            channel).setSmallIcon(R.drawable.ic_notify).setContentTitle(title).setContentText(text).setContentIntent(open).setOngoing(ongoing).setAutoCancel(!ongoing)
+            .setVisibility(Notification.VISIBILITY_PRIVATE);
+        if (ongoing) b.addAction(new Notification.Action.Builder(null,"断开",PendingIntent.getService(this,1,new Intent(this,ChatService.class).setAction("stop"),
+            PendingIntent.FLAG_IMMUTABLE|PendingIntent.FLAG_UPDATE_CURRENT)).build());
         return b.build();
     }
     private void connect() {
@@ -350,7 +414,17 @@ public final class ChatService extends Service {
                     @Override public void networkStateChanged(boolean available,String reason) {
                         main.post(()->{if(currentConnection(epoch))updateNetworkStatus(available,reason);});
                     }
-                    @Override public void networkReset(){main.post(()->{if(currentConnection(epoch)){cancelQueuedTransfers();stopGuest();closeGateways();closeSharing();PhoneRemoteService.stopActive();}});}
+                    @Override public void networkReset(){
+                        main.post(()->{
+                            if(currentConnection(epoch)){
+                                cancelQueuedTransfers();
+                                stopGuest();
+                                closeGateways();
+                                closeSharing();
+                                PhoneRemoteService.stopActive();
+                            }
+                        });
+                    }
                     @Override public void message(LanNode.Peer peer,LanNode.Message message,boolean update) { if(currentConnection(epoch)||update) incoming(peer,message,update,epoch); }
                     @Override public void fileProgress(LanNode.Peer peer,long packet,long file,int percent,String state,double bytesPerSecond) {
                         main.post(()->{if(currentConnection(epoch))ChatService.this.fileProgress(peer.id(),packet,file,true,percent,state,bytesPerSecond,null);});
@@ -459,15 +533,7 @@ public final class ChatService extends Service {
         target.setAvatar(avatar==null?"default":avatar);
         target.nickname=prefs.getString("name",Build.MODEL);
         target.group=prefs.getString("group","我的局域网");
-        target.allowLegacyProtocol=allowLegacy(prefs);
         target.setPendingFileLimit(SendFiles.limit(prefs,"pending_file_limit",10000));
-    }
-    static boolean allowLegacy(SharedPreferences prefs) {
-        if(!prefs.contains("legacy_protocol_policy")) {
-            // 0.7.0 没有记录该策略版本，升级时恢复旧版兼容；之后手动关闭会保留。
-            prefs.edit().putBoolean("allow_legacy_protocol",true).putInt("legacy_protocol_policy",LEGACY_POLICY_VERSION).apply();
-        }
-        return prefs.getBoolean("allow_legacy_protocol",true);
     }
     void profileSettingsChanged() {
         LanNode current=node;
@@ -479,7 +545,8 @@ public final class ChatService extends Service {
     void avatarSettingsChanged() { profileSettingsChanged(); }
     void deleteMessages(String peer,List<LanNode.Message> messages,Consumer<Boolean> done) {
         LanNode current=node;
-        boolean pending=messages.stream().anyMatch(message->waiting.values().stream().anyMatch(r->!message.outgoing&&r.peer.id().equals(peer)&&r.packet==message.number)||message.outgoing&&current!=null&&current.hasActiveOutgoingTransfer(peer,message.number)||message.files.stream().anyMatch(file->{
+        boolean pending=messages.stream().anyMatch(message->waiting.values().stream().anyMatch(r->!message.outgoing&&r.peer.id().equals(peer)&&r.packet==message.number)
+            ||message.outgoing&&current!=null&&current.hasActiveOutgoingTransfer(peer,message.number)||message.files.stream().anyMatch(file->{
             FileProgress progress=progress(peer,message.number,file.id,message.outgoing);
             return progress!=null&&progress.live&&progress.state.contains("中")&&!progress.state.contains("中断")&&progress.percent<100
                 &&(message.outgoing?offering(peer,message.number,file.id):progress.task!=null&&progress.task==transfer&&busy());
@@ -489,22 +556,46 @@ public final class ChatService extends Service {
         queue(()->{
             try {
                 LanNode active=node;
-                if(selected.stream().anyMatch(message->message.outgoing&&active!=null&&active.hasActiveOutgoingTransfer(peer,message.number))) {showError("请先完成、拒绝或取消选中消息的文件任务，再删除记录");main.post(()->{if(!stopped)done.accept(false);});return;}
+                if(selected.stream().anyMatch(message->message.outgoing&&active!=null&&active.hasActiveOutgoingTransfer(peer,message.number))) {
+                    showError("请先完成、拒绝或取消选中消息的文件任务，再删除记录");
+                    main.post(()->{
+                        if(!stopped)done.accept(false);
+                    });
+                    return;
+                }
                 for(LanNode.Message message:selected)if(message.outgoing&&active!=null)active.cancelUndeliveredOutgoing(peer,message.number,message.state,false);
-                if(active==null){Set<Long> unconfirmed=new HashSet<>(store.unconfirmedOutgoingPackets(peer));List<Long> packets=selected.stream().filter(message->message.outgoing&&unconfirmed.contains(message.number)).map(message->message.number).collect(java.util.stream.Collectors.toList());LanNode.cancelStoredOffers(new File(getFilesDir(),"security"),peer,packets);}
+                if(active==null){
+                    Set<Long> unconfirmed=new HashSet<>(store.unconfirmedOutgoingPackets(peer));
+                    List<Long> packets=selected.stream().filter(message->message.outgoing
+                        &&unconfirmed.contains(message.number)).map(message->message.number).collect(java.util.stream.Collectors.toList());
+                    LanNode.cancelStoredOffers(new File(getFilesDir(),"security"),peer,packets);
+                }
                 LanNode.Peer sender=store.findPeer(peer);
                 if(sender!=null)for(LanNode.Message selectedMessage:selected)if(!selectedMessage.outgoing) {
                     LanNode.Message stored=store.findMessage(peer,selectedMessage.number,false);
                     if(stored!=null)deleteIncomingPartials(sender,stored);
                 }
-                store.deleteMessages(peer,selected);main.post(()->{fileProgress.entrySet().removeIf(entry->entry.getKey().startsWith(peer+"/")&&selected.stream().anyMatch(message->entry.getKey().startsWith(peer+"/"+message.number+"/")&&entry.getKey().endsWith("/"+message.outgoing)));notifyTransfers.run();});publish();main.post(()->{if(!stopped)done.accept(true);});
+                store.deleteMessages(peer,selected);
+                main.post(()->{
+                    fileProgress.entrySet().removeIf(entry->entry.getKey().startsWith(peer+"/")
+                        &&selected.stream().anyMatch(message->entry.getKey().startsWith(peer+"/"+message.number+"/")&&entry.getKey().endsWith("/"+message.outgoing)));
+                    notifyTransfers.run();
+                });
+                publish();
+                main.post(()->{
+                    if(!stopped)done.accept(true);
+                });
             }
             catch(Exception error){fail(error);main.post(()->{if(!stopped)done.accept(false);});}
         });
     }
     private void drainReceives() {
         if(stopped||disconnecting||!online()||busy()||waiting.isEmpty()) return;
-        ReceiveRequest next=waiting.values().stream().filter(r->{if(receivedFileOperations.contains(receivedFile(r.peer,r.packet,r.file)))return false;FileProgress p=progress(r.peer.id(),r.packet,r.file.id,false);return storage.automatic()||p!=null&&p.state.equals("排队中");}).findFirst().orElse(null);
+        ReceiveRequest next=waiting.values().stream().filter(r->{
+            if(receivedFileOperations.contains(receivedFile(r.peer,r.packet,r.file)))return false;
+            FileProgress p=progress(r.peer.id(),r.packet,r.file.id,false);
+            return storage.automatic()||p!=null&&p.state.equals("排队中");
+        }).findFirst().orElse(null);
         if(next!=null)receive(next.peer,next.packet,next.file);
     }
     void observe(Observer o) { observers.add(o); o.changed(); }
@@ -517,7 +608,11 @@ public final class ChatService extends Service {
     }
     void removeConversation(String id,boolean clear,boolean hide,Consumer<Boolean> done) {
         LanNode current=node;
-        if(clear && (busy() || current!=null&&current.hasActiveOutgoingTransfer(id) || waiting.values().stream().anyMatch(r->r.peer.id().equals(id)))) {showError("请先完成、拒绝或取消文件任务，再清空记录");done.accept(false);return;}
+        if(clear && (busy() || current!=null&&current.hasActiveOutgoingTransfer(id) || waiting.values().stream().anyMatch(r->r.peer.id().equals(id)))) {
+            showError("请先完成、拒绝或取消文件任务，再清空记录");
+            done.accept(false);
+            return;
+        }
         queue(()->{try {
             LanNode active=node;
             if(clear&&active!=null&&active.hasActiveOutgoingTransfer(id)){showError("请先完成、拒绝或取消文件任务，再清空记录");main.post(()->done.accept(false));return;}
@@ -622,40 +717,9 @@ public final class ChatService extends Service {
         final Map<String,FileProgress> progress;
         ChatPage(List<LanNode.Message> rows,Map<String,FileProgress> progress){this.rows=rows;this.progress=progress;}
     }
-    private final Map<String,int[]> mediaSizes=new LinkedHashMap<String,int[]>(64,.75f,true) {
-        @Override protected boolean removeEldestEntry(Map.Entry<String,int[]> entry){return size()>512;}
-    };
-    private int[] mediaSize(Uri uri) {
-        String key=uri.toString();
-        synchronized(mediaSizes){int[] cached=mediaSizes.get(key);if(cached!=null)return cached;}
-        int[] size=MediaPreview.bounds(this,uri);
-        if(size!=null)synchronized(mediaSizes){mediaSizes.put(key,size);}
-        return size;
-    }
+    private final ChatPageResolver chatPages=new ChatPageResolver(this);
     ChatPage resolveChatPage(String peer,List<LanNode.Message> rows,Map<String,FileProgress> progress,java.util.function.BooleanSupplier current) {
-        ChatPage page=new ChatPage(rows,progress);
-        for(LanNode.Message message:rows)for(int index=0;index<message.files.size();index++) {
-            if(!current.getAsBoolean())return page;
-            Protocol.Attachment file=message.files.get(index);Uri uri;
-            String key=fileKey(peer,message.number,file.id,message.outgoing);
-            // 仅补当前页被内存缓存淘汰的状态，数据库读取始终留在后台。
-            if(!progress.containsKey(key)) {
-                ChatStore.TransferState saved=store.transfer(key);
-                if(saved!=null)progress.put(key,new FileProgress(saved.percent,saved.state,null));
-            }
-            if(message.outgoing)uri=storage.outgoingUri(message,index);
-            else {
-                File local=receivedFile(peer,message.number,file);
-                uri=local.isFile()?ReceivedFileProvider.uri(this,local,file.name):storage.existingSaved(local);
-                if(uri==null&&storage.saved(local)!=null)page.unavailable.add(key);
-            }
-            page.files.put(key,uri);
-            // 尺寸随后台快照准备好，绑定和解码完成时均不读 SAF，也不改变气泡高度。
-            if(uri!=null&&MediaPreview.supported(file.name)&&!MediaPreview.video(file.name)) {
-                int[] size=mediaSize(uri);if(size!=null)page.media.put(key,size);
-            }
-        }
-        return page;
+        return chatPages.resolve(store,storage,peer,rows,progress,current);
     }
     void chatPage(String peer,LanNode.Message anchor,java.util.function.BooleanSupplier current,Consumer<ChatPage> result,Consumer<String> error) {
         Map<String,FileProgress> before=new HashMap<>(fileProgress);
@@ -714,9 +778,25 @@ public final class ChatService extends Service {
     void verifyPresence() { LanNode current=node; if(current!=null&&!connecting&&!stopped) current.revalidate(); }
     void probe(String address) {
         if(stopped)return;long epoch=connectionEpoch;
-        try {discovery.execute(()->{try {if(currentConnection(epoch))requireNode().probe(LanNode.endpoint(address));}catch(IOException e){if(currentConnection(epoch))fail(e);}});}catch(RejectedExecutionException ignored){}
+        try {
+            discovery.execute(()->{
+                try {
+                    if(currentConnection(epoch))requireNode().probe(LanNode.endpoint(address));
+                }
+                catch(IOException e){
+                    if(currentConnection(epoch))fail(e);
+                }
+            });
+        }
+        catch(RejectedExecutionException ignored){
+        }
     }
-    private LanNode requireNode() throws IOException { LanNode current=node; if (current==null||stopped||disconnecting) throw new IOException("请先连接局域网");if(!current.networkAvailable())throw new IOException(current.networkStatus());return current; }
+    private LanNode requireNode() throws IOException {
+        LanNode current=node;
+        if (current==null||stopped||disconnecting) throw new IOException("请先连接局域网");
+        if(!current.networkAvailable())throw new IOException(current.networkStatus());
+        return current;
+    }
     void send(LanNode.Peer peer,String text,Consumer<Boolean> done) {
         DraftStore drafts=new DraftStore(this); DraftStore.Snapshot sent=drafts.snapshot(peer.id());
         if(stopped){main.post(()->done.accept(false));return;}
@@ -747,6 +827,7 @@ public final class ChatService extends Service {
                 catch(Exception e){fail(e);main.post(()->done.accept(false));}});
             return;
         }
+        try{requireNode().requireSecurePeer(target);}catch(IOException error){showError(error.getMessage());main.post(()->done.accept(false));return;}
         AtomicBoolean success=new AtomicBoolean();
         Set<File> reading=new HashSet<>();
         if(!message.outgoing)for(Protocol.Attachment file:message.files) {
@@ -797,6 +878,7 @@ public final class ChatService extends Service {
     private synchronized void sendContent(LanNode.Peer peer,String text,List<File> files) throws IOException {
         LanNode current=requireNode();
         if(!MessageText.asFile(text)){current.sendMessage(peer,text,files);return;}
+        current.requireSecurePeer(peer);
         if(text.length()>MessageText.INPUT_LIMIT||text.indexOf(0)>=0)throw new IOException("正文超过 1,048,576 个字符或含有空字符，请直接选择文件发送");
         if(files.size()>=20)throw new IOException("超长正文需要一个 TXT 附件位置，请最多选择 19 个其他文件");
         java.nio.ByteBuffer encoded=StandardCharsets.UTF_8.newEncoder().encode(java.nio.CharBuffer.wrap(text));
@@ -888,11 +970,22 @@ public final class ChatService extends Service {
         try { transferWorker.execute(()->{
             String result=completion;
             try { checkTransfer(task); job.run(task);diagnostics.record(Diagnostics.Event.TaskCompleted); }
-            catch(Exception e) { result=completion.isEmpty()&&cancellation.isEmpty()?"":task.isCancelled()?cancellation:"文件任务失败："+e.getMessage();diagnostics.record(task.isCancelled()?Diagnostics.Event.TaskCancelled:Diagnostics.Event.TaskFailed); fail(e); }
+            catch(Exception e) {
+                result=completion.isEmpty()&&cancellation.isEmpty()?"":task.isCancelled()?cancellation:"文件任务失败："+e.getMessage();
+                diagnostics.record(task.isCancelled()?Diagnostics.Event.TaskCancelled:Diagnostics.Event.TaskFailed);
+                fail(e);
+            }
             finally {
                 cleanup.run(); if(transferCleanup==cleanup) transferCleanup=null;
                 String outcome=result; transferOutcome=outcome;transfer=null;busy.set(false);
-                main.post(()->{ if(!stopped&&transferEpoch.get()==epoch) { transferStatus=outcome; changed();if(!queuedTransfers.isEmpty())queuedTransfers.removeFirst().start.run();else drainReceives(); } });
+                main.post(()->{
+                    if(!stopped&&transferEpoch.get()==epoch) {
+                        transferStatus=outcome;
+                        changed();
+                        if(!queuedTransfers.isEmpty())queuedTransfers.removeFirst().start.run();
+                        else drainReceives();
+                    }
+                });
             }
         }); return true; } catch(RejectedExecutionException e) { cleanup.run(); transferCleanup=null; transfer=null; busy.set(false); if(!stopped) showError("文件服务已停止，请重新连接"); return false; }
     }
@@ -912,9 +1005,22 @@ public final class ChatService extends Service {
     private void preflightCopies(List<Uri> uris,LanNode.Transfer task)throws IOException {
         long total=0;int known=0;
         for(Uri uri:uris){checkTransfer(task);try(Cursor cursor=getContentResolver().query(uri,new String[]{OpenableColumns.SIZE},null,null)){
-            if(cursor!=null&&cursor.moveToFirst()){int column=cursor.getColumnIndex(OpenableColumns.SIZE);if(column>=0&&!cursor.isNull(column)){long size=cursor.getLong(column);if(size>=0){if(size>Long.MAX_VALUE-total)throw new IOException("所选文件总大小超出支持范围");total+=size;known++;}}}
+            if(cursor!=null&&cursor.moveToFirst()){
+                int column=cursor.getColumnIndex(OpenableColumns.SIZE);
+                if(column>=0&&!cursor.isNull(column)){
+                    long size=cursor.getLong(column);
+                    if(size>=0){
+                        if(size>Long.MAX_VALUE-total)throw new IOException("所选文件总大小超出支持范围");
+                        total+=size;
+                        known++;
+                    }
+                }
+            }
         }}
-        File offers=directory("offers");quota(offers,total);String note="准备 "+uris.size()+" 个文件 · "+String.format(Locale.ROOT,"%.1f MiB",total/1048576.0)+(known<uris.size()?" 起":"")+" · 可用 "+String.format(Locale.ROOT,"%.1f GiB",remaining(offers)/1073741824.0);
+        File offers=directory("offers");
+        quota(offers,total);
+        String note="准备 "+uris.size()+" 个文件 · "+String.format(Locale.ROOT,"%.1f MiB",total/1048576.0)+(known<uris.size()?" 起":"")+" · 可用 "+String.format(Locale.ROOT,
+            "%.1f GiB",remaining(offers)/1073741824.0);
         main.post(()->{if(!stopped&&transfer==task){transferStatus=note;changed();}});
     }
     private void cleanStaging() throws IOException {
@@ -925,7 +1031,9 @@ public final class ChatService extends Service {
             if(files!=null) for(File f:files) if(f.isFile()) Files.deleteIfExists(f.toPath()); Files.deleteIfExists(folder.toPath());
         }
         // 启动/选文件不能删除可恢复断点；只回收一天未写入的残片。
-        File[] received=directory("received").listFiles(); if(received!=null) for(File f:received) if(f.getName().endsWith(".part") && f.lastModified()<System.currentTimeMillis()-TimeUnit.DAYS.toMillis(1)) Files.deleteIfExists(f.toPath());
+        File[] received=directory("received").listFiles();
+        if(received!=null) for(File f:received) if(f.getName().endsWith(".part")
+            && f.lastModified()<System.currentTimeMillis()-TimeUnit.DAYS.toMillis(1)) Files.deleteIfExists(f.toPath());
     }
     void sendFile(LanNode.Peer peer,Uri uri) {
         sendFile(peer,uri,null,()->{});
@@ -943,10 +1051,39 @@ public final class ChatService extends Service {
     void sendFolder(LanNode.Peer peer,Uri tree){sendBatch(peer,()->SendFiles.folder(this,tree,SendFiles.batchLimit(this)));}
     private interface BatchSource {List<SendFiles.Entry> read()throws IOException;}
     private void sendBatch(LanNode.Peer peer,BatchSource source){
-        transferJob(task->{LanNode current=requireNode();if(peer.fingerprint==null)throw new IOException("文件夹发送需要新版加密协议");current.verifyPeer(peer);List<SendFiles.Entry> entries=source.read();current.checkOfferCapacity(entries.size());preflightCopies(entries.stream().map(e->e.uri).collect(java.util.stream.Collectors.toList()),task);int sent=0;
+        transferJob(task->{
+            LanNode current=requireNode();
+            current.verifyPeer(peer);
+            List<SendFiles.Entry> entries=source.read();
+            current.checkOfferCapacity(entries.size());
+            preflightCopies(entries.stream().map(e->e.uri).collect(java.util.stream.Collectors.toList()),task);
+            int sent=0;
             for(int start=0;start<entries.size();start+=20){List<File> copies=new ArrayList<>();Map<String,String> relatives=new HashMap<>();boolean published=false;
-                try {for(SendFiles.Entry entry:entries.subList(start,Math.min(start+20,entries.size()))){checkTransfer(task);String name=entry.relative.substring(entry.relative.lastIndexOf('/')+1);File dir=new File(directory("offers"),UUID.randomUUID().toString());if(!dir.mkdir())throw new IOException("无法暂存文件");File copy=new File(dir,name);copies.add(copy);try(InputStream in=getContentResolver().openInputStream(entry.uri);OutputStream out=new FileOutputStream(copy)){copy(in,out,task,remaining(dir),"暂存空间不足");}relatives.put(copy.getCanonicalPath(),entry.relative);}
-                    current.awaitSendSlot(task);current.sendFiles(peer,copies,relatives);published=true;sent+=copies.size();final int done=sent;main.post(()->{if(transfer==task){transferStatus="邀请已发送 "+done+" / "+entries.size();changed();}});
+                try {
+                    for(SendFiles.Entry entry:entries.subList(start,Math.min(start+20,entries.size()))){
+                        checkTransfer(task);
+                        String name=entry.relative.substring(entry.relative.lastIndexOf('/')+1);
+                        File dir=new File(directory("offers"),UUID.randomUUID().toString());
+                        if(!dir.mkdir())throw new IOException("无法暂存文件");
+                        File copy=new File(dir,name);
+                        copies.add(copy);
+                        try(InputStream in=getContentResolver().openInputStream(entry.uri);
+                        OutputStream out=new FileOutputStream(copy)){
+                            copy(in,out,task,remaining(dir),"暂存空间不足");
+                        }
+                        relatives.put(copy.getCanonicalPath(),entry.relative);
+                    }
+                    current.awaitSendSlot(task);
+                    current.sendFiles(peer,copies,relatives);
+                    published=true;
+                    sent+=copies.size();
+                    final int done=sent;
+                    main.post(()->{
+                        if(transfer==task){
+                            transferStatus="邀请已发送 "+done+" / "+entries.size();
+                            changed();
+                        }
+                    });
                 }finally{if(!published)for(File copy:copies){Files.deleteIfExists(copy.toPath());Files.deleteIfExists(copy.getParentFile().toPath());}}
             }
         },()->{},"全部文件邀请已发送，接收状态见各文件","已取消，已发邀请保留",true);
@@ -956,9 +1093,30 @@ public final class ChatService extends Service {
         if(uris==null||uris.isEmpty()||uris.size()>limit) { finished.run();showError("每批请选择 1–"+limit+" 个文件，可在设置中调整");return false; }
         List<Uri> batch=new ArrayList<>(new LinkedHashSet<>(uris));
         return transferJob(task->{
-            LanNode current=requireNode();current.checkOfferCapacity(batch.size()); List<File> staged=new ArrayList<>();int published=0;if(current.security()!=null&&peer.fingerprint!=null)current.verifyPeer(peer);
-            if(keyboardMime==null&&peer.fingerprint!=null){List<LanNode.Source> direct=new ArrayList<>();boolean stable=true;for(Uri uri:batch)try{direct.add(new DocumentSource(this,uri));}catch(IOException unavailable){stable=false;break;}
-                if(stable){for(int start=0;start<direct.size();start+=20){checkTransfer(task);current.awaitSendSlot(task);current.sendSources(peer,direct.subList(start,Math.min(start+20,direct.size())));}return;}
+            LanNode current=requireNode();
+            current.checkOfferCapacity(batch.size());
+            List<File> staged=new ArrayList<>();
+            int published=0;
+            current.verifyPeer(peer);
+            if(keyboardMime==null){
+                List<LanNode.Source> direct=new ArrayList<>();
+                boolean stable=true;
+                for(Uri uri:batch)try{
+                    direct.add(new DocumentSource(this,uri));
+                }
+                catch(IOException unavailable){
+                    stable=false;
+                    break;
+                }
+                if(stable){
+                    for(int start=0;start<direct.size();
+                    start+=20){
+                        checkTransfer(task);
+                        current.awaitSendSlot(task);
+                        current.sendSources(peer,direct.subList(start,Math.min(start+20,direct.size())));
+                    }
+                    return;
+                }
             }
             cleanStaging();
             if(keyboardMime==null)preflightCopies(batch,task);
@@ -982,7 +1140,17 @@ public final class ChatService extends Service {
                     }
                     if(keyboardMime!=null) {
                         String extension;
-                        switch(keyboardMime) { case "image/png": extension=".png"; break; case "image/jpeg": extension=".jpg"; break; case "image/gif": extension=".gif"; break; case "image/webp": extension=".webp"; break; default: throw new IOException("输入法图片格式不支持"); }
+                        switch(keyboardMime) {
+                            case "image/png": extension=".png";
+                            break;
+                            case "image/jpeg": extension=".jpg";
+                            break;
+                            case "image/gif": extension=".gif";
+                            break;
+                            case "image/webp": extension=".webp";
+                            break;
+                            default: throw new IOException("输入法图片格式不支持");
+                        }
                         // 输入法可能只给 UUID 或临时名称；为副本补真实 MIME 对应后缀，不改变原始字节。
                         if(!Protocol.safeName(name)) name="键盘表情";
                         String lower=name.toLowerCase(Locale.ROOT);
@@ -996,15 +1164,27 @@ public final class ChatService extends Service {
                     File file=new File(folder,name); staged.add(file);
                     final String displayName=name;final long declaredSize=declared;
                     Consumer<Long> copying=bytes->main.post(()->{if(!stopped&&transfer==task&&!task.isCancelled()){
-                        transferStatus="本地准备 "+index+" / "+batch.size()+" · "+displayName+" · "+String.format(Locale.ROOT,"%.1f MiB",bytes/1048576.0)+(declaredSize>0?" / "+String.format(Locale.ROOT,"%.1f MiB",declaredSize/1048576.0):"")+"（尚未发送）";changed();
+                        transferStatus="本地准备 "+index+" / "+batch.size()+" · "+displayName+" · "+String.format(Locale.ROOT,"%.1f MiB",
+                            bytes/1048576.0)+(declaredSize>0?" / "+String.format(Locale.ROOT,"%.1f MiB",declaredSize/1048576.0):"")+"（尚未发送）";
+                        changed();
                     }});
                         // 不信任提供方上报大小：未知/错误大小同样在每次写入前受剩余容量限制。
-                        try(InputStream input=getContentResolver().openInputStream(uri); OutputStream output=new BufferedOutputStream(new FileOutputStream(file),65536)) { copy(input,output,task,available,"暂存空间不足，请清理发送缓存或释放设备空间",copying); }
+                        try(InputStream input=getContentResolver().openInputStream(uri);
+                        OutputStream output=new BufferedOutputStream(new FileOutputStream(file),65536)) {
+                            copy(input,output,task,available,"暂存空间不足，请清理发送缓存或释放设备空间",copying);
+                        }
                         if(task.isCancelled()) throw new IOException("已取消发送");
                 }
             // 暂存完成后分组发送；已经发布的邀请保留，失败后可从对应记录处理。
             if(task.isCancelled()) throw new IOException("已取消发送");
-            for(int offset=0;offset<staged.size();offset+=20){checkTransfer(task);current.awaitSendSlot(task);int end=Math.min(offset+20,staged.size());current.sendMessage(peer,"",staged.subList(offset,end));published=end;}
+            for(int offset=0;offset<staged.size();
+            offset+=20){
+                checkTransfer(task);
+                current.awaitSendSlot(task);
+                int end=Math.min(offset+20,staged.size());
+                current.sendMessage(peer,"",staged.subList(offset,end));
+                published=end;
+            }
             } finally {
                 if(published<staged.size()) {
                     IOException cleanupFailure=null;
@@ -1067,7 +1247,10 @@ public final class ChatService extends Service {
                     @Override public void update(int percent) { update(percent,0); }
                     @Override public void update(int percent,double bytesPerSecond) {
                         last[0]=percent;
-                        main.post(()->{if(!stopped&&transferEpoch.get()==epoch&&!request.offerCanceled&&!request.rejected)fileProgress(peer.id(),packet,file.id,false,percent,"接收中 · 点击取消",bytesPerSecond,task);});
+                        main.post(()->{
+                            if(!stopped&&transferEpoch.get()==epoch&&!request.offerCanceled
+                                &&!request.rejected)fileProgress(peer.id(),packet,file.id,false,percent,"接收中 · 点击取消",bytesPerSecond,task);
+                        });
                     }
                     @Override public void stage(String value) { progress.accept(100,value); }
                 });
@@ -1080,7 +1263,8 @@ public final class ChatService extends Service {
                 request.offerCanceled=true;offerCanceled(peer,packet);
             } catch(Exception e) {
                 if(request.offerCanceled||request.rejected)return;
-                progress.accept(target.isFile()?100:task.isPaused()?last[0]:task.isCancelled()?0:last[0],target.isFile()?"已保存":task.isPaused()?"已暂停":task.isCancelled()?"已取消 · 点击重试":"接收失败 · 点击续传："+e.getMessage());
+                progress.accept(target.isFile()?100:task.isPaused()?last[0]:task.isCancelled()?0:last[0],
+                    target.isFile()?"已保存":task.isPaused()?"已暂停":task.isCancelled()?"已取消 · 点击重试":"接收失败 · 点击续传："+e.getMessage());
                 // 保存目录失败时内部完整文件已经是正式文件；网络中断仍只由附件卡片反馈。
                 if(!target.isFile()&&e instanceof IOException){diagnostics.record(Diagnostics.Event.TaskFailed);return;}
                 throw e;
@@ -1092,7 +1276,7 @@ public final class ChatService extends Service {
             if(request.offerCanceled||request.rejected)queue(()->{
                 try {
                     boolean saved=storage.exists(target),wasBefore=receivedBefore.contains(receiveKey);
-                    if(!saved)Files.deleteIfExists(LanNode.partialFile(peer,packet,file,target).toPath());
+                    if(!saved)LanNode.discardPartial(peer,packet,file,target);
                     if(request.rejected)rejectIncomingOffer(peer,packet);
                     else finishIncomingOffer(peer,packet,"对方已取消发送",null);
                     rememberReceivedBefore(receiveKey,false);
@@ -1183,7 +1367,10 @@ public final class ChatService extends Service {
                 main.post(()->{
                     try {
                         if(stopped)return;
-                        for(ChatStore.FileTask item:removed){waiting.remove(receivedFile(peer,item.message.number,item.file).getName());fileProgress(peer,item.message.number,item.file.id,false,0,"本机文件已删除",null);}
+                        for(ChatStore.FileTask item:removed){
+                            waiting.remove(receivedFile(peer,item.message.number,item.file).getName());
+                            fileProgress(peer,item.message.number,item.file.id,false,0,"本机文件已删除",null);
+                        }
                         changed();notifyTransfers.run();
                         if(completed!=null)done.accept(completed);
                     } finally {
@@ -1253,7 +1440,7 @@ public final class ChatService extends Service {
                 kept++;
                 if(!stored.contains(key))restored=true;
                 if(exiting==null||exiting.file.id!=file.id) {
-                    try {Files.deleteIfExists(LanNode.partialFile(peer,packet,file,target).toPath());}
+                    try {LanNode.discardPartial(peer,packet,file,target);}
                     catch(IOException e){showError(state+"；断点清理未完成："+e.getMessage());}
                     rememberReceivedBefore(key,false);
                 }
@@ -1266,7 +1453,7 @@ public final class ChatService extends Service {
             unfinished.add(file);
             // 活跃线程的 finally 负责释放句柄；完成回调还会用原附件元数据补清一次。
             if(exiting==null||exiting.file.id!=file.id)
-                try {Files.deleteIfExists(LanNode.partialFile(peer,packet,file,target).toPath());}
+                try {LanNode.discardPartial(peer,packet,file,target);}
                 catch(IOException e){showError(state+"；断点清理未完成："+e.getMessage());}
             store.transfer(fileKey(peer.id(),packet,file.id,false),peer.id(),packet,0,state);
             main.post(()->{if(!stopped)fileProgress(peer.id(),packet,file.id,false,0,state,null);});
@@ -1288,7 +1475,13 @@ public final class ChatService extends Service {
         if(input==null) throw new IOException("无法读取所选文件"); byte[] buffer=new byte[65536]; long total=0; int count;
         long last=System.nanoTime();if(progress!=null)progress.accept(0L);
         while(true) {
-            checkTransfer(task); count=input.read(buffer); checkTransfer(task); if(count==-1) break; if(count>limit-total) throw new IOException(limitError); total+=count; output.write(buffer,0,count);
+            checkTransfer(task);
+            count=input.read(buffer);
+            checkTransfer(task);
+            if(count==-1) break;
+            if(count>limit-total) throw new IOException(limitError);
+            total+=count;
+            output.write(buffer,0,count);
             if(progress!=null&&System.nanoTime()-last>=TimeUnit.MILLISECONDS.toNanos(100)){progress.accept(total);last=System.nanoTime();}
         }
         if(progress!=null)progress.accept(total);
@@ -1343,7 +1536,9 @@ public final class ChatService extends Service {
                 queue(()->{List<ChatStore.FileTask> rows=store.fileTasks();
                     main.post(()->{if(stopped)return;
                         for(File file:deleted)waiting.remove(file.getName());
-                        for(ChatStore.FileTask row:rows)if(!row.message.outgoing&&deleted.contains(receivedFile(row.peer,row.message.number,row.file)))fileProgress(row.peer,row.message.number,row.file.id,false,0,"本机文件已删除",null);
+                        for(ChatStore.FileTask row:rows)if(!row.message.outgoing
+                            &&deleted.contains(receivedFile(row.peer,row.message.number,row.file)))fileProgress(row.peer,row.message.number,row.file.id,false,0,"本机文件已删除",
+                            null);
                         changed();notifyTransfers.run();if(completed!=null&&!task.isCancelled())done.accept(completed);
                     });
                 });

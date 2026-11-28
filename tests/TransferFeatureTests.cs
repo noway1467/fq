@@ -25,7 +25,7 @@ namespace FeiqLight.Tests
         private static void SaveSnapshot(Form form,string name){form.Refresh();Application.DoEvents();Thread.Sleep(80);using(var image=new Bitmap(form.Width,form.Height)){using(Graphics g=Graphics.FromImage(image)){IntPtr dc=g.GetHdc();try{Check(PrintWindow(form.Handle,dc,2),"窗口渲染失败："+name);}finally{g.ReleaseHdc(dc);}}image.Save(Path.Combine(output,name+".png"),System.Drawing.Imaging.ImageFormat.Png);}}
         private static void Check(bool value,string message){if(!value)throw new Exception(message);}
         private static void Run(string name,Action test){try{test();passed++;Console.WriteLine("PASS "+name);}catch(Exception e){failed++;Console.WriteLine("FAIL "+name+" "+e);}}
-        private static int FreePort(){var probe=new TcpListener(IPAddress.Loopback,0);probe.Start();int port=((IPEndPoint)probe.LocalEndpoint).Port;probe.Stop();return port;}
+        private static int FreePort() { return FeiqLight.Tests.LoopbackPorts.Chat(); }
         private static void Wait(Func<bool> condition,string message){for(int i=0;i<800;i++){if(condition())return;Thread.Sleep(10);}throw new Exception(message);}
         private sealed class Reply
         {
@@ -141,18 +141,18 @@ namespace FeiqLight.Tests
         private static void PauseResume()
         {
             byte[] content=new byte[4*1024*1024];new Random(17).NextBytes(content);TcpListener listener=new TcpListener(IPAddress.Loopback,0);listener.Start();long resumed=-1;
-            Task serving=Task.Run(()=>{try{for(int attempt=0;attempt<2;attempt++)using(TcpClient socket=listener.AcceptTcpClient()){
-                socket.ReceiveTimeout=5000;Stream stream=socket.GetStream();byte[] request=new byte[4096];int n=stream.Read(request,0,request.Length);string text=Encoding.UTF8.GetString(request,0,n).TrimEnd('\0');string[] fields=text.Split(':');long offset=Convert.ToInt64(fields[fields.Length-2],16);if(attempt==1)resumed=offset;
-                try{for(long pos=offset;pos<content.Length;pos+=32768){int count=(int)Math.Min(32768,content.Length-pos);stream.Write(content,(int)pos,count);Thread.Sleep(2);}}catch(IOException){}
-            }}finally{listener.Stop();}});
-            var peer=new Peer{Endpoint=(IPEndPoint)listener.LocalEndpoint,Login="source",Host="host",Nickname="发送方",Utf8=true};var file=new Attachment{Id=1,Name="pause.bin",Size=content.Length,Modified=1};string path=Path.Combine(root,"pause.bin"),partial=LanService.PartialPath(peer,1,file,path);
-            using(var node=new LanService(new AppSettings(),FreePort(),true,"receiver"))using(var cancel=new CancellationTokenSource()){
+            using(var node=new LanService(new AppSettings(),FreePort(),true,"receiver"))using(var cancel=new CancellationTokenSource())using(var sender=new TlsFilePeer(Path.Combine(root,"pause-fixture"),(IPEndPoint)listener.LocalEndpoint,node)){
+                var file=new Attachment{Id=1,Name="pause.bin",Size=content.Length,Modified=1,Sha256=SecureIdentity.Hash(content)};Peer peer=sender.Peer;string path=Path.Combine(root,"pause.bin"),partial=LanService.PartialPath(peer,1,file,path);
+                Task serving=Task.Run(()=>{try{for(int attempt=0;attempt<2;attempt++)using(TcpClient socket=listener.AcceptTcpClient()){
+                    long offset;using(Stream stream=sender.Open(socket,file,out offset)){if(attempt==1)resumed=offset;
+                    try{for(long pos=offset;pos<content.Length;pos+=32768){int count=(int)Math.Min(32768,content.Length-pos);stream.Write(content,(int)pos,count);Thread.Sleep(4);}SecureIdentity.ReadText(stream,128);}catch(IOException){}}
+                }}finally{listener.Stop();}});
                 var progress=new Progress{Update=value=>{if(value.Percent>=10)cancel.Cancel();}};
                 try{node.ReceiveFileAsync(peer,1,file,path,null,cancel.Token,true,progress,()=>true).GetAwaiter().GetResult();throw new Exception("暂停未中止下载");}catch(OperationCanceledException){}
                 long size=new FileInfo(partial).Length;Check(size>0&&size<content.Length,"暂停未保留非空断点");
                 string saved=node.ReceiveFileAsync(peer,1,file,path,null,CancellationToken.None,true).GetAwaiter().GetResult();Check(resumed==size,"续传未使用落盘偏移");Check(File.ReadAllBytes(saved).SequenceEqual(content),"续传内容变化");
+                Check(serving.Wait(5000),"发送测试未结束");
             }
-            Check(serving.Wait(5000),"发送测试未结束");
         }
         private static void BatchDeleteRegression()
         {
@@ -307,13 +307,15 @@ namespace FeiqLight.Tests
                 Theme.Configure(reject,"blue");var store=new LocalStore(Path.Combine(root,"active-actions-"+reject));TcpListener server=new TcpListener(IPAddress.Loopback,0);server.Start();
                 using(var release=new ManualResetEventSlim(false))
                 {
-                    Task serving=Task.Run(()=>{try{using(TcpClient socket=server.AcceptTcpClient()){Stream stream=socket.GetStream();byte[] request=new byte[4096];stream.Read(request,0,request.Length);byte[] bytes=new byte[131072];stream.Write(bytes,0,bytes.Length);release.Wait(5000);}}catch(IOException){}catch(SocketException){}});
-                    var settings=new AppSettings{CloseToTray=false,Notifications=false,AutoReceiveFiles=false,ReceiveFolder=Path.Combine(store.Root,"received"),Conversations=new[]{new SavedConversation{Endpoint=server.LocalEndpoint.ToString(),Login="active-peer",Nickname="真实停滞发送端"}}};
+                    Task serving=null;
+                    var settings=new AppSettings{CloseToTray=false,Notifications=false,AutoReceiveFiles=false,ReceiveFolder=Path.Combine(store.Root,"received"),Conversations=new[]{new SavedConversation{Endpoint=server.LocalEndpoint.ToString(),Login="source",Host="host",Nickname="真实停滞发送端"}}};
                     try
                     {
-                        using(var network=new LanService(settings,FreePort(),true,"active-actions"))using(var main=new MainForm(network,store))using(var window=new TransferWindow(main))
+                        using(var network=new LanService(settings,FreePort(),true,"active-actions"))using(var main=new MainForm(network,store))using(var window=new TransferWindow(main))using(var source=new TlsFilePeer(store.Root,(IPEndPoint)server.LocalEndpoint,network))
                         {
                             Peer peer=network.Peers.Single();string saved=Path.Combine(store.Root,"此前已存.txt");File.WriteAllText(saved,"keep");
+                            peer.DeviceId=source.Peer.DeviceId;peer.Fingerprint=source.Peer.Fingerprint;
+                            serving=Task.Run(()=>{try{using(TcpClient socket=server.AcceptTcpClient()){long offset;using(Stream stream=source.Open(socket,new Attachment{Size=1048576,Sha256=new string('a',64)},out offset)){byte[] bytes=new byte[131072];stream.Write(bytes,0,bytes.Length);release.Wait(8000);}}}catch(IOException){}catch(SocketException){}});
                             var active=new FileTransferState{Id=0,Name="活跃.bin",Size=1048576,Modified=1,Sha256=new string('a',64),RelativePath="活跃/空目录/活跃.bin",Status="已暂停"};
                             var paused=new FileTransferState{Id=1,Name="同批暂停.bin",Size=4096,Modified=1,Sha256=new string('b',64),RelativePath="另一断点/同批暂停.bin",Status="已暂停",Percent=30};
                             var record=new ChatRecord{PeerId=peer.Id,Packet=201,Sender=peer.Nickname,Text="活跃接收取消边界",Time=DateTime.Now,State="已接收 1 / 4",HasAttachments=true,LocalFiles=new[]{saved},Transfers=new[]{active,paused,new FileTransferState{Id=2,Name="此前已存.txt",Status="已保存",Percent=100,LocalPath=saved},new FileTransferState{Id=3,Name="此前已删.txt",Status="本机文件已删除"}}};
@@ -341,7 +343,7 @@ namespace FeiqLight.Tests
                             Check(!Application.OpenForms.OfType<NoticeDialog>().Any()&&!Field<Label>(main,"status").Text.Contains("接收失败"),"正常取消或拒绝出现迟到失败提示");SaveSnapshot(window,"transfer-active-"+(reject?"reject-dark":"cancel-light"));window.Close();main.ExitApplication();
                         }
                     }
-                    finally{release.Set();server.Stop();Check(serving.Wait(5000),"停滞接收测试进程未退出");}
+                    finally{release.Set();server.Stop();if(serving!=null)Check(serving.Wait(5000),"停滞接收测试进程未退出");}
                 }
             }
             Theme.Configure(false,"blue");
@@ -798,6 +800,7 @@ namespace FeiqLight.Tests
                         Check(!filesPane.Bounds.IntersectsWith(inspectorPane.Bounds),"窄窗堆叠模式下文件区与控制栏重叠");
                         Check(emptyPanel.Height>=110,"窄窗空状态高度过小导致文字裁切："+emptyPanel.Height);
                         Check(picker.Bounds.Right<=inspectorPane.Width&&picker.Height>=30,"窄窗地址栏异常："+picker.Bounds);
+                        foreach(Control field in new Control[]{Field<Control>(guest,"lifetimeField"),Field<Control>(guest,"lifetimeTitle"),Field<Control>(guest,"saveLifetime")})Check(inspectorPane.ClientRectangle.Contains(field.Bounds),"窄窗有效期控件裁切："+field.Bounds+" / "+inspectorPane.ClientRectangle);
                         foreach(Button b in Controls(guest).OfType<Button>().Where(b=>b.Visible))Check(b.Parent.ClientRectangle.Contains(b.Bounds),"窄窗按钮越界："+b.Text);
                         if(!dark)SaveSnapshot(guest,"guest-empty-light-min");
 

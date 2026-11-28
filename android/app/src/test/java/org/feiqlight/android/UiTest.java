@@ -208,7 +208,7 @@ public final class UiTest {
         shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));
         ActivityController<MainActivity> ac=Robolectric.buildActivity(MainActivity.class).create().start().resume().visible();MainActivity activity=ac.get();android.app.Dialog dialog=null;
         LanNode.Listener quiet=new LanNode.Listener(){public void peersChanged(){}public void error(String t){}public void message(LanNode.Peer p,LanNode.Message m,boolean update){}};
-        int port;try(java.net.ServerSocket socket=new java.net.ServerSocket(0,1,java.net.InetAddress.getLoopbackAddress())){port=socket.getLocalPort();}
+        int port=TestPorts.chat();
         try(LanNode node=new LanNode(port,true,"ui-forward","host","测试","",quiet)) {
             node.start();settle(service);Field nf=ChatService.class.getDeclaredField("node");nf.setAccessible(true);nf.set(service,node);
             for(int i=0;i<3;i++){LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:"+(32425+i)),"peer"+i,"host",i==0?"upstair win10":"phone","");LanNode.Message m=new LanNode.Message();m.number=i+1;m.time=i+1;m.text="历史";service.incoming(peer,m,false);}
@@ -279,10 +279,9 @@ public final class UiTest {
     @Test public void sendClickShowsImmediatePendingWithoutClearingDraftOrDuplicatingMessage() throws Exception {
         ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();CountDownLatch release=new CountDownLatch(1),blocked=new CountDownLatch(1);ActivityController<MainActivity> ac=null;
         try(java.net.DatagramSocket target=new java.net.DatagramSocket(0,java.net.InetAddress.getLoopbackAddress())) {
-            settle(service);int port;try(java.net.ServerSocket socket=new java.net.ServerSocket(0,1,java.net.InetAddress.getLoopbackAddress())){port=socket.getLocalPort();}
-            service.getSharedPreferences("settings",Context.MODE_PRIVATE).edit().putBoolean("allow_legacy_protocol",true).commit();
+            settle(service);int port=TestPorts.chat();
             service.connectionFactory=(prefs,listener)->new LanNode(port,true,"pending-test","test","发送方","test",listener);service.onStartCommand(new Intent(),0,1);settle(service);
-            LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:"+target.getLocalPort()),"pending-peer","test","发送反馈测试","");peer.utf8=true;
+            LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:"+target.getLocalPort()),"pending-peer","test","发送反馈测试","");peer.utf8=true;peer.deviceId="4".repeat(32);peer.fingerprint="d".repeat(64);
             LanNode.Message initial=new LanNode.Message();initial.number=1;initial.time=System.currentTimeMillis();initial.state="已收到";initial.text="发送消息时立即反馈，不会误认为没有点到。";service.incoming(peer,initial,false);settle(service);
             shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));
             ac=Robolectric.buildActivity(MainActivity.class).create().start().resume().visible();MainActivity activity=ac.get();settle(service);invoke(activity,"open",String.class,peer.id());settle(service);
@@ -705,8 +704,20 @@ public final class UiTest {
             scroll.scrollTo(0,scroll.getChildAt(0).getHeight());int y=done.getTop();View parent=(View)done.getParent();while(parent!=scroll){y+=parent.getTop()-parent.getScrollY();parent=(View)parent.getParent();}y-=scroll.getScrollY();
             assertTrue("最终操作按钮不能滚进视口",y>=0&&y+done.getHeight()<=scroll.getHeight());snapshotView(scroll,"android-layout-small-sheet-bottom");done.performClick();assertTrue(clicked.get());
             Method settings=MainActivity.class.getDeclaredMethod("settings");settings.setAccessible(true);settings.invoke(activity);dialog=org.robolectric.shadows.ShadowDialog.getLatestDialog();scroll=findScroller(dialog.getWindow().getDecorView());
-            for(View view:descendants(scroll))if(view instanceof TextView)((TextView)view).setTextSize(28);measure(scroll,640,600,false);
-            for(View view:descendants(scroll))if(view instanceof EditText){TextView field=(TextView)view;assertTrue("大字号输入被固定高度裁剪",field.getMeasuredHeight()>=field.getLineHeight()+field.getCompoundPaddingTop()+field.getCompoundPaddingBottom());}
+            for(View view:descendants(scroll))if(view instanceof TextView)((TextView)view).setTextSize(28);
+            measure(scroll,640,600,false);
+            for(View view:descendants(scroll))if(view instanceof EditText)System.out.println("28sp 初始布局："+view.getContentDescription()+" 可见="+view.isShown()+" 高度="+view.getMeasuredHeight());
+            View decor=dialog.getWindow().getDecorView();java.util.Set<View> checked=new java.util.HashSet<>();
+            for(int page=0;page<4;page++){
+                decor.findViewWithTag("settings-tab:"+page).performClick();measure(scroll,640,600,false);
+                View panel=decor.findViewWithTag("settings-page:"+page);assertTrue(panel.isShown());
+                for(View view:descendants(panel))if(view instanceof EditText&&view.isShown()){
+                    EditText input=(EditText)view;int required=input.getLineHeight()+input.getCompoundPaddingTop()+input.getCompoundPaddingBottom();
+                    assertTrue(input.getContentDescription()+" 大字号输入被固定高度裁剪："+input.getMeasuredHeight()+" < "+required,input.getMeasuredHeight()>=required);checked.add(input);
+                }
+            }
+            for(View view:descendants(scroll))if(view instanceof EditText)assertTrue("未实际测量："+view.getContentDescription(),checked.contains(view));
+            decor.findViewWithTag("settings-tab:0").performClick();measure(scroll,640,600,false);
             snapshotView(scroll,"android-layout-settings-large-font");
         }finally{if(dialog!=null)dialog.dismiss();ac.pause().stop().destroy();sc.destroy();}
     }

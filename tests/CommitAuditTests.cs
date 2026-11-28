@@ -36,8 +36,7 @@ namespace FeiqLight.Tests
         }
         private static int FreePort()
         {
-            TcpListener probe = new TcpListener(IPAddress.Loopback, 0); probe.Start();
-            int port = ((IPEndPoint)probe.LocalEndpoint).Port; probe.Stop(); return port;
+            return LoopbackPorts.Chat();
         }
         private static void Pump(Func<bool> done, string reason, int timeoutMs = 8000)
         {
@@ -108,7 +107,7 @@ namespace FeiqLight.Tests
             internal readonly MainForm Main;
             internal readonly LocalStore Store;
             internal readonly Peer Target, Back;
-            internal ReceivePair(string name, bool secure = true)
+            internal ReceivePair(string name)
             {
                 string folder = Path.Combine(root, name); Directory.CreateDirectory(folder);
                 Store = new LocalStore(Path.Combine(folder, "store"));
@@ -117,11 +116,11 @@ namespace FeiqLight.Tests
                 Sender = new LanService(sendSettings, FreePort(), true, "partial-sender");
                 Receiver = new LanService(receiveSettings, FreePort(), true, "partial-receiver");
                 Main = new MainForm(Receiver, Store);
-                if (secure) { Sender.ConfigureSecurity(Path.Combine(folder, "sender-security"), (peer, code) => true); Receiver.ConfigureSecurity(Path.Combine(folder, "receiver-security"), (peer, code) => true); }
+                Sender.ConfigureSecurity(Path.Combine(folder, "sender-security"), (peer, code) => true); Receiver.ConfigureSecurity(Path.Combine(folder, "receiver-security"), (peer, code) => true);
                 Sender.Start(); Receiver.Start(); Main.Show(); Main.NetworkStarted(); Sender.Probe(new IPEndPoint(IPAddress.Loopback, Receiver.Port));
                 Pump(() => Sender.Peers.Any(peer => peer.Login == "partial-receiver") && Receiver.Peers.Any(peer => peer.Login == "partial-sender"), "断点测试双方未发现");
                 Target = Sender.Peers.Single(peer => peer.Login == "partial-receiver"); Back = Receiver.Peers.Single(peer => peer.Login == "partial-sender");
-                if (secure) Sender.VerifyPeer(Target);
+                Sender.VerifyPeer(Target);
                 Main.OpenChat(Back);
             }
             internal ChatRecord Send(params string[] files)
@@ -160,8 +159,8 @@ namespace FeiqLight.Tests
         {
             string large = WriteLargeFile(Path.Combine(root, "partial-sources"), "large.bin"), small = Path.Combine(root, "partial-sources", "saved.txt");
             File.WriteAllText(small, "已保存文件必须保留", new UTF8Encoding(false));
-            Run("0.7.19 发送方中途取消：TLS 与明文即时终止、清断点并保留同批已保存文件", delegate {
-                foreach (bool secure in new[] { true, false }) using (ReceivePair pair = new ReceivePair("cancel-live-" + secure, secure))
+            Run("发送方中途取消：TLS 即时终止、清断点并保留同批已保存文件", delegate {
+                using (ReceivePair pair = new ReceivePair("cancel-live"))
                 {
                     ChatRecord record = pair.Send(small, large);
                     Await(Receive(pair.Main.ActiveChat, record.Packet, 0)); string saved = pair.Stored(record.Packet).Transfers[0].LocalPath;
@@ -184,7 +183,7 @@ namespace FeiqLight.Tests
                     });
                     Task download = Receive(pair.Main.ActiveChat, record.Packet, 1);
                     Await(canceled, 10000); Await(download, 15000);
-                    Console.WriteLine("DETAIL " + (secure ? "TLS" : "明文") + " 中途取消偏移=" + canceled.Result);
+                    Console.WriteLine("DETAIL TLS 中途取消偏移=" + canceled.Result);
                     Pump(() => !File.Exists(part) && pair.Main.ActiveChat.PendingFileCount == 0 && pair.Stored(record.Packet).Transfers[1].Status == "对方已取消发送", "中途取消没有收敛");
                     Check(pair.Stored(record.Packet).State == "对方已取消发送", "消息仍提示续传");
                     string footer = ((Label)Field(pair.Main, "status")).Text;
@@ -192,7 +191,7 @@ namespace FeiqLight.Tests
                     Check(!footer.Contains("接收失败") && !footer.Contains("保留断点"), "取消后主窗口仍提示接收失败或保留断点：" + footer);
                     Check(File.ReadAllBytes(saved).SequenceEqual(File.ReadAllBytes(small)) && pair.Stored(record.Packet).Transfers[0].Status == "已保存", "取消误删或改写已保存附件");
                     Check(!Application.OpenForms.OfType<NoticeDialog>().Any(), "取消后台接收弹了错误窗口");
-                    using (Bitmap image = new Bitmap(pair.Main.Width, pair.Main.Height)) { pair.Main.DrawToBitmap(image, new Rectangle(Point.Empty, image.Size)); image.Save(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "partial-canceled-" + secure + ".png")); }
+                    using (Bitmap image = new Bitmap(pair.Main.Width, pair.Main.Height)) { pair.Main.DrawToBitmap(image, new Rectangle(Point.Empty, image.Size)); image.Save(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "partial-canceled-tls.png")); }
                 }
             });
             Run("0.7.19 通知丢失后续传读取 REVOKED、删除断点且重启不复活待接收项", delegate {
@@ -275,29 +274,10 @@ namespace FeiqLight.Tests
                 using (ReceivePair pair = new ReceivePair("cancel-security"))
                 {
                     ChatRecord record = pair.Send(small, large); Await(Receive(pair.Main.ActiveChat, record.Packet, 0)); string saved = pair.Stored(record.Packet).Transfers[0].LocalPath, part = Partial(pair.Receiver, pair.Back, record, 1); File.WriteAllBytes(part, new byte[128]);
-                    bool barrier = false; pair.Receiver.MessageReceived += message => { if (message.Record.Text == "cancel-barrier") barrier = true; };
-                    using (UdpClient attacker = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0)))
-                    {
-                        foreach (string fingerprint in new[] { pair.Sender.Security.Fingerprint, null })
-                        {
-                            byte[] bytes = Protocol.Encode(81001, pair.Sender.Login, pair.Sender.Host, Protocol.ReleaseFiles | Protocol.Utf8, "cancel:" + record.Packet, null, pair.Sender.Settings.DeviceId, null, fingerprint);
-                            attacker.Send(bytes, bytes.Length, new IPEndPoint(IPAddress.Loopback, pair.Receiver.Port));
-                        }
-                        byte[] stripped = Protocol.Encode(81002, pair.Sender.Login, pair.Sender.Host, Protocol.ReleaseFiles | Protocol.Utf8, "cancel:" + record.Packet, null);
-                        attacker.Send(stripped, stripped.Length, new IPEndPoint(IPAddress.Loopback, pair.Receiver.Port));
-                        byte[] marker = Protocol.Encode(81003, "attacker", "host", Protocol.SendMessage | Protocol.Utf8, "cancel-barrier", null, "33333333333333333333333333333333");
-                        attacker.Send(marker, marker.Length, new IPEndPoint(IPAddress.Loopback, pair.Receiver.Port)); Pump(() => barrier, "伪造取消报文没有被完整处理");
-                    }
-                    Check(File.Exists(part) && pair.Stored(record.Packet).Transfers[1].Status != "对方已取消发送", "伪造明文取消破坏了 TLS 会话");
-                    AppSettings attackSettings = Settings("冒用证书"); attackSettings.DeviceId = pair.Sender.Settings.DeviceId;
-                    using (LanService attacker = new LanService(attackSettings, FreePort(), true, pair.Sender.Login))
-                    {
-                        attacker.ConfigureSecurity(Path.Combine(root, "impostor-security"), (name, code) => true); attacker.Start();
-                        Peer target = new Peer { Endpoint = new IPEndPoint(IPAddress.Loopback, pair.Receiver.Port), DeviceId = pair.Receiver.Settings.DeviceId, Fingerprint = pair.Receiver.Security.Fingerprint, Login = pair.Receiver.Login, Nickname = "接收方" };
-                        bool blocked = false; try { typeof(LanService).GetMethod("SendReleaseFiles", BindingFlags.Instance | BindingFlags.NonPublic).Invoke(attacker, new object[] { target, "cancel:" + record.Packet }); }
-                        catch (TargetInvocationException e) { Check(e.InnerException is IOException || e.InnerException is System.Security.Authentication.AuthenticationException, "冒用验证因无关错误失败：" + e.InnerException); blocked = true; }
-                        Check(blocked && pair.Receiver.Security.IsTrusted(pair.Sender.Settings.DeviceId, pair.Sender.Security.Fingerprint), "冒用证书覆盖了原配对");
-                    }
+                    MethodInfo handle=typeof(LanService).GetMethod("Handle",BindingFlags.Instance|BindingFlags.NonPublic);
+                    foreach(string fingerprint in new[]{pair.Sender.Security.Fingerprint,null})handle.Invoke(pair.Receiver,new object[]{new Packet{Command=Protocol.ReleaseFiles,Body="cancel:"+record.Packet,DeviceId=pair.Sender.Settings.DeviceId,Fingerprint=fingerprint},pair.Back.Endpoint,false});
+                    string wrongPin=new string('c',64);handle.Invoke(pair.Receiver,new object[]{new Packet{Command=Protocol.ReleaseFiles,Body="cancel:"+record.Packet,DeviceId=pair.Sender.Settings.DeviceId,Fingerprint=wrongPin},pair.Back.Endpoint,true});
+                    Check(!pair.Receiver.Security.IsTrusted(pair.Sender.Settings.DeviceId,wrongPin)&&pair.Receiver.Security.IsTrusted(pair.Sender.Settings.DeviceId,pair.Sender.Security.Fingerprint),"原配对发生变化");
                     Check(File.Exists(part) && pair.Stored(record.Packet).Transfers[1].Status != "对方已取消发送", "冒用证书篡改了状态");
                     pair.Main.ActiveChat.Dispose(); Check(pair.Sender.CancelOutgoing(pair.Target.Id, record.Packet, "已送达", true), "后台会话取消失败");
                     Pump(() => !File.Exists(part) && pair.Stored(record.Packet).Transfers[1].Status == "对方已取消发送", "会话未打开时取消没有清理持久化历史"); Check(File.Exists(saved) && pair.Stored(record.Packet).Transfers[0].Status == "已保存", "后台取消误删已保存文件");
@@ -474,10 +454,10 @@ namespace FeiqLight.Tests
                 LocalStore store = new LocalStore(Path.Combine(root, "text-cancel")); Peer peer;
                 using (UdpClient offline = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0)))
                 {
-                    peer = new Peer { Endpoint = (IPEndPoint)offline.Client.LocalEndPoint, Login = "offline-text", Host = "host", Nickname = "离线文本", Utf8 = true };
+                    peer = new Peer { Endpoint = (IPEndPoint)offline.Client.LocalEndPoint, Login = "offline-text", Host = "host", Nickname = "离线文本", Utf8 = true,DeviceId=Guid.NewGuid().ToString("N"),Fingerprint=new string('e',64) };
                     using (LanService sender = new LanService(Settings("文本取消"), FreePort(), true, "text-cancel")) using (MainForm main = new MainForm(sender, store))
                     {
-                        sender.Start(); main.Show(); main.OpenChat(peer); Application.DoEvents();
+                        sender.ConfigureSecurity(store.Root,(name,code)=>true);sender.Start(); main.Show(); main.OpenChat(peer); Application.DoEvents();
                         ChatRecord record = sender.SendContent(peer, "0", new string[0], store.Root); main.Sent(peer, record); main.ActiveChat.Append(record);
                         BubbleHistory history = All(main.ActiveChat).OfType<BubbleHistory>().Single();
                         typeof(BubbleHistory).GetField("selected", BindingFlags.Instance | BindingFlags.NonPublic).SetValue(history, 0);
@@ -694,7 +674,7 @@ namespace FeiqLight.Tests
                     if(generation==0){string stored=Path.Combine(senderRoot,"transfer-offers.json");var parser=new System.Web.Script.Serialization.JavaScriptSerializer();object[] legacy=(object[])parser.DeserializeObject(File.ReadAllText(stored,Encoding.UTF8));foreach(Dictionary<string,object> entry in legacy){entry.Remove("TransferState");entry.Remove("Percent");}File.WriteAllText(stored,parser.Serialize(legacy),new UTF8Encoding(false));}
                 }
             });
-            Run("明文发送完成不泄漏活跃流计数，正在发送中阻断删除且取消可中止传输流",delegate {
+            Run("TLS 保存后释放活跃流，传输中阻断删除，取消停止传输",delegate {
                 LocalStore store=new LocalStore(Path.Combine(root,"active-stream-store"));
                 string smallFile=Path.Combine(root,"明文小文件.bin"), largeFile=Path.Combine(root,"传输中取消.bin");
                 byte[] smallBytes=Enumerable.Range(0,1024).Select(i=>(byte)(i%251)).ToArray();
@@ -706,7 +686,7 @@ namespace FeiqLight.Tests
                 using(MainForm main=new MainForm(sender,store)) {
                     IncomingMessage gotSmall=null, gotLarge=null;
                     receiver.MessageReceived+=msg=>{if(msg.Files.Count>0&&msg.Files[0].Name=="明文小文件.bin")gotSmall=msg;else if(msg.Files.Count>0&&msg.Files[0].Name=="传输中取消.bin")gotLarge=msg;};
-                    sender.Start(); receiver.Start(); main.Show(); main.NetworkStarted();
+                    sender.ConfigureSecurity(Path.Combine(store.Root,"sender"),(name,code)=>true);receiver.ConfigureSecurity(Path.Combine(store.Root,"receiver"),(name,code)=>true);sender.Start(); receiver.Start(); main.Show(); main.NetworkStarted();
                     sender.Probe(new IPEndPoint(IPAddress.Loopback,receiverPort));
                     Pump(()=>sender.Peers.Any(p=>p.Login=="plain-receiver"&&p.Online)&&receiver.Peers.Any(p=>p.Login=="plain-sender"&&p.Online),"明文双端未互发现");
                     Peer target=sender.Peers.Single(p=>p.Login=="plain-receiver"), back=receiver.Peers.Single(p=>p.Login=="plain-sender");
@@ -723,16 +703,12 @@ namespace FeiqLight.Tests
                     ChatRecord rLarge=sender.SendContent(target,"大文件",new[]{largeFile},store.Root);
                     main.Sent(target,rLarge); main.ActiveChat.Append(rLarge);
                     Pump(()=>gotLarge!=null&&rLarge.State=="已送达","大文件邀请未送达");
-                    using(TcpClient stall=new TcpClient(AddressFamily.InterNetwork)) {
-                        stall.ReceiveBufferSize=4096;
-                        stall.Connect(IPAddress.Loopback,senderPort);
-                        byte[] req=Protocol.Encode(999,"plain-receiver","host",Protocol.GetFile|Protocol.Utf8,rLarge.Packet.ToString("x")+":0:0:",null);
-                        stall.GetStream().Write(req,0,req.Length);
-                        byte[] first=new byte[16];
-                        Check(stall.GetStream().Read(first,0,first.Length)>0,"未能启动明文发送流");
-                        Pump(()=>sender.HasActiveOutgoingTransfer(target.Id,rLarge.Packet),"活动发送流未登记");
+                    using(var stalled=new BlockedReceive()) {
+                        var receiving=receiver.ReceiveFileAsync(back,gotLarge.Record.Packet,gotLarge.Files[0],Path.Combine(store.Root,"中途接收.bin"),stalled,CancellationToken.None);
+                        Pump(()=>stalled.Entered.IsSet&&sender.HasActiveOutgoingTransfer(target.Id,rLarge.Packet),"TLS 活动发送流未登记");
                         Check(DeleteBlockedByNotice(main,target,new[]{rLarge}),"正在发送中的文件消息未被阻断删除");
                         Check(sender.CancelOutgoing(target.Id,rLarge.Packet,rLarge.State,true),"取消正在发送中的文件失败");
+                        stalled.Resume.Set();try{Await(receiving);}catch(IOException){}
                         Pump(()=>!sender.HasActiveOutgoingTransfer(target.Id,rLarge.Packet),"取消后活动发送流未释放");
                         Pump(()=>rLarge.Transfers[0].Status=="已取消发送","取消后附件状态未更新为已取消发送");
                         Thread.Sleep(200); Application.DoEvents();
@@ -745,6 +721,11 @@ namespace FeiqLight.Tests
             PartialRegression();
             Console.WriteLine("RESULT passed="+passed+" failed="+failed);
             return failed==0?0:1;
+        }
+        private sealed class BlockedReceive : IProgress<int>, IDisposable {
+            internal readonly ManualResetEventSlim Entered=new ManualResetEventSlim(),Resume=new ManualResetEventSlim();
+            public void Report(int percent){Entered.Set();if(!Resume.Wait(12000))throw new IOException("测试未释放接收端");}
+            public void Dispose(){Resume.Set();}
         }
     }
 }

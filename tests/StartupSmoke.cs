@@ -38,7 +38,7 @@ internal static class StartupSmoke
         try
         {
             Directory.CreateDirectory(root);
-            int port;using(TcpListenerHandle probe=new TcpListenerHandle())port=probe.Port;
+            int port=FeiqLight.Tests.LoopbackPorts.Chat();
             LocalStore store=new LocalStore(Path.Combine(root,"资料 with spaces"));
             AppSettings settings=new AppSettings { Port=port,Nickname="自启动真实烟测",CloseToTray=false,Notifications=false,ReceiveFolder=Path.Combine(root,"received") };
             WindowsStartup startup=new WindowsStartup(Path.Combine(root,"startup-links"),executable,store.Root,port,true);
@@ -47,7 +47,7 @@ internal static class StartupSmoke
             for(int launch=0;launch<2;launch++)
             {
                 if(launch==1) {
-                    using(TcpListenerHandle probe=new TcpListenerHandle())port=probe.Port;
+                    port=FeiqLight.Tests.LoopbackPorts.Chat();
                     settings=store.LoadSettings();settings.Port=port;store.SaveSettings(settings);
                 }
                 ProcessStartInfo start=launch==0?new ProcessStartInfo(startup.ShortcutPath){UseShellExecute=true}:new ProcessStartInfo(executable,"--autostart --loopback --port "+originalPort+" --profile \""+store.Root+"\""){UseShellExecute=false,WindowStyle=ProcessWindowStyle.Hidden};
@@ -89,12 +89,5 @@ internal static class StartupSmoke
                 if(stopped&&absolute.StartsWith(prefix,StringComparison.OrdinalIgnoreCase)&&Directory.Exists(absolute))Directory.Delete(absolute,true);
             }
         }
-    }
-    private sealed class TcpListenerHandle : IDisposable
-    {
-        private readonly TcpListener listener=new TcpListener(IPAddress.Loopback,0);
-        public int Port { get; private set; }
-        public TcpListenerHandle(){listener.Start();Port=((IPEndPoint)listener.LocalEndpoint).Port;}
-        public void Dispose(){listener.Stop();}
     }
 }

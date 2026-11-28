@@ -111,17 +111,18 @@ namespace FeiqLight.Tests
                 }
                 Theme.Change(false,"blue");
             });
-            Run("旧版协议：新装和缺字段配置默认开启，手动关闭后重启保持", () => {
+            Run("旧配置忽略明文开关，保留资料且不能发送明文", () => {
                 LocalStore store = new LocalStore(Path.Combine(root, "settings"));
-                Check(store.LoadSettings().AllowLegacyProtocol, "新装未默认开启兼容");
-                File.WriteAllText(Path.Combine(store.Root, "settings.json"), "{\"Nickname\":\"旧配置\"}");
-                AppSettings settings = store.LoadSettings(); Check(settings.AllowLegacyProtocol && settings.Nickname == "旧配置", "缺字段的旧配置未开启兼容");
-                File.WriteAllText(Path.Combine(store.Root, "settings.json"), "{\"Nickname\":\"0.7.0\",\"AllowLegacyProtocol\":false}");
-                Check(store.LoadSettings().AllowLegacyProtocol, "0.7.0 默认关闭的旧配置未迁移");
-                settings.AllowLegacyProtocol = false; store.SaveSettings(settings);
-                Check(!new LocalStore(store.Root).LoadSettings().AllowLegacyProtocol, "重启覆盖了已保存的关闭选择");
-                settings.AllowLegacyProtocol = true; store.SaveSettings(settings);
-                Check(new LocalStore(store.Root).LoadSettings().AllowLegacyProtocol, "开启未持久保存");
+                string path=Path.Combine(store.Root,"settings.json"),id=new string('a',32);
+                foreach(string oldFields in new[]{"",",\"AllowLegacyProtocol\":false",",\"AllowLegacyProtocol\":true,\"SettingsRevision\":1"}) {
+                    File.WriteAllText(path,"{\"Nickname\":\"旧配置\",\"DeviceId\":\""+id+"\",\"Port\":34567"+oldFields+"}");
+                    AppSettings settings=store.LoadSettings();Check(store.Warning==null&&settings.Nickname=="旧配置"&&settings.DeviceId==id&&settings.Port==34567,"旧配置被重置");
+                    using(var node=new LanService(settings,34567,true,"upgrade")) {
+                        try { node.SendMessage(new Peer{Endpoint=new IPEndPoint(IPAddress.Loopback,2425)},"test",null);throw new Exception("仍可发送明文"); }
+                        catch(IOException error){Check(error.Message.Contains("升级至 0.8"),"缺少升级提示");}
+                    }
+                    store.SaveSettings(settings);Check(!File.ReadAllText(path).Contains("AllowLegacyProtocol")&&new LocalStore(store.Root).LoadSettings().DeviceId==id,"重启未保留设备身份");
+                }
             });
             Run("输入框：读取正文不再导出流，中文、换行、表情和选区与系统控件一致", () => {
                 using (Form host = new Form { ClientSize = new Size(640,240) })

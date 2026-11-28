@@ -127,7 +127,7 @@ internal static class PartialInterop
                                 Task winner = await Task.WhenAny(item.Notification.Task, Task.Delay(8000)); Check(winner == item.Notification.Task, "Android TLS 取消通知未到达");
                                 // 发送流可能先于取消通知断开；下载释放句柄后按通知清理保留下来的断点。
                                 ReceiveStorage.DeletePartialAndEmptyParents(root, part, null);
-                                Check(item.Canceled && !File.Exists(part), "活跃取消未终止下载并清断点");
+                                Check(item.Canceled && !File.Exists(part) && !File.Exists(destination), "活跃取消未终止下载、清断点或错误发布了半成品");
                             }
                             else
                             {

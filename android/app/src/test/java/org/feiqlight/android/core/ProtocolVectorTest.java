@@ -11,7 +11,7 @@ import java.nio.file.*;
 import java.util.*;
 import static org.junit.Assert.*;
 
-/** 共用 JSON 是唯一预期来源；差异向量锁定现状，不放宽生产校验。 */
+/** 网络与历史入口分别验证，预期均来自同一份 JSON。 */
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk=35)
 public final class ProtocolVectorTest {
@@ -54,8 +54,8 @@ public final class ProtocolVectorTest {
                 if(test.has("encodedLength"))assertEquals("编码字节数",test.getInt("encodedLength"),encoded.length);
                 return packet(encoded);
             case "storedFiles":
-                assertTrue("历史兼容不得放宽网络入口",Protocol.parseFiles(input).isEmpty());
-                return files(Protocol.parseStoredFiles(input));
+                equal(test.get("storedExpected"),files(Protocol.parseStoredFiles(input)),"历史恢复："+test.getString("name"));
+                return files(Protocol.parseFiles(input));
             case "files":return files(Protocol.parseFiles(input));
             case "filesRoundTrip":
                 List<Protocol.Attachment> list=new ArrayList<>();JSONArray items=test.getJSONArray("input");
@@ -75,17 +75,29 @@ public final class ProtocolVectorTest {
         }
         equal(expected,execute(test),test.getString("name"));
     }
-    private static void constants(JSONObject c,Path root)throws Exception {
+    private static void constants(JSONObject c)throws Exception {
         JSONObject commands=new JSONObject();String[] names={"entry","exit","answer","absence","sendMessage","receiveMessage","getFile","releaseFiles"};int[] values={Protocol.ENTRY,Protocol.EXIT,Protocol.ANSWER,Protocol.ABSENCE,Protocol.MESSAGE,Protocol.ACK,Protocol.GET_FILE,Protocol.RELEASE};
         for(int i=0;i<names.length;i++)commands.put(names[i],values[i]);equal(c.get("commands"),commands,"命令常量");
         equal(c.get("flags"),new JSONObject().put("sendCheck",Protocol.CHECK).put("fileAttach",Protocol.FILE).put("utf8",Protocol.UTF8).put("capUtf8",Protocol.CAP_UTF8),"标志常量");
-        String protocol=new String(Files.readAllBytes(root.resolve("android/app/src/main/java/org/feiqlight/android/core/Protocol.java")),StandardCharsets.UTF_8);
-        String[][] checks={{"maxPacketBytes","bytes.length>"},{"maxHeaderColonOffset","end>"},{"maxHeaderFieldChars","parts[2].length()>"},{"maxFileNameUtf8Bytes","bytes>"},{"maxFileNameChars","name.length()>"},{"maxRelativePathChars","value.length()>"},{"maxRelativePathSegments","parts.length<="},{"maxParsedAttachments","Math.min(rows.length,"},{"maxAvatarJpegBytes","bytes.length>"}};
-        for(String[] check:checks)assertTrue("生产边界与常量不一致："+check[0],protocol.contains(check[1]+c.getInt(check[0])));
-        String lan=new String(Files.readAllBytes(root.resolve("android/app/src/main/java/org/feiqlight/android/core/LanNode.java")),StandardCharsets.UTF_8);
-        assertTrue("默认端口",lan.contains(":"+c.getInt("defaultChatPort")));
-        assertTrue("邀请上限",lan.contains("paths.size()>"+c.getInt("maxAttachmentsPerMessage")));
-        assertTrue("Hello 上限",lan.contains(","+c.getInt("helloFrameBytes")+")"));
+        assertEquals("MaxPacketBytes",c.getInt("maxPacketBytes"),Protocol.MAX_PACKET_BYTES);
+        assertEquals("MaxHeaderColonOffset",c.getInt("maxHeaderColonOffset"),Protocol.MAX_HEADER_COLON_OFFSET);
+        assertEquals("MaxHeaderFieldChars",c.getInt("maxHeaderFieldChars"),Protocol.MAX_HEADER_FIELD_CHARS);
+        assertEquals("MaxFileNameUtf8Bytes",c.getInt("maxFileNameUtf8Bytes"),Protocol.MAX_FILE_NAME_UTF8_BYTES);
+        assertEquals("MaxFileNameChars",c.getInt("maxFileNameChars"),Protocol.MAX_FILE_NAME_CHARS);
+        assertEquals("MaxRelativePathChars",c.getInt("maxRelativePathChars"),Protocol.MAX_RELATIVE_PATH_CHARS);
+        assertEquals("MaxRelativePathSegments",c.getInt("maxRelativePathSegments"),Protocol.MAX_RELATIVE_PATH_SEGMENTS);
+        assertEquals("MaxParsedAttachments",c.getInt("maxParsedAttachments"),Protocol.MAX_PARSED_ATTACHMENTS);
+        assertEquals("MaxAvatarJpegBytes",c.getInt("maxAvatarJpegBytes"),Protocol.MAX_AVATAR_JPEG_BYTES);
+        assertEquals("MaxAttachmentsPerMessage",c.getInt("maxAttachmentsPerMessage"),Protocol.MAX_ATTACHMENTS_PER_MESSAGE);
+        assertEquals("HelloFrameBytes",c.getInt("helloFrameBytes"),Protocol.HELLO_FRAME_BYTES);
+        assertEquals("默认端口",c.getInt("defaultChatPort"),LanNode.endpoint("127.0.0.1").getPort());
+        int hello=c.getInt("helloFrameBytes");
+        for(int length:new int[]{hello,hello+1}) {
+            ByteArrayOutputStream frame=new ByteArrayOutputStream();SecureIdentity.writeFrame(frame,new byte[length]);
+            try {assertEquals(hello,SecureIdentity.readFrame(new ByteArrayInputStream(frame.toByteArray()),Protocol.HELLO_FRAME_BYTES).length);}
+            catch(IOException error){if(length==hello)throw error;continue;}
+            assertEquals("超限 Hello 未拒绝",hello,length);
+        }
         Class<?> messageText=Class.forName("org.feiqlight.android.MessageText");java.lang.reflect.Field threshold=messageText.getDeclaredField("FILE_THRESHOLD");threshold.setAccessible(true);
         assertEquals("文本阈值",c.getInt("textAsFileUtf8Bytes"),threshold.getInt(null));
         ByteArrayOutputStream stream=new ByteArrayOutputStream();int maximum=c.getInt("maxFrameBytes");SecureIdentity.writeFrame(stream,new byte[maximum]);
@@ -95,10 +107,10 @@ public final class ProtocolVectorTest {
         Path vector=null;
         for(String candidate:new String[]{"../../tests/protocol-vectors.json","../tests/protocol-vectors.json","tests/protocol-vectors.json"})if(Files.isRegularFile(Paths.get(candidate))){vector=Paths.get(candidate).toAbsolutePath().normalize();break;}
         assertNotNull("未找到共用协议向量文件 tests/protocol-vectors.json",vector);
-        JSONObject data=new JSONObject(new String(Files.readAllBytes(vector),StandardCharsets.UTF_8));assertEquals(1,data.getInt("version"));constants(data.getJSONObject("constants"),vector.getParent().getParent());int count=0;
-        for(String group:new String[]{"fieldCases","prefixCases","deviceIdAndPairCodeCases","avatarCases","fileNameAndRelativePathCases","packetCases","attachmentListCases","frameCases","knownPlatformDivergences"}) {
+        JSONObject data=new JSONObject(new String(Files.readAllBytes(vector),StandardCharsets.UTF_8));assertEquals(2,data.getInt("version"));constants(data.getJSONObject("constants"));int count=0;
+        for(String group:new String[]{"fieldCases","prefixCases","deviceIdAndPairCodeCases","avatarCases","fileNameAndRelativePathCases","packetCases","attachmentListCases","frameCases","wireValidationCases","historyCases"}) {
             JSONArray cases=data.getJSONArray(group);assertTrue("向量组不能为空："+group,cases.length()>0);
-            for(int i=0;i<cases.length();i++){JSONObject test=cases.getJSONObject(i);runCase(test,test.get(group.equals("knownPlatformDivergences")?"android":"expected"));count++;}
+            for(int i=0;i<cases.length();i++){JSONObject test=cases.getJSONObject(i);runCase(test,test.get("expected"));count++;}
             System.out.println("PASS protocol "+group+" "+cases.length());
         }
         System.out.println("PASS 共用协议向量 "+count+" 项 + 常量核对");

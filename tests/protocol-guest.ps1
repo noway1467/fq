@@ -1,4 +1,4 @@
-param([string]$TemporaryDirectory,[string]$OutputDirectory)
+param([string]$TemporaryDirectory,[string]$OutputDirectory,[switch]$VectorsOnly)
 $ErrorActionPreference='Stop'
 $root=Split-Path -Parent $PSScriptRoot
 $temporary=if($TemporaryDirectory){[IO.Path]::GetFullPath($TemporaryDirectory)}else{Join-Path $root 'build/tmp/pg'}
@@ -12,7 +12,8 @@ $sources=@(Get-ChildItem -LiteralPath (Join-Path $root 'src') -Filter '*.cs' | F
 $common=@('/nologo','/utf8output','/warn:4','/warnaserror+','/target:exe','/r:System.dll','/r:System.Core.dll','/r:System.Drawing.dll','/r:System.Windows.Forms.dll','/r:System.Web.Extensions.dll',"/win32manifest:$root\src\app.manifest")
 foreach($asset in @('guest.html','guest.css','guest.js','qrcodegen.js')){$common+="/resource:$root\assets\tools\$asset,FeiqLight.Tools.$asset"}
 $common+=@("/resource:$root\src\emoji-atlas.png,FeiqLight.EmojiAtlas.png","/resource:$root\src\emoji-atlas.txt,FeiqLight.EmojiAtlas.txt","/resource:$root\assets\avatars\atlas.png,FeiqLight.Avatars.png","/resource:$root\assets\avatars\catalog.txt,FeiqLight.Avatars.txt")
-foreach($entry in @('ProtocolVectorTests','GuestLifetimeTests')) {
+$entries=@('ProtocolVectorTests');if(!$VectorsOnly){$entries+='GuestLifetimeTests'}
+foreach($entry in $entries) {
     $exe=Join-Path $temporary ($entry+'.exe')
     & $compiler @common "/main:FeiqLight.Tests.$entry" "/out:$exe" @sources "$root\tests\$entry.cs"
     if($LASTEXITCODE -ne 0){throw "$entry 编译失败"}

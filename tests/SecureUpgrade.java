@@ -10,8 +10,8 @@ public final class SecureUpgrade {
     private interface Test {void run()throws Exception;}
     private static void run(String name,Test test){try{test.run();passed++;System.out.println("PASS "+name);}catch(Exception|AssertionError e){failed++;System.out.println("FAIL "+name+": "+e);e.printStackTrace(System.out);}}
     private static void check(boolean value,String message){if(!value)throw new AssertionError(message);}
-    private static int port()throws IOException{try(ServerSocket socket=new ServerSocket(0,1,InetAddress.getLoopbackAddress())){return socket.getLocalPort();}}
-    private static int toolPorts()throws IOException{for(int port=21000;port<45000;port+=3){List<ServerSocket> sockets=new ArrayList<>();try{for(int i=0;i<3;i++)sockets.add(new ServerSocket(port+i,1,InetAddress.getLoopbackAddress()));return port;}catch(IOException ignored){}finally{for(ServerSocket socket:sockets)socket.close();}}throw new IOException("没有可用测试端口");}
+    private static int port() throws IOException { return org.feiqlight.android.TestPorts.chat(); }
+    private static int toolPorts() throws IOException { return org.feiqlight.android.TestPorts.withTools(); }
     private static final class Node implements AutoCloseable {
         final LanNode node;final BlockingQueue<LanNode.Message> incoming=new LinkedBlockingQueue<>();
         final BlockingQueue<String> canceled=new LinkedBlockingQueue<>(),states=new LinkedBlockingQueue<>();
@@ -24,7 +24,7 @@ public final class SecureUpgrade {
     }
     private static LanNode.Peer find(Node a,Node b)throws Exception {a.node.probe(new InetSocketAddress("127.0.0.1",b.node.port()));for(int i=0;i<500;i++){for(LanNode.Peer peer:a.node.peers())if(peer.endpoint.getPort()==b.node.port())return peer;Thread.sleep(10);}throw new AssertionError("发现超时");}
     private static Object field(LanNode node,String name)throws Exception{java.lang.reflect.Field value=LanNode.class.getDeclaredField(name);value.setAccessible(true);return value.get(node);}
-    private static void raw(Node sender,Node receiver,byte[] bytes)throws Exception{((DatagramSocket)field(sender.node,"udp")).send(new DatagramPacket(bytes,bytes.length,new InetSocketAddress("127.0.0.1",receiver.node.port())));}
+    private static void raw(Node sender,Node receiver,byte[] bytes)throws Exception{var method=LanNode.class.getDeclaredMethod("handle",Protocol.Packet.class,InetSocketAddress.class);method.setAccessible(true);method.invoke(receiver.node,Protocol.parse(bytes),new InetSocketAddress("127.0.0.1",sender.node.port()));}
     private static String http(int port,String path,String cookie)throws IOException {try(Socket socket=new Socket("127.0.0.1",port)){socket.setSoTimeout(10000);socket.getOutputStream().write(("GET "+path+" HTTP/1.1\r\nHost: 127.0.0.1:"+port+"\r\nCookie: "+cookie+"\r\nConnection: close\r\n\r\n").getBytes(java.nio.charset.StandardCharsets.US_ASCII));return new String(socket.getInputStream().readAllBytes(),java.nio.charset.StandardCharsets.UTF_8);}}
     private static String delayedLogin(int port,String cookie)throws IOException{try(Socket socket=new Socket("127.0.0.1",port)){socket.setSoTimeout(25000);socket.getOutputStream().write(("POST /api/login HTTP/1.1\r\nHost: 127.0.0.1:"+port+"\r\nCookie: "+cookie+"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").getBytes(java.nio.charset.StandardCharsets.US_ASCII));return new String(socket.getInputStream().readAllBytes(),java.nio.charset.StandardCharsets.UTF_8);}}
     private static void disconnectTests(Path root) {
@@ -79,9 +79,9 @@ public final class SecureUpgrade {
             }
             try(Node a=new Node(root.resolve("a").toFile(),ap,aid)){check(!a.node.offering("device:"+bid,message.number,0),"重启复活拒绝邀请");}
         });
-        run("拒绝错误证书和未允许的旧版明文",()->{
+        run("拒绝错误证书和旧版明文",()->{
             try(Node a=new Node(root.resolve("pin-a").toFile(),port(),"cccccccccccccccccccccccccccccccc");Node b=new Node(root.resolve("pin-b").toFile(),port(),"dddddddddddddddddddddddddddddddd")){
-                LanNode.Peer peer=find(a,b);String pin=peer.fingerprint;peer.fingerprint="f".repeat(64);boolean rejected=false;try{a.node.verifyPeer(peer);}catch(IOException e){rejected=true;}check(rejected,"接受错误证书");check(a.node.allowLegacyProtocol,"未默认开启兼容");a.node.allowLegacyProtocol=false;peer.fingerprint=null;rejected=false;try{a.node.sendMessage(peer,"secret",Collections.emptyList());}catch(IOException e){rejected=true;}check(rejected,"关闭后仍发送明文");peer.fingerprint=pin;
+                LanNode.Peer peer=find(a,b);String pin=peer.fingerprint;peer.fingerprint="f".repeat(64);boolean rejected=false;try{a.node.verifyPeer(peer);}catch(IOException e){rejected=true;}check(rejected,"接受错误证书");peer.fingerprint=null;rejected=false;try{a.node.sendMessage(peer,"test",Collections.emptyList());}catch(IOException e){rejected=e.getMessage().contains("升级至 0.8");}check(rejected,"未拒绝旧设备并提示升级");peer.fingerprint=pin;
             }
         });
         run("已配对会话拒绝省略身份的明文消息和退出报文",()->{
@@ -90,10 +90,9 @@ public final class SecureUpgrade {
                 LanNode.Peer peer=find(a,b);a.node.verifyPeer(peer);
                 raw(b,a,Protocol.encode(93001,bid,"Android",Protocol.MESSAGE|Protocol.UTF8,"stripped-message",null));
                 raw(b,a,Protocol.encode(93002,bid,"Android",Protocol.EXIT|Protocol.UTF8,"stripped-exit",null));
-                raw(b,a,Protocol.encode(93003,bid,"Android",Protocol.MESSAGE|Protocol.UTF8,"legacy-barrier",null,"56565656565656565656565656565656"));
-                List<String> texts=new ArrayList<>();long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(5);
-                while(!texts.contains("legacy-barrier")&&System.nanoTime()<end){LanNode.Message message=a.incoming.poll(100,TimeUnit.MILLISECONDS);if(message!=null)texts.add(message.text);}
-                check(texts.contains("legacy-barrier"),"旧设备兼容消息未处理");check(!texts.contains("stripped-message"),"省略设备 ID 的明文混入已信任会话");check(peer.online,"省略身份的退出报文把已信任联系人下线");
+                raw(b,a,Protocol.encode(93003,"fixture","test",Protocol.ANSWER|Protocol.UTF8,"发现屏障",null,"56565656565656565656565656565656"));
+                long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(5);while(a.node.peers().stream().noneMatch(found->"发现屏障".equals(found.name))&&System.nanoTime()<end)Thread.sleep(10);
+                check(a.node.peers().stream().anyMatch(found->"发现屏障".equals(found.name)),"发现屏障未处理");check(a.incoming.isEmpty(),"明文进入会话");check(peer.online,"省略身份的退出报文把已信任联系人下线");
             }
         });
         run("文件任务写盘失败不留下重试消息或发送授权",()->{

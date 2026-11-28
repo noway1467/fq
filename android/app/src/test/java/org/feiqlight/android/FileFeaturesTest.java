@@ -30,6 +30,7 @@ import static org.robolectric.Shadows.shadowOf;
 
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk=35,qualifiers="w393dp-h852dp-xhdpi")
+@org.robolectric.annotation.ConscryptMode(org.robolectric.annotation.ConscryptMode.Mode.OFF)
 public final class FileFeaturesTest {
     @Test public void onlineConversationsMoveAboveRecentOfflineAndPinsSurviveOffline() throws Exception {
         ServiceController<ChatService> controller=Robolectric.buildService(ChatService.class).create();ChatService service=controller.get();
@@ -59,7 +60,7 @@ public final class FileFeaturesTest {
         LanNode.Listener listener=new LanNode.Listener(){public void peersChanged(){}public void error(String t){}public void message(LanNode.Peer p,LanNode.Message m,boolean update){if(!update&&!m.outgoing)received.add(m);}};
         int a=port(),b=port();while(a==b)b=port();
         try(LanNode sender=new LanNode(a,true,"text-sender","host","发送方","test",quiet);LanNode receiver=new LanNode(b,true,"text-receiver","host","接收方","test",listener)) {
-            settle(service);set(service,"node",sender);sender.start();receiver.start();sender.probe(LanNode.endpoint("127.0.0.1:"+b));waitFor(service,()->sender.peers().size()==1&&receiver.peers().size()==1);
+            settle(service);set(service,"node",sender);TlsFilePeer.enable(sender);TlsFilePeer.enable(receiver);sender.start();receiver.start();sender.probe(LanNode.endpoint("127.0.0.1:"+b));waitFor(service,()->sender.peers().size()==1&&receiver.peers().size()==1);
             String text="中文 👩🏽‍💻\r\n 保留空格  \t".repeat(5000);LanNode.Peer peer=sender.peers().get(0);DraftStore drafts=new DraftStore(service);drafts.save(peer.id(),text);
             assertFalse(MessageText.asFile("a".repeat(16384)));assertTrue(MessageText.asFile("a".repeat(16385)));assertTrue(MessageText.asFile("中".repeat(6000)));
             List<Boolean> result=new ArrayList<>();service.send(peer,text,result::add);waitFor(service,()->!result.isEmpty()&&!received.isEmpty());assertEquals(Collections.singletonList(true),result);assertEquals("",drafts.read(peer.id()));
@@ -89,7 +90,7 @@ public final class FileFeaturesTest {
         LanNode.Listener listener=new LanNode.Listener(){public void peersChanged(){}public void error(String t){}public void message(LanNode.Peer p,LanNode.Message m,boolean update){if(!update&&!m.outgoing)received.add(m);}};
         int a=port(),b=port();while(a==b)b=port();
         try(LanNode sender=new LanNode(a,true,"batch-sender","host","发送方","test",quiet);LanNode receiver=new LanNode(b,true,"batch-receiver","host","接收方","test",listener)) {
-            settle(service);set(service,"node",sender);sender.start();receiver.start();sender.probe(LanNode.endpoint("127.0.0.1:"+b));
+            settle(service);set(service,"node",sender);TlsFilePeer.enable(sender);TlsFilePeer.enable(receiver);sender.start();receiver.start();sender.probe(LanNode.endpoint("127.0.0.1:"+b));
             waitFor(service,()->sender.peers().size()==1&&receiver.peers().size()==1);
             Docs docs=provider(service);List<Uri> uris=new ArrayList<>();
             for(String content:Arrays.asList("第一份中文 😀","第二份同名文件")) {
@@ -120,7 +121,7 @@ public final class FileFeaturesTest {
         LanNode.Listener receiving=new LanNode.Listener(){public void peersChanged(){}public void error(String text){}public void message(LanNode.Peer peer,LanNode.Message message,boolean update){if(!message.outgoing&&!update)received.add(message);}};
         int a=port(),b=port();while(a==b)b=port();
         try(LanNode sender=new LanNode(a,true,"cancel-sender","host","发送方","test",sending);LanNode receiver=new LanNode(b,true,"cancel-receiver","host","接收方","test",receiving)) {
-            settle(service);set(service,"node",sender);sender.start();receiver.start();sender.probe(LanNode.endpoint("127.0.0.1:"+b));waitFor(service,()->sender.peers().size()==1&&receiver.peers().size()==1);
+            settle(service);set(service,"node",sender);TlsFilePeer.enable(sender);TlsFilePeer.enable(receiver);sender.start();receiver.start();sender.probe(LanNode.endpoint("127.0.0.1:"+b));waitFor(service,()->sender.peers().size()==1&&receiver.peers().size()==1);
             Docs docs=provider(service);List<Uri> uris=new ArrayList<>();
             for(int i=0;i<21;i++){String id=docs.createDocument("root","text/plain","文件"+i+".txt");Files.write(docs.files.get(id).toPath(),("原始文件"+i).getBytes(StandardCharsets.UTF_8));uris.add(DocumentsContract.buildDocumentUri("feiq.documents",id));}
             service.sendFiles(sender.peers().get(0),uris);waitFor(service,()->!service.busy()&&!received.isEmpty());
@@ -306,9 +307,9 @@ public final class FileFeaturesTest {
     @Test public void forwardCanReadAuthorizedExportAfterInternalCopyIsGone()throws Exception {
         ServiceController<ChatService> controller=Robolectric.buildService(ChatService.class).create();ChatService service=controller.get();
         LanNode.Listener quiet=new LanNode.Listener(){public void peersChanged(){}public void error(String text){}public void message(LanNode.Peer p,LanNode.Message m,boolean update){}};
-        try(LanNode node=new LanNode(port(),true,"forward-saf","host","测试","测试",quiet);DatagramSocket socket=new DatagramSocket(0,InetAddress.getLoopbackAddress())){
-            settle(service);node.start();set(service,"node",node);Docs docs=provider(service);ReceivedStorage storage=new ReceivedStorage(service);storage.choose(TREE,FLAGS);
-            LanNode.Peer source=new LanNode.Peer(LanNode.endpoint("127.0.0.1:32425"),"source","host","来源","测试"),target=new LanNode.Peer(LanNode.endpoint("127.0.0.1:"+socket.getLocalPort()),"target","host","目标","测试");target.utf8=true;
+        try(LanNode node=new LanNode(port(),true,"forward-saf","host","测试","测试",quiet);TlsInbox remote=new TlsInbox()){
+            settle(service);TlsFilePeer.enable(node);node.start();set(service,"node",node);Docs docs=provider(service);ReceivedStorage storage=new ReceivedStorage(service);storage.choose(TREE,FLAGS);
+            LanNode.Peer source=new LanNode.Peer(LanNode.endpoint("127.0.0.1:32425"),"source","host","来源","测试"),target=remote.peer;
             LanNode.Message message=new LanNode.Message();message.number=123;message.text="SAF转发";byte[] bytes="授权副本".getBytes(StandardCharsets.UTF_8);Protocol.Attachment file=new Protocol.Attachment(0,"导出文件.txt",bytes.length,0);message.files.add(file);
             File local=service.receivedFile(source,message.number,file);assertTrue(local.getParentFile().isDirectory()||local.getParentFile().mkdirs());Files.write(local.toPath(),bytes);Uri saved=storage.save(local,file.name,new LanNode.Transfer());assertFalse(local.exists());
             List<Boolean> result=new ArrayList<>();service.forward(source,message,target,result::add);waitFor(service,()->!result.isEmpty());assertEquals(Collections.singletonList(true),result);
@@ -324,7 +325,7 @@ public final class FileFeaturesTest {
         LanNode.Listener quiet=new LanNode.Listener(){ public void peersChanged(){} public void error(String text){} public void message(LanNode.Peer p,LanNode.Message m,boolean update){} };
         LanNode.Listener incoming=new LanNode.Listener(){ public void peersChanged(){} public void error(String text){} public void message(LanNode.Peer p,LanNode.Message m,boolean update){service.incoming(p,m,update);} };
         try(LanNode sender=new LanNode(aPort,true,"file-sender","host","发送方","test",quiet); LanNode receiver=new LanNode(bPort,true,"file-receiver","host","接收方","test",incoming)) {
-            settle(service); set(service,"node",receiver); sender.start(); receiver.start(); sender.probe(LanNode.endpoint("127.0.0.1:"+bPort));
+            settle(service); set(service,"node",receiver);TlsFilePeer.enable(sender);TlsFilePeer.enable(receiver);sender.start(); receiver.start(); sender.probe(LanNode.endpoint("127.0.0.1:"+bPort));
             waitFor(service,()->sender.peers().size()==1&&receiver.peers().size()==1);
             LanNode.Peer remote=receiver.peers().get(0); File one=source(service,"自动接收内容"), empty=source(service,"");
             LanNode.Message batch=sender.sendMessage(sender.peers().get(0),"后台批量",Arrays.asList(one,empty));
@@ -487,7 +488,7 @@ public final class FileFeaturesTest {
         LanNode.Listener quiet=new LanNode.Listener(){public void peersChanged(){}public void error(String text){}public void message(LanNode.Peer peer,LanNode.Message message,boolean update){}};
         try(LanNode sender=new LanNode(port(),true,"live-sender","host","发送方","",quiet);LanNode receiver=new LanNode(port(),true,"live-receiver","host","接收方","",incoming)) {
             settle(service);service.observe(new ChatService.Observer(){public void changed(){}public void error(String text){errors.add(text);}});service.getSharedPreferences("settings",0).edit().putBoolean(ReceivedStorage.AUTO,false).commit();set(service,"node",receiver);
-            sender.setDeviceId("5".repeat(32));receiver.setDeviceId("6".repeat(32));sender.start();receiver.start();sender.probe(LanNode.endpoint("127.0.0.1:"+receiver.port()));waitFor(service,()->sender.peers().size()==1&&receiver.peers().size()==1);
+            TlsFilePeer.enable(sender);TlsFilePeer.enable(receiver);sender.start();receiver.start();sender.probe(LanNode.endpoint("127.0.0.1:"+receiver.port()));waitFor(service,()->sender.peers().size()==1&&receiver.peers().size()==1);
             File small=source(service,"完成附件"),large=new File(service.getFilesDir(),"large-cancel.bin");byte[] block=new byte[1024*1024];new Random(73).nextBytes(block);
             try(OutputStream output=new FileOutputStream(large)){for(int i=0;i<64;i++)output.write(block);}
             LanNode.Peer target=sender.peers().get(0),peer=receiver.peers().get(0);LanNode.Message sent=sender.sendMessage(target,"同批取消",Arrays.asList(small,large));

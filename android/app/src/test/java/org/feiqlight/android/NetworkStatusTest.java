@@ -38,8 +38,8 @@ public final class NetworkStatusTest {
     }
     @Test public void lostNetworkUpdatesListNotificationAndRefreshWithoutChangingConnectionIntent()throws Exception {
         ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();ActivityController<MainActivity> ac=null;
-        try(ServerSocket probe=new ServerSocket(0,1,InetAddress.getLoopbackAddress())) {
-            int port=probe.getLocalPort();probe.close();settle(service);
+        try {
+            int port=TestPorts.chat();settle(service);
             service.connectionFactory=(prefs,listener)->new LanNode(port,true,"network-ui","host","测试","组",listener);
             service.onStartCommand(new Intent(),0,1);settle(service);
             LanNode node=(LanNode)field(service,"node");((ScheduledExecutorService)field(node,"timer")).shutdownNow();assertTrue(service.online());
@@ -81,8 +81,8 @@ public final class NetworkStatusTest {
     }
     @Test public void hotspotBroadcastTriggersRecoveryAndDisconnectUnregisters()throws Exception {
         ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();
-        try(ServerSocket probe=new ServerSocket(0,1,InetAddress.getLoopbackAddress())) {
-            int port=probe.getLocalPort();probe.close();settle(service);
+        try {
+            int port=TestPorts.chat();settle(service);
             service.connectionFactory=(prefs,listener)->new LanNode(port,true,"hotspot-ui","host","测试","组",listener);
             service.onStartCommand(new Intent(),0,1);settle(service);
             LanNode node=(LanNode)field(service,"node");assertTrue(service.online());
@@ -114,8 +114,8 @@ public final class NetworkStatusTest {
         Constructor<LinkAddress> constructor=LinkAddress.class.getDeclaredConstructor(InetAddress.class,int.class);constructor.setAccessible(true);
         LinkProperties links=new LinkProperties();LinkProperties.class.getDeclaredMethod("addLinkAddress",LinkAddress.class).invoke(links,constructor.newInstance(InetAddress.getLoopbackAddress(),32));shadowOf(cm).setLinkProperties(wifi,links);
         manager.snapshot=new Network[]{vpn};
-        try(ServerSocket free=new ServerSocket(0,1,InetAddress.getLoopbackAddress())) {
-            int port=free.getLocalPort();free.close();settle(service);
+        try {
+            int port=TestPorts.chat();settle(service);
             service.networkFactory=connectivity->new LanNetwork(connectivity,java.util.Collections::emptyList);
             service.connectionFactory=(prefs,listener)->new LanNode(port,false,"callback-wifi","host","测试","",listener);
             service.onStartCommand(new Intent(),0,1);settle(service);assertFalse(service.online());assertTrue(service.status(),service.status().contains("VPN"));
@@ -139,8 +139,8 @@ public final class NetworkStatusTest {
         ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();
         CountDownLatch created=new CountDownLatch(1),release=new CountDownLatch(1);
         java.util.concurrent.atomic.AtomicReference<LanNode> candidate=new java.util.concurrent.atomic.AtomicReference<>();
-        try(ServerSocket probe=new ServerSocket(0,1,InetAddress.getLoopbackAddress())) {
-            int port=probe.getLocalPort();probe.close();settle(service);
+        try {
+            int port=TestPorts.chat();settle(service);
             SharedPreferences prefs=service.getSharedPreferences("settings",0);
             prefs.edit().putInt("port",port).putString("name","连接前昵称").putString("group","旧部门").commit();
             service.connectionFactory=(settings,listener)->{

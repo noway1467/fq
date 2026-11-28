@@ -136,23 +136,20 @@ public final class SettingsMessageTest {
         Bitmap image=Bitmap.createBitmap(view.getWidth(),view.getHeight(),Bitmap.Config.ARGB_8888);view.draw(new Canvas(image));File output=new File(System.getProperty("feiq.previewDir"),name+".png");
         try(OutputStream stream=new FileOutputStream(output)){assertTrue(image.compress(Bitmap.CompressFormat.PNG,100,stream));}image.recycle();
     }
-    @Test public void legacyProtocolDefaultsOnAndSavedChoicesReachServiceAndSettings() throws Exception {
+    @Test public void legacyProtocolPreferencesAreIgnoredWithoutResettingProfile() throws Exception {
         ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();
-        SharedPreferences prefs=service.getSharedPreferences("settings",0);prefs.edit().remove("allow_legacy_protocol").putBoolean("auto_connect",false).putString("name","协议设置").commit();
-        prefs.edit().putBoolean("allow_legacy_protocol",false).remove("legacy_protocol_policy").commit();
-        assertTrue(ChatService.allowLegacy(prefs));assertTrue(prefs.getBoolean("allow_legacy_protocol",false));assertEquals(ChatService.LEGACY_POLICY_VERSION,prefs.getInt("legacy_protocol_policy",0));
-        prefs.edit().putBoolean("allow_legacy_protocol",false).putInt("legacy_protocol_policy",ChatService.LEGACY_POLICY_VERSION).commit();assertFalse(ChatService.allowLegacy(prefs));
-        prefs.edit().putBoolean("allow_legacy_protocol",true).commit();
+        SharedPreferences prefs=service.getSharedPreferences("settings",0);prefs.edit().putBoolean("auto_connect",false).putString("name","协议设置").putInt("legacy_protocol_policy",1).commit();
         shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));
         LanNode.Listener quiet=new LanNode.Listener(){public void peersChanged(){}public void error(String text){}public void message(LanNode.Peer peer,LanNode.Message message,boolean update){}};
         try(ActivityController<MainActivity> ac=Robolectric.buildActivity(MainActivity.class).setup();LanNode node=new LanNode(24350,true,"settings","host","设置","test",quiet)) {
             MainActivity activity=ac.get();settle(service);Method apply=ChatService.class.getDeclaredMethod("applyProfile",LanNode.class,SharedPreferences.class);apply.setAccessible(true);
-            apply.invoke(null,node,prefs);assertTrue(node.allowLegacyProtocol);
-            for(boolean desired:new boolean[]{false,true}) {
+            for(boolean oldChoice:new boolean[]{false,true}) {
+                prefs.edit().putBoolean("allow_legacy_protocol",oldChoice).commit();apply.invoke(null,node,prefs);assertEquals("协议设置",node.nickname);
                 invoke(activity,"settings",new Class<?>[0]);Dialog dialog=ShadowDialog.getLatestDialog();
-                Switch option=(Switch)views(dialog.getWindow().getDecorView()).stream().filter(v->v instanceof Switch&&"允许旧版明文协议".contentEquals(((Switch)v).getText())).findFirst().orElseThrow();
-                assertEquals(!desired,option.isChecked());option.setChecked(desired);click(dialog,"保存");assertEquals(desired,prefs.getBoolean("allow_legacy_protocol",!desired));
-                apply.invoke(null,node,prefs);assertEquals(desired,node.allowLegacyProtocol);
+                assertFalse(views(dialog.getWindow().getDecorView()).stream().anyMatch(v->v instanceof Switch&&"允许旧版明文协议".contentEquals(((Switch)v).getText())));
+                click(dialog,"保存");assertEquals(oldChoice,prefs.getBoolean("allow_legacy_protocol",!oldChoice));assertEquals("协议设置",prefs.getString("name",null));
+                LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:2425"),"old","host","旧设备","");
+                java.io.IOException error=assertThrows(java.io.IOException.class,()->node.sendMessage(peer,"test",Collections.emptyList()));assertTrue(error.getMessage().contains("升级至 0.8"));
             }
         } finally {sc.destroy();}
     }
@@ -230,12 +227,12 @@ public final class SettingsMessageTest {
     }
     @Test public void sentAttachmentRecordCanBeDeletedWhileOriginalAndOfferRemain() throws Exception {
         ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();
-        try(java.net.ServerSocket port=new java.net.ServerSocket(0,1,java.net.InetAddress.getLoopbackAddress());java.net.DatagramSocket remote=new java.net.DatagramSocket(0,java.net.InetAddress.getLoopbackAddress())) {
-            int number=port.getLocalPort();port.close();
+        try(java.net.DatagramSocket remote=new java.net.DatagramSocket(0,java.net.InetAddress.getLoopbackAddress())) {
+            int number=TestPorts.chat();
             try(LanNode node=new LanNode(number,true,"delete-sender","host","发送方","",new LanNode.Listener(){public void peersChanged(){}public void error(String t){}public void message(LanNode.Peer p,LanNode.Message m,boolean u){}})) {
-                settle(service);node.start();Field current=ChatService.class.getDeclaredField("node");current.setAccessible(true);current.set(service,node);
+                settle(service);org.feiqlight.android.core.TlsFilePeer.enable(node);node.start();Field current=ChatService.class.getDeclaredField("node");current.setAccessible(true);current.set(service,node);
                 File original=new File(service.getFilesDir(),"保留的发送原文件.txt");java.nio.file.Files.write(original.toPath(),new byte[]{1,2,3});
-                LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:"+remote.getLocalPort()),"receiver","host","接收方","");peer.utf8=true;
+                LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:"+remote.getLocalPort()),"receiver","host","接收方","");peer.utf8=true;peer.deviceId="1".repeat(32);peer.fingerprint="b".repeat(64);
                 LanNode.Message sent=node.sendMessage(peer,"发送附件",Collections.singletonList(original));sent.state="已送达";service.incoming(peer,sent,false);settle(service);
                 assertTrue(node.offering(peer.id(),sent.number,0));List<Boolean> result=new ArrayList<>();service.deleteMessages(peer.id(),Collections.singletonList(sent),result::add);settle(service);
                 assertEquals(Collections.singletonList(true),result);assertTrue(original.isFile());assertTrue("删除本机消息不能破坏对方接收权限",node.offering(peer.id(),sent.number,0));
@@ -556,8 +553,8 @@ public final class SettingsMessageTest {
         ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();
         shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));
         ActivityController<MainActivity> ac=Robolectric.buildActivity(MainActivity.class).create().start().resume().visible();MainActivity activity=ac.get();
-        try(java.net.ServerSocket port=new java.net.ServerSocket(0,1,java.net.InetAddress.getLoopbackAddress());java.net.DatagramSocket offlinePeer=new java.net.DatagramSocket(0,java.net.InetAddress.getLoopbackAddress())) {
-            int localPort=port.getLocalPort();port.close();
+        try(java.net.DatagramSocket offlinePeer=new java.net.DatagramSocket(0,java.net.InetAddress.getLoopbackAddress())) {
+            int localPort=TestPorts.chat();
             try(LanNode node=new LanNode(localPort,true,"android-cancel","host","本机","",new LanNode.Listener(){
                 public void peersChanged(){}
                 public void error(String text){}
@@ -566,10 +563,10 @@ public final class SettingsMessageTest {
                     try{Class<?>[] sig={String.class,long.class,long.class,boolean.class,int.class,String.class,double.class,LanNode.Transfer.class};invoke(service,"fileProgress",sig,peer.id(),packet,file,true,percent,state,bytesPerSecond,null);}catch(Exception ignored){}
                 }
             })) {
-                settle(service);node.start();Field current=ChatService.class.getDeclaredField("node");current.setAccessible(true);current.set(service,node);
+                settle(service);org.feiqlight.android.core.TlsFilePeer.enable(node);node.start();Field current=ChatService.class.getDeclaredField("node");current.setAccessible(true);current.set(service,node);
                 File f1=new File(service.getFilesDir(),"离线菜单取消.txt"), f2=new File(service.getFilesDir(),"离线直接删除.txt");
                 java.nio.file.Files.write(f1.toPath(),new byte[]{1,2,3,4});java.nio.file.Files.write(f2.toPath(),new byte[]{5,6,7,8});
-                LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:"+offlinePeer.getLocalPort()),"offline-peer","host","离线联系人","");peer.utf8=true;
+                LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:"+offlinePeer.getLocalPort()),"offline-peer","host","离线联系人","");peer.utf8=true;peer.deviceId="1".repeat(32);peer.fingerprint="b".repeat(64);
                 LanNode.Message m1=node.sendMessage(peer,"离线菜单取消",Collections.singletonList(f1));settle(service);
                 invoke(activity,"open",new Class<?>[]{String.class},peer.id());settle(service);
                 assertTrue(service.canCancelOutgoing(peer.id(),m1.number));

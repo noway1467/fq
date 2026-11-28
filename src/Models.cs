@@ -46,8 +46,6 @@ namespace FeiqLight
         public string BackgroundImage { get; set; }
         public bool AutoReceiveFiles { get; set; }
         public bool AutoSendDroppedFiles { get; set; }
-        public bool AllowLegacyProtocol { get; set; }
-        public int SettingsRevision { get; set; }
         public string ReceiveFolder { get; set; }
         public WindowPlacement Window { get; set; }
         public WindowPlacement TransferWindow { get; set; }
@@ -63,7 +61,7 @@ namespace FeiqLight
             Nickname = Environment.UserName; Group = "我的局域网";
             Signature = "在同一个局域网，简单聊一聊。";
             CloseToTray = true; Notifications = true; AutoReceiveFiles = true; ReceiveFolder = DefaultReceiveFolder;
-            StartWithWindows = false; AutoSendDroppedFiles = false; AllowLegacyProtocol = true; ChatFontSize=10; ChatBackground="orbits"; BackgroundImage="";
+            StartWithWindows = false; AutoSendDroppedFiles = false; ChatFontSize=10; ChatBackground="orbits"; BackgroundImage="";
             KnownPeers = new string[0];
             Conversations = new SavedConversation[0];
             SidebarWidth = 336;
@@ -115,7 +113,7 @@ namespace FeiqLight
                 if(item==null||item.Login==null||item.Login.Length>128||Protocol.Field(item.Login)!=item.Login)continue;
                 IPEndPoint endpoint=AppSettings.ParseKnownPeer(item.Endpoint);if(endpoint==null)continue;
                 SavedConversation clean=new SavedConversation { Endpoint=endpoint.ToString(),Login=item.Login,
-                    DeviceId=Protocol.NormalizeDeviceId(item.DeviceId),Avatar=Protocol.NormalizeAvatar(item.Avatar),Fingerprint=SecureIdentity.ValidFingerprint(item.Fingerprint)?item.Fingerprint:null,ConversationId=String.IsNullOrEmpty(item.ConversationId)?null:Protocol.Prefix(item.ConversationId,256),
+                    DeviceId=Protocol.NormalizeStoredDeviceId(item.DeviceId),Avatar=Protocol.NormalizeAvatar(item.Avatar),Fingerprint=SecureIdentity.ValidFingerprint(item.Fingerprint)?item.Fingerprint:null,ConversationId=String.IsNullOrEmpty(item.ConversationId)?null:Protocol.Prefix(item.ConversationId,256),
                     Note=Protocol.Prefix((item.Note??"").Trim(),64),Pinned=item.Pinned,Hidden=item.Hidden,ConversationNumber=item.ConversationNumber>0&&item.ConversationNumber<=1000000?item.ConversationNumber:0,
                     Host=Protocol.Prefix(item.Host??"",128),Nickname=Protocol.Prefix(String.IsNullOrWhiteSpace(item.Nickname)?item.Login:item.Nickname,128),
                     Group=Protocol.Prefix(item.Group??"我的局域网",128),Preview=Protocol.Prefix(MessageText.NormalizeLineBreaks(item.Preview).Replace('\0',' ').Replace('\n',' '),160),
@@ -422,15 +420,13 @@ namespace FeiqLight
                 if(new FileInfo(path).Length>16*1024*1024)throw new IOException("配置文件超过大小限制。");
                 AppSettings s = json.Deserialize<AppSettings>(File.ReadAllText(path, Encoding.UTF8));
                 if (s == null || String.IsNullOrWhiteSpace(s.Nickname)) throw new FormatException();
-                s.DeviceId = Protocol.NormalizeDeviceId(s.DeviceId) ?? Guid.NewGuid().ToString("N");
+                s.DeviceId = Protocol.NormalizeStoredDeviceId(s.DeviceId) ?? Guid.NewGuid().ToString("N");
                 s.Avatar = Protocol.NormalizeAvatar(s.Avatar) ?? "default";
                 if (String.IsNullOrWhiteSpace(s.ReceiveFolder)) s.ReceiveFolder = AppSettings.DefaultReceiveFolder;
                 s.KnownPeers = AppSettings.NormalizeKnownPeers(s.KnownPeers);
                 s.Conversations = SavedConversation.Normalize(s.Conversations);
                 s.ChatFontSize=Math.Max(9,Math.Min(18,s.ChatFontSize));
                 if(s.ChatBackground!="none"&&s.ChatBackground!="lines"&&s.ChatBackground!="grid"&&s.ChatBackground!="aurora"&&s.ChatBackground!="image")s.ChatBackground="orbits";
-                // 0.7.0 没记录修订号，升级后无法区分默认关闭和用户主动关闭；只迁移这一次。
-                if (s.SettingsRevision < 1) { s.AllowLegacyProtocol = true; s.SettingsRevision = 1; }
                 return s;
             }
             catch (Exception e)
@@ -445,7 +441,6 @@ namespace FeiqLight
         {
             lock (gate)
             {
-                if (settings.SettingsRevision < 1) settings.SettingsRevision = 1;
                 string path = Path.Combine(Root, "settings.json"), tmp = path + ".tmp";
                 File.WriteAllText(tmp, json.Serialize(settings), new UTF8Encoding(false));
                 string backup=preserveUnreadableSettings&&File.Exists(path)?Path.Combine(Root,"settings-recovery-"+Guid.NewGuid().ToString("N").Substring(0,12)+".json"):null;

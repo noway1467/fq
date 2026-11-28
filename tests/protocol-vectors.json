@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "constants": {
     "defaultChatPort": 2425,
     "maxPacketBytes": 60000,
@@ -881,60 +881,48 @@
       "maximum": 4096
     }
   ],
-  "knownPlatformDivergences": [
+  "wireValidationCases": [
     {
       "name": "非规范头像 builtin:01",
       "op": "avatar",
       "input": "builtin:01",
-      "windows": "builtin:1",
-      "android": null,
-      "reason": "输入校验候选"
+      "expected": null
     },
     {
       "name": "非规范头像 builtin:+1",
       "op": "avatar",
       "input": "builtin:+1",
-      "windows": "builtin:1",
-      "android": null,
-      "reason": "输入校验候选"
+      "expected": null
     },
     {
       "name": "非规范头像 builtin: 1",
       "op": "avatar",
       "input": "builtin: 1",
-      "windows": "builtin:1",
-      "android": null,
-      "reason": "输入校验候选"
+      "expected": null
     },
     {
       "name": "Unicode 空白文件名",
       "op": "name",
       "input": "　",
-      "windows": false,
-      "android": true,
-      "reason": "输入校验候选"
+      "expected": false
     },
     {
       "name": "Unicode 空白文件名",
       "op": "name",
       "input": " ",
-      "windows": false,
-      "android": true,
-      "reason": "输入校验候选"
+      "expected": false
     },
     {
       "name": "GUID 首尾空格",
       "op": "device",
       "input": " 0123456789abcdef0123456789abcdef ",
-      "windows": "0123456789abcdef0123456789abcdef",
-      "android": null,
-      "reason": "输入校验候选"
+      "expected": null
     },
     {
       "name": "mtime ffffffffffffffff",
       "op": "files",
       "input": "0:a:0:ffffffffffffffff:1:::\u0007",
-      "windows": [
+      "expected": [
         {
           "id": 0,
           "name": "a",
@@ -943,100 +931,43 @@
           "sha256": null,
           "relativePath": null
         }
-      ],
-      "android": [],
-      "reason": "数值解析候选"
+      ]
     },
     {
       "name": "mtime -1",
       "op": "files",
       "input": "0:a:0:-1:1:::\u0007",
-      "windows": [],
-      "android": [
-        {
-          "id": 0,
-          "name": "a",
-          "size": 0,
-          "modified": -1,
-          "sha256": null,
-          "relativePath": null
-        }
-      ],
-      "reason": "数值解析候选"
+      "expected": []
     },
     {
       "name": "attr 100000001",
       "op": "files",
       "input": "0:a:0:0:100000001:::\u0007",
-      "windows": [],
-      "android": [
-        {
-          "id": 0,
-          "name": "a",
-          "size": 0,
-          "modified": 0,
-          "sha256": null,
-          "relativePath": null
-        }
-      ],
-      "reason": "Java 使用有符号 64 位，只检查低8位"
+      "expected": []
     },
     {
       "name": "attr -ff",
       "op": "files",
       "input": "0:a:0:0:-ff:::\u0007",
-      "windows": [],
-      "android": [
-        {
-          "id": 0,
-          "name": "a",
-          "size": 0,
-          "modified": 0,
-          "sha256": null,
-          "relativePath": null
-        }
-      ],
-      "reason": "Java 使用有符号 64 位，只检查低8位"
+      "expected": []
     },
     {
       "name": "附件 ID 首尾空格",
       "op": "files",
       "input": " 1 :a:0:0:1:::\u0007",
-      "windows": [
-        {
-          "id": 1,
-          "name": "a",
-          "size": 0,
-          "modified": 0,
-          "sha256": null,
-          "relativePath": null
-        }
-      ],
-      "android": [],
-      "reason": "数值解析候选"
+      "expected": []
     },
     {
       "name": "附件 size 首尾空格",
       "op": "files",
       "input": "0:a: 1 :0:1:::\u0007",
-      "windows": [
-        {
-          "id": 0,
-          "name": "a",
-          "size": 1,
-          "modified": 0,
-          "sha256": null,
-          "relativePath": null
-        }
-      ],
-      "android": [],
-      "reason": "数值解析候选"
+      "expected": []
     },
     {
       "name": "FQPORT 非数字",
       "op": "packet",
       "input": "MToxOmE6Yjo4Mzg4NjQwOmhlbGxvAABGUVBPUlQ9YWJjAA==",
-      "windows": {
+      "expected": {
         "number": 1,
         "login": "a",
         "host": "b",
@@ -1048,15 +979,181 @@
         "fingerprint": null,
         "replyPort": 0,
         "reverseConnections": false
-      },
-      "android": null,
-      "reason": "C# 忽略扩展，Java 拒绝整包"
+      }
     },
     {
       "name": "FQPORT 首尾空格",
       "op": "packet",
       "input": "MToxOmE6Yjo4Mzg4NjQwOmhlbGxvAABGUVBPUlQ9IDI0MjUgAA==",
-      "windows": {
+      "expected": {
+        "number": 1,
+        "login": "a",
+        "host": "b",
+        "command": 8388640,
+        "body": "hello",
+        "extra": "",
+        "deviceId": null,
+        "avatar": null,
+        "fingerprint": null,
+        "replyPort": 0,
+        "reverseConnections": false
+      }
+    },
+    {
+      "name": "头像 Base64 内部空白",
+      "op": "avatar",
+      "input": "image:/9j/ wAALCABAAEABARH/2Q==",
+      "expected": null
+    },
+    {
+      "name": "头像 Base64 缺 padding",
+      "op": "avatar",
+      "input": "image:/9j/wAALCABAAEABARH/2Q",
+      "expected": null
+    },
+    {
+      "name": "路径 Base64 内部空白",
+      "op": "files",
+      "input": "0:a:0:0:1::ZG lyL2E=:\u0007",
+      "expected": []
+    },
+    {
+      "name": "路径 Base64 缺 padding",
+      "op": "files",
+      "input": "0:a:0:0:1::ZGlyL2E:\u0007",
+      "expected": []
+    },
+    {
+      "name": "非法 FQPORT 不覆盖先前有效值：+2425",
+      "op": "packet",
+      "input": "MToxOmE6Yjo4Mzg4NjQwOmhlbGxvAABGUVBPUlQ9NjU1MzUARlFQT1JUPSsyNDI1AEZRUkVWPTEA",
+      "expected": {
+        "number": 1,
+        "login": "a",
+        "host": "b",
+        "command": 8388640,
+        "body": "hello",
+        "extra": "",
+        "deviceId": null,
+        "avatar": null,
+        "fingerprint": null,
+        "replyPort": 65535,
+        "reverseConnections": true
+      }
+    },
+    {
+      "name": "非法 FQPORT 不覆盖先前有效值：２４２５",
+      "op": "packet",
+      "input": "MToxOmE6Yjo4Mzg4NjQwOmhlbGxvAABGUVBPUlQ9NjU1MzUARlFQT1JUPe+8ku+8lO+8ku+8lQBGUVJFVj0xAA==",
+      "expected": {
+        "number": 1,
+        "login": "a",
+        "host": "b",
+        "command": 8388640,
+        "body": "hello",
+        "extra": "",
+        "deviceId": null,
+        "avatar": null,
+        "fingerprint": null,
+        "replyPort": 65535,
+        "reverseConnections": true
+      }
+    },
+    {
+      "name": "非法 FQPORT 不覆盖先前有效值：99999999999999999999",
+      "op": "packet",
+      "input": "MToxOmE6Yjo4Mzg4NjQwOmhlbGxvAABGUVBPUlQ9NjU1MzUARlFQT1JUPTk5OTk5OTk5OTk5OTk5OTk5OTk5AEZRUkVWPTEA",
+      "expected": {
+        "number": 1,
+        "login": "a",
+        "host": "b",
+        "command": 8388640,
+        "body": "hello",
+        "extra": "",
+        "deviceId": null,
+        "avatar": null,
+        "fingerprint": null,
+        "replyPort": 65535,
+        "reverseConnections": true
+      }
+    },
+    {
+      "name": "非法 FQPORT 不覆盖先前有效值：1023",
+      "op": "packet",
+      "input": "MToxOmE6Yjo4Mzg4NjQwOmhlbGxvAABGUVBPUlQ9NjU1MzUARlFQT1JUPTEwMjMARlFSRVY9MQA=",
+      "expected": {
+        "number": 1,
+        "login": "a",
+        "host": "b",
+        "command": 8388640,
+        "body": "hello",
+        "extra": "",
+        "deviceId": null,
+        "avatar": null,
+        "fingerprint": null,
+        "replyPort": 65535,
+        "reverseConnections": true
+      }
+    },
+    {
+      "name": "非法 FQPORT 不覆盖先前有效值：65536",
+      "op": "packet",
+      "input": "MToxOmE6Yjo4Mzg4NjQwOmhlbGxvAABGUVBPUlQ9NjU1MzUARlFQT1JUPTY1NTM2AEZRUkVWPTEA",
+      "expected": {
+        "number": 1,
+        "login": "a",
+        "host": "b",
+        "command": 8388640,
+        "body": "hello",
+        "extra": "",
+        "deviceId": null,
+        "avatar": null,
+        "fingerprint": null,
+        "replyPort": 65535,
+        "reverseConnections": true
+      }
+    },
+    {
+      "name": "非法 FQPORT 不覆盖先前有效值：",
+      "op": "packet",
+      "input": "MToxOmE6Yjo4Mzg4NjQwOmhlbGxvAABGUVBPUlQ9NjU1MzUARlFQT1JUPQBGUVJFVj0xAA==",
+      "expected": {
+        "number": 1,
+        "login": "a",
+        "host": "b",
+        "command": 8388640,
+        "body": "hello",
+        "extra": "",
+        "deviceId": null,
+        "avatar": null,
+        "fingerprint": null,
+        "replyPort": 65535,
+        "reverseConnections": true
+      }
+    },
+    {
+      "name": "有效 FQPORT 下界",
+      "op": "packet",
+      "input": "MToxOmE6Yjo4Mzg4NjQwOmhlbGxvAABGUVBPUlQ9MTAyNAA=",
+      "expected": {
+        "number": 1,
+        "login": "a",
+        "host": "b",
+        "command": 8388640,
+        "body": "hello",
+        "extra": "",
+        "deviceId": null,
+        "avatar": null,
+        "fingerprint": null,
+        "replyPort": 1024,
+        "reverseConnections": false
+      }
+    },
+    {
+      "name": "线上 FQID 空白与坏头像不损坏正文",
+      "op": "packet",
+      "input": "MToxOmE6Yjo4Mzg4NjQwOmhlbGxvAABGUUlEPSAwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZgBGUUFWPWJ1aWx0aW46KzEARlFQT1JUPTI0MjUA",
+      "expected": {
         "number": 1,
         "login": "a",
         "host": "b",
@@ -1068,66 +1165,172 @@
         "fingerprint": null,
         "replyPort": 2425,
         "reverseConnections": false
-      },
-      "android": null,
-      "reason": "数值解析候选"
+      }
     },
     {
-      "name": "头像 Base64 内部空白",
-      "op": "avatar",
-      "input": "image:/9j/ wAALCABAAEABARH/2Q==",
-      "windows": "image:/9j/wAALCABAAEABARH/2Q==",
-      "android": null,
-      "reason": "Base64 解码差异"
+      "name": "路径段仅 Unicode 空白",
+      "op": "path",
+      "input": "目录/ 　/file",
+      "expected": false
     },
     {
-      "name": "头像 Base64 缺 padding",
-      "op": "avatar",
-      "input": "image:/9j/wAALCABAAEABARH/2Q",
-      "windows": null,
-      "android": "image:/9j/wAALCABAAEABARH/2Q==",
-      "reason": "Base64 解码差异"
-    },
-    {
-      "name": "路径 Base64 内部空白",
+      "name": "附件 ID、size、mtime 上界及 attr 高位",
       "op": "files",
-      "input": "0:a:0:0:1::ZG lyL2E=:\u0007",
-      "windows": [
+      "input": "2147483647:a:7fffffffffffffff:8000000000000000:ffffff01:::\u0007",
+      "expected": [
         {
-          "id": 0,
+          "id": 2147483647,
           "name": "a",
-          "size": 0,
+          "size": 9223372036854775807,
+          "modified": -9223372036854775808,
+          "sha256": null,
+          "relativePath": null
+        }
+      ]
+    },
+    {
+      "name": "ID 溢出 仅跳坏行",
+      "op": "files",
+      "input": "2147483648:a:1:0:1:\u00071:ok:1:0:1:\u0007",
+      "expected": [
+        {
+          "id": 1,
+          "name": "ok",
+          "size": 1,
           "modified": 0,
           "sha256": null,
-          "relativePath": "dir/a"
+          "relativePath": null
         }
-      ],
-      "android": [],
-      "reason": "Base64 解码差异"
+      ]
     },
     {
-      "name": "路径 Base64 缺 padding",
+      "name": "全角 ID 仅跳坏行",
       "op": "files",
-      "input": "0:a:0:0:1::ZGlyL2E:\u0007",
-      "windows": [],
-      "android": [
+      "input": "１:a:1:0:1:\u00071:ok:1:0:1:\u0007",
+      "expected": [
         {
-          "id": 0,
-          "name": "a",
-          "size": 0,
+          "id": 1,
+          "name": "ok",
+          "size": 1,
           "modified": 0,
           "sha256": null,
-          "relativePath": "dir/a"
+          "relativePath": null
         }
-      ],
-      "reason": "Base64 解码差异"
+      ]
     },
+    {
+      "name": "ID 正号 仅跳坏行",
+      "op": "files",
+      "input": "+1:a:1:0:1:\u00071:ok:1:0:1:\u0007",
+      "expected": [
+        {
+          "id": 1,
+          "name": "ok",
+          "size": 1,
+          "modified": 0,
+          "sha256": null,
+          "relativePath": null
+        }
+      ]
+    },
+    {
+      "name": "size 负号 仅跳坏行",
+      "op": "files",
+      "input": "0:a:-1:0:1:\u00071:ok:1:0:1:\u0007",
+      "expected": [
+        {
+          "id": 1,
+          "name": "ok",
+          "size": 1,
+          "modified": 0,
+          "sha256": null,
+          "relativePath": null
+        }
+      ]
+    },
+    {
+      "name": "size 正号 仅跳坏行",
+      "op": "files",
+      "input": "0:a:+1:0:1:\u00071:ok:1:0:1:\u0007",
+      "expected": [
+        {
+          "id": 1,
+          "name": "ok",
+          "size": 1,
+          "modified": 0,
+          "sha256": null,
+          "relativePath": null
+        }
+      ]
+    },
+    {
+      "name": "size 溢出 仅跳坏行",
+      "op": "files",
+      "input": "0:a:8000000000000000:0:1:\u00071:ok:1:0:1:\u0007",
+      "expected": [
+        {
+          "id": 1,
+          "name": "ok",
+          "size": 1,
+          "modified": 0,
+          "sha256": null,
+          "relativePath": null
+        }
+      ]
+    },
+    {
+      "name": "mtime 溢出 仅跳坏行",
+      "op": "files",
+      "input": "0:a:0:10000000000000000:1:\u00071:ok:1:0:1:\u0007",
+      "expected": [
+        {
+          "id": 1,
+          "name": "ok",
+          "size": 1,
+          "modified": 0,
+          "sha256": null,
+          "relativePath": null
+        }
+      ]
+    },
+    {
+      "name": "mtime 前缀 仅跳坏行",
+      "op": "files",
+      "input": "0:a:0:0x1:1:\u00071:ok:1:0:1:\u0007",
+      "expected": [
+        {
+          "id": 1,
+          "name": "ok",
+          "size": 1,
+          "modified": 0,
+          "sha256": null,
+          "relativePath": null
+        }
+      ]
+    },
+    {
+      "name": "attr 低位 仅跳坏行",
+      "op": "files",
+      "input": "0:a:0:0:ffffff02:\u00071:ok:1:0:1:\u0007",
+      "expected": [
+        {
+          "id": 1,
+          "name": "ok",
+          "size": 1,
+          "modified": 0,
+          "sha256": null,
+          "relativePath": null
+        }
+      ]
+    }
+  ],
+  "historyCases": [
     {
       "name": "历史与网络入口分开断言",
       "op": "storedFiles",
       "input": "0:汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉a:0:0:1:::\u0007",
-      "windows": [],
-      "android": [
+      "expected": [],
+      "storedExpected": [
         {
           "id": 0,
           "name": "汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉汉a",
@@ -1136,8 +1339,48 @@
           "sha256": null,
           "relativePath": null
         }
+      ]
+    },
+    {
+      "name": "历史负时间与旧式无填充路径仍可恢复",
+      "op": "storedFiles",
+      "input": "0:a:0:-1:1::ZGlyL2E:\u0007",
+      "expected": [],
+      "storedExpected": [
+        {
+          "id": 0,
+          "name": "a",
+          "size": 0,
+          "modified": -1,
+          "sha256": null,
+          "relativePath": "dir/a"
+        }
+      ]
+    },
+    {
+      "name": "新写入的负数位模式可从历史读取",
+      "op": "storedFiles",
+      "input": "0:a:0:ffffffffffffffff:1:::\u0007",
+      "expected": [
+        {
+          "id": 0,
+          "name": "a",
+          "size": 0,
+          "modified": -1,
+          "sha256": null,
+          "relativePath": null
+        }
       ],
-      "reason": "历史兼容长期保留：Windows 比较网络解析；Java 额外断言网络拒绝"
+      "storedExpected": [
+        {
+          "id": 0,
+          "name": "a",
+          "size": 0,
+          "modified": -1,
+          "sha256": null,
+          "relativePath": null
+        }
+      ]
     }
   ]
 }

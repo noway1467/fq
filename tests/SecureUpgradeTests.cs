@@ -18,13 +18,12 @@ namespace FeiqLight.Tests
         private static string only;
         private static void Check(bool value,string message){if(!value)throw new Exception(message);}
         private static void Run(string name,Action test){if(!String.IsNullOrEmpty(only)&&!name.Contains(only))return;try{test();passed++;Console.WriteLine("PASS "+name);}catch(Exception e){failed++;Console.WriteLine("FAIL "+name+": "+e.GetBaseException().Message);Console.WriteLine(e.StackTrace);}}
-        private static int Port(){using(TcpListenerSocket socket=new TcpListenerSocket())return socket.Port;}
-        private static int ToolPorts(){for(int port=18000;port<45000;port+=3){var listeners=new List<TcpListener>();try{for(int i=0;i<3;i++){var listener=new TcpListener(IPAddress.Loopback,port+i);listeners.Add(listener);listener.Start();}return port;}catch(SocketException){}finally{foreach(var listener in listeners)listener.Stop();}}throw new IOException("没有可用测试端口");}
-        private sealed class TcpListenerSocket:IDisposable {private readonly TcpListener listener=new TcpListener(IPAddress.Loopback,0);public TcpListenerSocket(){listener.Start();}public int Port{get{return ((IPEndPoint)listener.LocalEndpoint).Port;}}public void Dispose(){listener.Stop();}}
+        private static int Port() { return LoopbackPorts.Chat(); }
+        private static int ToolPorts() { return LoopbackPorts.WithTools(); }
         private static void Wait(Func<bool> condition,string message){for(int i=0;i<500;i++){if(condition())return;Thread.Sleep(10);}throw new Exception(message);}
         private static LanService Node(string root,int port,string id){var node=new LanService(new AppSettings{DeviceId=id,Nickname=id},port,true,id);node.ConfigureSecurity(root,(name,code)=>true);node.Start();return node;}
         private static Peer Find(LanService a,LanService b){a.Probe(new IPEndPoint(IPAddress.Loopback,b.Port));Wait(()=>a.Peers.Count>0,"发现超时");return a.Peers.First(p=>p.DeviceId==b.Settings.DeviceId);}
-        private static void Raw(LanService sender,LanService receiver,byte[] bytes){typeof(LanService).GetMethod("Send",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic).Invoke(sender,new object[]{bytes,new IPEndPoint(IPAddress.Loopback,receiver.Port)});}
+        private static void Raw(LanService sender,LanService receiver,byte[] bytes){Packet packet;Check(Protocol.TryParse(bytes,out packet),"测试报文无效");typeof(LanService).GetMethod("Handle",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic).Invoke(receiver,new object[]{packet,new IPEndPoint(IPAddress.Loopback,sender.Port),false});}
         private static int Entries(LanService node,string field){return ((System.Collections.IDictionary)typeof(LanService).GetField(field,System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic).GetValue(node)).Count;}
         private static string Http(int port,string path,string cookie,string origin=null,string method="GET"){using(TcpClient client=new TcpClient()){client.Connect(IPAddress.Loopback,port);client.ReceiveTimeout=10000;byte[] request=Encoding.ASCII.GetBytes(method+" "+path+" HTTP/1.1\r\nHost: 127.0.0.1:"+port+"\r\nCookie: "+cookie+"\r\n"+(origin==null?"":"Origin: "+origin+"\r\n")+"Connection: close\r\n\r\n");client.GetStream().Write(request,0,request.Length);using(StreamReader reader=new StreamReader(client.GetStream()))return reader.ReadToEnd();}}
         public static int Main(string[] args)
@@ -112,17 +111,17 @@ namespace FeiqLight.Tests
                 }
                 using(LanService a=Node(aRoot,aPort,aid))Check(a.OutgoingRecord(pa.Id,incoming.Record.Packet)==null,"重启复活拒绝邀请");
             });
-            Run("默认兼容旧版明文，手动关闭后拒绝发送",()=>{using(LanService secure=Node(Path.Combine(root,"secure"),Port(),"cccccccccccccccccccccccccccccccc"))using(LanService legacy=new LanService(new AppSettings(),Port(),true,"legacy")){
-                legacy.Start();Peer peer=Find(secure,legacy);Check(secure.Settings.AllowLegacyProtocol,"新配置未默认开启兼容");IncomingMessage got=null;legacy.MessageReceived+=m=>got=m;secure.SendMessage(peer,"compat",null);Wait(()=>got!=null,"兼容消息未到达");
-                secure.Settings.AllowLegacyProtocol=false;bool rejected=false;try{secure.SendMessage(peer,"disabled",null);}catch(IOException){rejected=true;}Check(rejected,"手动关闭后仍发送明文");
+            Run("无指纹设备仍可发现但不能发送明文",()=>{using(LanService secure=Node(Path.Combine(root,"secure"),Port(),"cccccccccccccccccccccccccccccccc"))using(LanService legacy=new LanService(new AppSettings(),Port(),true,"legacy")){
+                legacy.Start();Peer peer=Find(secure,legacy);Check(peer.Fingerprint==null,"模拟旧设备意外具有指纹");
+                try{secure.SendMessage(peer,"disabled",null);throw new Exception("仍发送明文");}catch(IOException error){Check(error.Message.Contains("升级至 0.8"),"没有升级提示");}
             }});
             Run("已配对会话拒绝省略身份的明文消息和退出报文",()=>{
                 using(LanService a=Node(Path.Combine(root,"strip-a"),Port(),"12121212121212121212121212121212"))using(LanService b=Node(Path.Combine(root,"strip-b"),Port(),"34343434343434343434343434343434")){
                     Peer peer=Find(a,b);a.VerifyPeer(peer);var received=new System.Collections.Concurrent.ConcurrentQueue<string>();a.MessageReceived+=m=>received.Enqueue(m.Record.Text);
                     Raw(b,a,Protocol.Encode(93001,b.Login,b.Host,Protocol.SendMessage|Protocol.Utf8,"stripped-message",null));
                     Raw(b,a,Protocol.Encode(93002,b.Login,b.Host,Protocol.Exit|Protocol.Utf8,"stripped-exit",null));
-                    Raw(b,a,Protocol.Encode(93003,b.Login,b.Host,Protocol.SendMessage|Protocol.Utf8,"legacy-barrier",null,"56565656565656565656565656565656"));
-                    Wait(()=>received.Contains("legacy-barrier"),"旧设备兼容消息未处理");
+                    Raw(b,a,Protocol.Encode(93003,"fixture","test",Protocol.AnswerEntry|Protocol.Utf8,"发现屏障",null,"56565656565656565656565656565656"));
+                    Wait(()=>a.Peers.Any(found=>found.Nickname=="发现屏障"),"发现屏障未处理");
                     Check(!received.Contains("stripped-message"),"省略设备 ID 的明文混入已信任会话");Check(peer.Online,"省略身份的退出报文把已信任联系人下线");
                 }
             });
@@ -218,6 +217,7 @@ namespace FeiqLight.Tests
                     }
                 }
             });
+            if(!String.IsNullOrEmpty(only) && passed+failed==0){Console.Error.WriteLine("没有匹配的安全回归用例："+only);return 1;}
             Console.WriteLine("WINDOWS SECURE: "+passed+" passed, "+failed+" failed");return failed==0?0:1;
         }
     }

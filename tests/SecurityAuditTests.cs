@@ -177,9 +177,32 @@ namespace FeiqLight.Tests
         public static int Main(string[] args)
         {
             root = Path.GetFullPath(args[0]); Directory.CreateDirectory(root); baseline = args.Length > 1 && args[1] == "baseline";
+            if(!baseline) {
+                Run("旧设置保留且明文业务被拒绝",()=>{
+                    var store=new LocalStore(root);File.WriteAllText(Path.Combine(root,"settings.json"),"{\"Nickname\":\"迁移测试\",\"AllowLegacyProtocol\":true,\"SettingsRevision\":1}");
+                    var settings=store.LoadSettings();Check(store.Warning==null&&settings.Nickname=="迁移测试","配置被重置或报警");
+                    using(var node=new LanService(settings,LoopbackPorts.Chat(),true,"contract")){node.Start();AndroidInteropHost.VerifyPlaintextBoundary(node);}
+                });
+                Run("无指纹不能发送或建立附件授权",()=>{
+                    using(var node=new LanService(new AppSettings(),LoopbackPorts.Chat(),true,"contract")){
+                        node.ConfigureSecurity(root,(name,code)=>true);var peer=new Peer{Endpoint=new IPEndPoint(IPAddress.Loopback,2425),Login="old"};
+                        try{node.SendMessage(peer,"test",null);throw new Exception("没有拒绝");}catch(IOException error){Check(error.Message.Contains("升级至 0.8"),"无升级提示");}
+                        try{node.RejectFiles(peer,1);throw new Exception("没有拒绝");}catch(IOException error){Check(error.Message.Contains("升级至 0.8"),"无升级提示");}
+                    }
+                });
+                Run("请求总期限到达后不读取剩余数据",()=>{
+                    using(var client=new TcpClient())using(var source=new MemoryStream(new byte[]{1,2})) {
+                        var input=new RequestInput(client,source);input.Begin(1000);Check(input.ReadByte()==1,"正常读取失败");input.Begin(0);
+                        try{input.ReadByte();throw new Exception("过期后仍然读取");}catch(IOException){Check(source.Position==1,"过期请求消耗了数据");}
+                    }
+                });
+                if(args.Length>1&&args[1]=="contracts"){Console.WriteLine("RESULT Windows contracts passed="+passed+" failed="+failed);return failed==0?0:1;}
+            }
             ThreadPool.SetMinThreads(32, 32);
-            Run("冒用设备 ID 的重发截获、ACK 与附件权限", SpoofRetry);
-            Run("8 个未认证慢附件请求与合法下载", SlowFile);
+            if(baseline){
+                Run("历史基线：冒用设备 ID 的重发截获、ACK 与附件权限", SpoofRetry);
+                Run("历史基线：8 个未认证慢附件请求与合法下载", SlowFile);
+            }
             Run("12 个慢 HTTP 请求头/正文与合法请求", SlowHttp);
             Console.WriteLine("RESULT Windows mode=" + (baseline ? "baseline" : "fixed") + " passed=" + passed + " failed=" + failed);
             return failed == 0 ? 0 : 1;

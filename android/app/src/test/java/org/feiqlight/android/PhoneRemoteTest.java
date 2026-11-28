@@ -43,7 +43,7 @@ public final class PhoneRemoteTest {
         context.getSharedPreferences("settings",0).edit().putBoolean("auto_connect",false).putBoolean("connection_enabled",false).commit();
         org.robolectric.android.controller.ServiceController<ChatService> controller=Robolectric.buildService(ChatService.class).create();
         org.feiqlight.android.core.LanNode.Listener listener=new org.feiqlight.android.core.LanNode.Listener(){public void peersChanged(){}public void error(String text){}public void message(org.feiqlight.android.core.LanNode.Peer peer,org.feiqlight.android.core.LanNode.Message message,boolean update){}};
-        int port;try(ServerSocket socket=new ServerSocket(0,1,InetAddress.getByName("127.0.0.1"))){port=socket.getLocalPort();}
+        int port=TestPorts.withTools();
         try(org.feiqlight.android.core.LanNode node=new org.feiqlight.android.core.LanNode(port,true,"port-test","Android","测试","",listener)) {
             node.start();field(controller.get(),"node",node);
             context.getSharedPreferences("settings",0).edit().putInt("port",3000).commit();

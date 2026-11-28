@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
+using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
@@ -70,7 +71,8 @@ namespace FeiqLight.Tests
                 tcp.Connect(IPAddress.Loopback, port); tcp.ReceiveTimeout = 3000;
                 NetworkStream stream = tcp.GetStream();
                 byte[] request = Protocol.Encode(10, "requester", "local", Protocol.GetFile, packet.ToString("x") + ":" + file.ToString("x") + ":0:", null);
-                stream.Write(request, 0, request.Length); byte[] buffer = new byte[256]; int read = stream.Read(buffer, 0, buffer.Length);
+                stream.Write(request, 0, request.Length); byte[] buffer = new byte[256]; int read;
+                try{read=stream.Read(buffer,0,buffer.Length);}catch(IOException error){var socket=error.InnerException as SocketException;if(socket==null||socket.SocketErrorCode!=SocketError.ConnectionReset)throw;read=0;}
                 return buffer.Take(read).ToArray();
             }
         }
@@ -97,6 +99,10 @@ namespace FeiqLight.Tests
                     Assert(Protocol.NormalizeDeviceId("../invalid")==null,"接受非法身份");
                     LocalStore store=new LocalStore(Path.Combine(root,"identity"));AppSettings settings=store.LoadSettings();store.SaveSettings(settings);
                     Assert(store.LoadSettings().DeviceId==settings.DeviceId,"本机身份未持久化");
+                    var legacyStore=new LocalStore(Path.Combine(root,"legacy-id"));
+                    legacyStore.SaveSettings(new AppSettings{DeviceId="  "+id.ToUpperInvariant()+"  "});
+                    var migrated=legacyStore.LoadSettings();Assert(migrated.DeviceId==id,"旧配置的本机身份在升级时改变");
+                    legacyStore.SaveSettings(migrated);Assert(legacyStore.LoadSettings().DeviceId==id,"重启后未保留原设备 ID");
                     using(UdpClient first=new UdpClient(Endpoint(FreePort())))
                     using(UdpClient moved=new UdpClient(Endpoint(FreePort()))) {
                         string oldId=first.Client.LocalEndPoint+"/old";
@@ -428,19 +434,13 @@ namespace FeiqLight.Tests
         private sealed class DirectProgress : IProgress<int>
         {
             public readonly List<int> Values = new List<int>();
-            public void Report(int value) { Values.Add(value); }
+            public int StartDelay;
+            public void Report(int value) { if(Values.Count==0&&StartDelay>0)Thread.Sleep(StartDelay);Values.Add(value); }
         }
         private sealed class RateProgress : IProgress<TransferProgress>
         {
             public readonly List<TransferProgress> Values = new List<TransferProgress>();
             public void Report(TransferProgress value) { Values.Add(value); }
-        }
-        private static long ReadOffset(TcpClient connection)
-        {
-            connection.ReceiveTimeout = 5000; List<byte> bytes = new List<byte>(); int b;
-            while ((b = connection.GetStream().ReadByte()) > 0) bytes.Add((byte)b);
-            Packet request; Assert(Protocol.TryParse(bytes.ToArray(), out request), "续传请求无法解析");
-            return Int64.Parse(request.Body.Split(':')[2], System.Globalization.NumberStyles.HexNumber);
         }
         private static void NetworkTests()
         {
@@ -448,6 +448,7 @@ namespace FeiqLight.Tests
             using (LanService a = new LanService(new AppSettings { Nickname = "测试甲", Group = "测试组" }, portA, true, "alice"))
             using (LanService b = new LanService(new AppSettings { Nickname = "测试乙", Group = "测试组" }, portB, true, "bob"))
             {
+                a.ConfigureSecurity(Path.Combine(root,"alice-security"),(name,code)=>true);b.ConfigureSecurity(Path.Combine(root,"bob-security"),(name,code)=>true);
                 a.Start(); b.Start(); Peer bob = null; Peer alice = null;
                 List<IncomingMessage> inbox = new List<IncomingMessage>(); object inboxGate = new object();
                 b.MessageReceived += message => { lock (inboxGate) inbox.Add(message); };
@@ -464,11 +465,10 @@ namespace FeiqLight.Tests
                     Wait(() => { lock (inboxGate) return inbox.Any(m => m.Record.Packet == record.Packet); }, "未收到消息", 5000);
                     lock (inboxGate) Assert(inbox.Single(m => m.Record.Packet == record.Packet).Record.Text.Contains("😊"), "消息乱码");
                 });
-                Run("网络层 GBK 旧协议消息", () =>
+                Run("旧设备可以发现但不接受发送", () =>
                 {
-                    bob.Utf8 = false; ChatRecord record = a.SendMessage(bob, "旧版中文消息", null);
-                    Wait(() => { lock (inboxGate) return inbox.Any(m => m.Record.Packet == record.Packet); }, "GBK 消息未到达", 5000);
-                    lock (inboxGate) Assert(inbox.Single(m => m.Record.Packet == record.Packet).Record.Text == "旧版中文消息", "GBK 乱码"); bob.Utf8 = true;
+                    var old=new Peer{Endpoint=bob.Endpoint,Login="old",Utf8=false};
+                    try{a.SendMessage(old,"旧版中文消息",null);throw new Exception("旧设备仍能接收明文");}catch(IOException error){Assert(error.Message.Contains("升级至 0.8"),"升级提示错误");}
                 });
                 Run("Unicode 语料、字节长度边界与无损失败", () =>
                 {
@@ -502,17 +502,15 @@ namespace FeiqLight.Tests
                     ExpectFailure(()=>a.SendContent(bob,text+"\ud800",null,folder),"非法 Unicode 被替换");
                     Assert(Directory.GetFiles(Path.Combine(folder,"text-offers")).Length==before,"失败留下 TXT 缓存");
                 });
-                Run("UDP 重复消息去重，同时返回 ACK", () =>
+                Run("UDP 重复业务消息不交付，不返回 ACK", () =>
                 {
                     using (UdpClient sender = new UdpClient(Endpoint(0)))
                     {
                         byte[] packet = Protocol.Encode(9944, "dedup", "host", Protocol.SendMessage | Protocol.SendCheck | Protocol.Utf8, "去重测试", null);
                         sender.Send(packet, packet.Length, Endpoint(portB)); sender.Send(packet, packet.Length, Endpoint(portB));
-                        sender.Client.ReceiveTimeout = 3000; IPEndPoint from = Endpoint(0); Packet ack;
-                        Assert(Protocol.TryParse(sender.Receive(ref from), out ack) && ack.Mode == Protocol.ReceiveMessage, "缺少第一次确认");
-                        Assert(Protocol.TryParse(sender.Receive(ref from), out ack) && ack.Mode == Protocol.ReceiveMessage, "重复包未确认");
-                        Wait(() => { lock (inboxGate) return inbox.Any(m => m.Record.Packet == 9944); }, "未处理去重消息", 3000);
-                        lock (inboxGate) Assert(inbox.Count(m => m.Record.Packet == 9944) == 1, "出现重复消息");
+                        sender.Client.ReceiveTimeout = 300; IPEndPoint from = Endpoint(0);
+                        try{sender.Receive(ref from);throw new Exception("发送了明文 ACK");}catch(SocketException error){Assert(error.SocketErrorCode==SocketError.TimedOut,"不是接收超时");}
+                        lock (inboxGate) Assert(!inbox.Any(m => m.Record.Packet == 9944), "明文消息进入会话");
                     }
                 });
                 Run("真实 TCP 大文件传输与 SHA-256 一致性", () =>
@@ -540,8 +538,8 @@ namespace FeiqLight.Tests
                         Wait(()=>sent.State!="等待确认","邀请未确认",4000);
                         lock(progress)Assert(progress.Count==0,"ACK 被误当作文件进度");
                         Assert(sent.Transfers.Length==2&&sent.Transfers.All(f=>f.Percent==0),"逐文件初始状态错误");
-                        for(int i=0;i<2;i++)b.ReceiveFileAsync(alice,sent.Packet,new Attachment{Id=i,Name=i==0?"progress-large.bin":"progress-empty.bin",Size=i==0?new FileInfo(first).Length:0},Path.Combine(root,"progress-copy-"+i),null,CancellationToken.None).GetAwaiter().GetResult();
-                        Wait(()=>{lock(progress)return progress.Count(p=>p.Item4=="已发送（非保存确认）")==2;},"缺少逐文件完成事件",4000);
+                        for(int i=0;i<2;i++)b.ReceiveFileAsync(alice,sent.Packet,new Attachment{Id=i,Name=i==0?"progress-large.bin":"progress-empty.bin",Size=i==0?new FileInfo(first).Length:0,Sha256=sent.Transfers[i].Sha256},Path.Combine(root,"progress-copy-"+i),new DirectProgress{StartDelay=400},CancellationToken.None).GetAwaiter().GetResult();
+                        Wait(()=>{lock(progress)return progress.Count(p=>p.Item4=="对方已校验保存")==2;},"缺少逐文件保存确认",4000);
                         lock(progress) {
                             Assert(progress.All(p=>p.Item1==sent.Packet&&p.Item3>=0&&p.Item3<=100),"进度关联错消息或越界");
                             Assert(progress.Any(p=>p.Item2==0&&p.Item3>0&&p.Item3<100),"大文件没有中间进度");
@@ -554,7 +552,7 @@ namespace FeiqLight.Tests
                 {
                     string folder = Path.Combine(root, "collision"); Directory.CreateDirectory(folder);
                     string source = Path.Combine(root, "同名.txt"), destination = Path.Combine(folder, "同名.txt"); File.WriteAllText(source, "本次传输"); File.WriteAllText(destination, "必须保留"); Directory.CreateDirectory(Path.Combine(folder, "同名 (1).txt"));
-                    ChatRecord record = a.SendMessage(bob, "文件", new[] { source }); Attachment file = new Attachment { Id = 0, Name = "同名.txt", Size = new FileInfo(source).Length };
+                    ChatRecord record = a.SendMessage(bob, "文件", new[] { source }); Attachment file = new Attachment { Id = 0, Name = "同名.txt", Size = new FileInfo(source).Length,Sha256=record.Transfers[0].Sha256 };
                     Task<string> first = b.ReceiveFileAsync(alice, record.Packet, file, destination, null, CancellationToken.None, true), second = b.ReceiveFileAsync(alice, record.Packet, file, destination, null, CancellationToken.None, true);
                     Task.WaitAll(first, second); Assert(first.Result != second.Result && EqualFiles(source, first.Result) && EqualFiles(source, second.Result), "并发同名文件未分别保存");
                     Assert(File.ReadAllText(destination) == "必须保留" && Directory.Exists(Path.Combine(folder, "同名 (1).txt")), "覆盖了旧文件或目录"); Assert(!Directory.GetFiles(folder, "*.part").Any(), "残留半成品");
@@ -567,7 +565,7 @@ namespace FeiqLight.Tests
                     List<string> sources=new List<string>(); Random random=new Random(91);
                     foreach(string name in names) {string source=Path.Combine(folder,name);byte[] bytes=new byte[262144+sources.Count];random.NextBytes(bytes);File.WriteAllBytes(source,bytes);sources.Add(source);}
                     ChatRecord record=a.SendMessage(bob,"",sources);List<Task<string>> downloads=new List<Task<string>>();
-                    for(int i=0;i<sources.Count;i++) downloads.Add(b.ReceiveFileAsync(alice,record.Packet,new Attachment{Id=i,Name=names[i],Size=new FileInfo(sources[i]).Length},Path.Combine(folder,"received-"+i),null,CancellationToken.None));
+                    for(int i=0;i<sources.Count;i++) downloads.Add(b.ReceiveFileAsync(alice,record.Packet,new Attachment{Id=i,Name=names[i],Size=new FileInfo(sources[i]).Length,Sha256=record.Transfers[i].Sha256},Path.Combine(folder,"received-"+i),null,CancellationToken.None));
                     Task.WaitAll(downloads.ToArray());for(int i=0;i<sources.Count;i++)Assert(EqualFiles(sources[i],downloads[i].Result),"并发内容串写");
                 });
                 Run("未知文件、错误来源地址的 TCP 请求拒绝", () =>
@@ -576,25 +574,26 @@ namespace FeiqLight.Tests
                     ChatRecord record = a.SendMessage(bob, "文件", new[] { path });
                     Assert(Fetch(portA, record.Packet, 999, "127.0.0.1").Length == 0, "未知文件获准读取");
                     Assert(Fetch(portA, record.Packet, 0, "127.0.0.2").Length == 0, "非接收方获准读取");
-                    Assert(Fetch(portA, record.Packet, 0, "127.0.0.1").Length > 0, "正常请求被拒绝");
+                    Assert(Fetch(portA, record.Packet, 0, "127.0.0.1").Length == 0, "同地址明文请求错误取得文件");
                 });
                 Run("文件改变后拒绝发送、清理半成品", () =>
                 {
                     string path = Path.Combine(root, "changed.txt"), target = Path.Combine(root, "changed-received.txt"); File.WriteAllText(path, "before");
                     ChatRecord record = a.SendMessage(bob, "文件", new[] { path }); File.WriteAllText(path, "after-changed");
-                    ExpectFailure(() => b.ReceiveFileAsync(alice, record.Packet, new Attachment { Id = 0, Name = "changed.txt", Size = 6 }, target, null, CancellationToken.None).GetAwaiter().GetResult(), "改变的文件被静默接受");
+                    ExpectFailure(() => b.ReceiveFileAsync(alice, record.Packet, new Attachment { Id = 0, Name = "changed.txt", Size = 6,Sha256=record.Transfers[0].Sha256 }, target, null, CancellationToken.None).GetAwaiter().GetResult(), "改变的文件被静默接受");
                     Assert(!File.Exists(target) && !Directory.GetFiles(root, "*.part").Any(), "留下不完整文件");
                 });
                 Run("真实断网后保留断点、非零偏移续传与完整内容校验", () =>
                 {
                     byte[] payload = new byte[1024 * 1024 + 7]; new Random(123).NextBytes(payload);
                     TcpListener server = new TcpListener(IPAddress.Loopback, 0); server.Start();
-                    string target = Path.Combine(root, "resume.bin"); Peer remote = new Peer { Endpoint = (IPEndPoint)server.LocalEndpoint, Login = "resume", Host = "server" };
-                    Attachment file = new Attachment { Id = 2, Name = "resume.bin", Size = payload.Length, Modified = 42 };
+                    using(var source=new TlsFilePeer(Path.Combine(root,"resume-peer"),(IPEndPoint)server.LocalEndpoint,b)){
+                    string target = Path.Combine(root, "resume.bin"); Peer remote=source.Peer;
+                    Attachment file = new Attachment { Id = 2, Name = "resume.bin", Size = payload.Length, Modified = 42,Sha256=SecureIdentity.Hash(payload) };
                     Task sender = Task.Run(() =>
                     {
-                        using (TcpClient first = server.AcceptTcpClient()) { Assert(ReadOffset(first) == 0, "首次偏移非零"); first.GetStream().Write(payload, 0, 80000); }
-                        using (TcpClient second = server.AcceptTcpClient()) { long offset = ReadOffset(second); Assert(offset == 80000, "重试没有从断点开始"); for(int at=(int)offset;at<payload.Length;at+=65536){Thread.Sleep(40);second.GetStream().Write(payload,at,Math.Min(65536,payload.Length-at));} }
+                        long offset;using (TcpClient first = server.AcceptTcpClient())using(Stream stream=source.Open(first,file,out offset)){Assert(offset==0,"首次偏移非零");stream.Write(payload,0,80000);}
+                        using (TcpClient second = server.AcceptTcpClient())using(Stream stream=source.Open(second,file,out offset)){Assert(offset==80000,"重试没有从断点开始");for(int at=(int)offset;at<payload.Length;at+=65536){Thread.Sleep(40);stream.Write(payload,at,Math.Min(65536,payload.Length-at));}Assert(SecureIdentity.ReadText(stream,128)=="STORED\n"+file.Sha256,"未确认保存");}
                     });
                     try
                     {
@@ -609,13 +608,13 @@ namespace FeiqLight.Tests
                         Assert(rates.Values.First().BytesPerSecond==0&&rates.Values.Any(p=>p.BytesPerSecond>0&&p.BytesPerSecond<4*1024*1024),"续传没有按实际新增字节报告速率");
                         Assert(File.ReadAllBytes(target).SequenceEqual(payload) && !File.Exists(part), "续传结果损坏或未清理断点");
                     }
-                    finally { server.Stop(); }
+                    finally { server.Stop(); } }
                 });
                 Run("零字节文件传输", () =>
                 {
                     string source = Path.Combine(root, "empty.txt"), target = Path.Combine(root, "empty-received.txt"); File.WriteAllBytes(source, new byte[0]);
                     ChatRecord record = a.SendMessage(bob, "空文件", new[] { source });
-                    b.ReceiveFileAsync(alice, record.Packet, new Attachment { Id = 0, Name = "empty.txt", Size = 0 }, target, null, CancellationToken.None).GetAwaiter().GetResult();
+                    b.ReceiveFileAsync(alice, record.Packet, new Attachment { Id = 0, Name = "empty.txt", Size = 0,Sha256=record.Transfers[0].Sha256 }, target, null, CancellationToken.None).GetAwaiter().GetResult();
                     Assert(File.Exists(target) && new FileInfo(target).Length == 0, "空文件传输失败");
                 });
                 Run("取消文件传输与临时文件清理", () =>
@@ -624,12 +623,14 @@ namespace FeiqLight.Tests
                     using (ManualResetEventSlim release = new ManualResetEventSlim(false))
                     using (CancellationTokenSource cancel = new CancellationTokenSource())
                     {
-                        Task holder = Task.Run(() => { using (TcpClient connection = server.AcceptTcpClient()) { connection.GetStream().Write(new byte[32], 0, 32); release.Wait(5000); } });
-                        string path = Path.Combine(root, "cancelled.bin"); Peer fake = new Peer { Endpoint = (IPEndPoint)server.LocalEndpoint };
+                        using(var source=new TlsFilePeer(Path.Combine(root,"cancel-peer"),(IPEndPoint)server.LocalEndpoint,b)){
+                        var file=new Attachment{Id=0,Name="cancelled.bin",Size=1048576,Sha256=new string('a',64)};
+                        Task holder = Task.Run(() => { long offset;using (TcpClient connection = server.AcceptTcpClient())using(Stream stream=source.Open(connection,file,out offset)){stream.Write(new byte[32],0,32);release.Wait(5000);} });
+                        string path = Path.Combine(root, "cancelled.bin"); Peer fake=source.Peer;
                         cancel.CancelAfter(150);
-                        try { ExpectFailure(() => b.ReceiveFileAsync(fake, 1, new Attachment { Id = 0, Name = "cancelled.bin", Size = 1048576 }, path, null, cancel.Token).GetAwaiter().GetResult(), "取消没有中止接收"); }
+                        try { ExpectFailure(() => b.ReceiveFileAsync(fake, 1, file, path, null, cancel.Token).GetAwaiter().GetResult(), "取消没有中止接收"); }
                         finally { release.Set(); holder.Wait(6000); server.Stop(); }
-                        Assert(!File.Exists(path) && !Directory.GetFiles(root, "*.part").Any(), "取消残留文件");
+                        Assert(!File.Exists(path) && !Directory.GetFiles(root, "*.part").Any(), "取消残留文件");}
                     }
                 });
                 Run("排队接收取消：不等待前一个同目标任务结束", () =>
@@ -640,16 +641,18 @@ namespace FeiqLight.Tests
                     using(CancellationTokenSource firstCancel=new CancellationTokenSource())
                     using(CancellationTokenSource queuedCancel=new CancellationTokenSource()) {
                         Task first=null,queued=null;
-                        Task sender=Task.Run(()=>{using(TcpClient client=server.AcceptTcpClient()){client.GetStream().Write(new byte[32],0,32);entered.Set();release.Wait(8000);}});
+                        using(var source=new TlsFilePeer(Path.Combine(root,"queued-peer"),(IPEndPoint)server.LocalEndpoint,b)){
+                        Attachment file=new Attachment{Id=0,Name="queued-cancel.bin",Size=1048576,Sha256=new string('a',64)};
+                        Task sender=Task.Run(()=>{long offset;using(TcpClient client=server.AcceptTcpClient())using(Stream stream=source.Open(client,file,out offset)){stream.Write(new byte[32],0,32);entered.Set();release.Wait(8000);}});
                         try {
-                            Peer remote=new Peer{Endpoint=(IPEndPoint)server.LocalEndpoint,Login="queued",Host="test"};string target=Path.Combine(root,"queued-cancel.bin");Attachment file=new Attachment{Id=0,Name="queued-cancel.bin",Size=1048576};
+                            Peer remote=source.Peer;string target=Path.Combine(root,"queued-cancel.bin");
                             first=b.ReceiveFileAsync(remote,101,file,target,null,firstCancel.Token);Assert(entered.Wait(3000),"首个下载没有进入传输");
                             queued=b.ReceiveFileAsync(remote,102,file,target,null,queuedCancel.Token);
                             Wait(()=>queued.Status==TaskStatus.Running,"排队任务没有开始等待目标锁",3000);queuedCancel.Cancel();
                             Wait(()=>queued.IsCompleted,"取消仍在等待前一个下载释放目标锁",1500);Assert(queued.IsCanceled,"排队取消没有返回取消状态");Assert(!first.IsCompleted,"取消排队任务中断了前一个任务");
                         } finally {
                             firstCancel.Cancel();queuedCancel.Cancel();release.Set();server.Stop();
-                            foreach(Task job in new[]{first,queued,sender}.Where(t=>t!=null)) try{Assert(job.Wait(5000),"测试任务未退出");}catch(AggregateException){ }
+                            foreach(Task job in new[]{first,queued,sender}.Where(t=>t!=null)) try{Assert(job.Wait(5000),"测试任务未退出");}catch(AggregateException){ } }
                         }
                     }
                 });
@@ -657,11 +660,10 @@ namespace FeiqLight.Tests
                 {
                     using (UdpClient blackhole = new UdpClient(Endpoint(0)))
                     {
-                        int count = 0; Peer noAck = new Peer { Endpoint = (IPEndPoint)blackhole.Client.LocalEndPoint, Login = "noack", Nickname = "未确认节点", Utf8 = true };
+                        Peer noAck = new Peer { Endpoint = (IPEndPoint)blackhole.Client.LocalEndPoint,DeviceId=Guid.NewGuid().ToString("N"),Fingerprint=new string('c',64), Login = "noack", Nickname = "未确认节点", Utf8 = true };
                         ChatRecord record = a.SendMessage(noAck, "重试测试", null);
-                        blackhole.Client.ReceiveTimeout = 12000;
-                        for (int i = 0; i < 4; i++) { IPEndPoint from = Endpoint(0); blackhole.Receive(ref from); count++; }
-                        Wait(() => record.State.StartsWith("未确认"), "重试后没有失败状态", 5000); Assert(count == 4, "重试次数不正确");
+                        var pending=(System.Collections.IDictionary)typeof(LanService).GetField("pending",BindingFlags.NonPublic|BindingFlags.Instance).GetValue(a);
+                        object item=pending[record.Packet];Wait(() => record.State.StartsWith("未确认"), "重试后没有失败状态", 40000); Assert((int)item.GetType().GetField("Attempts").GetValue(item)==4,"重试次数不正确");
                     }
                 });
                 Run("回环隔离不能发送至局域网", () => { ExpectFailure(() => a.Probe(new IPEndPoint(IPAddress.Parse("192.168.1.1"), 2425)), "测试节点连接了外部网络"); });

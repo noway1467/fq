@@ -70,7 +70,7 @@ public final class GuestLifetimeTest {
             ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();service.networkFactory=manager->new LanNetwork(manager,Collections::emptyList);settle(service);
             Shadows.shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(context,ChatService.class),service.onBind(new Intent()));
             LanNode.Listener quiet=new LanNode.Listener(){public void peersChanged(){}public void error(String message){}public void message(LanNode.Peer p,LanNode.Message m,boolean update){}};
-            int port;try(ServerSocket socket=new ServerSocket(0,1,InetAddress.getLoopbackAddress())){port=socket.getLocalPort();}
+            int port=TestPorts.chat();
             try(LanNode node=new LanNode(port,true,"guest-ui","host","测试","",quiet);ActivityController<MainActivity> ac=Robolectric.buildActivity(MainActivity.class).setup()) {
                 settle(service);node.start();set(service,"node",node);MainActivity activity=ac.get();invoke(activity,"showGuest");Dialog dialog=ShadowDialog.getLatestDialog();
                 EditText input=input(dialog);assertEquals("60",input.getText().toString());input.setText("1441");button(dialog,"保存有效期").performClick();assertNotNull(input.getError());assertEquals(60,GuestTransfer.lifetimeMinutes(context));
