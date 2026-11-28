@@ -358,6 +358,25 @@ button:disabled, button.primary:disabled, button.soft:disabled, button.tool-btn:
   min-width: 0;
 }
 
+.section-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.archive-hint {
+  padding: 10px 16px;
+  color: var(--muted);
+  font-size: 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.directory { background: var(--card); }
+.directory .file-icon { background: var(--surface); color: var(--muted); }
+.directory .file-name { font-size: 13px; }
+.directory:last-child { border-bottom: 1px solid var(--line); }
+
 h2 {
   font-size: 15px;
   font-weight: 700;

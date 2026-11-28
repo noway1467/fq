@@ -239,7 +239,8 @@ public sealed class MainForm : ModernWindow
             }
         }
         internal void PrepareNetworkCallbacks() { if(!IsHandleCreated)CreateHandle();network.NetworkReset+=OnNetworkReset; }
-        private void OnNetworkReset(){Ui(()=>{foreach(ToolsGateway gateway in gateways)gateway.Dispose();gateways.Clear();if(guestWindow!=null&&!guestWindow.IsDisposed)guestWindow.Stop();if(toolsWindow!=null&&!toolsWindow.IsDisposed)toolsWindow.NetworkReset();});}
+        // 网关自己在网络回调中同步关闭；延后的 UI 清理只能移除旧实例，不能误关新网关。
+        private void OnNetworkReset(){ToolsWindow current=toolsWindow;if(current!=null&&!current.IsDisposed)current.NetworkReset();Ui(()=>{gateways.RemoveAll(gateway=>gateway.IsClosed);if(guestWindow!=null&&!guestWindow.IsDisposed)guestWindow.Stop();});}
         private bool RememberPeerAddresses()
         {
             List<Peer> peers=network.Peers;Peer.UpdateConversationNames(peers);

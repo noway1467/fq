@@ -2,17 +2,38 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
+using System.Web.Script.Serialization;
+using Microsoft.Win32.SafeHandles;
 
 namespace FeiqLight
 {
     // 访客模式由用户单独开启，随机能力链接仅限本次选择的文件和接收位置。
     internal sealed class GuestTransfer : IDisposable
     {
-        private sealed class Download { internal string Id,Path,Name,Relative; internal long Size,Modified; }
+        private sealed class Download { internal string Id,Path,Name,Relative; internal long Size,Modified; internal HandleInfo Identity; }
+        private sealed class DownloadDirectory
+        {
+            internal string Id,Path,Name;
+            internal readonly List<Download> Files = new List<Download>();
+        }
+        [StructLayout(LayoutKind.Sequential)]
+        private struct HandleInfo
+        {
+            internal uint Attributes;
+            internal System.Runtime.InteropServices.ComTypes.FILETIME Created,Accessed,Written;
+            internal uint Volume,SizeHigh,SizeLow,Links,IndexHigh,IndexLow;
+        }
+        [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+        private static extern uint GetFinalPathNameByHandle(SafeFileHandle file,StringBuilder path,uint size,uint flags);
+        [DllImport("kernel32.dll", SetLastError=true)]
+        [return:MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetFileInformationByHandle(SafeFileHandle file,out HandleInfo info);
         private sealed class Upload { internal string Id,Name,Partial,Saved,Relative; internal long Size,Offset; internal bool Canceled; }
         private readonly Dictionary<string,Download> downloads=new Dictionary<string,Download>();
+        private readonly Dictionary<string,DownloadDirectory> directories=new Dictionary<string,DownloadDirectory>();
         private readonly Dictionary<string,Upload> uploads=new Dictionary<string,Upload>();
         private readonly object gate=new object();
         private readonly ToolsHttp http;
@@ -23,6 +44,8 @@ namespace FeiqLight
         private readonly bool allowUpload;
         private long reserved;
         private int activeUploads;
+        private bool archiveBusy;
+        private FileStream archiveInput;
         private volatile bool closed;
         internal const long UploadQuota=100L*1024*1024*1024;
         internal const int UploadFileLimit=1000, UploadTaskLimit=4096;
@@ -42,11 +65,35 @@ namespace FeiqLight
             this.destination=ReceiveStorage.Folder(destination);this.allowUpload=allowUpload;
             if(allowUpload)ReceiveStorage.ValidateWritable(this.destination);
             Token=ToolsService.RandomToken(32);
+            var directoryPaths=new Dictionary<string,DownloadDirectory>(StringComparer.Ordinal);
             foreach(SendBatch.Item source in files) {
                 var info=new FileInfo(source.Path);
                 if(!info.Exists||!Protocol.SafeFileName(info.Name)||(info.Attributes&FileAttributes.ReparsePoint)!=0||ReceiveStorage.LinkedDirectory(info.DirectoryName)||source.Relative!=null&&(!Protocol.SafeRelativePath(source.Relative)||source.Relative.Split('/').Last()!=info.Name))throw new IOException("请选择可读取且名称安全的普通文件。");
                 if(downloads.Count>=1000)throw new IOException("单次最多选择 1000 个文件。");
-                string id=Guid.NewGuid().ToString("N");downloads.Add(id,new Download{Id=id,Path=info.FullName,Name=info.Name,Relative=source.Relative,Size=info.Length,Modified=info.LastWriteTimeUtc.Ticks});
+                string id=Guid.NewGuid().ToString("N");
+                var file=new Download{Id=id,Path=info.FullName,Name=info.Name,Relative=source.Relative,Size=info.Length,Modified=info.LastWriteTimeUtc.Ticks};
+                using(var input=new FileStream(file.Path,FileMode.Open,FileAccess.Read,FileShare.Read))file.Identity=ReadHandle(file,input);
+                downloads.Add(id,file);
+                if(file.Relative!=null) {
+                    string[] parts=file.Relative.Split('/');string path="";
+                    for(int index=0;index<parts.Length-1;index++) {
+                        path=path.Length==0?parts[index]:path+"/"+parts[index];
+                        if(index!=0&&index!=parts.Length-2)continue;
+                        DownloadDirectory directory;
+                        if(!directoryPaths.TryGetValue(path,out directory)) {
+                            directory=new DownloadDirectory{Id=Guid.NewGuid().ToString("N"),Path=path,Name=parts[index]};
+                            directoryPaths.Add(path,directory);directories.Add(directory.Id,directory);
+                        }
+                    }
+                }
+            }
+            // 入口只登记分享根和有直接文件的目录，再用冻结清单填满各入口的授权子树。
+            foreach(Download file in downloads.Values)if(file.Relative!=null) {
+                string[] parts=file.Relative.Split('/');string path="";
+                for(int index=0;index<parts.Length-1;index++) {
+                    path=path.Length==0?parts[index]:path+"/"+parts[index];
+                    DownloadDirectory directory;if(directoryPaths.TryGetValue(path,out directory))directory.Files.Add(file);
+                }
             }
             if(downloads.Count==0&&!allowUpload)throw new IOException("请先选择文件或开启接收。");
             Until=DateTime.UtcNow.AddMinutes(lifetimeMinutes);
@@ -73,8 +120,18 @@ namespace FeiqLight
             }
             if(request.Path=="/favicon.ico"){response.Bytes(new byte[0],"image/x-icon",204);return;}
             Authorize(request);
-            if(request.Method=="GET"&&request.Path=="/api/guest") {response.Json(new{files=downloads.Values.Select(f=>new{id=f.Id,name=f.Name,relativePath=f.Relative,size=f.Size}),upload=allowUpload,requestIds=true,folders=true,until=Until.ToString("o"),remainingMilliseconds=RemainingMilliseconds,limit=UploadQuota,countLimit=UploadFileLimit});return;}
+            if(request.Method=="GET"&&request.Path=="/api/guest") {
+                var status=new {
+                    files=downloads.Values.Select(f=>new{id=f.Id,name=f.Name,relativePath=f.Relative,size=f.Size}),
+                    directories=directories.Values.Select(d=>new{id=d.Id,name=d.Name,relativePath=d.Path,count=d.Files.Count,size=d.Files.Sum(f=>f.Size)}),
+                    archive=new{enabled=true,maxEntries=StoreZipStream.MaxEntries,maxBytes=StoreZipStream.MaxBytes},upload=allowUpload,requestIds=true,folders=true,
+                    until=Until.ToString("o"),remainingMilliseconds=RemainingMilliseconds,limit=UploadQuota,countLimit=UploadFileLimit
+                };
+                // 1000 个长路径及最多 2000 个入口允许超过默认约 200 万字符；JSON 转义也计入预算。
+                response.Bytes(Encoding.UTF8.GetBytes(new JavaScriptSerializer{MaxJsonLength=32*1024*1024}.Serialize(status)),"application/json; charset=utf-8");return;
+            }
             if((request.Method=="GET"||request.Method=="HEAD")&&request.Path=="/file"){Send(request,response);return;}
+            if(request.Method=="GET"&&request.Path=="/archive"){Archive(request,response);return;}
             if(!allowUpload)throw new ToolsHttp.HttpError(403,"对方未开启浏览器接收。");
             if(request.Method=="POST"&&request.Path=="/api/prepare") {
                 var data=request.Json();string name=Convert.ToString(data.ContainsKey("name")?data["name"]:null);long size;
@@ -135,6 +192,84 @@ namespace FeiqLight
             }
         }
         private static bool RequestId(string value) { return value.Length==32&&value.All(c=>c>='0'&&c<='9'||c>='a'&&c<='f'); }
+        private static void CheckSource(Download file)
+        {
+            var info=new FileInfo(file.Path);
+            if(!info.Exists||info.Length!=file.Size||info.LastWriteTimeUtc.Ticks!=file.Modified||(info.Attributes&FileAttributes.ReparsePoint)!=0||ReceiveStorage.LinkedDirectory(info.DirectoryName))
+                throw new ToolsHttp.HttpError(409,"原文件已变化，请让对方重新选择。");
+        }
+        private static HandleInfo ReadHandle(Download file,FileStream input)
+        {
+            CheckSource(file);
+            var actual=new StringBuilder(32768);
+            uint count=GetFinalPathNameByHandle(input.SafeFileHandle,actual,(uint)actual.Capacity,0);
+            string resolved=actual.ToString();
+            if(resolved.StartsWith("\\\\?\\UNC\\"))resolved="\\\\"+resolved.Substring(8);
+            else if(resolved.StartsWith("\\\\?\\"))resolved=resolved.Substring(4);
+            HandleInfo info;
+            if(count==0||count>=actual.Capacity||!String.Equals(resolved,file.Path,StringComparison.OrdinalIgnoreCase)||!GetFileInformationByHandle(input.SafeFileHandle,out info))
+                throw new ToolsHttp.HttpError(409,"文件来源已离开本次授权位置，请重新选择。");
+            long size=((long)info.SizeHigh<<32)|info.SizeLow;
+            long written=((long)(uint)info.Written.dwHighDateTime<<32)|(uint)info.Written.dwLowDateTime;
+            if((info.Attributes&(uint)(FileAttributes.ReparsePoint|FileAttributes.Directory))!=0||size!=file.Size||written!=new DateTime(file.Modified,DateTimeKind.Utc).ToFileTimeUtc())
+                throw new ToolsHttp.HttpError(409,"原文件已变化，请让对方重新选择。");
+            return info;
+        }
+        private static void ValidateSource(Download file,Stream input)
+        {
+            if(input==null) {
+                CheckSource(file);
+                using(var probe=new FileStream(file.Path,FileMode.Open,FileAccess.Read,FileShare.Read))ValidateSource(file,probe);
+                return;
+            }
+            HandleInfo info=ReadHandle(file,(FileStream)input);
+            if(info.Volume!=file.Identity.Volume||info.IndexHigh!=file.Identity.IndexHigh||info.IndexLow!=file.Identity.IndexLow)
+                throw new ToolsHttp.HttpError(409,"原文件已被替换，请让对方重新选择。");
+        }
+        private Stream OpenArchiveSource(Download file)
+        {
+            Check();CheckSource(file);
+            var input=new FileStream(file.Path,FileMode.Open,FileAccess.Read,FileShare.Read,65536,FileOptions.SequentialScan);
+            try {
+                ValidateSource(file,input);
+                lock(gate){Check();archiveInput=input;}
+                return input;
+            } catch { input.Dispose();throw; }
+        }
+        private void Archive(ToolsHttp.Request request,ToolsHttp.Response response)
+        {
+            string scope=request.Parameter("scope"),id=request.Parameter("dir");
+            DownloadDirectory directory=null;
+            if(scope=="all"&&id.Length==0) { }
+            else if(scope.Length==0&&id.Length>0) {
+                if(!directories.TryGetValue(id,out directory))throw new ToolsHttp.HttpError(404,"目录不在本次分享中。");
+            } else throw new ToolsHttp.HttpError(400,"请选择下载全部或本次分享的目录。");
+            if(request.Header("Range").Length>0)throw new ToolsHttp.HttpError(416,"打包下载暂不支持续传，请重新下载。");
+            Download[] files=directory==null?downloads.Values.ToArray():directory.Files.ToArray();
+            int prefix=directory==null?0:directory.Path.LastIndexOf('/')+1;
+            lock(gate) {
+                Check();
+                if(archiveBusy)throw new ToolsHttp.HttpError(409,"已有一个打包下载正在进行，请等它完成后重试。");
+                archiveBusy=true;
+            }
+            try {
+                Action check=()=>{Check();response.CheckConnection();};
+                StoreZipStream archive;
+                try {
+                    archive=new StoreZipStream(files.Select(file=>new StoreZipStream.Entry(
+                        directory==null?(file.Relative??file.Name):file.Relative.Substring(prefix),file.Size,new DateTime(file.Modified,DateTimeKind.Utc),
+                        ()=>OpenArchiveSource(file),input=>ValidateSource(file,input))));
+                } catch(InvalidDataException error) { throw new ToolsHttp.HttpError(409,error.Message); }
+                try { archive.Prepare(check); }
+                catch(IOException) { throw new ToolsHttp.HttpError(409,"原文件已变化或不可用，请让对方重新选择。"); }
+                catch(UnauthorizedAccessException) { throw new ToolsHttp.HttpError(409,"原文件不可读取，请让对方重新选择。"); }
+                check();
+                string name=directory==null?"飞Q-全部文件.zip":directory.Name+".zip";
+                string encoded=Uri.EscapeDataString(name).Replace("'","%27").Replace("(","%28").Replace(")","%29");
+                response.Begin(200,"application/zip",archive.ContentLength,"Content-Disposition: attachment; filename*=UTF-8''"+encoded+"\r\n");
+                archive.Write((bytes,count)=>{check();response.Write(bytes,count);},check);
+            } finally { lock(gate){archiveInput=null;archiveBusy=false;} }
+        }
         private void Send(ToolsHttp.Request request,ToolsHttp.Response response)
         {
             Download file;if(!downloads.TryGetValue(request.Parameter("id"),out file))throw new ToolsHttp.HttpError(404,"文件不在本次分享中。");
@@ -150,8 +285,9 @@ namespace FeiqLight
         }
         public void Dispose()
         {
-            Upload[] pending;lock(gate){if(closed)return;closed=true;pending=uploads.Values.ToArray();}
+            Upload[] pending;FileStream input;lock(gate){if(closed)return;closed=true;pending=uploads.Values.ToArray();input=archiveInput;archiveInput=null;}
             http.Dispose();if(expiry!=null)expiry.Dispose();
+            if(input!=null)input.Dispose();
             foreach(Upload upload in pending)lock(upload)if(upload.Saved==null&&upload.Partial!=null)try{File.Delete(upload.Partial);}catch(IOException e){CleanupError="未完成文件清理失败："+e.Message;}catch(UnauthorizedAccessException e){CleanupError="未完成文件清理失败："+e.Message;}
         }
     }

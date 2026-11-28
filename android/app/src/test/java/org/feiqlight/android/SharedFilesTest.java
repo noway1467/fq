@@ -143,9 +143,11 @@ public final class SharedFilesTest {
                     ByteArrayOutputStream bytes=new ByteArrayOutputStream();int last=0;
                     while(last!=0x0d0a0d0a){int b=socket.getInputStream().read();assertTrue("复用连接提前结束",b>=0);bytes.write(b);last=(last<<8)|b;}
                     String response=bytes.toString("US-ASCII");assertTrue(response.startsWith("HTTP/1.1 "+(request==3?401:206)));
+                    assertTrue(response.contains(request==3?"Connection: close":"Connection: keep-alive"));
                     int length=method.equals("HEAD")?0:Integer.parseInt(Arrays.stream(response.split("\r\n")).filter(s->s.startsWith("Content-Length:")).findFirst().get().substring(15).trim());
                     byte[] body=socket.getInputStream().readNBytes(length);assertEquals(length,body.length);
                     if(request!=1&&request!=3)assertArrayEquals(Arrays.copyOfRange(Files.readAllBytes(docs.file.toPath()),40,60),body);
+                    if(request==3)assertEquals(-1,socket.getInputStream().read());
                 }
             }
         }

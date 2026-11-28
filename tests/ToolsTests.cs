@@ -37,7 +37,7 @@ namespace FeiqLight.Tests
                 {
                     stream.CopyTo(result); byte[] bytes = result.ToArray(); int split = -1;
                     for (int i = 0; i + 3 < bytes.Length; i++) if (bytes[i] == 13 && bytes[i + 1] == 10 && bytes[i + 2] == 13 && bytes[i + 3] == 10) { split = i; break; }
-                    if (split < 0) throw new Exception("没有收到 HTTP 响应");
+                    if (split < 0) throw new EndOfStreamException("没有收到 HTTP 响应");
                     string text = Encoding.ASCII.GetString(bytes, 0, split); return new Reply { Code = Int32.Parse(text.Split(' ')[1]), Headers = text, Body = bytes.Skip(split + 4).ToArray() };
                 }
             }
@@ -52,6 +52,10 @@ namespace FeiqLight.Tests
         private static string PairCookie(Reply reply) { return reply.Headers.Split(new[] { "\r\n" }, StringSplitOptions.None).Single(s => s.StartsWith("Set-Cookie: fq_pair_")).Substring(12).Split(';')[0]; }
         private static Reply Reconnect(ToolsService server, string mode, string cookie) { return Request(server.Port, "/api/reconnect", cookie, "{\"mode\":\"" + mode + "\"}", "X-FQ-Reconnect: 1\r\n"); }
         private static void Assert(bool value, string text) { if (!value) throw new Exception(text); }
+        private static bool RemoteRequestEnded(Func<Reply> request)
+        {
+            try { return request().Code == 401; } catch (IOException) { return true; }
+        }
         private static Reply Persistent(TcpClient client, int port, string path, string cookie, string method = "GET")
         {
             Stream stream = client.GetStream(); byte[] header = Encoding.ASCII.GetBytes(method + " " + path + " HTTP/1.1\r\nHost: 127.0.0.1:" + port + "\r\nCookie: " + cookie + "\r\nRange: bytes=40-59\r\nConnection: keep-alive\r\n\r\n"); stream.Write(header, 0, header.Length);
@@ -75,6 +79,8 @@ namespace FeiqLight.Tests
             if (args.Length > 2 && args[0] == "upgrade") { try { Upgrade(root, Path.GetFullPath(args[2]), args.Length > 3 ? Path.GetFullPath(args[3]) : Path.GetFullPath(args[2])); return 0; } catch(Exception error) { Console.WriteLine("UPGRADE FAIL: " + error.GetType().Name + " " + error.Message); return 1; } }
             int passed = 0, failed = 0;
             Action<string, Action> run = (name, test) => { try { test(); Console.WriteLine("PASS " + name); passed++; } catch (Exception e) { Console.WriteLine("FAIL " + name + ": " + e); failed++; } };
+            RemoteReuseTests.Run(run, root);
+            if(args.Length>0&&args[0]=="remote-reuse"){Console.WriteLine(passed+" passed, "+failed+" failed");return failed==0?0:1;}
             string folder = Path.Combine(root, "shared"); Directory.CreateDirectory(folder); Directory.CreateDirectory(Path.Combine(folder, "子目录"));
             File.WriteAllBytes(Path.Combine(folder, "视频 sample.mp4"), Enumerable.Range(0, 256).Select(i => (byte)i).ToArray()); File.WriteAllBytes(Path.Combine(folder, "empty.bin"), new byte[0]);
             run("FQF1：首帧、静止、128像素脏块、整帧回退及基线恢复", () => {
@@ -117,9 +123,9 @@ namespace FeiqLight.Tests
                     Assert(idle.Code==200&&idle.Body.Length==18&&watch.ElapsedMilliseconds>=275&&samples<=5,"静止请求未节流或多传像素");
                     Assert(Request(server.Port,"/api/screen?display=0",cookie).Headers.Contains("image/jpeg"),"旧JPEG不兼容");
                     Assert(Request(server.Port,"/api/screen?delta=1&since=-1",cookie).Code==400,"无效帧序号未拒绝");
-                    sampled.Reset();Task<Reply> pending=Task.Run(()=>Request(server.Port,"/api/screen?delta=1&since="+seq,cookie));
+                    sampled.Reset();Task<bool> pending=Task.Run(()=>RemoteRequestEnded(()=>Request(server.Port,"/api/screen?delta=1&since="+seq,cookie)));
                     Assert(sampled.WaitOne(2000),"未开始长轮询");watch.Restart();server.StopRemote();
-                    Assert(pending.Wait(1000)&&pending.Result.Code==401&&watch.ElapsedMilliseconds<250,"撤销后仍交付或等待旧帧");
+                    Assert(pending.Wait(1000)&&pending.Result&&watch.ElapsedMilliseconds<250,"撤销后仍交付或等待旧帧");
                 }
             });
             run("组合键：白名单、去重顺序、扩展键与安全热键拒绝", () => {
@@ -419,7 +425,7 @@ namespace FeiqLight.Tests
                     string id = (string)files.Single(i => (string)i["name"] == "视频 sample.mp4")["id"];
                     server.ConfirmRemote = address => true; server.AllowRemote(); string remote = Login(server, "remote");
                     server.Capture = display => { entered.Set(); release.WaitOne(5000); return new byte[10]; };
-                    Task<Reply> capture = Task.Run(() => Request(server.Port, "/api/screen", remote)); Assert(entered.WaitOne(5000), "没有进入捕获");
+                    Task<bool> capture = Task.Run(() => RemoteRequestEnded(() => Request(server.Port, "/api/screen", remote))); Assert(entered.WaitOne(5000), "没有进入捕获");
                     try
                     {
                         Task<Reply> range = Task.Run(() => Request(server.Port, "/file?id=" + id, share, null, "Range: bytes=20-39\r\n"));
@@ -427,7 +433,7 @@ namespace FeiqLight.Tests
                         server.StopRemote();
                     }
                     finally { release.Set(); }
-                    Assert(capture.Result.Code == 401, "停止后仍交付旧帧");
+                    Assert(capture.Result, "停止后仍交付旧帧");
                 }
             });
             run("视频复用连接：连续 Range、HEAD 边界和每次请求重新校验授权", () => {

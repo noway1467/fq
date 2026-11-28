@@ -2,6 +2,8 @@ package org.feiqlight.android;
 
 import android.content.Context;
 import org.feiqlight.android.core.ToolsHttp;
+import org.feiqlight.android.core.SecureIdentity;
+import org.feiqlight.android.core.LanNode;
 import org.json.JSONObject;
 import java.io.*;
 import java.nio.charset.StandardCharsets;
@@ -24,6 +26,8 @@ final class PhoneRemoteAccess implements AutoCloseable {
     private final ToolsPairings pairings;
     private final ToolsHttp http;
     private final Backend backend;
+    private final SecureIdentity security;
+    private final java.util.function.Consumer<String> revoked=value->revoke();
     private final Object gate=new Object();
     private final String code=String.format(Locale.ROOT,"%06d",new SecureRandom().nextInt(1000000));
     private final long created=System.nanoTime();
@@ -32,25 +36,31 @@ final class PhoneRemoteAccess implements AutoCloseable {
     private int attempts,epoch;
     private boolean closed,pending,codeUsed;
     PhoneRemoteAccess(Context context,int port,boolean loopback,Backend backend)throws IOException{
-        this.context=context.getApplicationContext();this.backend=backend;pairings=new ToolsPairings(context);http=new ToolsHttp(port,loopback,this::handle,loopback?null:AppIdentity.get(context),loopback?null:new LanNetwork(context.getSystemService(android.net.ConnectivityManager.class)));
+        this(context,port,loopback,backend,loopback?null:AppIdentity.get(context),loopback?null:new LanNetwork(context.getSystemService(android.net.ConnectivityManager.class)));
     }
+    PhoneRemoteAccess(Context context,int port,boolean loopback,Backend backend,SecureIdentity security,LanNode.SocketBinding binding)throws IOException{
+        this.context=context.getApplicationContext();this.backend=backend;this.security=security;pairings=new ToolsPairings(context);http=new ToolsHttp(port,loopback,this::handle,security,binding);
+        if(security!=null)security.observeRevocation(revoked);
+    }
+    private void revoke(){synchronized(gate){token="";epoch++;pending=false;http.disconnectRemoteClients();}backend.disconnected();}
     static int portFor(int chatPort){return chatPort>=65534?chatPort-2:chatPort+2;}
     int port(){return http.port();}
     String code(){synchronized(gate){return closed?"已停止":codeUsed||System.nanoTime()-created>600000000000L?"等待已配对设备":code;}}
     String address(){synchronized(gate){return valid()?address:"";}}
     private boolean valid(){return !closed&&!token.isEmpty()&&System.nanoTime()-last<30000000000L;}
-    void expire(){boolean expired; synchronized(gate){expired=!token.isEmpty()&&!valid();if(expired){token="";epoch++;}}if(expired)backend.disconnected();}
-    void forget()throws IOException{synchronized(gate){pairings.clear();epoch++;token="";pending=false;codeUsed=true;}backend.disconnected();}
+    void expire(){boolean expired; synchronized(gate){expired=!token.isEmpty()&&!valid();if(expired){token="";epoch++;http.disconnectRemoteClients();}}if(expired)backend.disconnected();}
+    void forget()throws IOException{synchronized(gate){pairings.clear();epoch++;token="";pending=false;codeUsed=true;http.disconnectRemoteClients();}backend.disconnected();}
     private static JSONObject json(ToolsHttp.Request request)throws Exception{
         if(!request.header("Content-Type").startsWith("application/json"))throw new ToolsHttp.Failure(400,"请求格式错误");
         return new JSONObject(new String(request.body,StandardCharsets.UTF_8));
     }
     private static String cookie(ToolsHttp.Request request,String name){for(String item:request.header("Cookie").split(";"))if(item.trim().startsWith(name+"="))return item.trim().substring(name.length()+1);return "";}
     private String pairName(){return "fq_pair_phone_"+port();}
-    private int authorize(ToolsHttp.Request request)throws ToolsHttp.Failure{
+    private int authorize(ToolsHttp.Request request)throws IOException{
         synchronized(gate){
             if(!valid()||!address.equals(request.address)||!java.util.Objects.equals(fingerprint,request.fingerprint)||!token.equals(cookie(request,"fq_phone")))throw new ToolsHttp.Failure(401,"控制已结束");
             if(request.method.equals("POST")&&!token.equals(request.header("X-FQ-Token")))throw new ToolsHttp.Failure(403,"请求校验失败");
+            if(!request.path.equals("/api/logout"))request.bindRemoteSession(token);
             last=System.nanoTime();return epoch;
         }
     }
@@ -67,7 +77,7 @@ final class PhoneRemoteAccess implements AutoCloseable {
             if(pending||valid())throw new ToolsHttp.Failure(409,"已有控制端或请求等待确认");
             trusted=reconnect&&pairings.alwaysAllows(remembered,request.pairScope("phone-remote"));
             // 旧会话已超时；先撤销令牌，避免定时清理误撤销正在等待本机确认的新请求。
-            token="";address="";pending=true;version=++epoch;if(!reconnect)codeUsed=true;
+            token="";address="";pending=true;version=++epoch;http.disconnectRemoteClients();if(!reconnect)codeUsed=true;
         }
         try{
             if(!trusted)response.waitingForUser();
@@ -91,7 +101,7 @@ final class PhoneRemoteAccess implements AutoCloseable {
         if(request.method.equals("POST")){
             if(request.path.equals("/api/login")||request.path.equals("/api/reconnect")){login(request,response,request.path.equals("/api/reconnect"));return;}
             int version=authorize(request);
-            if(request.path.equals("/api/logout")){synchronized(gate){if(epoch==version){token="";epoch++;}}backend.disconnected();response.json("{\"ok\":true}","");return;}
+            if(request.path.equals("/api/logout")){synchronized(gate){if(epoch==version){http.disconnectRemoteClients(token);token="";epoch++;}}backend.disconnected();response.json("{\"ok\":true}","");return;}
             if(request.path.equals("/api/input")){backend.input(json(request),()->current(version));if(!current(version))throw new ToolsHttp.Failure(401,"控制已停止");response.json("{\"ok\":true}","");return;}
             if(request.path.equals("/api/clipboard")){
                 Object value=json(request).opt("text");
@@ -121,5 +131,5 @@ final class PhoneRemoteAccess implements AutoCloseable {
             response.bytes(200,asset.endsWith(".js")?"application/javascript; charset=utf-8":asset.endsWith(".css")?"text/css; charset=utf-8":"text/html; charset=utf-8",output.toByteArray(),"");
         }
     }
-    @Override public void close(){synchronized(gate){closed=true;token="";epoch++;pending=false;}http.close();backend.disconnected();}
+    @Override public void close(){synchronized(gate){if(closed)return;closed=true;token="";epoch++;pending=false;http.disconnectRemoteClients();}if(security!=null)security.removeRevocationObserver(revoked);http.close();backend.disconnected();}
 }

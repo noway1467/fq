@@ -59,7 +59,7 @@ public final class ChatService extends Service {
     private volatile LanNode node;
     private volatile LanNode startingNode;
     private volatile LanNetwork lanNetwork;
-    private final List<ToolsGateway> gateways=new ArrayList<>();
+    private final List<ToolsGateway> gateways=new java.util.concurrent.CopyOnWriteArrayList<>();
     static Intent toolIntent(Context context,Uri url,String peerId,String mode,boolean phone) {
         if("share".equals(mode)) {
             return new Intent(Intent.ACTION_VIEW,url).addCategory(Intent.CATEGORY_BROWSABLE).putExtra("peer_id",peerId).putExtra("tool_mode",mode);
@@ -96,7 +96,8 @@ public final class ChatService extends Service {
             }
         });
     }
-    private void closeGateways(){for(ToolsGateway gateway:gateways)gateway.close();gateways.clear();}
+    // 只移除本次快照中的实例，避免网络线程清空刚由 UI 加入的新网关。
+    private void closeGateways(){for(ToolsGateway gateway:gateways)if(gateways.remove(gateway))gateway.close();}
     volatile SecureIdentity.Confirmation securityConfirmation;
     private SharedFiles sharedFiles;
     private GuestTransfer guestTransfer;
@@ -415,13 +416,12 @@ public final class ChatService extends Service {
                         main.post(()->{if(currentConnection(epoch))updateNetworkStatus(available,reason);});
                     }
                     @Override public void networkReset(){
+                        if(currentConnection(epoch)){closeGateways();PhoneRemoteService.stopActive();}
                         main.post(()->{
                             if(currentConnection(epoch)){
                                 cancelQueuedTransfers();
                                 stopGuest();
-                                closeGateways();
                                 closeSharing();
-                                PhoneRemoteService.stopActive();
                             }
                         });
                     }

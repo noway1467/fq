@@ -377,11 +377,16 @@ namespace FeiqLight.Tests
             }
             string sample=Path.Combine(root,"资料 中文 English.txt");File.WriteAllText(sample,"访客下载原文 😀",new UTF8Encoding(false));
             if(args.Length>2&&args[2]=="server"){
-                using(var server=new GuestTransfer(new[]{sample},Path.Combine(root,"browser-received"),true,true)){
+                string browserFolder=Path.Combine(root,"browser-source","分享资料 中文 English");Directory.CreateDirectory(Path.Combine(browserFolder,"子目录"));
+                File.WriteAllText(Path.Combine(browserFolder,"子目录","特殊 +&%#😀.txt"),"归档中文 English 😀",new UTF8Encoding(false));
+                File.WriteAllBytes(Path.Combine(browserFolder,"空文件.txt"),new byte[0]);
+                using(var server=new GuestTransfer(new[]{sample,browserFolder},Path.Combine(root,"browser-received"),true,true)){
                     File.WriteAllText(Path.Combine(output,"guest-url.txt"),server.Url("127.0.0.1"));Console.WriteLine("READY local guest test server");
                     for(int i=0;i<1200&&!File.Exists(Path.Combine(output,"stop-server"));i++)Thread.Sleep(1000);
                 }return 0;
             }
+            StoreZipTests.RunAll(Run,Path.Combine(root,"zip"));
+            if(args.Length>2&&args[2]=="zip"){Console.WriteLine("TOTAL "+passed+" passed, "+failed+" failed");return failed==0?0:1;}
             Run("访客鉴权、越权、跨站、HEAD与Range",()=>{
                 using(var server=new GuestTransfer(new[]{sample},Path.Combine(root,"receive"),false,true)){
                     Check(Request(server.Port,"/api/guest").Code==403,"无链接授权仍可读取");Check(Request(server.Port,"/api/guest",server.Token,null,"GET","Origin: http://evil.invalid\r\n").Code==403,"跨站未拒绝");

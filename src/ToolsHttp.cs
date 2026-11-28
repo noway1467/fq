@@ -17,6 +17,8 @@ namespace FeiqLight
         internal sealed class Request
         {
             internal string Method, Path, Query, Address, Fingerprint;
+            internal Action<string> RemoteAuthorized;
+            internal void BindRemoteSession(string token) { RemoteAuthorized(token); }
             internal string PairScope(string scope){return Fingerprint==null?scope:scope+"|tls="+Fingerprint;}
             internal readonly Dictionary<string, string> Headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             internal byte[] Body;
@@ -37,15 +39,18 @@ namespace FeiqLight
         {
             private readonly Stream stream;
             private readonly bool head;
-            private readonly bool keepAlive;
+            internal bool KeepAlive;
+            private readonly Func<bool> connected;
             private long remaining;
             internal bool Complete { get { return Started && remaining == 0; } }
             internal bool Started;
-            internal Response(Stream stream, bool head, bool keepAlive = false) { this.stream = stream; this.head = head; this.keepAlive = keepAlive; }
+            internal Response(Stream stream, bool head, bool keepAlive = false, Func<bool> connected = null) { this.stream = stream; this.head = head; KeepAlive = keepAlive; this.connected = connected; }
+            internal void CheckConnection() { if (connected != null && !connected()) throw new IOException("下载连接已关闭。"); }
             internal void Begin(int code, string type, long size, string extra)
             {
+                if (code >= 300) KeepAlive = false;
                 string reason = code == 200 ? "OK" : code == 206 ? "Partial Content" : "Error";
-                byte[] header = Encoding.ASCII.GetBytes("HTTP/1.1 " + code + " " + reason + "\r\nContent-Type: " + type + "\r\nContent-Length: " + size.ToString(CultureInfo.InvariantCulture) + "\r\nConnection: " + (keepAlive ? "keep-alive\r\nKeep-Alive: timeout=3, max=16" : "close") + "\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; media-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'\r\n" + extra + "\r\n");
+                byte[] header = Encoding.ASCII.GetBytes("HTTP/1.1 " + code + " " + reason + "\r\nContent-Type: " + type + "\r\nContent-Length: " + size.ToString(CultureInfo.InvariantCulture) + "\r\nConnection: " + (KeepAlive ? "keep-alive\r\nKeep-Alive: timeout=3, max=16" : "close") + "\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; media-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'\r\n" + extra + "\r\n");
                 Started = true; remaining = head ? 0 : size; stream.Write(header, 0, header.Length);
             }
             internal void Bytes(byte[] bytes, string type, int code = 200, string extra = "") { Begin(code, type, bytes.LongLength, extra); Write(bytes, bytes.Length); }
@@ -60,6 +65,7 @@ namespace FeiqLight
         private readonly TcpListener listener;
         private readonly Action<Request, Response> handler;
         private readonly HashSet<TcpClient> clients = new HashSet<TcpClient>();
+        private readonly Dictionary<TcpClient, string> remoteClients = new Dictionary<TcpClient, string>();
         private readonly object gate = new object();
         private bool closed;
         private readonly SecureIdentity security;
@@ -80,6 +86,11 @@ namespace FeiqLight
         }
         private void OnTrustRevoked(string fingerprint){DisconnectClients();}
         internal void DisconnectClients(){lock(gate)foreach(TcpClient client in clients)client.Close();}
+        internal void DisconnectRemoteClients(string token = null)
+        {
+            lock (gate) foreach (KeyValuePair<TcpClient, string> item in remoteClients)
+                if (token == null || item.Value == token) item.Key.Close();
+        }
         internal static int PortFor(int chatPort) { return chatPort == 65535 ? 65534 : chatPort + 1; }
         private void Accept()
         {
@@ -107,8 +118,22 @@ namespace FeiqLight
                     Request request = Read(input,bodyLimit);
                     request.Fingerprint=fingerprint;
                     if(security!=null&&!security.IsTrustedFingerprint(fingerprint))throw new IOException("设备信任已撤销。");
-                    bool reuse = index < 15 && request.Path == "/file" && (request.Method == "GET" || request.Method == "HEAD") && request.Header("Connection").Equals("keep-alive", StringComparison.OrdinalIgnoreCase);
-                    response = new Response(stream, request.Method == "HEAD", reuse);
+                    bool requestedReuse = index < 15 && request.Header("Connection").Equals("keep-alive", StringComparison.OrdinalIgnoreCase);
+                    bool fileReuse = requestedReuse && request.Path == "/file" && (request.Method == "GET" || request.Method == "HEAD");
+                    bool remoteReuse = requestedReuse && ((request.Path == "/api/screen" && request.Method == "GET") || (request.Path == "/api/input" && request.Method == "POST"));
+                    response = new Response(stream, request.Method == "HEAD", fileReuse, () => !client.Client.Poll(0, SelectMode.SelectRead) || client.Available > 0);
+                    Response currentResponse = response;
+                    request.RemoteAuthorized = token => {
+                        // 业务授权锁先于连接登记锁，停止与登记不会留下漏关的连接。
+                        lock (gate)
+                        {
+                            if (closed || !clients.Contains(client)) throw new IOException("连接已关闭。");
+                            string previous;
+                            if (remoteClients.TryGetValue(client, out previous) && previous != token) throw new HttpError(401, "远控会话已变更");
+                            remoteClients[client] = token;
+                            currentResponse.KeepAlive = remoteReuse;
+                        }
+                    };
                     request.Address = ((IPEndPoint)client.Client.RemoteEndPoint).Address.ToString();
                     string expected = ((IPEndPoint)client.Client.LocalEndPoint).Address+":"+Port;
                     if (request.Header("Host") != expected) throw new HttpError(403, "请使用设备的 IPv4 地址访问");
@@ -116,7 +141,7 @@ namespace FeiqLight
                     if (origin.Length > 0 && origin != (security==null?"http://":"https://") + expected) throw new HttpError(403, "不允许跨站请求");
                     handler(request, response);
                     stream.Flush();
-                    if (!reuse || !response.Complete) break;
+                    if (!response.KeepAlive || !response.Complete) break;
                     client.ReceiveTimeout = 3000;
                 }
             }
@@ -130,7 +155,7 @@ namespace FeiqLight
                 catch (IOException) { }
                 catch (ObjectDisposedException) { }
             }
-            finally { try { if (transport != null) transport.Dispose(); } finally { client.Close(); lock (gate) clients.Remove(client); } }
+            finally { try { if (transport != null) transport.Dispose(); } finally { client.Close(); lock (gate) { clients.Remove(client); remoteClients.Remove(client); } } }
         }
         private static Request Read(Stream stream,int bodyLimit)
         {

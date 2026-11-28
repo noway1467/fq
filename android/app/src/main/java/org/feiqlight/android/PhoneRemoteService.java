@@ -27,7 +27,7 @@ public final class PhoneRemoteService extends Service implements PhoneRemoteAcce
     private MediaProjection projection;
     private VirtualDisplay display;
     private volatile ImageReader reader;
-    private PhoneRemoteAccess access;
+    private volatile PhoneRemoteAccess access;
     private CompletableFuture<Integer> approval;
     private String pendingAddress="";
     private byte[] jpeg;
@@ -38,7 +38,7 @@ public final class PhoneRemoteService extends Service implements PhoneRemoteAcce
     private volatile boolean stopping;
     private boolean receiverRegistered;
     static PhoneRemoteService active(){PhoneRemoteService service=instance;return service==null||service.stopping?null:service;}
-    static void stopActive(){PhoneRemoteService service=instance;if(service!=null){service.stopping=true;service.answer(false);service.main.post(service::stopSelf);}}
+    static void stopActive(){PhoneRemoteService service=instance;if(service!=null){service.stopping=true;service.answer(false);PhoneRemoteAccess current=service.access;if(current!=null)current.close();service.main.post(service::stopSelf);}}
     String code(){return access==null?"准备中":access.code();}
     String pendingAddress(){synchronized(confirmation){return pendingAddress;}}
     String connectedAddress(){return access==null?"":access.address();}

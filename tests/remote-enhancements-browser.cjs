@@ -7,7 +7,7 @@ const {chromium} = require('playwright');
 const root = path.resolve(__dirname,'..');
 const output = process.env.FQ_VALIDATION_DIR || path.join(root,'build/remote-enhancements');
 const temporary = process.env.FQ_BROWSER_TEMP || path.join(root,'build/tmp/remote-enhancements');
-const fixtures = path.join(root,'build/test-data/shared-remote');
+const fixtures = process.env.FQ_REMOTE_FIXTURES || path.join(root,'build/test-data/shared-remote');
 fs.mkdirSync(output,{recursive:true});fs.mkdirSync(temporary,{recursive:true});
 const full=fs.readFileSync(path.join(fixtures,'frame-full.fqf'));
 const tile=fs.readFileSync(path.join(fixtures,'frame-tile.fqf'));

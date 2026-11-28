@@ -13,7 +13,13 @@ import java.util.concurrent.*;
 final class GuestTransfer implements AutoCloseable {
     private static final class Download {
         final LanNode.Source source;final String id,relative;
-        Download(LanNode.Source source,String relative){this.source=source;this.relative=relative;id=SharedFiles.random(16);}
+        final String name;final long size,modified;
+        Download(LanNode.Source source,String relative){this.source=source;this.relative=relative;id=SharedFiles.random(16);name=source.name();size=source.size();modified=source.modified();}
+    }
+    private static final class DownloadDirectory {
+        final String id=SharedFiles.random(16),path,name;
+        final List<Download> files=new ArrayList<>();
+        DownloadDirectory(String path,String name){this.path=path;this.name=name;}
     }
     private static final class Upload {
         final String id,name,relative;final long size;final File partial,target;long offset,time;boolean canceled,moved,placed,saved;String warning="";
@@ -38,6 +44,7 @@ final class GuestTransfer implements AutoCloseable {
     }
     private final Context context;
     private final Map<String,Download> downloads=new LinkedHashMap<>();
+    private final Map<String,DownloadDirectory> directories=new LinkedHashMap<>();
     private final Map<String,Upload> uploads=new LinkedHashMap<>();
     private final Map<String,Upload> requests=new HashMap<>();
     private final File directory;
@@ -47,6 +54,8 @@ final class GuestTransfer implements AutoCloseable {
     private volatile boolean closed;
     private long reserved;
     private int activeUploads;
+    private boolean archiveBusy;
+    private InputStream archiveInput;
     final String token=SharedFiles.random(32);
     final long until;
     private final long deadline;
@@ -63,7 +72,28 @@ final class GuestTransfer implements AutoCloseable {
         if(!loopback&&binding==null)throw new IOException("请先连接局域网");
         this.context=context.getApplicationContext();this.allowUpload=allowUpload;directory=new File(context.getFilesDir(),"received");Files.createDirectories(directory.toPath());
         if(sources.size()>1000)throw new IOException("单次最多 1000 个文件");
-        for(LanNode.Source source:sources){String relative=relatives.get(source.key());if(!Protocol.safeName(source.name())||source.size()<0||relative!=null&&(!Protocol.safeRelativePath(relative)||!relative.endsWith("/"+source.name())))throw new IOException("文件名、目录或大小无效");Download file=new Download(source,relative);downloads.put(file.id,file);}
+        Map<String,DownloadDirectory> directoryPaths=new HashMap<>();
+        for(LanNode.Source source:sources){
+            String relative=relatives.get(source.key());if(!Protocol.safeName(source.name())||source.size()<0||relative!=null&&(!Protocol.safeRelativePath(relative)||!relative.endsWith("/"+source.name())))throw new IOException("文件名、目录或大小无效");
+            Download file=new Download(source,relative);downloads.put(file.id,file);
+            if(relative!=null){
+                String[] parts=relative.split("/");String path="";
+                for(int index=0;index<parts.length-1;index++){
+                    path=path.isEmpty()?parts[index]:path+"/"+parts[index];
+                    if(index!=0&&index!=parts.length-2)continue;
+                    DownloadDirectory directory=directoryPaths.get(path);
+                    if(directory==null){directory=new DownloadDirectory(path,parts[index]);directoryPaths.put(path,directory);directories.put(directory.id,directory);}
+                }
+            }
+        }
+        // 入口只登记分享根和有直接文件的目录，再用冻结清单填满各入口的授权子树。
+        for(Download file:downloads.values())if(file.relative!=null){
+            String[] parts=file.relative.split("/");String path="";
+            for(int index=0;index<parts.length-1;index++){
+                path=path.isEmpty()?parts[index]:path+"/"+parts[index];
+                DownloadDirectory directory=directoryPaths.get(path);if(directory!=null)directory.files.add(file);
+            }
+        }
         if(downloads.isEmpty()&&!allowUpload)throw new IOException("请先选择文件或开启接收");
         int minutes=lifetimeMinutes(context);
         until=System.currentTimeMillis()+TimeUnit.MINUTES.toMillis(minutes);
@@ -89,10 +119,17 @@ final class GuestTransfer implements AutoCloseable {
         if(request.path.equals("/favicon.ico")){response.bytes(204,"image/x-icon",new byte[0],"");return;}
         authorize(request);
         if(request.method.equals("GET")&&request.path.equals("/api/guest")) {
-            JSONArray list=new JSONArray();for(Download file:downloads.values())list.put(new JSONObject().put("id",file.id).put("name",file.source.name()).put("relativePath",file.relative).put("size",file.source.size()));
-            response.json(new JSONObject().put("files",list).put("upload",allowUpload).put("requestIds",true).put("folders",true).put("until",java.time.Instant.ofEpochMilli(until).toString()).put("remainingMilliseconds",Math.max(0,TimeUnit.NANOSECONDS.toMillis(deadline-System.nanoTime()))).put("limit",UPLOAD_QUOTA).put("countLimit",UPLOAD_FILE_LIMIT).toString(),"");return;
+            JSONArray list=new JSONArray();for(Download file:downloads.values())list.put(new JSONObject().put("id",file.id).put("name",file.name).put("relativePath",file.relative).put("size",file.size));
+            JSONArray folders=new JSONArray();
+            for(DownloadDirectory directory:directories.values()){
+                long size=0;for(Download file:directory.files)size+=file.size;
+                folders.put(new JSONObject().put("id",directory.id).put("name",directory.name).put("relativePath",directory.path).put("count",directory.files.size()).put("size",size));
+            }
+            JSONObject archive=new JSONObject().put("enabled",true).put("maxEntries",StoreZipWriter.MAX_ENTRIES).put("maxBytes",StoreZipWriter.MAX_BYTES);
+            response.json(new JSONObject().put("files",list).put("directories",folders).put("archive",archive).put("upload",allowUpload).put("requestIds",true).put("folders",true).put("until",java.time.Instant.ofEpochMilli(until).toString()).put("remainingMilliseconds",Math.max(0,TimeUnit.NANOSECONDS.toMillis(deadline-System.nanoTime()))).put("limit",UPLOAD_QUOTA).put("countLimit",UPLOAD_FILE_LIMIT).toString(),"");return;
         }
         if((request.method.equals("GET")||request.method.equals("HEAD"))&&request.path.equals("/file")){send(request,response);return;}
+        if(request.method.equals("GET")&&request.path.equals("/archive")){archive(request,response);return;}
         if(!allowUpload)throw new ToolsHttp.Failure(403,"对方未开启浏览器接收");
         if(request.method.equals("POST")&&request.path.equals("/api/prepare")) {
             if(!request.header("Content-Type").startsWith("application/json"))throw new ToolsHttp.Failure(400,"请求格式错误");
@@ -153,6 +190,62 @@ final class GuestTransfer implements AutoCloseable {
             throw new ToolsHttp.Failure(404,"没有此操作");
         }
     }
+    private void validateArchiveSource(Download file,InputStream input)throws IOException {
+        check();
+        if(!file.name.equals(file.source.name())||file.size!=file.source.size()||file.modified!=file.source.modified())
+            throw new ToolsHttp.Failure(409,"原文件已变化，请让对方重新选择");
+        if(file.source instanceof DocumentSource)((DocumentSource)file.source).check();
+        else try(InputStream probe=file.source.open(0)) {
+            if(probe instanceof FileInputStream&&((FileInputStream)probe).getChannel().size()!=file.size)
+                throw new IOException("原文件长度已变化");
+        }
+        if(input instanceof FileInputStream&&((FileInputStream)input).getChannel().size()!=file.size)
+            throw new IOException("原文件长度已变化");
+    }
+    private InputStream openArchiveSource(Download file)throws IOException {
+        check();
+        InputStream input=file.source.open(0);
+        try {
+            validateArchiveSource(file,input);
+            synchronized(this){check();archiveInput=input;}
+            return input;
+        }catch(IOException|RuntimeException error){input.close();throw error;}
+    }
+    private void archive(ToolsHttp.Request request,ToolsHttp.Response response)throws IOException {
+        String scope=request.parameter("scope"),id=request.parameter("dir");
+        DownloadDirectory directory=null;
+        if(scope.equals("all")&&id.isEmpty()) { }
+        else if(scope.isEmpty()&&!id.isEmpty()) {
+            directory=directories.get(id);
+            if(directory==null)throw new ToolsHttp.Failure(404,"目录不在本次分享中");
+        }else throw new ToolsHttp.Failure(400,"请选择下载全部或本次分享的目录");
+        if(!request.header("Range").isEmpty())throw new ToolsHttp.Failure(416,"打包下载暂不支持续传，请重新下载");
+        List<Download> files=new ArrayList<>(directory==null?downloads.values():directory.files);
+        int prefix=directory==null?0:directory.path.lastIndexOf('/')+1;
+        synchronized(this){
+            check();
+            if(archiveBusy)throw new ToolsHttp.Failure(409,"已有一个打包下载正在进行，请等它完成后重试");
+            archiveBusy=true;
+        }
+        try {
+            List<StoreZipWriter.Entry> entries=new ArrayList<>();
+            for(Download file:files)entries.add(new StoreZipWriter.Entry(
+                directory==null?(file.relative==null?file.name:file.relative):file.relative.substring(prefix),file.size,file.modified,
+                ()->openArchiveSource(file),input->validateArchiveSource(file,input)));
+            StoreZipWriter writer;
+            try { writer=new StoreZipWriter(entries); }
+            catch(IOException error){throw new ToolsHttp.Failure(409,error.getMessage());}
+            try { writer.prepare(()->{check();response.processing();}); }
+            catch(ToolsHttp.Failure error){throw error;}
+            catch(IOException error){throw new ToolsHttp.Failure(409,"原文件已变化或不可用，请让对方重新选择");}
+            check();
+            String name=directory==null?"飞Q-全部文件.zip":directory.name+".zip";
+            String encoded=java.net.URLEncoder.encode(name,"UTF-8").replace("+","%20").replace("*","%2A");
+            response.begin(200,"application/zip",writer.contentLength(),"Content-Disposition: attachment; filename*=UTF-8''"+encoded+"\r\n");
+            StoreZipWriter.Check archiveCheck=()->{check();response.checkConnection();};
+            writer.write((bytes,count)->{archiveCheck.check();response.write(bytes,count);},archiveCheck);
+        }finally{synchronized(this){archiveInput=null;archiveBusy=false;}}
+    }
     private void send(ToolsHttp.Request request,ToolsHttp.Response response)throws Exception {
         Download file=downloads.get(request.parameter("id"));if(file==null)throw new ToolsHttp.Failure(404,"文件不在本次分享中");
         long size=file.source.size();long[] range=ToolsHttp.range(request.header("Range"),size);
@@ -165,8 +258,9 @@ final class GuestTransfer implements AutoCloseable {
         }
     }
     @Override public void close() {
-        List<Upload> pending;synchronized(this){if(closed)return;closed=true;pending=new ArrayList<>(uploads.values());}
+        List<Upload> pending;InputStream input;synchronized(this){if(closed)return;closed=true;pending=new ArrayList<>(uploads.values());input=archiveInput;archiveInput=null;}
         http.close();expiry.shutdownNow();
+        if(input!=null)try{input.close();}catch(IOException error){cleanupError="打包读取关闭失败："+error.getMessage();}
         for(Upload upload:pending)synchronized(upload){if(!upload.saved)try{Files.deleteIfExists(upload.partial.toPath());}catch(IOException e){cleanupError="未完成文件清理失败："+e.getMessage();}}
     }
 }

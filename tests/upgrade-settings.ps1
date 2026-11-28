@@ -17,7 +17,7 @@ $previous = (Get-Item -LiteralPath $PreviousExecutablePath).FullName
 $compiler = Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
 $sources = @(Get-ChildItem -LiteralPath (Join-Path $root 'src') -Filter '*.cs' | ForEach-Object FullName)
 $arguments = @('/nologo','/utf8output','/warn:4','/warnaserror+','/target:exe','/main:FeiqLight.Tests.ToolsTests','/r:System.dll','/r:System.Core.dll','/r:System.Drawing.dll','/r:System.Windows.Forms.dll','/r:System.Web.Extensions.dll',"/win32manifest:$root\src\app.manifest","/out:$out\UpgradeTests.exe")
-& $compiler @arguments @sources "$root\tests\LoopbackPorts.cs" "$root\tests\ToolsTests.cs"
+& $compiler @arguments @sources "$root\tests\LoopbackPorts.cs" "$root\tests\ToolsTests.cs" "$root\tests\RemoteReuseTests.cs"
 if ($LASTEXITCODE -ne 0) { throw '升级配置测试编译失败' }
 & "$out/UpgradeTests.exe" upgrade $data $next $previous
 if ($LASTEXITCODE -ne 0) { throw "升级配置保留失败，隔离资料保留于 $data" }

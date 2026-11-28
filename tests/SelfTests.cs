@@ -93,6 +93,7 @@ namespace FeiqLight.Tests
             try
             {
                 Run("双端共用协议向量核对", ProtocolVectorTests.RunAll);
+                StoreZipTests.RunAll(Run, Path.Combine(root, "store-zip"));
                 Run("稳定设备身份：协议兼容、地址与登录变化、旧会话升级及重启", () => {
                     string id="0123456789abcdef0123456789abcdef"; Packet packet;
                     Assert(Protocol.TryParse(Protocol.Encode(1,"a","host",Protocol.Entry|Protocol.Utf8,"设备","组",id),out packet)&&packet.DeviceId==id&&packet.Extra=="组","身份扩展破坏基础字段");

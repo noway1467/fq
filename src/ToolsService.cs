@@ -48,9 +48,9 @@ namespace FeiqLight
         internal void SetRemoteClipboardRead(bool enabled) { lock (gate) preferences.SaveRemoteClipboardRead(enabled); }
         internal string SavedFolder { get { lock (gate) return preferences.Value.Folder; } }
         internal string[] SavedFolders { get { lock (gate) return preferences.Value.Folders.ToArray(); } }
-        internal ToolsService(int port, bool loopback, string root = null,SecureIdentity security=null) { this.security=security;pairings = new ToolsPairings(root); preferences = new ToolsPreferences(root); http = new ToolsHttp(port, loopback, Handle,loopback?null:security);if(security!=null)security.TrustRevoked+=OnTrustRevoked; }
+        internal ToolsService(int port, bool loopback, string root = null,SecureIdentity security=null) { this.security=security;pairings = new ToolsPairings(root); preferences = new ToolsPreferences(root); http = new ToolsHttp(port, loopback, Handle,security);if(security!=null)security.TrustRevoked+=OnTrustRevoked; }
         private void OnTrustRevoked(string fingerprint){NetworkReset();lock(gate)pairings.ForgetFingerprint(fingerprint);}
-        internal void NetworkReset(){lock(gate){sessions.Clear();Monitor.PulseAll(gate);remoteEpoch++;shareEpoch++;remotePending=false;shareCode=ConnectionCode();remoteCode=ConnectionCode();shareUntil=remoteUntil=clock.ElapsedMilliseconds+600000;if(ReleaseInput!=null)ReleaseInput();}http.DisconnectClients();}
+        internal void NetworkReset(){lock(gate){sessions.Clear();Monitor.PulseAll(gate);remoteEpoch++;shareEpoch++;remotePending=false;shareCode=ConnectionCode();remoteCode=ConnectionCode();shareUntil=remoteUntil=clock.ElapsedMilliseconds+600000;http.DisconnectClients();if(ReleaseInput!=null)ReleaseInput();}}
         internal string RestoreSettings()
         {
             lock (gate)
@@ -126,7 +126,7 @@ namespace FeiqLight
         // 锁屏、注销和显示器切换只结束当前会话，不能把用户保存的开机恢复意愿改成关闭。
         internal void SuspendRemote() { lock (gate) EndRemote(); }
         internal void ResumeRemote() { lock (gate) { if (!closed && preferences.Value.RemoteEnabled && !remoteEnabled) StartRemote(false); } }
-        private void EndRemote() { remoteEpoch++; remoteEnabled = false; remotePending = false; remoteCode = ""; remoteUntil = 0; sessions.RemoveAll(s => s.Mode == "remote"); Monitor.PulseAll(gate); if (ReleaseInput != null) ReleaseInput(); }
+        private void EndRemote() { remoteEpoch++; remoteEnabled = false; remotePending = false; remoteCode = ""; remoteUntil = 0; sessions.RemoveAll(s => s.Mode == "remote"); http.DisconnectRemoteClients(); Monitor.PulseAll(gate); if (ReleaseInput != null) ReleaseInput(); }
         internal void ForgetPairings() { lock (gate) { pairings.Clear(); shareEpoch++; StopRemote(); sessions.Clear(); } }
         private string Scope(string mode)
         {
@@ -153,6 +153,7 @@ namespace FeiqLight
                 Session session = sessions.FirstOrDefault(s => s.Mode == mode && s.Token == token && s.Address == request.Address && s.Fingerprint==request.Fingerprint);
                 if (session == null || !Valid(session)) throw new ToolsHttp.HttpError(401, "连接已结束，请重新连接");
                 if (request.Method == "POST" && request.Header("X-FQ-Token") != token) throw new ToolsHttp.HttpError(403, "请求校验失败");
+                if (mode == "remote" && request.Path != "/api/logout") request.BindRemoteSession(session.Token);
                 session.Last = clock.ElapsedMilliseconds; return session;
             }
         }
@@ -164,6 +165,7 @@ namespace FeiqLight
             string expected, scope, remembered = Cookie(request, PairCookie(mode)); int epoch; bool trusted;
             lock (gate)
             {
+                foreach(Session expired in sessions.Where(s=>s.Mode=="remote"&&!Valid(s)))http.DisconnectRemoteClients(expired.Token);
                 sessions.RemoveAll(s => !Valid(s));
                 if (clock.ElapsedMilliseconds - attemptsSince >= 60000) { attemptsSince = clock.ElapsedMilliseconds; attempts = 0; }
                 if (++attempts > 8) throw new ToolsHttp.HttpError(429, "尝试过多，请一分钟后重试");
@@ -239,7 +241,7 @@ namespace FeiqLight
             if (request.Method == "POST" && request.Path == "/api/logout")
             {
                 string mode = Text(request.Json(), "mode"); if (mode != "share" && mode != "remote") throw new ToolsHttp.HttpError(400, "无效类型");
-                Session session = Authorize(request, mode); lock (gate) { sessions.Remove(session); Monitor.PulseAll(gate); if (mode == "remote" && ReleaseInput != null) ReleaseInput(); } response.Json(new { ok = true }); return;
+                Session session = Authorize(request, mode); lock (gate) { sessions.Remove(session); if (mode == "remote") http.DisconnectRemoteClients(session.Token); Monitor.PulseAll(gate); if (mode == "remote" && ReleaseInput != null) ReleaseInput(); } response.Json(new { ok = true }); return;
             }
             if (request.Path == "/api/input" && request.Method == "POST")
             {

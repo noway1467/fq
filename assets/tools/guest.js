@@ -171,6 +171,32 @@
       const totalSize = data.files.reduce((sum, f) => sum + (f.size || 0), 0);
       $('count').textContent = data.files.length ? data.files.length + ' 个文件 · ' + size(totalSize) : '0 个文件';
       $('downloads').replaceChildren();
+      const archiveEnabled = data.archive && data.archive.enabled === true && data.files.length > 0;
+      const downloadAll = $('download-all');
+      downloadAll.hidden = $('archive-hint').hidden = !archiveEnabled;
+      if (archiveEnabled) {
+        downloadAll.href = '/archive?scope=all&token=' + encodeURIComponent(token);
+        downloadAll.download = '飞Q-全部文件.zip';
+      }
+      const directoryDownloads = $('directory-downloads');
+      directoryDownloads.replaceChildren();
+      const directories = archiveEnabled && Array.isArray(data.directories) ? data.directories : [];
+      directoryDownloads.hidden = directories.length === 0;
+      for (const directory of directories) {
+        const view = row(directory.relativePath || directory.name);
+        view.item.classList.add('directory');
+        view.item.dataset.directory = directory.id;
+        const icon = view.item.children[0];
+        icon.textContent = 'DIR';
+        view.meta.textContent = directory.count + ' 个文件 · ' + size(directory.size);
+        const a = document.createElement('a');
+        a.className = 'download';
+        a.textContent = '下载此目录';
+        a.href = '/archive?dir=' + encodeURIComponent(directory.id) + '&token=' + encodeURIComponent(token);
+        a.download = directory.name + '.zip';
+        view.actions.append(a);
+        directoryDownloads.append(view.item);
+      }
       for (const file of data.files) {
         const view = row(file.relativePath || file.name);
         view.meta.textContent = size(file.size);

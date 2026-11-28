@@ -55,8 +55,13 @@
         <div class="section-heading">
           <h2 id="files-title">对方分享的文件</h2>
         </div>
-        <span id="count" class="count-pill">读取中…</span>
+        <div class="section-actions">
+          <span id="count" class="count-pill">读取中…</span>
+          <a id="download-all" class="download" hidden>下载全部</a>
+        </div>
       </div>
+      <p id="archive-hint" class="archive-hint" hidden>打包下载最多 1000 个文件、单包小于 4 GiB；较大内容请分目录或逐件下载。</p>
+      <div id="directory-downloads" class="directories" aria-label="可下载的文件夹" hidden></div>
       <div id="downloads" class="files">
         <p class="empty">正在读取文件…</p>
       </div>

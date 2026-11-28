@@ -6,12 +6,15 @@ import org.junit.*;
 import org.junit.runner.RunWith;
 import org.robolectric.*;
 import org.robolectric.annotation.Config;
+import org.robolectric.annotation.ConscryptMode;
 import java.io.*;
 import java.net.*;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.function.BooleanSupplier;
+import javax.net.ssl.SSLSocket;
+import org.feiqlight.android.core.SecureIdentity;
 import static org.junit.Assert.*;
 
 @RunWith(RobolectricTestRunner.class) @Config(sdk=35)
@@ -19,25 +22,126 @@ public final class PhoneRemoteTest {
     private Context context;
     private static final class Backend implements PhoneRemoteAccess.Backend {
         int allows=1,confirmations,inputs,writes;long delay;BooleanSupplier lastAuthorization;String clipboard;
-        CountDownLatch entered,release;
+        CountDownLatch entered,release,captureEntered,captureRelease;
         public int confirm(String address)throws Exception{confirmations++;if(entered!=null){entered.countDown();release.await(5,TimeUnit.SECONDS);}if(delay>0)Thread.sleep(delay);return allows;}
-        public byte[] capture(){return new byte[]{1,2,3};}
+        public byte[] capture()throws Exception{if(captureEntered!=null){captureEntered.countDown();captureRelease.await(5,TimeUnit.SECONDS);}return new byte[]{1,2,3};}
         public byte[] captureDelta(long since,BooleanSupplier authorized){return new byte[]{70,81,70,49};}
         public void clipboard(String text,BooleanSupplier authorized){lastAuthorization=authorized;if(authorized.getAsBoolean()){clipboard=text;writes++;}}
         public JSONObject displays()throws Exception{return new JSONObject().put("platform","android").put("items",new JSONArray().put(new JSONObject().put("id",0)));}
         public void input(JSONObject data,BooleanSupplier authorized){lastAuthorization=authorized;if(authorized.getAsBoolean())inputs++;}
         public void disconnected(){}
     }
-    private static final class Reply {int code;String text,session,pair;byte[] bytes;JSONObject json()throws Exception{return new JSONObject(text);}}
+    private static final class Reply {int code;String text,session,pair,header;byte[] bytes;JSONObject json()throws Exception{return new JSONObject(text);}}
     private static Reply call(int port,String path,String cookie,String data,boolean csrf)throws Exception{
         HttpURLConnection connection=(HttpURLConnection)new URL("http://127.0.0.1:"+port+path).openConnection(Proxy.NO_PROXY);connection.setConnectTimeout(3000);connection.setReadTimeout(40000);connection.setRequestProperty("Cookie",cookie);
-        if(data!=null){connection.setRequestMethod("POST");connection.setDoOutput(true);connection.setRequestProperty("Content-Type","application/json");if(csrf){connection.setRequestProperty("X-FQ-Reconnect","1");if(cookie.startsWith("fq_phone="))connection.setRequestProperty("X-FQ-Token",cookie.substring(9));}try(OutputStream output=connection.getOutputStream()){output.write(data.getBytes(StandardCharsets.UTF_8));}}
+        if(data!=null){connection.setRequestMethod("POST");connection.setDoOutput(true);connection.setRequestProperty("Content-Type","application/json");if(csrf){connection.setRequestProperty("X-FQ-Reconnect","1");for(String part:cookie.split(";")){String value=part.trim();if(value.startsWith("fq_phone=")||value.matches("g[0-9a-f]{16}_fq_phone=.*"))connection.setRequestProperty("X-FQ-Token",value.substring(value.indexOf('=')+1));}}try(OutputStream output=connection.getOutputStream()){output.write(data.getBytes(StandardCharsets.UTF_8));}}
         Reply reply=new Reply();reply.code=connection.getResponseCode();
         try(InputStream input=reply.code>=400?connection.getErrorStream():connection.getInputStream()){reply.bytes=input.readAllBytes();reply.text=new String(reply.bytes,StandardCharsets.UTF_8);}
-        for(Map.Entry<String,List<String>> header:connection.getHeaderFields().entrySet())if("Set-Cookie".equalsIgnoreCase(header.getKey()))for(String value:header.getValue()){if(value.startsWith("fq_phone="))reply.session=value.split(";")[0];if(value.startsWith("fq_pair_phone_"))reply.pair=value.split(";")[0];}
+        for(Map.Entry<String,List<String>> header:connection.getHeaderFields().entrySet())if("Set-Cookie".equalsIgnoreCase(header.getKey()))for(String value:header.getValue()){if(value.startsWith("fq_phone=")||value.matches("g[0-9a-f]{16}_fq_phone=.*"))reply.session=value.split(";")[0];if(value.startsWith("fq_pair_phone_"))reply.pair=value.split(";")[0];}
         connection.disconnect();return reply;
     }
     private static Reply login(PhoneRemoteAccess access)throws Exception{return call(access.port(),"/api/login","",new JSONObject().put("mode","remote").put("code",access.code()).toString(),true);}
+    private static SecureIdentity[] identities()throws Exception{
+        File root=java.nio.file.Files.createTempDirectory(new File(System.getProperty("java.io.tmpdir")).toPath(),"phone-tls-").toFile();
+        SecureIdentity server=new SecureIdentity(new File(root,"server")),client=new SecureIdentity(new File(root,"client"));server.confirmation=client.confirmation=(name,code)->true;
+        assertTrue(server.ensureTrusted("e".repeat(32),client.fingerprint,"client"));assertTrue(client.ensureTrusted("d".repeat(32),server.fingerprint,"server"));return new SecureIdentity[]{server,client};
+    }
+    private static Reply secure(SSLSocket tls,int port,String path,String cookie,String data,boolean csrf,String extra)throws Exception{
+        String header=(data==null?"GET":"POST")+" "+path+" HTTP/1.1\r\nHost: 127.0.0.1:"+port+"\r\nCookie: "+cookie+"\r\nConnection: keep-alive\r\n"+extra;
+        byte[] body=data==null?new byte[0]:data.getBytes(StandardCharsets.UTF_8);
+        if(data!=null){header+="Content-Type: application/json\r\nContent-Length: "+body.length+"\r\n";if(csrf)header+="X-FQ-Token: "+cookie.substring(cookie.indexOf('=')+1)+"\r\n";}
+        tls.getOutputStream().write((header+"\r\n").getBytes(StandardCharsets.US_ASCII));if(body.length>0)tls.getOutputStream().write(body);tls.getOutputStream().flush();
+        ByteArrayOutputStream bytes=new ByteArrayOutputStream();int last=0;
+        while(last!=0x0d0a0d0a){int value=tls.getInputStream().read();if(value<0)throw new EOFException();bytes.write(value);last=(last<<8)|value;assertTrue(bytes.size()<16384);}
+        Reply reply=new Reply();reply.header=bytes.toString(StandardCharsets.US_ASCII);reply.code=Integer.parseInt(reply.header.split(" ",3)[1]);int length=-1;
+        for(String line:reply.header.split("\r\n")){
+            if(line.startsWith("Content-Length:"))length=Integer.parseInt(line.substring(15).trim());
+            if(line.startsWith("Set-Cookie: fq_phone="))reply.session=line.substring(12).split(";",2)[0];
+        }
+        assertTrue(length>=0);reply.bytes=tls.getInputStream().readNBytes(length);assertEquals(length,reply.bytes.length);reply.text=new String(reply.bytes,StandardCharsets.UTF_8);return reply;
+    }
+    private static Reply secure(SecureIdentity[] identity,int port,String path,String cookie,String data,boolean csrf)throws Exception{
+        try(Socket raw=new Socket("127.0.0.1",port)){raw.setSoTimeout(4000);try(SSLSocket tls=identity[1].client(raw,identity[0].fingerprint)){return secure(tls,port,path,cookie,data,csrf,"");}}
+    }
+    private static Reply secureLogin(SecureIdentity[] identity,PhoneRemoteAccess server)throws Exception{return secure(identity,server.port(),"/api/login","",new JSONObject().put("mode","remote").put("code",server.code()).toString(),true);}
+    private static boolean closed(SSLSocket tls)throws IOException{try{return tls.getInputStream().read()<0;}catch(IOException expected){return true;}}
+    // 沿用项目真实 JVM TLS 回环的 provider；Robolectric Conscrypt 反射受 JDK 17 模块边界限制。
+    @Test @ConscryptMode(ConscryptMode.Mode.OFF) public void authenticatedTlsReuseHas16RequestCapAndRechecksOriginSessionAndCsrf()throws Exception{
+        SecureIdentity[] identity=identities();Backend backend=new Backend();
+        try(PhoneRemoteAccess server=new PhoneRemoteAccess(context,0,true,backend,identity[0],null)){
+            Reply login=secureLogin(identity,server);assertEquals(200,login.code);assertTrue(login.header.contains("Connection: close"));String cookie=login.session;
+            try(Socket raw=new Socket("127.0.0.1",server.port());SSLSocket tls=identity[1].client(raw,identity[0].fingerprint)){
+                raw.setSoTimeout(4000);for(int i=0;i<16;i++){Reply frame=secure(tls,server.port(),"/api/screen",cookie,null,false,"");assertEquals(200,frame.code);assertTrue(frame.header.contains(i<15?"Connection: keep-alive":"Connection: close"));}assertTrue(closed(tls));
+            }
+            try(Socket raw=new Socket("127.0.0.1",server.port());SSLSocket tls=identity[1].client(raw,identity[0].fingerprint)){
+                raw.setSoTimeout(4000);assertEquals(200,secure(tls,server.port(),"/api/screen",cookie,null,false,"").code);Reply denied=secure(tls,server.port(),"/api/screen",cookie,null,false,"Origin: https://bad.example\r\n");assertEquals(403,denied.code);assertTrue(denied.header.contains("Connection: close"));
+            }
+            try(Socket raw=new Socket("127.0.0.1",server.port());SSLSocket tls=identity[1].client(raw,identity[0].fingerprint)){
+                raw.setSoTimeout(4000);assertEquals(200,secure(tls,server.port(),"/api/input",cookie,"{}",true,"").code);assertEquals(403,secure(tls,server.port(),"/api/input",cookie,"{}",false,"").code);assertEquals(1,backend.inputs);
+            }
+            assertEquals(401,secure(identity,server.port(),"/api/screen","fq_phone=wrong",null,false).code);
+            assertTrue(secure(identity,server.port(),"/api/displays",cookie,null,false).header.contains("Connection: close"));
+            assertTrue(secure(identity,server.port(),"/api/clipboard",cookie,"{\"text\":\"test\"}",true).header.contains("Connection: close"));
+        }
+    }
+    @Test @ConscryptMode(ConscryptMode.Mode.OFF) public void tlsStopLogoutForgetAndTrustRevocationImmediatelyCloseActiveAndIdleConnections()throws Exception{
+        for(String action:new String[]{"stop","logout","forget","revoke"}){
+            SecureIdentity[] identity=identities();Backend backend=new Backend();
+            try(PhoneRemoteAccess server=new PhoneRemoteAccess(context,0,true,backend,identity[0],null)){
+                String cookie=secureLogin(identity,server).session;
+                try(Socket screenRaw=new Socket("127.0.0.1",server.port());SSLSocket screenTls=identity[1].client(screenRaw,identity[0].fingerprint);Socket inputRaw=new Socket("127.0.0.1",server.port());SSLSocket inputTls=identity[1].client(inputRaw,identity[0].fingerprint)){
+                    screenRaw.setSoTimeout(4000);inputRaw.setSoTimeout(4000);assertEquals(200,secure(screenTls,server.port(),"/api/screen",cookie,null,false,"").code);assertEquals(200,secure(inputTls,server.port(),"/api/input",cookie,"{}",true,"").code);
+                    backend.captureEntered=new CountDownLatch(1);backend.captureRelease=new CountDownLatch(1);
+                    CompletableFuture<Boolean> pending=CompletableFuture.supplyAsync(()->{try{return secure(screenTls,server.port(),"/api/screen",cookie,null,false,"").code!=200;}catch(IOException expected){return true;}catch(Exception error){throw new CompletionException(error);}});
+                    assertTrue(backend.captureEntered.await(2,TimeUnit.SECONDS));long start=System.nanoTime();
+                    try{
+                        if(action.equals("stop"))server.close();else if(action.equals("logout"))assertEquals(200,secure(identity,server.port(),"/api/logout",cookie,"{}",true).code);else if(action.equals("forget"))server.forget();else identity[0].forget("e".repeat(32));
+                        assertTrue(pending.get(500,TimeUnit.MILLISECONDS));assertTrue(closed(inputTls));long ms=TimeUnit.NANOSECONDS.toMillis(System.nanoTime()-start);assertTrue("未立即关闭："+action+" "+ms,ms<500);assertFalse(backend.lastAuthorization.getAsBoolean());System.out.println("METRIC Android server_"+action+"_ms="+ms);
+                    }finally{backend.captureRelease.countDown();}
+                    try{assertNotEquals(200,secure(identity,server.port(),"/api/screen",cookie,null,false).code);}catch(IOException expected){/* 已关闭的监听或被撤信的 TLS 也必须拒绝。 */}
+                }
+            }
+        }
+    }
+    @Test @ConscryptMode(ConscryptMode.Mode.OFF) public void phoneServiceStopClosesTlsBeforeQueuedMainThreadStop()throws Exception{
+        org.robolectric.android.controller.ServiceController<PhoneRemoteService> controller=Robolectric.buildService(PhoneRemoteService.class).create();SecureIdentity[] identity=identities();Backend backend=new Backend();
+        try(PhoneRemoteAccess access=new PhoneRemoteAccess(context,0,true,backend,identity[0],null)){
+            field(controller.get(),"access",access);String cookie=secureLogin(identity,access).session;
+            try(Socket raw=new Socket("127.0.0.1",access.port());SSLSocket tls=identity[1].client(raw,identity[0].fingerprint)){
+                raw.setSoTimeout(1000);assertEquals(200,secure(tls,access.port(),"/api/screen",cookie,null,false,"").code);PhoneRemoteService.stopActive();assertEquals("已停止",access.code());assertTrue(closed(tls));
+            }
+        }finally{controller.destroy();}
+    }
+    @Test @ConscryptMode(ConscryptMode.Mode.OFF) public void remoteIdleConnectionsRemainInsideHttpLimit12()throws Exception{
+        SecureIdentity[] identity=identities();Backend backend=new Backend();
+        try(PhoneRemoteAccess server=new PhoneRemoteAccess(context,0,true,backend,identity[0],null)){
+            String cookie=secureLogin(identity,server).session;
+            try(Socket screenRaw=new Socket("127.0.0.1",server.port());SSLSocket screenTls=identity[1].client(screenRaw,identity[0].fingerprint);Socket inputRaw=new Socket("127.0.0.1",server.port());SSLSocket inputTls=identity[1].client(inputRaw,identity[0].fingerprint)){
+                screenRaw.setSoTimeout(4000);inputRaw.setSoTimeout(4000);assertEquals(200,secure(screenTls,server.port(),"/api/screen",cookie,null,false,"").code);assertEquals(200,secure(inputTls,server.port(),"/api/input",cookie,"{}",true,"").code);
+                java.lang.reflect.Field httpField=PhoneRemoteAccess.class.getDeclaredField("http");httpField.setAccessible(true);Object http=httpField.get(server);java.lang.reflect.Field clientsField=http.getClass().getDeclaredField("clients");clientsField.setAccessible(true);Set<?> clients=(Set<?>)clientsField.get(http);List<Socket> slow=new ArrayList<>();
+                try{
+                    for(int i=0;i<10;i++)slow.add(new Socket("127.0.0.1",server.port()));long until=System.nanoTime()+TimeUnit.SECONDS.toNanos(1);
+                    while(System.nanoTime()<until){synchronized(clients){if(clients.size()==12)break;}Thread.sleep(5);}synchronized(clients){assertEquals(12,clients.size());}
+                    try(Socket rejected=new Socket("127.0.0.1",server.port())){rejected.setSoTimeout(1000);assertEquals(-1,rejected.getInputStream().read());}
+                }finally{for(Socket raw:slow)raw.close();}
+            }
+        }
+    }
+    @Test @ConscryptMode(ConscryptMode.Mode.OFF) public void productionGatewayAndPhoneServerReuseTwoTlsConnectionsFor24Requests()throws Exception{
+        SecureIdentity[] identity=identities();Backend backend=new Backend();java.util.concurrent.atomic.AtomicInteger connections=new java.util.concurrent.atomic.AtomicInteger();
+        org.feiqlight.android.core.LanNode.SocketBinding binding=new org.feiqlight.android.core.LanNode.SocketBinding(){
+            public void bind(DatagramSocket socket){throw new AssertionError("本回环不使用 UDP");}
+            public void bind(Socket socket)throws IOException{connections.incrementAndGet();socket.bind(new InetSocketAddress("127.0.0.1",0));}
+        };
+        try(PhoneRemoteAccess server=new PhoneRemoteAccess(context,0,true,backend,identity[0],null)){
+            org.feiqlight.android.core.LanNode.Peer peer=new org.feiqlight.android.core.LanNode.Peer(new InetSocketAddress("127.0.0.1",server.port()),"server","host","server","");peer.deviceId="d".repeat(32);peer.fingerprint=identity[0].fingerprint;
+            try(org.feiqlight.android.core.ToolsGateway gateway=new org.feiqlight.android.core.ToolsGateway(identity[1],peer,server.port(),binding)){
+                URI uri=URI.create(gateway.url());String suffix="?gateway="+uri.getQuery().substring("access=".length());Reply login=call(uri.getPort(),"/api/login"+suffix,"",new JSONObject().put("mode","remote").put("code",server.code()).toString(),true);assertEquals(200,login.code);int before=connections.get();
+                for(int i=0;i<12;i++){assertArrayEquals(new byte[]{1,2,3},call(uri.getPort(),"/api/screen"+suffix,login.session,null,false).bytes);assertEquals(200,call(uri.getPort(),"/api/input"+suffix,login.session,"{}",true).code);}
+                assertEquals(2,connections.get()-before);assertEquals(12,backend.inputs);System.out.println("METRIC Android production_pair_requests=24 tls_connections="+(connections.get()-before));
+            }
+        }
+    }
     @Before public void setup()throws Exception{context=RuntimeEnvironment.getApplication();new ToolsPairings(context).clear();}
     @Test public void remotePortUsesActiveConnectionAndRejectsDisconnectedService()throws Exception {
         context.getSharedPreferences("settings",0).edit().putBoolean("auto_connect",false).putBoolean("connection_enabled",false).commit();

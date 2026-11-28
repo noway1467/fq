@@ -39,7 +39,7 @@ if (Test-Path -LiteralPath $previous) {
 } else { Write-Warning '未找到 dist 中的旧 EXE，本次无法验证跨版本配置保留。' }
 if ($Test) {
     New-Item -ItemType Directory -Force -Path $testOut | Out-Null
-    & $compiler @common '/target:exe' '/main:FeiqLight.Tests.SelfTests' "/win32manifest:$root\src\app.manifest" "/out:$testOut\FeiqLight.Tests.exe" @sources "$root\tests\SelfTests.cs" "$root\tests\UiSmokeTests.cs" "$root\tests\ProtocolVectorTests.cs" "$root\tests\TlsFilePeer.cs"
+    & $compiler @common '/r:System.IO.Compression.dll' '/target:exe' '/main:FeiqLight.Tests.SelfTests' "/win32manifest:$root\src\app.manifest" "/out:$testOut\FeiqLight.Tests.exe" @sources "$root\tests\SelfTests.cs" "$root\tests\UiSmokeTests.cs" "$root\tests\ProtocolVectorTests.cs" "$root\tests\TlsFilePeer.cs" "$root\tests\StoreZipTests.cs"
     if ($LASTEXITCODE -ne 0) { throw '测试编译失败' }
     & "$testOut\FeiqLight.Tests.exe"
     if ($LASTEXITCODE -ne 0) { throw '测试未通过' }
