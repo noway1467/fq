@@ -216,14 +216,18 @@ async function countRequest(page, pathname) {
       let releaseLoad,loadEntered;
       const pendingLoad=new Promise(resolve=>loadEntered=resolve);
       await loadingPage.route('**'+pathname+'*',async route=>{
-        const gate=new Promise(resolve=>releaseLoad=resolve);loadEntered();await gate;await route.continue();
+        const gate=new Promise(resolve=>releaseLoad=resolve);loadEntered();await gate;await route.continue().catch(()=>{});
       },{times:1});
       await loadingPage.goto(`http://127.0.0.1:${server.address().port}/#${mode}`);
       await loadingPage.locator('#code').fill('123456');await loadingPage.locator('#connect').click();await pendingLoad;
       assert.ok(await loadingPage.locator('#connect').isDisabled(),'connection remains pending while loading '+pathname);
+      const settled=Promise.race([
+        loadingPage.waitForResponse(response=>new URL(response.url()).pathname===pathname),
+        loadingPage.waitForEvent('requestfailed',request=>new URL(request.url()).pathname===pathname)
+      ]);
       await loadingPage.locator(mode==='remote'?'#remote-disconnect':'#disconnect').click();
       assert.ok(await loadingPage.locator('#connect').isEnabled()&&await loadingPage.locator('#reconnect').isEnabled(),'disconnect immediately unlocks buttons during '+pathname);
-      const loadedResponse=loadingPage.waitForResponse(response=>new URL(response.url()).pathname===pathname);releaseLoad();await loadedResponse;await loadingPage.waitForTimeout(80);
+      releaseLoad();await settled;await loadingPage.waitForTimeout(80);
       assert.ok(await loadingPage.locator('#connect').isEnabled()&&await loadingPage.locator('#reconnect').isEnabled()&&await loadingPage.locator('#login').isVisible(),'old load response cannot lock buttons during '+pathname);
       await loadingPage.locator('#reconnect').click();await loadingPage.locator(mode==='remote'?'#remote':'#files').waitFor({state:'visible'});
       await loadingPage.waitForFunction(()=>!document.querySelector('#connect').disabled);

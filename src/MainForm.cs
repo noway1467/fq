@@ -233,7 +233,7 @@ public sealed class MainForm : ModernWindow
                 try
                 {
                     ToolsPreferences.State saved = new ToolsPreferences(store.Root).Value;
-                    if (saved.ShareEnabled || saved.RemoteEnabled) { toolsWindow = new ToolsWindow(network.Port, network.LoopbackOnly, store.Root,network.Security); toolsWindow.PrepareRestoredWindow(); }
+                    if (saved.ShareEnabled || saved.RemoteEnabled) { toolsWindow = new ToolsWindow(network.Port, network.LoopbackOnly, store.Root, network.LoopbackOnly ? null : network.Security); toolsWindow.PrepareRestoredWindow(); }
                 }
                 catch (Exception e) { status.Text = "共享与远控未恢复：" + e.Message; }
             }
@@ -704,7 +704,7 @@ public sealed class MainForm : ModernWindow
         }
         private void OpenTools()
         {
-            try { if (toolsWindow == null || toolsWindow.IsDisposed) toolsWindow = new ToolsWindow(network.Port, network.LoopbackOnly, store.Root,network.Security); toolsWindow.Show(); if (toolsWindow.WindowState == FormWindowState.Minimized) toolsWindow.WindowState = FormWindowState.Normal; toolsWindow.Activate(); }
+            try { if (toolsWindow == null || toolsWindow.IsDisposed) toolsWindow = new ToolsWindow(network.Port, network.LoopbackOnly, store.Root, network.LoopbackOnly ? null : network.Security); toolsWindow.Show(); if (toolsWindow.WindowState == FormWindowState.Minimized) toolsWindow.WindowState = FormWindowState.Normal; toolsWindow.Activate(); }
             catch (Exception e) { using (NoticeDialog notice = new NoticeDialog("共享与远控未开启", "请检查额外 TCP 端口是否被占用。\n" + e.Message)) notice.ShowDialog(this); }
         }
         private void ShowMenu(object sender, EventArgs args)

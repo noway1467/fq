@@ -595,7 +595,7 @@ namespace FeiqLight.Tests
                     try
                     {
                         bool ready=false;string observed="尚未收到响应";Stopwatch clock=Stopwatch.StartNew();
-                        while(clock.ElapsedMilliseconds<12000&&!ready){Assert(!process.HasExited,"交付程序提前退出");try{Reply status=Request(port,"/api/status");observed="HTTP "+status.Code;if(status.Code==200){var flags=status.Json();ready=(bool)flags["share"]&&(bool)flags["remote"];observed+=", share="+flags["share"]+", remote="+flags["remote"];}}catch(SocketException error){observed=error.SocketErrorCode.ToString();}if(!ready)Thread.Sleep(100);}
+                        while(clock.ElapsedMilliseconds<12000&&!ready){Assert(!process.HasExited,"交付程序提前退出");try{Reply status=Request(port,"/api/status");observed="HTTP "+status.Code;if(status.Code==200){var flags=status.Json();ready=(bool)flags["share"]&&(bool)flags["remote"];observed+=", share="+flags["share"]+", remote="+flags["remote"];}}catch(SocketException error){observed=error.SocketErrorCode.ToString();}catch(IOException error){observed=error.Message;}if(!ready)Thread.Sleep(100);}
                         Assert(ready,"正式程序未恢复设置："+FileVersionInfo.GetVersionInfo(copy).FileVersion+"，"+observed);Reply login=Request(port,"/api/reconnect",pair,"{\"mode\":\"share\"}","X-FQ-Reconnect: 1\r\n");Assert(login.Code==200,"换包后共享需重新配对");
                         Reply list=Request(port,"/api/list","fq_share="+login.Json()["token"]);Assert(list.Code==200&&Encoding.UTF8.GetString(list.Body).Contains("测试文件.txt"),"换包后目录丢失");
                         Reply control=Request(port,"/api/reconnect",remotePair,"{\"mode\":\"remote\"}","X-FQ-Reconnect: 1\r\n");Assert(control.Code==200,"换包后丢失始终允许");
