@@ -128,6 +128,22 @@ public final class RemoteReuseTest {
     private static String login(String url)throws Exception{Reply reply=call(url,"/api/login","","{\"mode\":\"remote\"}","");assertEquals(200,reply.code);return reply.cookies();}
     private static Reply screen(String url,String cookie)throws Exception{return call(url,"/api/screen",cookie,null,"");}
     private static Reply input(String url,String cookie,String token)throws Exception{return call(url,"/api/input",cookie,"{}",token);}
+    @Test public void changedPeerAddressDoesNotReuseFrozenGatewayTarget()throws Exception {
+        try(Peer server=new Peer(temporary.newFolder())) {
+            LanNode.Peer peer=new LanNode.Peer(new InetSocketAddress("127.0.0.2",server.port()),"server","host","server","");
+            peer.deviceId=SERVER_ID;peer.fingerprint=server.server.fingerprint;
+            try(ToolsGateway old=new ToolsGateway(server.client,peer,server.port(),null)) {
+                assertTrue(old.matches(peer,server.port()));
+                peer.endpoint=new InetSocketAddress("127.0.0.1",server.port());
+                assertFalse("新IP仍匹配旧目标",old.matches(peer,server.port()));
+                try(ToolsGateway current=new ToolsGateway(server.client,peer,server.port(),null)) {
+                    String cookie=login(current.url());assertEquals(200,screen(current.url(),cookie).code);
+                    peer.endpoint=new InetSocketAddress("127.0.0.1",server.port()==65535?server.port()-1:server.port()+1);
+                    assertFalse("回连端口变化仍复用旧入口",current.matches(peer,server.port()));
+                }
+            }
+        }
+    }
     @Test public void oversizedWriteDoesNotPolluteStream()throws Exception{
         ByteArrayOutputStream bytes=new ByteArrayOutputStream();ToolsHttp.Response response=new ToolsHttp.Response(bytes,false,new AtomicLong(),true);
         response.begin(200,"text/plain",2,"");int header=bytes.size();try{response.write(new byte[3],3);fail("超长正文未拒绝");}catch(IOException expected){}assertEquals(header,bytes.size());response.write(new byte[2],2);assertEquals(header+2,bytes.size());

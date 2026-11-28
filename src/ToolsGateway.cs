@@ -52,7 +52,7 @@ namespace FeiqLight
         internal bool Matches(Peer value,int port)
         {
             if(!Available())return false;
-            lock(gate){if(value.DeviceId!=deviceId||value.Fingerprint!=fingerprint||port!=target.Port)return false;lastActivity=clock.ElapsedMilliseconds;return true;}
+            lock(gate){if(value.DeviceId!=deviceId||value.Fingerprint!=fingerprint||port!=target.Port||!value.Endpoint.Equals(peer.Endpoint))return false;lastActivity=clock.ElapsedMilliseconds;return true;}
         }
         internal string Url { get { return "http://"+listener.LocalEndpoint+"/?access="+access; } }
         internal ToolsGateway(SecureIdentity security,Peer peer,int port,bool loopback,LanService node=null)

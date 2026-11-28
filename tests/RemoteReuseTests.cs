@@ -194,6 +194,21 @@ namespace FeiqLight.Tests
         private static string Profile(string root) { return Path.Combine(root, "remote-tls-" + Guid.NewGuid().ToString("N")); }
         internal static void Run(Action<string, Action> run, string root)
         {
+            run("网关地址更新：同一设备换IP或聊天端口后不复用旧入口",()=>{
+                using(TlsPeer server=new TlsPeer(Profile(root))) {
+                    var peer=new Peer{DeviceId=ServerId,Fingerprint=server.Server.Fingerprint,Endpoint=new IPEndPoint(IPAddress.Parse("127.0.0.2"),server.Port)};
+                    using(var old=new ToolsGateway(server.Client,peer,server.Port,true)) {
+                        Check(old.Matches(peer,server.Port),"相同地址入口不能复用");
+                        peer.Endpoint=new IPEndPoint(IPAddress.Loopback,server.Port);
+                        Check(!old.Matches(peer,server.Port),"新IP仍匹配旧目标");
+                        using(var current=new ToolsGateway(server.Client,peer,server.Port,true)) {
+                            string cookie=Login(current);Check(Call(current,"/api/screen",cookie).Code==200,"更新地址后TLS访问失败");
+                            peer.Endpoint=new IPEndPoint(IPAddress.Loopback,server.Port==65535?server.Port-1:server.Port+1);
+                            Check(!current.Matches(peer,server.Port),"回连聊天端口变化仍复用旧入口");
+                        }
+                    }
+                }
+            });
             run("阶段二：响应在写前拒绝超长正文",()=>{
                 using(MemoryStream bytes=new MemoryStream()){
                     var response=new ToolsHttp.Response(bytes,false);response.Begin(200,"text/plain",2,"");long header=bytes.Length;

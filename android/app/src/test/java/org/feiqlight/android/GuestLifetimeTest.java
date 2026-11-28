@@ -90,6 +90,21 @@ public final class GuestLifetimeTest {
                 invoke(activity,"showGuest");dialog=ShadowDialog.getLatestDialog();assertEquals("120",input(dialog).getText().toString());dialog.dismiss();
                 try(GuestTransfer server=new GuestTransfer(context,Collections.emptyList(),true,true,true)) {
                     set(service,"guestTransfer",server);invoke(activity,"showGuest");dialog=ShadowDialog.getLatestDialog();screenshot(dialog,"android-guest-active-"+(dark?"dark":"light"));
+                    Button receivedFiles=button(dialog,"查看已接收文件"),textTransfer=button(dialog,"文本互传");
+                    LinearLayout actions=(LinearLayout)receivedFiles.getParent();float density=activity.getResources().getDisplayMetrics().density;
+                    for(int width:new int[]{Math.round(284*density),Math.round(357*density)}) {
+                        actions.measure(View.MeasureSpec.makeMeasureSpec(width,View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(0,View.MeasureSpec.UNSPECIFIED));
+                        actions.layout(0,0,width,actions.getMeasuredHeight());
+                        assertTrue("两个操作按钮应保留间隔",textTransfer.getLeft()-receivedFiles.getRight()>=Math.round(8*density));
+                        assertTrue("操作按钮不应铺满整行",textTransfer.getRight()<actions.getWidth());
+                        for(Button action:new Button[]{receivedFiles,textTransfer}) {
+                            assertTrue("操作按钮过高",action.getHeight()<=Math.round(44*density));
+                            assertEquals("操作文字不应换行",1,action.getLineCount());
+                            assertEquals("操作文字不能截断",0,action.getLayout().getEllipsisCount(0));
+                        }
+                    }
+                    actions.requestLayout();
+                    screenshot(dialog,"android-guest-active-compact-"+(dark?"dark":"light"));
                     button(dialog,"文本互传").performClick();Dialog textDialog=ShadowDialog.getLatestDialog();
                     EditText draft=(EditText)views(textDialog.getWindow().getDecorView()).stream().filter(v->"发送给访客的纯文本".contentEquals(v.getContentDescription()==null?"":v.getContentDescription())).findFirst().orElseThrow();
                     ClipboardManager clipboard=context.getSystemService(ClipboardManager.class);ClipData oldClipboard=clipboard.getPrimaryClip();

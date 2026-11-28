@@ -2252,11 +2252,18 @@ public final class MainActivity extends Activity implements ChatService.Observer
             box.addView(card,cp);
             Dialog dialog=sheet("临时浏览器传输",box,null,null);
             LinearLayout sessionActions=row();
-            Button receivedFiles=button("查看已接收文件",false);receivedFiles.setMinHeight(dp(52));
-            receivedFiles.setOnClickListener(v->{dialog.dismiss();showTasks("guest");});sessionActions.addView(receivedFiles,weight());
+            Button receivedFiles=button("查看已接收文件",false);
+            receivedFiles.setTextSize(14);receivedFiles.setMinimumWidth(0);receivedFiles.setMinWidth(0);
+            receivedFiles.setMinimumHeight(0);receivedFiles.setMinHeight(dp(40));receivedFiles.setPadding(dp(12),dp(6),dp(12),dp(6));
+            receivedFiles.setOnClickListener(v->{dialog.dismiss();showTasks("guest");});
+            sessionActions.addView(receivedFiles,new LinearLayout.LayoutParams(-2,-2));
             if(active.allowText) {
-                Button textTransfer=button("文本互传",false);textTransfer.setMinHeight(dp(52));
-                textTransfer.setOnClickListener(v->{dialog.dismiss();showGuestText(source,active);});sessionActions.addView(textTransfer,weight());
+                Button textTransfer=button("文本互传",false);
+                textTransfer.setTextSize(14);textTransfer.setMinimumWidth(0);textTransfer.setMinWidth(0);
+                textTransfer.setMinimumHeight(0);textTransfer.setMinHeight(dp(40));textTransfer.setPadding(dp(12),dp(6),dp(12),dp(6));
+                textTransfer.setOnClickListener(v->{dialog.dismiss();showGuestText(source,active);});
+                LinearLayout.LayoutParams textAction=new LinearLayout.LayoutParams(-2,-2);textAction.leftMargin=dp(8);
+                sessionActions.addView(textTransfer,textAction);
             }
             box.addView(sessionActions);
             fileAction(box,dialog,"结束临时传输",()->{source.stopGuest();error("临时传输已结束，完整文件保留");});
@@ -2474,7 +2481,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
             item.addView(title,weight());
             IconButton remove=new IconButton(this,"close","移除共享文件夹",MUTED);
             item.addView(remove,new LinearLayout.LayoutParams(dp(48),dp(48)));
-            remove.setOnClickListener(v->confirm("移除共享文件夹","仅取消这个目录的共享，不删除文件；当前共享连接将结束。","移除",()->{
+            remove.setOnClickListener(v->confirm("移除共享文件夹","仅取消这个目录的共享，不删除文件；其他目录的连接保留，移除最后一个目录时停止共享。","移除",()->{
                 ChatService expected=service;
                 if(expected!=null)expected.removeSharedFolder(folder,success->{if(success&&!isDestroyed()){
                     dialog.dismiss();

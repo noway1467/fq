@@ -57,7 +57,7 @@ public final class ToolsGateway implements AutoCloseable {
     public boolean isClosed(){synchronized(gate){return closed;}}
     public boolean matches(LanNode.Peer value,int port){
         if(!available())return false;
-        synchronized(gate){if(!deviceId.equals(value.deviceId)||!fingerprint.equals(value.fingerprint)||endpoint.getPort()!=port)return false;lastActivity=System.nanoTime();return true;}
+        synchronized(gate){if(!deviceId.equals(value.deviceId)||!fingerprint.equals(value.fingerprint)||endpoint.getPort()!=port||!peer.endpoint.equals(value.endpoint))return false;lastActivity=System.nanoTime();return true;}
     }
     private void relay(ToolsHttp.Request request,ToolsHttp.Response response)throws IOException {
         synchronized(gate){activeRequests++;lastActivity=System.nanoTime();}
