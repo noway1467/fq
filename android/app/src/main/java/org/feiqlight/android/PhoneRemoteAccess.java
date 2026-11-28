@@ -27,7 +27,7 @@ final class PhoneRemoteAccess implements AutoCloseable {
     private final ToolsHttp http;
     private final Backend backend;
     private final SecureIdentity security;
-    private final java.util.function.Consumer<String> revoked=value->revoke();
+    private final java.util.function.Consumer<String> revoked=this::revoke;
     private final Object gate=new Object();
     private final String code=String.format(Locale.ROOT,"%06d",new SecureRandom().nextInt(1000000));
     private final long created=System.nanoTime();
@@ -42,7 +42,7 @@ final class PhoneRemoteAccess implements AutoCloseable {
         this.context=context.getApplicationContext();this.backend=backend;this.security=security;pairings=new ToolsPairings(context);http=new ToolsHttp(port,loopback,this::handle,security,binding);
         if(security!=null)security.observeRevocation(revoked);
     }
-    private void revoke(){synchronized(gate){token="";epoch++;pending=false;http.disconnectRemoteClients();}backend.disconnected();}
+    private void revoke(String value){synchronized(gate){if(!java.util.Objects.equals(value,fingerprint))return;token="";epoch++;pending=false;http.disconnectRemoteClients();}backend.disconnected();}
     static int portFor(int chatPort){return chatPort>=65534?chatPort-2:chatPort+2;}
     int port(){return http.port();}
     String code(){synchronized(gate){return closed?"已停止":codeUsed||System.nanoTime()-created>600000000000L?"等待已配对设备":code;}}
@@ -77,7 +77,7 @@ final class PhoneRemoteAccess implements AutoCloseable {
             if(pending||valid())throw new ToolsHttp.Failure(409,"已有控制端或请求等待确认");
             trusted=reconnect&&pairings.alwaysAllows(remembered,request.pairScope("phone-remote"));
             // 旧会话已超时；先撤销令牌，避免定时清理误撤销正在等待本机确认的新请求。
-            token="";address="";pending=true;version=++epoch;http.disconnectRemoteClients();if(!reconnect)codeUsed=true;
+            token="";address="";fingerprint=request.fingerprint;pending=true;version=++epoch;http.disconnectRemoteClients();if(!reconnect)codeUsed=true;
         }
         try{
             if(!trusted)response.waitingForUser();

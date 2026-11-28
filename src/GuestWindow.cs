@@ -1052,6 +1052,7 @@ namespace FeiqLight
                 session.Dispose();
                 SetState(session.CleanupError ?? "临时传输已结束，完整文件已保留", session.CleanupError != null);
                 session = null;
+                allowText.Checked = false;
             }
             ReloadAddresses();
             UpdateActions();

@@ -10,6 +10,7 @@ namespace FeiqLight
 {
 public sealed class MainForm : ModernWindow
     {
+        internal bool PlainToolsForTests;
         private readonly LanService network;
         private readonly LocalStore store;
         private readonly Diagnostics diagnostics;
@@ -226,6 +227,7 @@ public sealed class MainForm : ModernWindow
         }
         public void NetworkStarted()
         {
+            if(!started)RestoreCompletedOutgoingHistory();
             if(!started)diagnostics.Record(DiagnosticEvent.Started); started = true; System.Threading.Interlocked.Exchange(ref peersRefreshQueued,0); RefreshPeers(); if (store.Warning != null) status.Text = store.Warning;
             if (!toolsRestored)
             {
@@ -233,9 +235,35 @@ public sealed class MainForm : ModernWindow
                 try
                 {
                     ToolsPreferences.State saved = new ToolsPreferences(store.Root).Value;
-                    if (saved.ShareEnabled || saved.RemoteEnabled) { toolsWindow = new ToolsWindow(network.Port, network.LoopbackOnly, store.Root, network.LoopbackOnly ? null : network.Security); toolsWindow.PrepareRestoredWindow(); }
+                    if (saved.ShareEnabled || saved.RemoteEnabled) { toolsWindow = new ToolsWindow(network.Port, network.LoopbackOnly, store.Root, PlainToolsForTests?null:network.Security); toolsWindow.PrepareRestoredWindow(); }
                 }
                 catch (Exception e) { status.Text = "共享与远控未恢复：" + e.Message; }
+            }
+        }
+        internal void RestoreCompletedOutgoingHistory()
+        {
+            foreach(var group in network.CompletedOutgoingRecords().GroupBy(record=>record.PeerId))
+            {
+                Dictionary<long,ChatRecord> saved=store.AttachmentHistory(group.Key).Where(record=>record.Outgoing&&!record.Deleted).ToDictionary(record=>record.Packet);
+                foreach(ChatRecord completed in group)
+                {
+                    ChatRecord current;
+                    if(!saved.TryGetValue(completed.Packet,out current))continue;
+                    bool changed=false;
+                    foreach(FileTransferState restored in completed.Transfers??new FileTransferState[0])
+                    {
+                        if(restored.Status!="对方已校验保存"||restored.Percent!=100)continue;
+                        FileTransferState file=current.Transfers.FirstOrDefault(value=>value.Id==restored.Id&&value.Size==restored.Size&&value.Sha256==restored.Sha256);
+                        if(file==null||(file.Status==restored.Status&&file.Percent==100))continue;
+                        file.Status=restored.Status;
+                        file.Percent=100;
+                        file.BytesPerSecond=0;
+                        file.Error=null;
+                        file.MarkCurrent();
+                        changed=true;
+                    }
+                    if(changed)TrySave(current);
+                }
             }
         }
         internal void PrepareNetworkCallbacks() { if(!IsHandleCreated)CreateHandle();network.NetworkReset+=OnNetworkReset; }
@@ -573,7 +601,7 @@ public sealed class MainForm : ModernWindow
             if (!managementOnly) {
                 conversationMenu.Items.Add("浏览共享文件…",null,delegate { OpenShared(peer); });
                 conversationMenu.Items.Add("控制 Android 手机…",null,delegate { OpenPhone(peer); });
-                if(network.Security!=null&&peer.Fingerprint!=null)conversationMenu.Items.Add("撤销设备信任…",null,delegate {using(ConfirmDialog confirm=new ConfirmDialog("撤销设备信任？","下次连接将重新核对配对码，并撤销该设备未完成的文件邀请。","撤销",true))if(confirm.ShowDialog(this)==DialogResult.OK){try{network.ForgetSecurity(peer);if(toolsWindow==null||toolsWindow.IsDisposed)new ToolsPairings(store.Root).ForgetFingerprint(peer.Fingerprint);OnNetworkReset();}catch(Exception error){OnError(error.Message);}}});
+                if(network.Security!=null&&peer.Fingerprint!=null)conversationMenu.Items.Add("撤销设备信任…",null,delegate {using(ConfirmDialog confirm=new ConfirmDialog("撤销设备信任？","下次连接将重新核对配对码，并撤销该设备未完成的文件邀请。","撤销",true))if(confirm.ShowDialog(this)==DialogResult.OK){try{RevokeDeviceTrust(peer);}catch(Exception error){OnError(error.Message);}}});
                 conversationMenu.Items.Add(new ToolStripSeparator());
             }
             conversationMenu.Items.Add("设置备注…",null,delegate { EditConversation(peer); });
@@ -697,14 +725,30 @@ public sealed class MainForm : ModernWindow
             try
             {
                 await System.Threading.Tasks.Task.Run(()=>network.VerifyPeer(peer));if(IsDisposed||epoch!=network.TransportEpoch)return;
-                ToolsGateway gateway=new ToolsGateway(network.Security,peer,port,network.LoopbackOnly,network);gateways.Add(gateway);
+                ToolsGateway gateway=GetToolGateway(peer,port);
                 System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(gateway.Url+"#"+mode){UseShellExecute=true});
             }
             catch (Exception e) { if (!IsDisposed) using (NoticeDialog notice = new NoticeDialog("连接未完成", e.GetBaseException().Message)) notice.ShowDialog(this); }
         }
+        internal void RevokeDeviceTrust(Peer peer)
+        {
+            network.ForgetSecurity(peer);
+            if(toolsWindow==null||toolsWindow.IsDisposed)new ToolsPairings(store.Root).ForgetFingerprint(peer.Fingerprint);
+            gateways.RemoveAll(gateway=>gateway.IsClosed);
+        }
+        internal ToolsGateway GetToolGateway(Peer peer,int port)
+        {
+            gateways.RemoveAll(value=>value.IsClosed);
+            ToolsGateway gateway=gateways.FirstOrDefault(value=>value.Matches(peer,port));
+            if(gateway!=null)return gateway;
+            if(gateways.Count>=8)throw new IOException("已打开 8 个设备工具入口，请等待空闲入口回收后重试。");
+            gateway=new ToolsGateway(network.Security,peer,port,network.LoopbackOnly,network);
+            gateways.Add(gateway);
+            return gateway;
+        }
         private void OpenTools()
         {
-            try { if (toolsWindow == null || toolsWindow.IsDisposed) toolsWindow = new ToolsWindow(network.Port, network.LoopbackOnly, store.Root, network.LoopbackOnly ? null : network.Security); toolsWindow.Show(); if (toolsWindow.WindowState == FormWindowState.Minimized) toolsWindow.WindowState = FormWindowState.Normal; toolsWindow.Activate(); }
+            try { if (toolsWindow == null || toolsWindow.IsDisposed) toolsWindow = new ToolsWindow(network.Port, network.LoopbackOnly, store.Root, PlainToolsForTests?null:network.Security); toolsWindow.Show(); if (toolsWindow.WindowState == FormWindowState.Minimized) toolsWindow.WindowState = FormWindowState.Normal; toolsWindow.Activate(); }
             catch (Exception e) { using (NoticeDialog notice = new NoticeDialog("共享与远控未开启", "请检查额外 TCP 端口是否被占用。\n" + e.Message)) notice.ShowDialog(this); }
         }
         private void ShowMenu(object sender, EventArgs args)

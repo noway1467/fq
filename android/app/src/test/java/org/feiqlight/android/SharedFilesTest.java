@@ -40,6 +40,7 @@ public final class SharedFilesTest {
         final Map<String,Doc> documents=new HashMap<>();
         final Map<String,List<String>> children=new HashMap<>();
         final Map<String,Integer> opens=new ConcurrentHashMap<>();
+        final Map<FileDescriptor,File> descriptors=new ConcurrentHashMap<>();
         volatile String sortOrder="unset",slowParent="";
         volatile int delay;
         volatile Runnable afterOpen;
@@ -77,7 +78,8 @@ public final class SharedFilesTest {
         @Override public ParcelFileDescriptor openDocument(String id,String mode,CancellationSignal signal)throws FileNotFoundException {
             if(denied)throw new SecurityException("权限已撤销");Doc doc=documents.get(id);if(!id.equals("video")&&(doc==null||doc.directory))throw new FileNotFoundException();openedMode=mode;
             int count=opens.merge(id,1,Integer::sum);if(id.equals(triggerDocument)&&count==triggerOpen&&afterOpen!=null)afterOpen.run();
-            return ParcelFileDescriptor.open(doc!=null&&doc.file!=null?doc.file:file,ParcelFileDescriptor.MODE_READ_ONLY);
+            File source=doc!=null&&doc.file!=null?doc.file:file;
+            ParcelFileDescriptor descriptor=ParcelFileDescriptor.open(source,ParcelFileDescriptor.MODE_READ_ONLY);descriptors.put(descriptor.getFileDescriptor(),source);return descriptor;
         }
     }
     private static final class Doc {
@@ -105,6 +107,14 @@ public final class SharedFilesTest {
     }
     private static Reply get(SharedFiles server,String path,String cookie)throws Exception{return request(server.port(),path,cookie,null,"","GET");}
     private static String login(SharedFiles server)throws Exception {Reply reply=request(server.port(),"/api/login","",new JSONObject().put("mode","share").put("code",server.code()).toString(),"","POST");assertEquals(new String(reply.body,StandardCharsets.UTF_8),200,reply.code);return "fq_share="+reply.json().getString("token");}
+    private void regularFileStats(SharedFiles server){
+        // Windows宿主的Robolectric不提供真实POSIX文件类型；按夹具打开的描述符注入身份与时间。
+        server.fileStat=descriptor->{
+            File file=docs.descriptors.get(descriptor);assertNotNull(file);long millis=file.lastModified();
+            android.system.StructTimespec time=new android.system.StructTimespec(millis/1000,(millis%1000)*1000000);
+            return new android.system.StructStat(1,file.getAbsolutePath().hashCode(),android.system.OsConstants.S_IFREG,1,0,0,0,file.length(),time,time,time,4096,1);
+        };
+    }
     @Test public void rangesAre64BitAndRejectMalformedOrMultipleRanges(){
         assertArrayEquals(new long[]{2147483650L,2999999999L},ToolsHttp.range("bytes=2147483650-",3000000000L));assertArrayEquals(new long[]{90,99},ToolsHttp.range("bytes=-10",100));
         for(String range:new String[]{"bytes=100-","bytes=-0","bytes=0-1,4-5","items=0-1","bytes=4-2","bytes=+1-2"})assertNull(range,ToolsHttp.range(range,100));assertNull(ToolsHttp.range("bytes=0-",0));
@@ -412,7 +422,12 @@ public final class SharedFilesTest {
                 assertTrue(((Map<?,?>)field(server,"entries")).size()<=10000);assertEquals(((Map<?,?>)field(server,"entries")).size(),((Map<?,?>)field(server,"entryIds")).size());
                 if(page.json().isNull("nextCursor"))break;page=get(server,"/api/list?limit=200&cursor="+page.json().getString("nextCursor"),cookie);
             }
-            assertTrue(names.size()>1000);assertTrue(names.size()<=SharedFiles.LIST_SCAN_LIMIT);assertEquals(10000,((Map<?,?>)field(server,"entries")).size());
+            assertTrue(names.size()>1000);assertTrue(names.size()<=SharedFiles.LIST_SCAN_LIMIT);
+            assertEquals(Math.min(10000,names.size()+1),((Map<?,?>)field(server,"entries")).size());
+            Class<?> entryType=Class.forName(SharedFiles.class.getName()+"$Entry");java.lang.reflect.Constructor<?> create=entryType.getDeclaredConstructor(Uri.class,Uri.class,String.class,long.class,boolean.class);create.setAccessible(true);
+            java.lang.reflect.Method remember=SharedFiles.class.getDeclaredMethod("remember",entryType);remember.setAccessible(true);
+            for(int index=0;index<10001;index++)remember.invoke(server,create.newInstance(TREE,DocumentsContract.buildDocumentUriUsingTree(TREE,"lru"+index),"lru"+index,0L,false));
+            assertEquals(10000,((Map<?,?>)field(server,"entries")).size());assertEquals(10000,((Map<?,?>)field(server,"entryIds")).size());
         }
     }
     @Test public void slowSafProviderHasTimeBudgetAndDoesNotHoldAuthorizationLock()throws Exception {
@@ -431,6 +446,7 @@ public final class SharedFilesTest {
         Doc content=add("root","text","中文 +%#😀.txt",false,(long)docs.file.length(),docs.file.lastModified());content.file=docs.file;
         Doc zero=add("root","zero","empty.txt",false,0L,null);zero.file=new File(context.getCacheDir(),"zip-empty");Files.write(zero.file.toPath(),new byte[0]);
         try(SharedFiles server=new SharedFiles(context,TREE,0,true)) {
+            regularFileStats(server);
             String cookie=login(server),id=get(server,"/api/list?limit=100",cookie).json().getString("id"),path="/file?id="+id+"&archive=store";
             assertEquals(401,get(server,path,"").code);assertEquals(401,request(server.port(),path,"",null,"X-FQ-Guest: fake\r\n","GET").code);assertEquals(404,get(server,"/file?archive=store",cookie).code);assertEquals(404,get(server,"/file?id="+id,cookie).code);
             assertEquals(403,request(server.port(),path,cookie,null,"Origin: https://evil.invalid\r\n","GET").code);assertEquals(416,request(server.port(),path,cookie,null,"Range: bytes=0-5\r\n","GET").code);
@@ -442,11 +458,11 @@ public final class SharedFilesTest {
         }
     }
     @Test public void zipBoundsRejectFileCountDirectoryCountDepthCyclesAndUnsafeNames()throws Exception {
-        for(String mode:Arrays.asList("files","directories","depth","cycle","unsafe")) {
+        for(String mode:Arrays.asList("files","directories","depth","cycle","unsafe","slash")) {
             docs.documents.clear();docs.children.clear();
             if(mode.equals("files")||mode.equals("directories"))for(int index=0;index<1001;index++)add("root","n"+index,"n"+index,mode.equals("directories"),0L,null);
             else if(mode.equals("depth")){String parent="root";for(int index=0;index<33;index++){add(parent,"d"+index,"d",true,0L,null);parent="d"+index;}}
-            else if(mode.equals("cycle"))docs.children.put("root",Collections.singletonList("root"));else add("root","unsafe","../outside.txt",false,0L,null);
+            else if(mode.equals("cycle"))docs.children.put("root",Collections.singletonList("root"));else add("root","unsafe",mode.equals("slash")?"分类/说明.txt":"../outside.txt",false,0L,null);
             try(SharedFiles server=new SharedFiles(context,TREE,0,true)){String cookie=login(server),id=get(server,"/api/list?limit=1",cookie).json().getString("id");assertEquals(mode,409,get(server,"/file?id="+id+"&archive=store",cookie).code);}
         }
     }
@@ -479,8 +495,29 @@ public final class SharedFilesTest {
         Doc source=add("root","crc","crc.bin",false,256L,null);source.file=docs.file;docs.triggerDocument="crc";docs.triggerOpen=4;
         docs.afterOpen=()->{try{byte[] bytes=Files.readAllBytes(docs.file.toPath());bytes[0]^=1;Files.write(docs.file.toPath(),bytes);}catch(IOException error){throw new UncheckedIOException(error);}};
         try(SharedFiles server=new SharedFiles(context,TREE,0,true)) {
+            regularFileStats(server);
             String cookie=login(server),id=get(server,"/api/list?limit=1",cookie).json().getString("id");Reply zip=get(server,"/file?id="+id+"&archive=store",cookie);assertEquals(200,zip.code);assertFalse(eocd(zip.body));assertTrue(zip.body.length<contentLength(zip));
         }
+    }
+    @Test public void changedAlreadySentFileWithoutSafMtimePreventsArchiveTail()throws Exception {
+        Doc first=add("root","first","a.bin",false,256L,null);first.file=docs.file;
+        Doc second=add("root","second","b.bin",false,256L,null);second.file=new File(context.getCacheDir(),"second.bin");Files.write(second.file.toPath(),new byte[256]);
+        docs.triggerDocument="second";docs.triggerOpen=4;
+        docs.afterOpen=()->{try{byte[] changed=Files.readAllBytes(first.file.toPath());changed[0]^=1;Files.write(first.file.toPath(),changed);assertTrue(first.file.setLastModified(first.file.lastModified()+2000));}catch(IOException error){throw new UncheckedIOException(error);}};
+        try(SharedFiles server=new SharedFiles(context,TREE,0,true)){
+            regularFileStats(server);
+            String cookie=login(server),id=get(server,"/api/list?limit=100",cookie).json().getString("id");Reply reply=get(server,"/file?id="+id+"&archive=store",cookie);
+            assertEquals(200,reply.code);assertFalse("发完A后修改A仍写出完整尾记录",eocd(reply.body));assertTrue(reply.body.length<contentLength(reply));
+        }
+    }
+    @Test public void androidEightUnknownModificationTimeRefusesArchive()throws Exception {
+        Doc source=add("root","unknown","unknown.bin",false,256L,null);source.file=docs.file;
+        int sdk=Build.VERSION.SDK_INT;org.robolectric.util.ReflectionHelpers.setStaticField(Build.VERSION.class,"SDK_INT",26);
+        try(SharedFiles server=new SharedFiles(context,TREE,0,true)){
+            regularFileStats(server);
+            String cookie=login(server),id=get(server,"/api/list?limit=100",cookie).json().getString("id");assertEquals(409,get(server,"/file?id="+id+"&archive=store",cookie).code);
+        }
+        finally{org.robolectric.util.ReflectionHelpers.setStaticField(Build.VERSION.class,"SDK_INT",sdk);}
     }
     private static Reply secureRequest(SharedFiles server,SecureIdentity client,String fingerprint,String path,String cookie,String data)throws Exception {
         try(Socket socket=new Socket("127.0.0.1",server.port());Socket tls=client.client(socket,fingerprint)) {

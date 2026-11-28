@@ -17,7 +17,7 @@
   let recoveryAttempts=0;
   let capabilityTimer=0, statusChecking=false;
   let shareTimer=0, shareRevision=null;
-  let listPaging=false,directoryArchive=false,nextCursor=null,listTruncated=false,directoryId='';
+  let listPaging=false,directoryArchive=false,entryCheck=false,nextCursor=null,listTruncated=false,directoryId='';
   let searchTimer=0,listAbort=null;
   const status = (text, error = false) => {
     const activeRemote=mode==='remote'&&Boolean(token);
@@ -147,7 +147,7 @@
         capabilityTimer=setTimeout(checkCapabilities,3000);
       } else {
         const capabilities=await request('/api/status');if(version!==generation)return;
-        listPaging=capabilities.listPaging===true;directoryArchive=capabilities.directoryArchive===true;
+        listPaging=capabilities.listPaging===true;directoryArchive=capabilities.directoryArchive===true;entryCheck=capabilities.entryCheck===true;
         trail = [{id: '', name: '共享文件夹'}];$('search').value='';await loadDirectory();watchSharing(version);
       }
     } catch (error) {
@@ -253,6 +253,28 @@
     if (gatewayAccess) u += '&gateway=' + encodeURIComponent(gatewayAccess);
     return u;
   }
+  const checkedLinks=new WeakSet();
+  document.addEventListener('click',async event=>{
+    const link=event.target.closest('a');
+    if(!entryCheck||!link||checkedLinks.has(link)||new URL(link.href,location.href).pathname!=='/file')return;
+    event.preventDefault();
+    const version=generation,currentListing=listing,url=new URL(link.href,location.href);
+    const preview=link.target==='_blank'?window.open('about:blank','_blank'):null;
+    if(preview)preview.opener=null;
+    try{
+      await request('/api/entry?id='+encodeURIComponent(url.searchParams.get('id')||''));
+      if(version!==generation||currentListing!==listing){if(preview)preview.close();return;}
+      status('');
+      if(preview)preview.location.href=link.href;
+      else {checkedLinks.add(link);try{link.click();}finally{checkedLinks.delete(link);}}
+    }catch(error){
+      if(preview)preview.close();
+      if(version!==generation||currentListing!==listing)return;
+      if(error.status===404||error.status===410){await loadDirectory();if(version===generation&&token)status('文件链接已过期或目录已移除，已刷新列表。请重新选择文件下载。',true);}
+      else if(error.status===401||error.status===403)end(error.message,true);
+      else status(error.message,true);
+    }
+  });
   const kindIcons = {
     dir: '<path d="M3.5 18V6.5L5 5h4.2l2 2.5H19L20.5 9v9L19 19.5H5z"/>',
     video: '<rect x="3.5" y="5.5" width="17" height="13" rx="2.5"/><path d="M10 9.5l5 2.5-5 2.5z"/>',

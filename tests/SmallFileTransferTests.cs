@@ -70,6 +70,10 @@ namespace FeiqLight.Tests
             catch(TargetInvocationException error){throw error.InnerException;}
         }
         private static int Offers(LanService node) {lock(Field(node,"gate"))return ((IDictionary)Field(node,"offers")).Count;}
+        private static void HoldReverseSync(LanService node,string deviceId)
+        {
+            Wait(()=>{lock(Field(node,"gate"))return ((HashSet<string>)Field(node,"activeSyncPeers")).Add(deviceId);},"已有同步连接未结束");
+        }
         private static int Completed(LanService node)
         {
             lock(Field(node,"gate"))return ((IDictionary)Field(node,"offers")).Values.Cast<object>().Count(offer=>(bool)Field(offer,"Stored"));
@@ -87,6 +91,12 @@ namespace FeiqLight.Tests
             if(selected=="all"||selected=="boundary")Run("批量连接拒绝非F下一帧",()=>Boundary(Path.Combine(root,"boundary")));
             if(selected=="all"||selected=="recovery")Run("真实进程崩溃、截断确认日志恢复与损坏日志拒绝",()=>Recovery(Path.Combine(root,"recovery")));
             if(selected=="all"||selected=="eviction")Run("1105完成项淘汰与100待处理额度跨重启",()=>Eviction(Path.Combine(root,"eviction")));
+            if(selected=="all"||selected=="phase2") {
+                Run("快照提交后日志清理失败仍保持发送撤销状态一致",()=>JournalCleanup(Path.Combine(root,"cleanup")));
+                Run("确认日志失败不发送NEXT且保留本机已保存文件",()=>JournalFailure(Path.Combine(root,"journal-failure")));
+                Run("取消单邀请保留同联系人正反向批量连接",()=>CancelIsolation(Path.Combine(root,"cancel-isolation")));
+                Run("旧批量连接断开后单次操作经反向P完成",()=>StaleReverse(Path.Combine(root,"stale-reverse")));
+            }
             Console.WriteLine("WINDOWS SMALL FILE: "+passed+" passed, "+failed+" failed");return failed==0?0:1;
         }
         private static void Batch(string root)
@@ -192,6 +202,9 @@ namespace FeiqLight.Tests
             using(LanService restored=Node(Path.Combine(root,"a"),AId,false))
             {
                 Check(Offers(restored)==100&&Completed(restored)==1,"确认日志、续期或末尾半条恢复错误");
+                ChatRecord recovered=restored.CompletedOutgoingRecords().Single();
+                Check(recovered.Transfers.Single(file=>file.Id==Int32.Parse(confirmation[1])).Status=="对方已校验保存"&&
+                    recovered.Transfers.Single(file=>file.Id==Int32.Parse(confirmation[1])).Percent==100,"日志重放未同步恢复Record.Transfers");
                 restored.Settings.PendingFileLimit=100;Capacity(restored,1);bool full=false;try{Capacity(restored,2);}catch(InvalidOperationException){full=true;}
                 Check(full,"崩溃恢复后已完成项重占额度或待处理额度失效");
             }
@@ -215,6 +228,77 @@ namespace FeiqLight.Tests
             {
                 Check(Offers(restored)==1100&&Completed(restored)==1000,"淘汰后的完成/待处理状态未跨重启保留");
                 restored.Settings.PendingFileLimit=100;bool full=false;try{Capacity(restored,1);}catch(InvalidOperationException){full=true;}Check(full,"重启后待处理额度失效");
+            }
+        }
+        private static void JournalCleanup(string root)
+        {
+            string journal=Path.Combine(root,"a/transfer-offer-completions.log");
+            using(var pair=new Pair(root)) {
+                pair.Send(1);File.WriteAllText(journal,"unfinished",new UTF8Encoding(false));File.SetAttributes(journal,FileAttributes.ReadOnly);
+                try {
+                    var second=pair.Send(1)[0];Check(Offers(pair.A)==2,"已提交的新邀请未进入内存");
+                    Check(pair.A.CancelOutgoing(pair.Target.Id,second.Item1,null,false),"快照提交后的日志清理失败被误报为撤销失败");
+                    Check(Offers(pair.A)==1,"撤销未同步当前内存");
+                }finally{File.SetAttributes(journal,FileAttributes.Normal);}
+            }
+            using(var restored=Node(Path.Combine(root,"a"),AId,false))Check(Offers(restored)==1,"重启恢复授权与当前内存分叉");
+        }
+        private static void JournalFailure(string root)
+        {
+            using(var pair=new Pair(root)) {
+                var files=pair.Send(2);string journal=Path.Combine(root,"a/transfer-offer-completions.log");Directory.CreateDirectory(journal);
+                string target=Path.Combine(root,"saved.bin");
+                try {
+                    pair.B.ReceiveFileAsync(pair.Back,files[0].Item1,files[0].Item2,target,null,CancellationToken.None).GetAwaiter().GetResult();
+                    Check(File.ReadAllBytes(target).SequenceEqual(new byte[]{3,5,7,11}),"回执失败丢失本地正式文件");
+                    Check(Field(pair.B,"idleFileConnection")==null,"未落盘确认仍发NEXT并复用连接");
+                    Check(Completed(pair.A)==0,"写日志失败却已标记完成");
+                }finally{Directory.Delete(journal);}
+                pair.B.ReceiveFileAsync(pair.Back,files[1].Item1,files[1].Item2,Path.Combine(root,"second.bin"),null,CancellationToken.None).GetAwaiter().GetResult();
+                Check(Completed(pair.A)==1,"故障恢复后新文件不能正常确认保存");
+                Check(Directory.GetFiles(root,"saved*").Length==1,"回执丢失造成重复副本");
+            }
+        }
+        private static void CancelIsolation(string root)
+        {
+            using(var pair=new Pair(root))
+            using(var reverse=new BlockingCollection<IncomingMessage>()) {
+                pair.A.MessageReceived+=reverse.Add;
+                var forward=pair.Send(2);var cancel=pair.Send(1)[0];
+                pair.B.SendMessage(pair.Back,"",new[]{pair.Source,pair.Source});IncomingMessage incoming;
+                Check(reverse.TryTake(out incoming,10000),"反向邀请未到达");
+                HoldReverseSync(pair.A,BId);HoldReverseSync(pair.B,AId);
+                Task.WaitAll(pair.B.ReceiveFileAsync(pair.Back,forward[0].Item1,forward[0].Item2,Path.Combine(root,"forward1.bin"),null,CancellationToken.None),
+                    pair.A.ReceiveFileAsync(pair.Target,incoming.Record.Packet,incoming.Files[0],Path.Combine(root,"back1.bin"),null,CancellationToken.None));
+                object forwardChannel=Field(pair.B,"idleFileConnection"),backChannel=Field(pair.A,"idleFileConnection");
+                Check(forwardChannel!=null&&backChannel!=null,"夹具预热期间连接已空闲过期：forward="+(forwardChannel!=null)+" reverse="+(backChannel!=null));
+                object forwardClient=Field(forwardChannel,"Client"),backClient=Field(backChannel,"Client");
+                Check(pair.A.CancelOutgoing(pair.Target.Id,cancel.Item1,null,false),"未取消指定邀请");
+                typeof(LanService).GetMethod("SendReleaseFiles",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(pair.A,new object[]{pair.Target,"cancel:"+cancel.Item1});
+                pair.B.ReceiveFileAsync(pair.Back,forward[1].Item1,forward[1].Item2,Path.Combine(root,"forward2.bin"),null,CancellationToken.None).GetAwaiter().GetResult();
+                Check(Field(pair.B,"idleFileConnection")!=null,"取消甲后的乙没有可复用连接");
+                Check(Object.ReferenceEquals(forwardClient,Field(Field(pair.B,"idleFileConnection"),"Client")),"取消甲后乙未沿原连接完成");
+                pair.A.ReceiveFileAsync(pair.Target,incoming.Record.Packet,incoming.Files[1],Path.Combine(root,"back2.bin"),null,CancellationToken.None).GetAwaiter().GetResult();
+                Check(Object.ReferenceEquals(backClient,Field(Field(pair.A,"idleFileConnection"),"Client")),"取消出站甲误关反向接收连接");
+                Check(File.ReadAllBytes(Path.Combine(root,"forward2.bin")).SequenceEqual(File.ReadAllBytes(pair.Source))&&File.ReadAllBytes(Path.Combine(root,"back2.bin")).SequenceEqual(File.ReadAllBytes(pair.Source)),"正反向内容不符");
+                pair.A.MessageReceived-=reverse.Add;
+            }
+        }
+        private static void StaleReverse(string root)
+        {
+            using(var pair=new Pair(root)) {
+                var files=pair.Send(2);
+                HoldReverseSync(pair.A,BId);
+                pair.B.ReceiveFileAsync(pair.Back,files[0].Item1,files[0].Item2,Path.Combine(root,"first.bin"),null,CancellationToken.None).GetAwaiter().GetResult();
+                object channel=Field(pair.B,"idleFileConnection");Check(channel!=null,"未预热批量连接");
+                ((Timer)Field(channel,"IdleTimer")).Change(Timeout.Infinite,Timeout.Infinite);
+                ((TcpListener)Field(pair.A,"tcp")).Stop();
+                lock(Field(pair.A,"gate"))foreach(TcpClient client in ((IDictionary)Field(pair.A,"fileBatchPeers")).Keys)client.Close();
+                lock(Field(pair.A,"gate"))((HashSet<string>)Field(pair.A,"activeSyncPeers")).Remove(BId);
+                pair.B.ReceiveFileAsync(pair.Back,files[1].Item1,files[1].Item2,Path.Combine(root,"reverse.bin"),null,CancellationToken.None).GetAwaiter().GetResult();
+                Check(File.ReadAllBytes(Path.Combine(root,"reverse.bin")).SequenceEqual(File.ReadAllBytes(pair.Source)),"反向重试内容不符");
+                Check(Field(pair.B,"idleFileConnection")==null,"反向P被误回收为批量连接");
+                Check(Directory.GetFiles(root,"reverse*").Length==1,"单次接收产生重复文件");
             }
         }
     }

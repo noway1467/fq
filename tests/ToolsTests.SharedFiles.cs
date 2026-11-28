@@ -71,9 +71,67 @@ namespace FeiqLight.Tests
             return null;
         }
         private static string AllCookies(Reply reply){return String.Join("; ",reply.Headers.Split(new[]{"\r\n"},StringSplitOptions.None).Where(line=>line.StartsWith("Set-Cookie: ")).Select(line=>line.Substring(12).Split(';')[0]));}
+        private static void LoopbackPackage(string root,string executable)
+        {
+            string[] profiles={Path.Combine(root,"a"),Path.Combine(root,"b")},ids={new string('a',32),new string('b',32)};
+            int firstPort=LoopbackPorts.WithTools();int[] ports={firstPort,LoopbackPorts.WithTools(firstPort+3)};
+            SecureIdentity[] identities=new SecureIdentity[2];Process[] processes=new Process[2];string[] pairings=new string[2];
+            try{
+                for(int index=0;index<2;index++){
+                    string files=Path.Combine(profiles[index],"files");Directory.CreateDirectory(files);File.WriteAllText(Path.Combine(files,"sample.txt"),"loopback "+index,new UTF8Encoding(false));
+                    new LocalStore(profiles[index]).SaveSettings(new AppSettings{DeviceId=ids[index],Port=ports[index],Nickname="回环包"+index,CloseToTray=false,Notifications=false,ReceiveFolder=Path.Combine(profiles[index],"received")});
+                    identities[index]=new SecureIdentity(profiles[index]);identities[index].ConfirmPeer=(name,code)=>true;
+                }
+                for(int index=0;index<2;index++)identities[index].EnsureTrusted(ids[1-index],identities[1-index].Fingerprint,"回环对端");
+                for(int index=0;index<2;index++)using(ToolsService setup=new ToolsService(ports[index]+1,true,profiles[index],identities[index])){
+                    setup.Share(Path.Combine(profiles[index],"files"));Peer target=new Peer{DeviceId=ids[index],Fingerprint=identities[index].Fingerprint,Endpoint=new IPEndPoint(IPAddress.Loopback,ports[index])};
+                    using(ToolsGateway gateway=new ToolsGateway(identities[1-index],target,setup.Port,true)){
+                        Uri url=new Uri(gateway.Url);Reply login=Request(url.Port,"/api/login"+url.Query,"","{\"mode\":\"share\",\"code\":\""+setup.ShareCode+"\"}");Assert(login.Code==200,"测试预配对失败");pairings[index]=AllCookies(login);
+                    }
+                }
+                for(int index=0;index<2;index++)processes[index]=Process.Start(new ProcessStartInfo(executable,"--autostart --loopback --port "+ports[index]+" --profile \""+profiles[index]+"\""){UseShellExecute=false,WindowStyle=ProcessWindowStyle.Hidden});
+                for(int index=0;index<2;index++){
+                    Peer target=new Peer{DeviceId=ids[index],Fingerprint=identities[index].Fingerprint,Endpoint=new IPEndPoint(IPAddress.Loopback,ports[index])};
+                    using(ToolsGateway gateway=new ToolsGateway(identities[1-index],target,ports[index]+1,true)){
+                        Uri url=new Uri(gateway.Url);bool ready=false;Stopwatch watch=Stopwatch.StartNew();
+                        while(!ready&&watch.ElapsedMilliseconds<15000){Assert(!processes[index].HasExited,"正式EXE提前退出");try{ready=Request(url.Port,"/api/status"+url.Query).Code==200;}catch(IOException){}catch(SocketException){}if(!ready)Thread.Sleep(100);}
+                        Assert(ready,"正式回环EXE未提供可信TLS工具服务");
+                        Reply login=Request(url.Port,"/api/reconnect"+url.Query,pairings[index],"{\"mode\":\"share\"}","X-FQ-Reconnect: 1\r\n");Assert(login.Code==200,"回环网关固定证书配对恢复失败");string cookie=AllCookies(login);
+                        Reply list=Request(url.Port,"/api/list?limit=100"+"&gateway="+url.Query.Substring(8),cookie);Assert(list.Code==200&&Items(list).Length==1,"回环分页失败");
+                        Reply zip=Request(url.Port,"/file?id="+list.Json()["id"]+"&archive=store&gateway="+url.Query.Substring(8),cookie);Assert(zip.Code==200,"回环归档失败");VerifySharedZip(zip.Body,new Dictionary<string,byte[]>{{"sample.txt",Encoding.UTF8.GetBytes("loopback "+index)}});
+                        bool plainRejected=false;try{plainRejected=Request(ports[index]+1,"/api/status").Code!=200;}catch(IOException){plainRejected=true;}catch(SocketException){plainRejected=true;}Assert(plainRejected,"正式--loopback意外接受明文工具请求");
+                        Console.WriteLine("PASS 正式EXE回环 "+(1-index)+"→"+index+"：可信TLS、配对恢复、共享分页、ZIP解压与明文拒绝");
+                    }
+                }
+            }
+            finally{foreach(Process process in processes)if(process!=null){ClosePackage(process);process.Dispose();}foreach(SecureIdentity identity in identities)if(identity!=null)identity.Dispose();}
+        }
         private static void RunSharedFiles(Action<string,Action> run,string root,string filter="")
         {
             if(filter.Length>0){Action<string,Action> all=run;run=(name,test)=>{if(name.Contains(filter))all(name,test);};}
+            run("阶段二：目录句柄阻止祖先替换，大小写索引不合并",()=>{
+                string folder=Path.Combine(root,"pinned-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(folder);string target=folder+"-moved";
+                var pin=typeof(ToolsService).GetMethod("PinDirectory",BindingFlags.NonPublic|BindingFlags.Static);
+                var handles=(List<Microsoft.Win32.SafeHandles.SafeFileHandle>)pin.Invoke(null,new object[]{folder});
+                try{bool refused=false;try{Directory.Move(folder,target);}catch(IOException){refused=true;}Assert(refused&&Directory.Exists(folder),"枚举目录仍可被替换");}finally{foreach(var handle in handles)handle.Dispose();}
+                Directory.Move(folder,target);Assert(Directory.Exists(target),"目录句柄没有释放");
+                using(ToolsService server=new ToolsService(0,true)){
+                    Type type=typeof(ToolsService).GetNestedType("SharedEntry",BindingFlags.NonPublic);var id=typeof(ToolsService).GetMethod("Id",BindingFlags.Instance|BindingFlags.NonPublic);
+                    object first=Activator.CreateInstance(type,true),second=Activator.CreateInstance(type,true);SetPrivateField(first,"Root",target);SetPrivateField(second,"Root",target);SetPrivateField(first,"Path",Path.Combine(target,"Report.txt"));SetPrivateField(second,"Path",Path.Combine(target,"report.txt"));
+                    Assert((string)id.Invoke(server,new[]{first})!=(string)id.Invoke(server,new[]{second}),"大小写不同路径共用授权ID");
+                }
+            });
+            run("阶段二：LRU过期可检查并刷新，移根仍失效",()=>{
+                string folder=Path.Combine(root,"lru-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(folder);File.WriteAllText(Path.Combine(folder,"a.txt"),"original");
+                using(ToolsService server=new ToolsService(0,true)){
+                    server.Share(folder);string cookie=Login(server,"share"),id=(string)Items(Request(server.Port,"/api/list?limit=100",cookie))[0]["id"];
+                    Type type=typeof(ToolsService).GetNestedType("SharedEntry",BindingFlags.NonPublic);var remember=typeof(ToolsService).GetMethod("Id",BindingFlags.Instance|BindingFlags.NonPublic);
+                    for(int index=0;index<10001;index++){object value=Activator.CreateInstance(type,true);SetPrivateField(value,"Root",folder);SetPrivateField(value,"Path",Path.Combine(folder,"virtual-"+index));remember.Invoke(server,new[]{value});}
+                    Assert(Request(server.Port,"/api/entry?id="+id,cookie).Code==404,"过期入口未明确拒绝");
+                    string fresh=(string)Items(Request(server.Port,"/api/list?limit=100",cookie))[0]["id"];Assert(Request(server.Port,"/api/entry?id="+fresh,cookie).Code==200&&Encoding.UTF8.GetString(Request(server.Port,"/file?id="+fresh,cookie).Body)=="original","刷新后仍不能下载");
+                    server.StopSharing();Assert(Request(server.Port,"/file?id="+fresh,cookie).Code!=200,"移根后授权仍有效");
+                }
+            });
             run("共享分页：旧接口 409、新分页不漏不重、后页搜索和页内登记",()=>{
                 string folder=Path.Combine(root,"paging-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(folder);
                 Directory.CreateDirectory(Path.Combine(folder,"Alpha 目录"));Directory.CreateDirectory(Path.Combine(folder,"z目录"));
@@ -200,7 +258,9 @@ namespace FeiqLight.Tests
                     string idA=(string)roots.Single(item=>item["name"].Equals(Path.GetFileName(first)))["id"],idB=(string)roots.Single(item=>item["name"].Equals(Path.GetFileName(second)))["id"];
                     using(ArchiveConnection downloadA=new ArchiveConnection(server.Port,"/file?id="+idA+"&archive=store",a))using(ArchiveConnection downloadB=new ArchiveConnection(server.Port,"/file?id="+idB+"&archive=store",b))
                     {
-                        Assert(downloadA.Reply.Code==200&&downloadB.Reply.Code==200,"归档未开始");Stream inputA=ArchiveHandle(server,a.Substring(9)),inputB=ArchiveHandle(server,b.Substring(9));Assert(inputA!=null&&inputA.CanRead&&inputB!=null&&inputB.CanRead,"没有活跃来源句柄");
+                        Assert(downloadA.Reply.Code==200&&downloadB.Reply.Code==200,"归档未开始");
+                        Await(()=>{Stream firstInput=ArchiveHandle(server,a.Substring(9)),secondInput=ArchiveHandle(server,b.Substring(9));return firstInput!=null&&firstInput.CanRead&&secondInput!=null&&secondInput.CanRead;},"没有活跃来源句柄");
+                        Stream inputA=ArchiveHandle(server,a.Substring(9)),inputB=ArchiveHandle(server,b.Substring(9));
                         Stopwatch wait=Stopwatch.StartNew();server.RemoveFolder(first);Assert(wait.ElapsedMilliseconds<500&&!inputA.CanRead&&inputB.CanRead,"移根没有即时且按根关闭句柄");
                         byte[] interrupted=downloadA.ReadBody();Assert(interrupted.Length<HeaderLength(downloadA.Reply)&&!Eocd(interrupted),"移根后仍给出完整 ZIP");
                         byte[] complete=downloadB.ReadBody();Assert(complete.Length==HeaderLength(downloadB.Reply)&&Eocd(complete),"移根误断另一共享根");

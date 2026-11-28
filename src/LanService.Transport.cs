@@ -79,13 +79,15 @@ namespace FeiqLight
         {
             string ticket=System.Text.Encoding.ASCII.GetString(SecureIdentity.ReadBytes(input,32));
             lock(gate){ReverseRequest request;if(!reverseRequests.TryGetValue(ticket,out request)||!Security.IsTrusted(request.DeviceId,request.Fingerprint))return false;
-                reverseRequests.Remove(ticket);request.Client=client;request.Direct.Close();request.Ready.Set();return true;}
+                reverseRequests.Remove(ticket);request.Client=client;RegisterConnectionFingerprint(client,request.Fingerprint);request.Direct.Close();request.Ready.Set();return true;}
         }
         // 回连只改变 TCP 建连方向，调用方仍执行原有 TLS、设备配对和业务权限检查。
-        internal TcpClient ConnectPeer(Peer peer,int port)
+        internal TcpClient ConnectPeer(Peer peer,int port,CancellationToken cancellation = default(CancellationToken))
         {
+            cancellation.ThrowIfCancellationRequested();
             TcpClient direct=new TcpClient(AddressFamily.InterNetwork);ReverseRequest request=null;string ticket=Guid.NewGuid().ToString("N");
             lock(gate){if(disposed||connections.Count>=8){direct.Close();throw new IOException("服务已关闭或连接任务过多。");}connections.Add(direct);
+                RegisterConnectionFingerprint(direct,peer.Fingerprint);
                 if(Security.IsTrusted(peer.DeviceId,peer.Fingerprint)){
                     request=new ReverseRequest{
                         DeviceId=peer.DeviceId,Fingerprint=peer.Fingerprint,Port=port,Direct=direct
@@ -93,11 +95,19 @@ namespace FeiqLight
                     reverseRequests.Add(ticket,request);
                 }
                 }
+            CancellationTokenRegistration registration=cancellation.Register(()=>{
+                lock(gate)
+                {
+                    reverseRequests.Remove(ticket);direct.Close();connections.Remove(direct);
+                    if(request!=null){if(request.Client!=null){request.Client.Close();connections.Remove(request.Client);}request.Ready.Set();}
+                }
+            });
             try {
+                cancellation.ThrowIfCancellationRequested();
                 if(LoopbackOnly&&!IPAddress.IsLoopback(peer.Endpoint.Address))throw new IOException("回环模式禁止连接局域网。");
                 BindClient(direct,peer.Endpoint.Address);
                 if(request!=null)Task.Delay(150).ContinueWith(_=>{
-                    lock(gate)if(!reverseRequests.ContainsKey(ticket))return;
+                    lock(gate)if(cancellation.IsCancellationRequested||!reverseRequests.ContainsKey(ticket))return;
                     try{
                         Probe(peer.Endpoint);
                     }
@@ -111,22 +121,25 @@ namespace FeiqLight
                 Exception failure=null;
                 try{PeerConnector(direct,new IPEndPoint(peer.Endpoint.Address,port));}
                 catch(Exception e){if(!(e is SocketException||e is IOException||e is AggregateException||e is ObjectDisposedException))throw;failure=e;}
-                if(failure==null){lock(gate){reverseRequests.Remove(ticket);if(request==null||request.Client==null){direct.ReceiveTimeout=45000;direct.SendTimeout=15000;return direct;}}}
+                cancellation.ThrowIfCancellationRequested();
+                if(failure==null){lock(gate){cancellation.ThrowIfCancellationRequested();reverseRequests.Remove(ticket);if(request==null||request.Client==null){direct.ReceiveTimeout=45000;direct.SendTimeout=15000;return direct;}}}
                 direct.Close();ReleaseConnection(direct);
                 if(request==null)throw new IOException("无法连接对方。",failure);
                 if(!request.Ready.Wait(8000))throw new IOException("无法连接对方，请确认双方已升级并允许局域网连接。",failure);
+                cancellation.ThrowIfCancellationRequested();
                 lock(gate){if(request.Client==null||disposed||!Security.IsTrusted(request.DeviceId,request.Fingerprint))throw new IOException("连接已取消或设备信任已撤销。");}
                 request.Client.ReceiveTimeout=45000;request.Client.SendTimeout=15000;return request.Client;
             }catch{direct.Close();ReleaseConnection(direct);lock(gate)if(request!=null&&request.Client!=null){request.Client.Close();connections.Remove(request.Client);}throw;}
-            finally{lock(gate)reverseRequests.Remove(ticket);}
+            finally{registration.Dispose();lock(gate)reverseRequests.Remove(ticket);}
         }
-        internal void ReleaseConnection(TcpClient client){lock(gate)connections.Remove(client);}
+        internal void ReleaseConnection(TcpClient client){lock(gate){connections.Remove(client);connectionFingerprints.Remove(client);}}
         private void ServeReverse(IPEndPoint endpoint,int servicePort,string ticket,string id,string fingerprint,int epoch)
         {
             int sharePort=Port==65535?65534:Port+1,phonePort=Port>=65534?Port-2:Port+2;
             if(servicePort!=Port&&servicePort!=sharePort&&servicePort!=phonePort)return;
             TcpClient client=new TcpClient(AddressFamily.InterNetwork);
             lock(gate){if(disposed||epoch!=transportEpoch||connections.Count>=8||!Security.IsTrusted(id,fingerprint)){client.Close();return;}connections.Add(client);}
+            RegisterConnectionFingerprint(client,fingerprint);
             try {
                 BindClient(client,endpoint.Address);if(!client.ConnectAsync(endpoint.Address,endpoint.Port).Wait(8000))throw new IOException("回连超时。");
                 client.ReceiveTimeout=5000;client.SendTimeout=15000;

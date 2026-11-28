@@ -48,7 +48,7 @@ namespace FeiqLight
                 if (channel.IdleTimer != null) channel.IdleTimer.Dispose();
                 channel.Client.Close();
                 try { channel.Stream.Dispose(); } catch (IOException) { }
-                connections.Remove(channel.Client); fileBatchPeers.Remove(channel.Client);
+                ReleaseConnection(channel.Client); fileBatchPeers.Remove(channel.Client);
             }
         }
         private void CloseFileBatches(string deviceId)
@@ -88,7 +88,6 @@ namespace FeiqLight
         private void SendReleaseFiles(Peer peer, string body)
         {
             RequireSecurePeer(peer.DeviceId,peer.Fingerprint);
-            CloseFileBatches(peer.DeviceId);
             TcpClient connection = null;
             try
             {
@@ -102,7 +101,7 @@ namespace FeiqLight
                     Upsert(remote, peer.Endpoint);
                 }
             }
-            finally { if (connection != null) lock (gate) connections.Remove(connection); }
+            finally { if (connection != null) ReleaseConnection(connection); }
         }
         public void RejectFiles(Peer peer, long packet)
         {
@@ -150,59 +149,60 @@ namespace FeiqLight
                 using(FileStream output=new FileStream(part,FileMode.OpenOrCreate,FileAccess.ReadWrite,FileShare.None)) {
                     owned=true;if((File.GetAttributes(part)&FileAttributes.ReparsePoint)!=0)throw new IOException("断点文件不能是链接。");
                     if(output.Length>file.Size)output.SetLength(0);long offset=output.Length;output.Position=offset;
-                    pd=new PendingDownload(peer.DeviceId,peer.Fingerprint,packet,file.Id,offset);
-                    PendingDownload activePd=pd;
                     channel=TakeFileConnection(peer);
                     borrowedConnection=channel!=null;
-                    if(channel!=null) {
-                        connection=channel.Client;directStream=channel.Stream;pd.DirectClient=connection;pd.Claimed=1;
-                    } else {
-                        lock(gate)pendingDownloads.Add(pd);
-                        Task.Delay(150).ContinueWith(_=>{
-                            if(activePd.Claimed==0&&!disposed)
-                                try{Send(Encode(Protocol.Entry|Protocol.CapUtf8|Protocol.FileAttach,Protocol.Field(Settings.Nickname),Protocol.Field(Settings.Group)),peer.Endpoint);}catch{}
-                        },TaskScheduler.Default);
-                    }
-                    TimeSpan waitUntil=clock.Elapsed+TimeSpan.FromSeconds(8);
-                    Exception connectError=null;
-                    if(channel==null)try {
-                        connection=SecureConnect(peer.Endpoint,c=>activePd.DirectClient=c);
-                        directStream=Security.Client(connection,peer.Fingerprint);
-                        Packet remote=AuthenticateSecureClient(directStream,peer.DeviceId,peer.Fingerprint,peer.DisplayName);
-                        Upsert(remote,peer.Endpoint);
-                        if(Interlocked.CompareExchange(ref pd.Claimed,1,0)==0) {
-                            lock(gate)pendingDownloads.Remove(pd);
-                            if(remote.BatchFiles) {
-                                channel=CreateFileConnection(connection,directStream,peer);
-                            }
-                        } else {
-                            try{directStream.Dispose();}catch{}directStream=null;
-                            try{connection.Close();}catch{}lock(gate)connections.Remove(connection);connection=null;
-                        }
-                    } catch(Exception e) {
-                        connectError=e is AggregateException?e.GetBaseException():e;
-                        if(directStream!=null){try{directStream.Dispose();}catch{}directStream=null;}
-                        if(connection!=null){try{connection.Close();}catch{}lock(gate)connections.Remove(connection);connection=null;}
-                    }
-                    if(directStream==null) {
-                        pd.DirectFailed=true;
-                        cancel.ThrowIfCancellationRequested();
-                        string msg=connectError==null?null:connectError.Message;
-                        if(connectError is SecureIdentity.TrustException||connectError is System.Security.Authentication.AuthenticationException||msg=="服务已关闭或连接任务过多。"
-                            ||msg=="回环模式禁止连接局域网。"||msg=="目标不在当前物理局域网内。")throw connectError;
-                        while(pd.PushedStream==null&&HeartbeatRetry>=TimeSpan.FromSeconds(1)&&clock.Elapsed<waitUntil) {
-                            cancel.ThrowIfCancellationRequested();
-                            if(disposed)throw new ObjectDisposedException("LanService");
-                            if(pd.Ready.Wait(100,cancel))break;
-                        }
-                        if(pd.PushedStream==null)throw connectError??new IOException("加密连接超时。");
-                    }
+                    int receiveEpoch=TransportEpoch;
                     string[] response;
-                    if(directStream==null)response=SecureIdentity.ReadText(pd.PushedStream,256).Split('\n');
-                    else {
-                        byte[] request=Protocol.Encode(Next(),Login,Host,Protocol.GetFile|Protocol.Utf8,
-                            packet.ToString("x")+":"+file.Id.ToString("x")+":"+offset.ToString("x")+":",null,Settings.DeviceId,null,Security.Fingerprint);
-                        while(true) {
+                    while(true) {
+                        cancel.ThrowIfCancellationRequested();
+                        if(receiveEpoch!=TransportEpoch)throw new IOException("网络已变化，请重新接收。");
+                        pd=new PendingDownload(peer.DeviceId,peer.Fingerprint,packet,file.Id,offset);
+                        PendingDownload activePd=pd;
+                        if(channel!=null) {
+                            connection=channel.Client;directStream=channel.Stream;pd.DirectClient=connection;pd.Claimed=1;
+                        } else {
+                            lock(gate)pendingDownloads.Add(pd);
+                            Task.Delay(150).ContinueWith(_=>{
+                                if(activePd.Claimed==0&&!disposed)
+                                    try{Send(Encode(Protocol.Entry|Protocol.CapUtf8|Protocol.FileAttach,Protocol.Field(Settings.Nickname),Protocol.Field(Settings.Group)),peer.Endpoint);}catch{}
+                            },TaskScheduler.Default);
+                        }
+                        TimeSpan waitUntil=clock.Elapsed+TimeSpan.FromSeconds(8);
+                        Exception connectError=null;
+                        if(channel==null)try {
+                            connection=SecureConnect(peer.Endpoint,c=>{activePd.DirectClient=c;RegisterConnectionFingerprint(c,peer.Fingerprint);if(cancel.IsCancellationRequested)c.Close();});
+                            directStream=Security.Client(connection,peer.Fingerprint);
+                            Packet remote=AuthenticateSecureClient(directStream,peer.DeviceId,peer.Fingerprint,peer.DisplayName);
+                            Upsert(remote,peer.Endpoint);
+                            if(Interlocked.CompareExchange(ref pd.Claimed,1,0)==0) {
+                                lock(gate)pendingDownloads.Remove(pd);
+                                if(remote.BatchFiles)channel=CreateFileConnection(connection,directStream,peer);
+                            } else {
+                                try{directStream.Dispose();}catch{}directStream=null;
+                                try{connection.Close();}catch{}ReleaseConnection(connection);connection=null;
+                            }
+                        } catch(Exception e) {
+                            connectError=e is AggregateException?e.GetBaseException():e;
+                            if(directStream!=null){try{directStream.Dispose();}catch{}directStream=null;}
+                            if(connection!=null){try{connection.Close();}catch{}ReleaseConnection(connection);connection=null;}
+                        }
+                        if(directStream==null) {
+                            pd.DirectFailed=true;
+                            cancel.ThrowIfCancellationRequested();
+                            string msg=connectError==null?null:connectError.Message;
+                            if(connectError is SecureIdentity.TrustException||connectError is System.Security.Authentication.AuthenticationException||msg=="服务已关闭或连接任务过多。"
+                                ||msg=="回环模式禁止连接局域网。"||msg=="目标不在当前物理局域网内。")throw connectError;
+                            while(pd.PushedStream==null&&HeartbeatRetry>=TimeSpan.FromSeconds(1)&&clock.Elapsed<waitUntil) {
+                                cancel.ThrowIfCancellationRequested();
+                                if(disposed)throw new ObjectDisposedException("LanService");
+                                if(pd.Ready.Wait(100,cancel))break;
+                            }
+                            if(pd.PushedStream==null)throw connectError??new IOException("加密连接超时。");
+                        }
+                        if(directStream==null)response=SecureIdentity.ReadText(pd.PushedStream,256).Split('\n');
+                        else {
+                            byte[] request=Protocol.Encode(Next(),Login,Host,Protocol.GetFile|Protocol.Utf8,
+                                packet.ToString("x")+":"+file.Id.ToString("x")+":"+offset.ToString("x")+":",null,Settings.DeviceId,null,Security.Fingerprint);
                             cancel.ThrowIfCancellationRequested();
                             try {
                                 SecureIdentity.WriteText(directStream,"F\n"+Port);SecureIdentity.WriteFrame(directStream,request);
@@ -210,14 +210,15 @@ namespace FeiqLight
                             } catch(IOException error) {
                                 if(!borrowedConnection||cancel.IsCancellationRequested||channel.Epoch!=TransportEpoch||!Security.IsTrusted(peer.DeviceId,peer.Fingerprint)
                                     ||!(error is EndOfStreamException||error.GetBaseException() is SocketException))throw;
-                                // 仅陈旧连接的 F 请求在尚未收到正文前可换新连接一次；校验失败、取消与撤信不重放。
+                                // 回到完整建连路径，重新登记反向 P，单向可达时也能完成这一次重试。
                                 borrowedConnection=false;CloseFileConnection(channel);channel=null;
-                                TcpClient retryClient=SecureConnect(peer.Endpoint,c=>activePd.DirectClient=c);connection=retryClient;
-                                SslStream retryStream=Security.Client(retryClient,peer.Fingerprint);directStream=retryStream;
-                                Packet retryRemote=AuthenticateSecureClient(retryStream,peer.DeviceId,peer.Fingerprint,peer.DisplayName);
-                                if(retryRemote.BatchFiles)channel=CreateFileConnection(retryClient,retryStream,peer);
+                                directStream=null;connection=null;
+                                lock(gate)pendingDownloads.Remove(pd);
+                                pd.Done.Set();
+                                continue;
                             }
                         }
+                        break;
                     }
                     SslStream stream=directStream??pd.PushedStream;
                     {
@@ -260,13 +261,17 @@ namespace FeiqLight
                     }
                 }
                 SslStream finalStream=directStream??pd.PushedStream;
-                bool confirmed=false;
-                try{SecureIdentity.WriteText(finalStream,"STORED\n"+file.Sha256);confirmed=true;}catch(IOException){Report("文件已校验保存，但保存确认未送达。");}
-                if(channel!=null&&confirmed) {
-                    string boundary=SecureIdentity.ReadText(finalStream,16);
-                    if(boundary!="NEXT"&&boundary!="DONE")throw new IOException("批量文件边界确认无效，连接已丢弃。");
-                    channel.Files++;reuseConnection=boundary=="NEXT";
+                // 正式文件移动成功后，本地保存不可被远端确认失败改写；异常连接不再复用。
+                try {
+                    SecureIdentity.WriteText(finalStream,"STORED\n"+file.Sha256);
+                    if(channel!=null) {
+                        string boundary=SecureIdentity.ReadText(finalStream,16);
+                        if(boundary!="NEXT"&&boundary!="DONE")throw new IOException("批量文件边界确认无效，连接已丢弃。");
+                        channel.Files++;reuseConnection=boundary=="NEXT";
+                    }
                 }
+                catch(IOException){Report("文件已校验保存，远端确认未完成；连接已丢弃。");}
+                catch(ObjectDisposedException){Report("文件已校验保存，远端确认未完成；连接已丢弃。");}
                 if(progress!=null)progress.Report(100);return path;
             } catch(Exception){if(cancel.IsCancellationRequested)throw new OperationCanceledException(cancel);throw;}
             finally {
@@ -277,7 +282,7 @@ namespace FeiqLight
                     directStream=null;connection=null;
                 }
                 if(directStream!=null)try{directStream.Dispose();}catch{}
-                if(connection!=null){try{connection.Close();}catch{}lock(gate)connections.Remove(connection);}
+                if(connection!=null){try{connection.Close();}catch{}ReleaseConnection(connection);}
                 try{
                     if(owned&&File.Exists(part)&&(revoked||cancel.IsCancellationRequested&&!(keepPartial!=null&&keepPartial())
                         ||new FileInfo(part).Length==0))File.Delete(part);

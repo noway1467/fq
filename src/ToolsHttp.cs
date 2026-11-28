@@ -43,26 +43,46 @@ namespace FeiqLight
             private readonly Func<bool> connected;
             private readonly Action disconnect;
             private long remaining;
+            private long lastProgress;
+            internal bool ArchiveProgress;
+            internal string RequestId = "";
             internal bool Complete { get { return Started && remaining == 0; } }
             internal bool Started;
             internal Response(Stream stream, bool head, bool keepAlive = false, Func<bool> connected = null, Action disconnect = null) { this.stream = stream; this.head = head; KeepAlive = keepAlive; this.connected = connected; this.disconnect = disconnect; }
             internal void CheckConnection() { if (connected != null && !connected()) throw new IOException("下载连接已关闭。"); }
             internal void Abort() { if (disconnect != null) disconnect(); }
+            internal void Processing()
+            {
+                CheckConnection();
+                if (Started || !ArchiveProgress) return;
+                long now = System.Diagnostics.Stopwatch.GetTimestamp();
+                if (lastProgress != 0 && now - lastProgress < System.Diagnostics.Stopwatch.Frequency) return;
+                lastProgress = now;
+                byte[] progress = Encoding.ASCII.GetBytes("HTTP/1.1 102 Processing\r\nX-FQ-Archive-Progress: 1\r\n\r\n");
+                stream.Write(progress, 0, progress.Length); stream.Flush();
+            }
             internal void Begin(int code, string type, long size, string extra)
             {
+                if (Started || size < 0) throw new IOException("响应状态或长度无效。");
                 if (code >= 300) KeepAlive = false;
+                if (RequestId.Length > 0) extra += "X-FQ-Request-ID: " + RequestId + "\r\n";
                 string reason = code == 200 ? "OK" : code == 206 ? "Partial Content" : "Error";
                 byte[] header = Encoding.ASCII.GetBytes("HTTP/1.1 " + code + " " + reason + "\r\nContent-Type: " + type + "\r\nContent-Length: " + size.ToString(CultureInfo.InvariantCulture) + "\r\nConnection: " + (KeepAlive ? "keep-alive\r\nKeep-Alive: timeout=3, max=16" : "close") + "\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; media-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'\r\n" + extra + "\r\n");
                 Started = true; remaining = head ? 0 : size; stream.Write(header, 0, header.Length);
             }
             internal void Bytes(byte[] bytes, string type, int code = 200, string extra = "") { Begin(code, type, bytes.LongLength, extra); Write(bytes, bytes.Length); }
             internal void Json(object value, string extra = "") { Bytes(Encoding.UTF8.GetBytes(new JavaScriptSerializer().Serialize(value)), "application/json; charset=utf-8", 200, extra); }
-            internal void Write(byte[] bytes, int count) { if (!head && count > 0) { stream.Write(bytes, 0, count); remaining -= count; } }
+            internal void Write(byte[] bytes, int count)
+            {
+                if (count < 0 || count > bytes.Length || !Started || (!head && count > remaining)) throw new IOException("响应正文超出声明长度。");
+                if (!head && count > 0) { stream.Write(bytes, 0, count); remaining -= count; }
+            }
         }
         internal sealed class HttpError : Exception
         {
             internal readonly int Code;
-            internal HttpError(int code, string message) : base(message) { Code = code; }
+            internal readonly string ErrorCode;
+            internal HttpError(int code, string message, string errorCode = null) : base(message) { Code = code; ErrorCode = errorCode; }
         }
         private readonly TcpListener listener;
         private readonly Action<Request, Response> handler;
@@ -126,7 +146,11 @@ namespace FeiqLight
                     bool requestedReuse = index < 15 && request.Header("Connection").Equals("keep-alive", StringComparison.OrdinalIgnoreCase);
                     bool fileReuse = requestedReuse && request.Path == "/file" && (request.Method == "GET" || request.Method == "HEAD");
                     bool remoteReuse = requestedReuse && ((request.Path == "/api/screen" && request.Method == "GET") || (request.Path == "/api/input" && request.Method == "POST"));
-                    response = new Response(stream, request.Method == "HEAD", fileReuse, () => !client.Client.Poll(0, SelectMode.SelectRead) || client.Available > 0, client.Close);
+                    Socket acceptedSocket=client.Client;
+                    response = new Response(stream, request.Method == "HEAD", fileReuse, () => !acceptedSocket.Poll(0, SelectMode.SelectRead) || acceptedSocket.Available > 0, client.Close);
+                    string requestId = request.Header("X-FQ-Request-ID");
+                    if (requestId.Length > 0 && (requestId.Length != 32 || !System.Text.RegularExpressions.Regex.IsMatch(requestId, "\\A[0-9a-f]{32}\\z"))) throw new HttpError(400, "请求标识无效");
+                    response.RequestId = requestId;
                     Response currentResponse = response;
                     request.RemoteAuthorized = token => {
                         // 业务授权锁先于连接登记锁，停止与登记不会留下漏关的连接。
@@ -155,7 +179,9 @@ namespace FeiqLight
                 if (response != null && !response.Started) try
                 {
                     HttpError error = e as HttpError;
-                    response.Bytes(Encoding.UTF8.GetBytes(new JavaScriptSerializer().Serialize(new { error = error == null ? "操作失败：文件不可用或连接已关闭" : error.Message })), "application/json; charset=utf-8", error == null ? 500 : error.Code);
+                    Dictionary<string,object> details=new Dictionary<string,object>{{"error",error==null?"操作失败：文件不可用或连接已关闭":error.Message}};
+                    if(error!=null&&error.ErrorCode!=null)details["code"]=error.ErrorCode;
+                    response.Bytes(Encoding.UTF8.GetBytes(new JavaScriptSerializer().Serialize(details)), "application/json; charset=utf-8", error == null ? 500 : error.Code);
                 }
                 catch (IOException) { }
                 catch (ObjectDisposedException) { }

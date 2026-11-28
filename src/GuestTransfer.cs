@@ -117,7 +117,7 @@ namespace FeiqLight
             expiry=new Timer(_=>Dispose(),null,TimeSpan.FromMinutes(lifetimeMinutes),Timeout.InfiniteTimeSpan);
         }
         internal string Url(string address) { return "http://"+address+":"+Port+"/#"+Token; }
-        private void Check() { if(!Active)throw new ToolsHttp.HttpError(410,"临时传输已结束，请让对方重新开启。"); }
+        private void Check() { if(!Active)throw new ToolsHttp.HttpError(410,"临时传输已结束，请让对方重新开启。","sessionEnded"); }
         private void Authorize(ToolsHttp.Request request)
         {
             Check();string supplied=request.Header("X-FQ-Guest");
@@ -159,7 +159,7 @@ namespace FeiqLight
                 Upload upload;
                 lock(gate) {
                     if(key!=null&&uploads.TryGetValue(key,out upload)) {
-                        if(upload.Canceled)throw new ToolsHttp.HttpError(410,"上传已取消。");
+                        if(upload.Canceled)throw new ToolsHttp.HttpError(410,"上传已取消。","taskCanceled");
                         if(upload.Name!=name||upload.Size!=size||upload.Relative!=relative)throw new ToolsHttp.HttpError(409,"上传标识已用于其他文件。");
                         response.Json(new{id=upload.Id,offset=0});return;
                     }
@@ -183,7 +183,7 @@ namespace FeiqLight
                 }
             }
             lock(current) {
-                Check();if(current.Canceled){if(cancelRequest){response.Json(new{ok=true});return;}throw new ToolsHttp.HttpError(410,"上传已取消。");}
+                Check();if(current.Canceled){if(cancelRequest){response.Json(new{ok=true});return;}throw new ToolsHttp.HttpError(410,"上传已取消。","taskCanceled");}
                 if(request.Method=="GET"&&request.Path=="/api/upload-status"){response.Json(new{offset=current.Offset,complete=current.Saved!=null});return;}
                 if(request.Method=="POST"&&request.Path=="/api/cancel") {
                     if(current.Saved!=null)throw new ToolsHttp.HttpError(409,"文件已保存。");
@@ -220,7 +220,7 @@ namespace FeiqLight
         private void CheckText()
         {
             Check();
-            if(textsEnded)throw new ToolsHttp.HttpError(410,"临时传输已结束，请让对方重新开启。");
+            if(textsEnded)throw new ToolsHttp.HttpError(410,"临时传输已结束，请让对方重新开启。","sessionEnded");
             if(!AllowText)throw new ToolsHttp.HttpError(403,"对方未开启文本互传。");
         }
         private void AddText(List<TextEntry> entries,string text,ref int total,ref long next)
@@ -354,6 +354,7 @@ namespace FeiqLight
             Download file;if(!downloads.TryGetValue(request.Parameter("id"),out file))throw new ToolsHttp.HttpError(404,"文件不在本次分享中。");
             var info=new FileInfo(file.Path);if(!info.Exists||info.Length!=file.Size||info.LastWriteTimeUtc.Ticks!=file.Modified||(info.Attributes&FileAttributes.ReparsePoint)!=0||ReceiveStorage.LinkedDirectory(info.DirectoryName))throw new ToolsHttp.HttpError(409,"原文件已变化，请让对方重新选择。");
             using(FileStream input=new FileStream(file.Path,FileMode.Open,FileAccess.Read,FileShare.Read)) {
+                ValidateSource(file,input);
                 long[] range=ToolsHttp.Range(request.Header("Range"),file.Size);if(range==null){response.Bytes(new byte[0],"application/octet-stream",416,"Content-Range: bytes */"+file.Size+"\r\n");return;}
                 input.Position=range[0];long left=Math.Max(0,range[1]-range[0]+1);
                 string headers="Content-Disposition: attachment; filename*=UTF-8''"+Uri.EscapeDataString(file.Name)+"\r\nAccept-Ranges: bytes\r\n";

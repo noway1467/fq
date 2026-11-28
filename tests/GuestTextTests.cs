@@ -84,6 +84,29 @@ namespace FeiqLight.Tests
         }
         private static void GuestTextUiRegression()
         {
+            Run("确认日志恢复订正历史与任务，保留新正文且不复活删除消息",()=>{
+                var store=new LocalStore(Path.Combine(root,"completion-history"));string source=Path.Combine(store.Root,"source.bin");File.WriteAllBytes(source,new byte[]{1,2,3});
+                const string device="abababababababababababababababab";string fingerprint=new string('a',64),peer="device:"+device,hash=SecureIdentity.HashFile(source);
+                using(var identity=new SecureIdentity(store.Root)){identity.ConfirmPeer=(name,code)=>true;identity.EnsureTrusted(device,fingerprint,"测试联系人");}
+                ChatRecord[] records=Enumerable.Range(1,2).Select(index=>new ChatRecord{PeerId=peer,Packet=index,Outgoing=true,Time=DateTime.Now,Text="旧正文",State="已送达",HasAttachments=true,
+                    Transfers=new[]{new FileTransferState{Id=0,Name="source.bin",Size=3,Sha256=hash,Status="等待对方接收",LocalPath=source}}}).ToArray();
+                foreach(ChatRecord record in records)store.Append(record);
+                var offers=records.Select(record=>new LanService.StoredOffer{Key=record.Packet+":0",Path=source,DeviceId=device,Fingerprint=fingerprint,Sha256=hash,Size=3,
+                    ModifiedTicks=File.GetLastWriteTimeUtc(source).Ticks,ExpiresTicks=DateTime.UtcNow.AddDays(1).Ticks,FileId=0,Record=record,TransferState="等待对方接收"}).ToArray();
+                SecureIdentity.AtomicBytes(Path.Combine(store.Root,"transfer-offers.json"),Encoding.UTF8.GetBytes(new System.Web.Script.Serialization.JavaScriptSerializer().Serialize(offers)));
+                File.WriteAllText(Path.Combine(store.Root,"transfer-offer-completions.log"),String.Join("",offers.Select(offer=>offer.Key+":"+offer.ExpiresTicks+":"+hash+":"+device+":"+fingerprint+"\n")),new UTF8Encoding(false));
+                records[0].Text="更新后的正文";store.Append(records[0]);store.DeleteRecords(peer,new[]{records[1]});
+                using(var network=new LanService(new AppSettings{CloseToTray=false,Notifications=false,DeviceId="cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",ReceiveFolder=Path.Combine(store.Root,"received")},FreePort(),true,"completion-history")) {
+                    network.ConfigureSecurity(store.Root,(name,code)=>true);
+                    using(var main=new MainForm(network,store)) {
+                        main.RestoreCompletedOutgoingHistory();main.RestoreCompletedOutgoingHistory();
+                        ChatRecord saved=store.AttachmentHistory(peer).Single();
+                        Check(saved.Packet==1&&saved.Text=="更新后的正文"&&saved.State=="已送达","恢复覆盖新历史或复活已删除消息");
+                        Check(saved.Transfers[0].Status=="对方已校验保存"&&saved.Transfers[0].Percent==100,"历史完成态未修正");
+                        Check(main.TransferRecords.Single().Transfers[0].Status=="对方已校验保存","任务列表状态未修正");
+                    }
+                }
+            });
             Run("文本独立小窗：明暗收发、复制、默认关闭、切网清界面与历史隔离",()=>{
                 foreach(bool dark in new[]{false,true}) {
                     Theme.Configure(dark,"blue");var store=new LocalStore(Path.Combine(root,"text-ui-"+dark));
@@ -118,6 +141,22 @@ namespace FeiqLight.Tests
                         Check(!session.Active&&session.Texts(false).Length==0&&session.Texts(true).Length==0,"切网在界面回调前没有同步清内存");Application.DoEvents();
                         Check(Field<GuestTransfer>(window,"session")==null&&!panel.Visible&&staleDraft.Text.Length==0&&history.Items.Count==0,"切网残留文本小窗或内容");
                         Check(session.Texts(false).Length==0&&session.Texts(true).Length==0,"切网没有清队列");
+                        foreach(string reason in new[]{"manual","expiry","network"}) {
+                            Field<ToggleSwitch>(window,"upload").Checked=true;
+                            Field<ToggleSwitch>(window,"allowText").Checked=true;Field<Button>(window,"start").PerformClick();
+                            GuestTransfer current=Field<GuestTransfer>(window,"session");Check(current!=null&&current.AllowText,"文本会话未启动");
+                            if(reason=="manual")window.Stop();
+                            else {
+                                if(reason=="expiry")typeof(GuestTransfer).GetField("lifetimeMilliseconds",BindingFlags.Instance|BindingFlags.NonPublic).SetValue(current,0L);
+                                else Field<Action>(network,"NetworkReset")();
+                                Tick(Field<System.Windows.Forms.Timer>(window,"timer"));Application.DoEvents();
+                            }
+                            Check(!Field<ToggleSwitch>(window,"allowText").Checked,"终止后文本开关未重置："+reason);
+                            Field<Button>(window,"start").PerformClick();GuestTransfer next=Field<GuestTransfer>(window,"session");
+                            Check(next!=null&&!next.AllowText,"下一次会话继承文本权限："+reason);
+                            Check(Request(next.Port,"/api/text",next.Token).Code==403&&Json(next,"/api/text",new{text="禁止继承"}).Code==403,"下一次会话文本API未拒绝："+reason);
+                            window.Stop();
+                        }
                         window.Close();main.ExitApplication();
                     }
                 }

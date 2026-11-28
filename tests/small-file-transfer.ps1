@@ -1,4 +1,4 @@
-param([string]$JavaHome=$env:JAVA_HOME,[string]$TemporaryDirectory,[switch]$WindowsOnly,[switch]$AndroidOnly,[ValidateSet('all','batch','boundary','recovery','eviction')][string]$Case='all')
+param([string]$JavaHome=$env:JAVA_HOME,[string]$TemporaryDirectory,[switch]$WindowsOnly,[switch]$AndroidOnly,[ValidateSet('all','batch','boundary','recovery','eviction','phase2')][string]$Case='all')
 $ErrorActionPreference='Stop'
 [Console]::OutputEncoding=[Text.Encoding]::UTF8
 $root=Split-Path -Parent $PSScriptRoot

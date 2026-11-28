@@ -77,6 +77,7 @@ namespace FeiqLight.Tests
             if (args.Length > 0 && args[0] == "wheel-desktop") { WheelDesktop(root); return Environment.ExitCode; }
             if (args.Length > 2 && args[0] == "benchmark") { Benchmark(root, Path.GetFullPath(args[2])); return Environment.ExitCode; }
             if (args.Length > 2 && args[0] == "upgrade") { try { Upgrade(root, Path.GetFullPath(args[2]), args.Length > 3 ? Path.GetFullPath(args[3]) : Path.GetFullPath(args[2])); return 0; } catch(Exception error) { Console.WriteLine("UPGRADE FAIL: " + error.GetType().Name + " " + error.Message); return 1; } }
+            if(args.Length>2&&args[0]=="loopback-package"){try{LoopbackPackage(root,Path.GetFullPath(args[2]));return 0;}catch(Exception error){Console.WriteLine("LOOPBACK FAIL: "+error);return 1;}}
             int passed = 0, failed = 0;
             Action<string, Action> run = (name, test) => { try { test(); Console.WriteLine("PASS " + name); passed++; } catch (Exception e) { Console.WriteLine("FAIL " + name + ": " + e); failed++; } };
             if(args.Length>0&&args[0]=="shared-files"){RunSharedFiles(run,root,args.Length>2?args[2]:"");Console.WriteLine("RESULT "+passed+" passed, "+failed+" failed");return failed==0?0:1;}
@@ -590,7 +591,8 @@ namespace FeiqLight.Tests
             for(int run=0;run<2;run++)
             {
                 string package=Path.Combine(root,run==0?"first":"replacement");Directory.CreateDirectory(package);string copy=Path.Combine(package,"飞Q.exe");File.Copy(run==0?previousExecutable:executable,copy,true);
-                using(Process process=Process.Start(new ProcessStartInfo(copy,"--autostart --loopback --port "+(port-1)+" --profile \""+profile+"\""){UseShellExecute=false,WindowStyle=ProcessWindowStyle.Hidden}))
+                bool explicitPlainTools=new Version(FileVersionInfo.GetVersionInfo(copy).FileVersion)>=new Version(0,8,25,0);
+                using(Process process=Process.Start(new ProcessStartInfo(copy,"--autostart --loopback "+(explicitPlainTools?"--test-plain-tools ":"")+"--port "+(port-1)+" --profile \""+profile+"\""){UseShellExecute=false,WindowStyle=ProcessWindowStyle.Hidden}))
                 {
                     try
                     {

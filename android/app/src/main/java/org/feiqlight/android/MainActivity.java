@@ -2341,7 +2341,7 @@ public final class MainActivity extends Activity implements ChatService.Observer
 
         Dialog dialog=sheet("临时浏览器传输",box,"开启临时传输",d->{
             if(!saveGuestLifetime(lifetime))return;
-            source.startGuest(new ArrayList<>(guestFiles),receive.isChecked(),allowText.isChecked(),success->{if(success&&!isDestroyed()&&
+            source.startGuest(new ArrayList<>(guestFiles),receive.isChecked(),allowText.isChecked(),success->{if(success)guestText=false;if(success&&!isDestroyed()&&
                     service==source){
                 d.dismiss();
                 showGuest();

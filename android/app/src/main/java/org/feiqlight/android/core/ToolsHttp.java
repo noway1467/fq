@@ -12,7 +12,9 @@ public final class ToolsHttp implements AutoCloseable {
     public static final class Failure extends IOException {
         private static final long serialVersionUID=1L;
         public final int code;
-        public Failure(int code,String text) {super(text);this.code=code;}
+        public final String errorCode;
+        public Failure(int code,String text) {this(code,text,null);}
+        public Failure(int code,String text,String errorCode) {super(text);this.code=code;this.errorCode=errorCode;}
     }
     public static final class Request {
         public String method,path,query,address,fingerprint;
@@ -35,12 +37,17 @@ public final class ToolsHttp implements AutoCloseable {
         private final Socket disconnect;
         private long connectionCheck;
         private long remaining;
+        private long lastProgress;
+        private boolean archiveProgress;
+        private String requestId="";
         boolean started;
         Response(OutputStream output,boolean head,AtomicLong progress,boolean keepAlive) {this(output,head,progress,keepAlive,null);}
         Response(OutputStream output,boolean head,AtomicLong progress,boolean keepAlive,Socket socket) {this(output,head,progress,keepAlive,socket,socket);}
         Response(OutputStream output,boolean head,AtomicLong progress,boolean keepAlive,Socket socket,Socket disconnect) {this.output=output;this.head=head;this.progress=progress;this.keepAlive=keepAlive;this.socket=socket;this.disconnect=disconnect;}
         public void begin(int code,String type,long length,String extra) throws IOException {
+            if(started||length<0)throw new IOException("响应状态或长度无效");
             if(code>=300)keepAlive=false;
+            if(!requestId.isEmpty())extra+="X-FQ-Request-ID: "+requestId+"\r\n";
             String header="HTTP/1.1 "+code+" "+(code==200?"OK":code==206?"Partial Content":"Error")+"\r\nContent-Type: "+type+"\r\nContent-Length: "+length+"\r\nConnection: "+(keepAlive?"keep-alive\r\nKeep-Alive: timeout=3, max=16":"close")+"\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; media-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'\r\n"+extra+"\r\n";
             started=true;remaining=head?0:length;output.write(header.getBytes(StandardCharsets.US_ASCII));progress.set(System.nanoTime());
         }
@@ -49,10 +56,16 @@ public final class ToolsHttp implements AutoCloseable {
         // 本机确认最多等待 30 秒；只给该请求增加等待时间，不放宽视频写入超时。
         public void waitingForUser(){progress.set(System.nanoTime()+TimeUnit.SECONDS.toNanos(20));}
         // CRC 预检还未发送响应头，用实际读取进度避免被误判为空闲连接。
-        public void processing()throws IOException{checkConnection();progress.set(System.nanoTime());}
+        public void processing()throws IOException{
+            checkConnection();long now=System.nanoTime();progress.set(now);
+            if(!started&&archiveProgress&&(lastProgress==0||now-lastProgress>=TimeUnit.SECONDS.toNanos(1))){
+                lastProgress=now;output.write("HTTP/1.1 102 Processing\r\nX-FQ-Archive-Progress: 1\r\n\r\n".getBytes(StandardCharsets.US_ASCII));output.flush();
+            }
+        }
+        public void enableArchiveProgress(){archiveProgress=true;}
         public void disableReuse(){keepAlive=false;}
         public void abort()throws IOException{if(disconnect!=null)disconnect.close();}
-        public void checkConnection()throws IOException {
+        public synchronized void checkConnection()throws IOException {
             if(socket==null)return;
             if(socket.isClosed())throw new IOException("下载连接已关闭");
             if(keepAlive)return;
@@ -68,7 +81,10 @@ public final class ToolsHttp implements AutoCloseable {
             }catch(SocketTimeoutException expected){/* 没有后续输入表示下载连接仍然开放。 */}
             finally{if(!socket.isClosed())socket.setSoTimeout(timeout);}
         }
-        public void write(byte[] bytes,int length) throws IOException {if(!head){output.write(bytes,0,length);remaining-=length;}progress.set(System.nanoTime());}
+        public void write(byte[] bytes,int length) throws IOException {
+            if(length<0||length>bytes.length||!started||(!head&&length>remaining))throw new IOException("响应正文超出声明长度");
+            if(!head){output.write(bytes,0,length);remaining-=length;}progress.set(System.nanoTime());
+        }
     }
     public interface Handler {void handle(Request request,Response response) throws Exception;}
     private interface RemoteAuthorization {void bind(String token)throws IOException;}
@@ -77,7 +93,7 @@ public final class ToolsHttp implements AutoCloseable {
     private final Set<Socket> clients=new HashSet<>();
     private final Map<Socket,String> remoteClients=new HashMap<>();
     private final Map<Socket,String> fingerprints=new HashMap<>();
-    private final ScheduledExecutorService timeouts=Executors.newSingleThreadScheduledExecutor(r->{Thread t=new Thread(r,"shared-files-timeouts");t.setDaemon(true);return t;});
+    private static final ScheduledExecutorService timeouts=Executors.newScheduledThreadPool(2,r->{Thread t=new Thread(r,"shared-files-timeouts");t.setDaemon(true);return t;});
     private final ExecutorService workers=Executors.newFixedThreadPool(12,r->{Thread t=new Thread(r,"shared-files-http");t.setDaemon(true);return t;});
     private boolean closed;
     private final SecureIdentity security;
@@ -99,7 +115,7 @@ public final class ToolsHttp implements AutoCloseable {
         this.binding=binding;
         this.handler=handler;server=new ServerSocket();
         try {server.bind(new InetSocketAddress(loopback?InetAddress.getByName("127.0.0.1"):InetAddress.getByName("0.0.0.0"),port),16);}
-        catch(IOException e){server.close();workers.shutdownNow();timeouts.shutdownNow();throw e;}
+        catch(IOException e){server.close();workers.shutdownNow();throw e;}
         if(security!=null){security.observeRevocation(revoked);security.registerReverseListener(port(),this::acceptReverse);}
         Thread accept=new Thread(this::accept,"shared-files-listener");accept.setDaemon(true);accept.start();
     }
@@ -132,6 +148,9 @@ public final class ToolsHttp implements AutoCloseable {
             boolean remoteReuse=requestedReuse&&((request.path.equals("/api/screen")&&request.method.equals("GET"))||(request.path.equals("/api/input")&&request.method.equals("POST")));
             request.fingerprint=fingerprint;if(security!=null&&!security.isTrustedFingerprint(fingerprint))throw new IOException("设备信任已撤销");
             response=new Response(transport.getOutputStream(),request.method.equals("HEAD"),progress,fileReuse,transport,socket);
+            String requestId=request.header("X-FQ-Request-ID");
+            if(!requestId.isEmpty()&&!requestId.matches("[0-9a-f]{32}"))throw new Failure(400,"请求标识无效");
+            response.requestId=requestId;
             Response currentResponse=response;
             request.remoteAuthorized=token->{
                 synchronized(clients){
@@ -150,7 +169,10 @@ public final class ToolsHttp implements AutoCloseable {
         } catch(Exception e) {
             if(response!=null&&!response.started)try {
                 String text=e instanceof Failure?e.getMessage():"文件不可用或连接已关闭";
-                response.bytes(e instanceof Failure?((Failure)e).code:500,"application/json; charset=utf-8",("{\"error\":\""+text.replace("\\","\\\\").replace("\"","\\\"").replace("\n"," ").replace("\r"," ")+"\"}").getBytes(StandardCharsets.UTF_8),"");
+                String errorCode=e instanceof Failure?((Failure)e).errorCode:null;
+                String json="{\"error\":\""+text.replace("\\","\\\\").replace("\"","\\\"").replace("\n"," ").replace("\r"," ")+"\"";
+                if(errorCode!=null)json+=",\"code\":\""+errorCode.replace("\\","\\\\").replace("\"","\\\"").replace("\n"," ").replace("\r"," ")+"\"";
+                response.bytes(e instanceof Failure?((Failure)e).code:500,"application/json; charset=utf-8",(json+"}").getBytes(StandardCharsets.UTF_8),"");
             }catch(IOException ignored){/* 对端已经关闭，不能再发送错误响应。 */}
         } finally {if(timeout!=null)timeout.cancel(false);try{socket.close();}catch(IOException ignored){}synchronized(clients){clients.remove(socket);remoteClients.remove(socket);fingerprints.remove(socket);}}
     }
@@ -185,7 +207,7 @@ public final class ToolsHttp implements AutoCloseable {
             if(security!=null){security.removeRevocationObserver(revoked);security.unregisterReverseListener(port());}
             try{server.close();}catch(IOException ignored){}
             for(Socket socket:clients)try{socket.close();}catch(IOException ignored){}
-            workers.shutdownNow();timeouts.shutdownNow();
+            workers.shutdownNow();
         }
     }
     public void disconnectClients(){synchronized(clients){for(Socket socket:clients)try{socket.close();}catch(IOException ignored){}}}

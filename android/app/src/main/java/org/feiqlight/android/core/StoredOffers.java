@@ -80,12 +80,15 @@ final class StoredOffers {
         }
     }
 
-    static void write(File saved, byte[] contents) throws IOException {
+    static IOException write(File saved, byte[] contents) throws IOException {
         synchronized (storedOffersGate) {
             SecureIdentity.atomic(saved, contents);
             File journal=completionFile(saved.getParentFile());
             // 快照原子提交后才清日志；在这两步之间崩溃，恢复时重放相同记录仍是安全的。
-            if(journal.isFile()&&journal.length()>0)try(FileOutputStream output=new FileOutputStream(journal)){output.getFD().sync();}
+            try {
+                if(journal.isFile()&&journal.length()>0)try(FileOutputStream output=new FileOutputStream(journal)){output.getFD().sync();}
+            }catch(IOException error){return error;}
+            return null;
         }
     }
 

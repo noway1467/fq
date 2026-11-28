@@ -549,6 +549,40 @@ public final class SettingsMessageTest {
             restored.configureSecurity(security,(name,code)->true);assertTrue(restored.offering(target.id(),10,0));assertFalse(restored.canCancelOutgoing(target.id(),10));assertTrue(restored.offering(target.id(),11,0));assertTrue(restored.canCancelOutgoing(target.id(),11));
         }
     }
+    @Test public void completionJournalRepairsHistoryWithoutRevivingDeletedMessage()throws Exception {
+        Context context=RuntimeEnvironment.getApplication();context.getSharedPreferences("settings",0).edit().putBoolean("auto_connect",false).putBoolean("connection_enabled",false).commit();
+        ServiceController<ChatService> controller=Robolectric.buildService(ChatService.class).create();ChatService service=controller.get();
+        try {
+            settle(service);File original=new File(service.getFilesDir(),"replayed.bin");java.nio.file.Files.write(original.toPath(),new byte[]{1,2,3});
+            File security=new File(service.getFilesDir(),"security");
+            LanNode.Peer peer=new LanNode.Peer(LanNode.endpoint("127.0.0.1:34251"),"replayed","host","测试","");peer.deviceId="a".repeat(32);peer.fingerprint="b".repeat(64);
+            SecureIdentity identity=AppIdentity.get(service);identity.confirmation=(name,code)->true;identity.ensureTrusted(peer.deviceId,peer.fingerprint,peer.name);
+            writeLegacyOffers(security,original,peer,peer);String hash=SecureIdentity.hashFile(original);StringBuilder completed=new StringBuilder();
+            ChatStore store=(ChatStore)field(service,"store");
+            for(int index=0;index<3;index++) {
+                LanNode.Message message=new LanNode.Message();message.number=10+index;message.outgoing=true;message.time=System.currentTimeMillis();message.state="已送达";message.text="保留现有正文";
+                Protocol.Attachment file=new Protocol.Attachment(0,original.getName(),3,0);file.sha256=hash;message.files.add(file);
+                if(index<2){store.message(peer,message,false,false);store.transfer(ChatService.fileKey(peer.id(),message.number,0,true),peer.id(),message.number,0,"等待对方接收");}
+                if(index==1)store.deleteMessages(peer.id(),Collections.singletonList(message));
+                completed.append(message.number).append(":0:").append(System.currentTimeMillis()+86400000).append(':').append(hash).append(':').append(peer.deviceId).append(':').append(peer.fingerprint).append('\n');
+            }
+            java.nio.file.Files.write(new File(security,"transfer-offer-completions.log").toPath(),completed.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            int port=TestPorts.chat();service.connectionFactory=(prefs,listener)->new LanNode(port,true,"recovery","host","测试","",listener);
+            service.networkFactory=manager->new LanNetwork(manager,Collections::emptyList);
+            service.onStartCommand(new Intent(),0,1);settle(service);
+            assertNotNull("恢复节点未启动",field(service,"node"));
+            ChatStore.TransferState state=store.transfer(ChatService.fileKey(peer.id(),10,0,true));
+            assertNotNull(state);assertEquals("对方已校验保存",state.state);assertEquals(100,state.percent);
+            assertEquals("保留现有正文",store.findMessage(peer.id(),10,true).text);
+            assertEquals("对方已校验保存",service.progress(peer.id(),10,0,true).state);
+            for(long packet:new long[]{11,12}) {
+                assertNull(store.findMessage(peer.id(),packet,true));assertNull(store.transfer(ChatService.fileKey(peer.id(),packet,0,true)));
+                assertNull(service.progress(peer.id(),packet,0,true));
+            }
+            ((LanNode)field(service,"node")).replayCompletedOutgoingStates();settle(service);
+            assertEquals(1,store.history(peer.id()).size());assertEquals(100,store.transfer(ChatService.fileKey(peer.id(),10,0,true)).percent);
+        }finally{controller.destroy();}
+    }
     @Test public void offlineOutgoingFileCancelAndDelete() throws Exception {
         ServiceController<ChatService> sc=Robolectric.buildService(ChatService.class).create();ChatService service=sc.get();
         shadowOf(RuntimeEnvironment.getApplication()).setComponentNameAndServiceForBindService(new ComponentName(service,ChatService.class),service.onBind(new Intent()));

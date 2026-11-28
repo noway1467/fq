@@ -3,6 +3,10 @@ package org.feiqlight.android;
 import android.content.*;
 import android.content.pm.ProviderInfo;
 import android.net.Uri;
+import android.os.CancellationSignal;
+import android.os.ParcelFileDescriptor;
+import android.database.Cursor;
+import android.database.MatrixCursor;
 import android.provider.DocumentsContract;
 import org.feiqlight.android.core.*;
 import org.json.*;
@@ -218,5 +222,71 @@ public final class GuestArchiveTest {
             }
         }
         context.getContentResolver().releasePersistableUriPermission(uri,Intent.FLAG_GRANT_READ_URI_PERMISSION);
+    }
+    public static final class BlockingDocuments extends ContentProvider {
+        File file;volatile String block="";
+        final CountDownLatch entered=new CountDownLatch(1),cancelled=new CountDownLatch(1);
+        @Override public boolean onCreate(){return true;}
+        private void block(String operation,CancellationSignal signal) {
+            if(!block.equals(operation))return;
+            assertNotNull("阻塞SAF调用没有CancellationSignal",signal);
+            signal.setOnCancelListener(cancelled::countDown);entered.countDown();
+            try{assertTrue("SAF调用未在1秒内取消",cancelled.await(1,TimeUnit.SECONDS));}
+            catch(InterruptedException error){Thread.currentThread().interrupt();throw new AssertionError(error);}
+            signal.throwIfCanceled();
+        }
+        @Override public Cursor query(Uri uri,String[] projection,String selection,String[] args,String sort,CancellationSignal signal){
+            block("query",signal);return query(uri,projection,selection,args,sort);
+        }
+        @Override public Cursor query(Uri uri,String[] projection,android.os.Bundle arguments,CancellationSignal signal){
+            block("query",signal);return query(uri,projection,null,null,null);
+        }
+        @Override public Cursor query(Uri uri,String[] projection,String selection,String[] args,String sort){
+            MatrixCursor result=new MatrixCursor(projection);Object[] row=new Object[projection.length];
+            for(int index=0;index<projection.length;index++)switch(projection[index]) {
+                case DocumentsContract.Document.COLUMN_DISPLAY_NAME:row[index]="source.bin";break;
+                case DocumentsContract.Document.COLUMN_SIZE:row[index]=file.length();break;
+                case DocumentsContract.Document.COLUMN_LAST_MODIFIED:row[index]=1000L;break;
+                default:row[index]="file";
+            }
+            result.addRow(row);return result;
+        }
+        @Override public ParcelFileDescriptor openFile(Uri uri,String mode,CancellationSignal signal)throws FileNotFoundException {
+            block("open",signal);return ParcelFileDescriptor.open(file,ParcelFileDescriptor.MODE_READ_ONLY);
+        }
+        @Override public ParcelFileDescriptor openFile(Uri uri,String mode)throws FileNotFoundException{return openFile(uri,mode,null);}
+        @Override public android.content.res.AssetFileDescriptor openTypedAssetFile(Uri uri,String mime,android.os.Bundle options,CancellationSignal signal)throws FileNotFoundException {
+            return new android.content.res.AssetFileDescriptor(openFile(uri,"r",signal),0,android.content.res.AssetFileDescriptor.UNKNOWN_LENGTH);
+        }
+        @Override public android.content.res.AssetFileDescriptor openAssetFile(Uri uri,String mode,CancellationSignal signal)throws FileNotFoundException {
+            return new android.content.res.AssetFileDescriptor(openFile(uri,mode,signal),0,android.content.res.AssetFileDescriptor.UNKNOWN_LENGTH);
+        }
+        @Override public String getType(Uri uri){return "application/octet-stream";}
+        @Override public Uri insert(Uri uri,ContentValues values){throw new UnsupportedOperationException();}
+        @Override public int delete(Uri uri,String selection,String[] args){throw new UnsupportedOperationException();}
+        @Override public int update(Uri uri,ContentValues values,String selection,String[] args){throw new UnsupportedOperationException();}
+    }
+    @Test public void blockedSafQueryAndOpenCancelOnStopExpiryAndClientDisconnect()throws Exception {
+        Context context=RuntimeEnvironment.getApplication();
+        for(String operation:new String[]{"query","open"})for(String reason:new String[]{"stop","expiry","disconnect"}) {
+            BlockingDocuments provider=new BlockingDocuments();ProviderInfo info=new ProviderInfo();info.authority="guest.block."+operation+reason;
+            info.exported=true;info.grantUriPermissions=true;provider.attachInfo(context,info);ShadowContentResolver.registerProviderInternal(info.authority,provider);
+            android.content.pm.ResolveInfo resolved=new android.content.pm.ResolveInfo();resolved.providerInfo=info;
+            Shadows.shadowOf(context.getPackageManager()).addResolveInfoForIntent(new Intent(DocumentsContract.PROVIDER_INTERFACE),resolved);
+            provider.file=new File(context.getFilesDir(),"blocked-"+operation+reason+".bin");Files.write(provider.file.toPath(),new byte[]{1,2,3});
+            Uri uri=DocumentsContract.buildDocumentUri(info.authority,"file");context.getContentResolver().takePersistableUriPermission(uri,Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            DocumentSource source=new DocumentSource(context,uri);
+            try(GuestTransfer server=new GuestTransfer(context,Collections.singletonList(source),false,true);
+                Socket client=new Socket("127.0.0.1",server.port())) {
+                provider.block=operation;
+                client.getOutputStream().write(("GET /archive?scope=all HTTP/1.1\r\nHost: 127.0.0.1:"+server.port()+"\r\nX-FQ-Guest: "+server.token+"\r\nConnection: close\r\n\r\n").getBytes(StandardCharsets.US_ASCII));
+                assertTrue("SAF夹具未进入阻塞："+operation+"/"+reason,provider.entered.await(3,TimeUnit.SECONDS));
+                long started=System.nanoTime();
+                if(reason.equals("stop"))server.close();else if(reason.equals("expiry"))set(server,"deadline",System.nanoTime()-1);else client.close();
+                assertTrue("取消信号未到达："+operation+"/"+reason,provider.cancelled.await(1,TimeUnit.SECONDS));
+                while((boolean)field(server,"archiveBusy")&&System.nanoTime()-started<TimeUnit.SECONDS.toNanos(1))Thread.sleep(5);
+                assertFalse("取消后归档工作线程未释放",(boolean)field(server,"archiveBusy"));
+            }finally{context.getContentResolver().releasePersistableUriPermission(uri,Intent.FLAG_GRANT_READ_URI_PERMISSION);}
+        }
     }
 }

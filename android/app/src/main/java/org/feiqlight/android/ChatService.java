@@ -70,8 +70,12 @@ public final class ChatService extends Service {
         LanNode current=node;LanNetwork route=lanNetwork;long epoch=connectionEpoch;int transport=current==null?0:current.transportEpoch();
         queue(()->{try {
             if(current==null||route==null)throw new IOException("请先连接局域网");current.verifyPeer(peer);
-            ToolsGateway gateway=new ToolsGateway(current.security(),peer,port,route,current);
-            main.post(()->{if(!currentConnection(epoch)||node!=current||transport!=current.transportEpoch()){gateway.close();return;}gateways.add(gateway);
+            gateways.removeIf(ToolsGateway::isClosed);
+            ToolsGateway existing=gateways.stream().filter(value->value.matches(peer,port)).findFirst().orElse(null);
+            if(existing==null&&gateways.size()>=8)throw new IOException("已打开 8 个设备工具入口，请等待空闲入口回收后重试");
+            ToolsGateway gateway=existing==null?new ToolsGateway(current.security(),peer,port,route,current):existing;
+            if(existing==null)gateways.add(gateway);
+            main.post(()->{if(!currentConnection(epoch)||node!=current||transport!=current.transportEpoch()){gateways.remove(gateway);gateway.close();return;}
                 ready.accept(toolIntent(this,Uri.parse(gateway.url()+"#"+mode),peer.id(),mode,phone));});
         }catch(Exception error){fail(error);}});
     }
@@ -85,9 +89,7 @@ public final class ChatService extends Service {
                 requireNode().forgetSecurity(peer);
                 new ToolsPairings(this).forgetFingerprint(peer.fingerprint);
                 main.post(()->{
-                    closeGateways();
-                    closeSharing();
-                    PhoneRemoteService.stopActive();
+                    gateways.removeIf(ToolsGateway::isClosed);
                 });
                 showError("已撤销设备信任，下次连接需重新核对");
             }
@@ -438,7 +440,12 @@ public final class ChatService extends Service {
                     }
                     @Override public void message(LanNode.Peer peer,LanNode.Message message,boolean update) { if(currentConnection(epoch)||update) incoming(peer,message,update,epoch); }
                     @Override public void fileProgress(LanNode.Peer peer,long packet,long file,int percent,String state,double bytesPerSecond) {
-                        main.post(()->{if(currentConnection(epoch))ChatService.this.fileProgress(peer.id(),packet,file,true,percent,state,bytesPerSecond,null);});
+                        queue(()->{
+                            if(!currentConnection(epoch))return;
+                            LanNode.Message saved=store.findMessage(peer.id(),packet,true);
+                            if(saved==null||saved.files.stream().noneMatch(item->item.id==file))return;
+                            main.post(()->{if(currentConnection(epoch))ChatService.this.fileProgress(peer.id(),packet,file,true,percent,state,bytesPerSecond,null);});
+                        });
                     }
                     @Override public void offerCanceled(LanNode.Peer peer,long packet) { if(currentConnection(epoch))ChatService.this.offerCanceled(peer,packet); }
                 });
@@ -447,6 +454,7 @@ public final class ChatService extends Service {
                 next.setSourceResolver(key->new DocumentSource(this,Uri.parse(key)));
                 next.configureSecurity(new File(getFilesDir(),"security"),AppIdentity.get(this),(name,code)->securityConfirmation!=null&&securityConfirmation.confirm(name,code));
                 Map<String,String> savedStates=new HashMap<>();for(ChatStore.TransferState state:store.transfers())savedStates.put(state.key,state.state);next.restoreOutgoingStates(savedStates);
+                next.replayCompletedOutgoingStates();
                 next.rememberPeers(store.conversations().stream().map(c->c.peer).collect(java.util.stream.Collectors.toList()));
                 next.rememberEndpoints(store.conversations().stream().map(c->c.peer.endpoint).collect(java.util.stream.Collectors.toList()));
                 final LanNetwork route=networkFactory.apply(getSystemService(ConnectivityManager.class));

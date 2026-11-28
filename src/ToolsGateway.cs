@@ -36,6 +36,7 @@ namespace FeiqLight
         private readonly Peer peer;
         private readonly HashSet<TcpClient> clients=new HashSet<TcpClient>();
         private readonly HashSet<Connection> upstreams = new HashSet<Connection>();
+        private readonly Dictionary<CancellationTokenSource,bool> connecting = new Dictionary<CancellationTokenSource,bool>();
         private readonly object gate = new object();
         private readonly Slot screen = new Slot(), input = new Slot();
         private readonly Stopwatch clock = Stopwatch.StartNew();
@@ -45,7 +46,14 @@ namespace FeiqLight
         private string sessionCookie;
         private long sessionGeneration;
         private bool closed;
+        private long lastActivity;
+        internal const long ScreenResponseLimit=16*1024*1024, InputResponseLimit=64*1024;
         internal bool IsClosed { get { lock(gate)return closed; } }
+        internal bool Matches(Peer value,int port)
+        {
+            if(!Available())return false;
+            lock(gate){if(value.DeviceId!=deviceId||value.Fingerprint!=fingerprint||port!=target.Port)return false;lastActivity=clock.ElapsedMilliseconds;return true;}
+        }
         internal string Url { get { return "http://"+listener.LocalEndpoint+"/?access="+access; } }
         internal ToolsGateway(SecureIdentity security,Peer peer,int port,bool loopback,LanService node=null)
         {
@@ -54,7 +62,7 @@ namespace FeiqLight
             if(!security.IsTrusted(deviceId,fingerprint))throw new IOException("请先核对设备身份。");
             if(!loopback){LanNetwork.Link route=LanNetwork.Route(LanNetwork.Scan(),target.Address);if(route==null)throw new IOException("目标不在当前物理局域网内。");local=route.Address;routeIndex=route.Index;}
             else if(!IPAddress.IsLoopback(target.Address))throw new IOException("回环模式禁止局域网连接。");
-            cookiePrefix="g"+SecureIdentity.Hash(Encoding.UTF8.GetBytes(peer.DeviceId+":"+port)).Substring(0,16)+"_";
+            cookiePrefix="g"+SecureIdentity.Hash(Encoding.UTF8.GetBytes(peer.DeviceId+":"+port+":"+fingerprint)).Substring(0,16)+"_";
             listener=new TcpListener(IPAddress.Loopback,0);listener.Start(12);
             idleTimer = new Timer(_ => ExpireIdle(), null, 1000, 1000);
             security.TrustRevoked+=OnRevoked;
@@ -64,7 +72,7 @@ namespace FeiqLight
         private void OnRevoked(string value){if(value==fingerprint)Dispose();}
         private void Accept()
         {
-            try {while(true){TcpClient client=listener.AcceptTcpClient();lock(gate){if(closed||clients.Count>=12){client.Close();if(closed)return;continue;}clients.Add(client);}Task.Run(()=>Serve(client));}}
+            try {while(true){TcpClient client=listener.AcceptTcpClient();lock(gate){if(closed||clients.Count>=12){client.Close();if(closed)return;continue;}clients.Add(client);lastActivity=clock.ElapsedMilliseconds;}Task.Run(()=>Serve(client));}}
             catch(SocketException){Dispose();}catch(ObjectDisposedException){}
         }
         private void Serve(TcpClient client)
@@ -73,6 +81,8 @@ namespace FeiqLight
             Lease lease=null;
             bool reusable=false,downstreamStarted=false,authenticationRejected=false;
             int rejection=0;
+            Timer readDeadline=null,downstreamMonitor=null;
+            bool timedOut=false;
             try {
                 if(!Available())return;
                 client.ReceiveTimeout=5000;client.SendTimeout=15000;RequestInput deadline=new RequestInput(client);deadline.Begin(5000);
@@ -96,6 +106,8 @@ namespace FeiqLight
                 string[] forwardedCookies=parts.Where(s=>s.StartsWith(cookiePrefix,StringComparison.Ordinal)).Select(s=>s.Substring(cookiePrefix.Length)).ToArray();
                 string remoteCookie=RemoteCookie(forwardedCookies);
                 string targetPath=StripAccess(first[1]),path=targetPath.Split('?')[0];
+                bool archive=path=="/file"&&targetPath.Split('?').Skip(1).SelectMany(value=>value.Split('&')).Contains("archive=store");
+                bool remoteResponse=path=="/api/screen"||path=="/api/input";
                 long generation;lock(gate)generation=sessionGeneration;
                 string csrf;fields.TryGetValue("X-FQ-Token",out csrf);
                 bool logout=first[0]=="POST"&&path=="/api/logout"&&remoteCookie.Length>0&&csrf==remoteCookie.Substring(remoteCookie.IndexOf('=')+1);
@@ -109,10 +121,19 @@ namespace FeiqLight
                     lease=Acquire(path=="/api/screen"?screen:input,remoteCookie);
                 fields["Host"]=remoteHost;fields["Connection"]=lease==null?"close":"keep-alive";if(origin!=null)fields["Origin"]="https://"+remoteHost;
                 fields.Remove("X-FQ-Gateway");fields.Remove("Referer");
+                fields.Remove("X-FQ-Archive-Progress");if(archive)fields["X-FQ-Archive-Progress"]="1";
+                string requestId=Guid.NewGuid().ToString("N");fields["X-FQ-Request-ID"]=requestId;
                 fields["Cookie"]=String.Join("; ",forwardedCookies);
+                Socket downstreamSocket=client.Client;
+                if(archive)downstreamMonitor=new Timer(_=>{
+                    try{if(downstreamSocket.Poll(0,SelectMode.SelectRead)&&downstreamSocket.Available==0){Connection active=remote;if(active!=null)CloseConnection(active);}}
+                    catch(SocketException){}catch(ObjectDisposedException){}
+                },null,100,100);
                 for(int attempt=0;attempt<2;attempt++)
                 {
                     remote=TakeConnection(lease);
+                    if(remoteResponse&&readDeadline==null)readDeadline=new Timer(_=>{timedOut=true;Connection active=remote;if(active!=null)CloseConnection(active);},null,10000,Timeout.Infinite);
+                    if(timedOut)throw new IOException("远控响应超时。");
                     bool reused=remote.Requests>0;
                     try
                     {
@@ -120,7 +141,10 @@ namespace FeiqLight
                     Write(tls,first[0]+" "+targetPath+" "+first[2]+"\r\n"+String.Join("\r\n",fields.Select(p=>p.Key+": "+p.Value))+"\r\n\r\n");
                     // Framework SslStream 的空写入仍会发 TLS 记录；GET 后多出的未读记录会令对端关闭时复位连接。
                     if(body.Length>0)tls.Write(body,0,body.Length);tls.Flush();
-                    string response=ReadHeader(tls);List<string> responseLines=response.Split(new[]{"\r\n"},StringSplitOptions.RemoveEmptyEntries).ToList();
+                    string response;
+                    do {response=ReadHeader(tls);if(response.StartsWith("HTTP/1.1 102 ",StringComparison.Ordinal)&&(!archive||!response.Contains("\r\nX-FQ-Archive-Progress: 1\r\n")))throw new IOException("归档进展响应无效。");}
+                    while(response.StartsWith("HTTP/1.1 102 ",StringComparison.Ordinal));
+                    List<string> responseLines=response.Split(new[]{"\r\n"},StringSplitOptions.RemoveEmptyEntries).ToList();
                     string[] status=responseLines[0].Split(new[]{' '},3);int code;
                     if(status.Length!=3||status[0]!="HTTP/1.1"||!Int32.TryParse(status[1],NumberStyles.None,CultureInfo.InvariantCulture,out code)||code<200||code>599)throw new IOException("共享响应状态无效。");
                     authenticationRejected=code==401||code==403;
@@ -128,10 +152,13 @@ namespace FeiqLight
                     bool keepAlive=ConnectionToken(responseLines,"keep-alive")&&!ConnectionToken(responseLines,"close");
                     if(responseLines.Any(line=>line.StartsWith("Transfer-Encoding:",StringComparison.OrdinalIgnoreCase)))throw new IOException("共享响应帧边界无效。");
                     string nextCookie=RemoteCookie(responseLines.Where(line=>line.StartsWith("Set-Cookie:",StringComparison.OrdinalIgnoreCase)).Select(line=>line.Substring(11).Trim().Split(';')[0]));
-                    for(int i=1;i<responseLines.Count;i++)if(responseLines[i].StartsWith("Set-Cookie: ",StringComparison.OrdinalIgnoreCase))responseLines[i]="Set-Cookie: "+cookiePrefix+responseLines[i].Substring(12).Replace("; Secure","").Replace("SameSite=Strict","SameSite=Lax");
+                    for(int i=1;i<responseLines.Count;i++)if(responseLines[i].StartsWith("Set-Cookie:",StringComparison.OrdinalIgnoreCase))responseLines[i]="Set-Cookie: "+cookiePrefix+responseLines[i].Substring(11).Trim().Replace("; Secure","").Replace("SameSite=Strict","SameSite=Lax");
                     if(!cookieAllowed&&tokenAllowed&&responseLines.Count>1)responseLines.Insert(1,"Set-Cookie: "+guard+"="+access+"; Path=/; HttpOnly; SameSite=Lax");
                     string[] lengths=responseLines.Where(line=>line.StartsWith("Content-Length:",StringComparison.OrdinalIgnoreCase)).ToArray();long remaining;
                     if(lengths.Length!=1||!Int64.TryParse(lengths[0].Substring(15).Trim(),NumberStyles.None,CultureInfo.InvariantCulture,out remaining)||remaining<0)throw new IOException("共享响应长度无效。");
+                    if(remoteResponse&&remaining>(path=="/api/screen"?ScreenResponseLimit:InputResponseLimit))throw new IOException("远控响应超过长度上限。");
+                    string[] responseIds=responseLines.Where(line=>line.StartsWith("X-FQ-Request-ID:",StringComparison.OrdinalIgnoreCase)).ToArray();
+                    if(responseIds.Length>1||(reused&&responseIds.Length==0)||(responseIds.Length==1&&responseIds[0].Substring(16).Trim()!=requestId))throw new IOException("上游响应不属于当前请求。");
                     if(!Available()||(lease!=null&&!Current(lease)))throw new IOException("远控会话已变更。");
                     if(first[0]=="POST"&&(path=="/api/login"||path=="/api/reconnect")&&code==200&&nextCookie.Length>0)
                     {
@@ -150,7 +177,7 @@ namespace FeiqLight
                     if(lease!=null&&authenticationRejected)ChangeSession(code==401?"":lease.Cookie,lease.Generation);
                     else if(logout&&code==200)ChangeSession("",generation);
                     else if(logout)ChangeSession(remoteCookie,generation);
-                    reusable=lease!=null&&code==200&&keepAlive&&nextCookie.Length==0&&remote.Requests<16;
+                    reusable=lease!=null&&code==200&&keepAlive&&nextCookie.Length==0&&remote.Requests<16&&responseIds.Length==1&&!timedOut;
                     break;
                     }
                     catch(IOException error)
@@ -158,13 +185,14 @@ namespace FeiqLight
                         SocketException socket=error.GetBaseException() as SocketException;
                         // Schannel 也可能把陈旧连接 EOF 报为 reset/abort；超时、鉴权和协议错误不属此分支。
                         bool eof=error is EndOfStreamException||(socket!=null&&(socket.SocketErrorCode==SocketError.ConnectionReset||socket.SocketErrorCode==SocketError.ConnectionAborted||socket.SocketErrorCode==SocketError.Shutdown));
-                        if(!eof||attempt!=0||lease==null||first[0]!="GET"||!reused||downstreamStarted||authenticationRejected||!Current(lease))throw;
+                        if(!eof||timedOut||attempt!=0||lease==null||first[0]!="GET"||!reused||downstreamStarted||authenticationRejected||!Current(lease))throw;
                         CloseConnection(remote);remote=null;
                     }
                 }
-            } catch(IOException){}catch(SocketException){}catch(ObjectDisposedException){}catch(System.Security.Authentication.AuthenticationException){}catch(AggregateException){}
+            } catch(IOException){}catch(SocketException){}catch(ObjectDisposedException){}catch(System.Security.Authentication.AuthenticationException){}catch(AggregateException){}catch(OperationCanceledException){}
             finally
             {
+                if(readDeadline!=null)readDeadline.Dispose();if(downstreamMonitor!=null)downstreamMonitor.Dispose();
                 if(lease!=null&&authenticationRejected)ChangeSession(rejection==401?"":lease.Cookie,lease.Generation);
                 bool returned=false;
                 if(lease!=null)
@@ -181,7 +209,7 @@ namespace FeiqLight
                     }
                 }
                 if(!returned&&remote!=null)CloseConnection(remote);
-                client.Close();lock(gate)clients.Remove(client);
+                client.Close();lock(gate){clients.Remove(client);lastActivity=clock.ElapsedMilliseconds;}
             }
         }
         private bool Available()
@@ -225,9 +253,12 @@ namespace FeiqLight
                 if(connection!=null&&clock.ElapsedMilliseconds-connection.IdleSince>=2000){CloseConnection(connection);connection=null;}
             }
             if(connection!=null)return connection;
-            connection=new Connection{Client=node==null?new TcpClient(AddressFamily.InterNetwork):node.ConnectPeer(peer,target.Port),Pooled=lease!=null};
+            CancellationTokenSource cancellation=new CancellationTokenSource();
+            lock(gate){if(closed||(lease!=null&&lease.Generation!=sessionGeneration)){cancellation.Dispose();throw new IOException("连接已关闭。");}connecting.Add(cancellation,lease!=null);}
+            connection=new Connection{Pooled=lease!=null};
             try
             {
+                connection.Client=node==null?new TcpClient(AddressFamily.InterNetwork):node.ConnectPeer(peer,target.Port,cancellation.Token);
                 lock(gate){if(closed||upstreams.Count>=12||(lease!=null&&lease.Generation!=sessionGeneration))throw new IOException("连接已关闭或请求过多。");upstreams.Add(connection);}
                 TcpClient raw=connection.Client;raw.ReceiveTimeout=45000;raw.SendTimeout=15000;raw.NoDelay=true;
                 if(node==null)
@@ -240,12 +271,14 @@ namespace FeiqLight
                 return connection;
             }
             catch{CloseConnection(connection);throw;}
+            finally {lock(gate)connecting.Remove(cancellation);cancellation.Dispose();}
         }
         private void CloseConnection(Connection connection)
         {
             bool release;
             lock(gate){release=!connection.Closed;connection.Closed=true;upstreams.Remove(connection);}
             // 先关 socket，立即中断在用读写；节点额度不能等空闲超时才释放。
+            if(connection.Client==null)return;
             connection.Client.Close();
             if(release&&node!=null)node.ReleaseConnection(connection.Client);
             if(connection.Tls!=null)try{connection.Tls.Dispose();}catch(IOException){}catch(ObjectDisposedException){}
@@ -253,20 +286,25 @@ namespace FeiqLight
         private bool ChangeSession(string cookie,long expectedGeneration)
         {
             Connection[] stale;
+            CancellationTokenSource[] pending;
             lock(gate)
             {
                 if(closed||sessionGeneration!=expectedGeneration)return false;
                 sessionCookie=cookie;sessionGeneration++;
                 stale=upstreams.Where(connection=>connection.Pooled).ToArray();
+                pending=connecting.Where(item=>item.Value).Select(item=>item.Key).ToArray();
                 screen.Connection=input.Connection=null;screen.Owner=input.Owner=null;
                 Monitor.PulseAll(gate);
             }
             foreach(Connection connection in stale)CloseConnection(connection);
+            foreach(CancellationTokenSource cancellation in pending)try{cancellation.Cancel();}catch(ObjectDisposedException){}
             return true;
         }
         private void ExpireIdle()
         {
             if(!Available())return;
+            bool expiredGateway;lock(gate)expiredGateway=clients.Count==0&&clock.ElapsedMilliseconds-lastActivity>=600000;
+            if(expiredGateway){Dispose();return;}
             List<Connection> expired=new List<Connection>();
             lock(gate)foreach(Slot slot in new[]{screen,input})
                 if(slot.Owner==null&&slot.Connection!=null&&clock.ElapsedMilliseconds-slot.Connection.IdleSince>=2000){expired.Add(slot.Connection);slot.Connection=null;}
@@ -288,16 +326,19 @@ namespace FeiqLight
         public void Dispose()
         {
             Connection[] active;
+            CancellationTokenSource[] pending;
             lock(gate)
             {
                 if(closed)return;closed=true;sessionGeneration++;
                 listener.Stop();idleTimer.Dispose();
                 foreach(TcpClient client in clients)client.Close();
                 active=upstreams.ToArray();screen.Connection=input.Connection=null;screen.Owner=input.Owner=null;
+                pending=connecting.Keys.ToArray();
                 Monitor.PulseAll(gate);
             }
             security.TrustRevoked-=OnRevoked;if(node!=null)node.NetworkReset-=Dispose;
             foreach(Connection connection in active)CloseConnection(connection);
+            foreach(CancellationTokenSource cancellation in pending)try{cancellation.Cancel();}catch(ObjectDisposedException){}
         }
     }
 }

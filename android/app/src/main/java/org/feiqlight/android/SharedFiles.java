@@ -22,6 +22,8 @@ import java.util.*;
 
 /** 仅访问用户授权的只读 SAF 目录；授权持久化由共享设置入口管理。 */
 final class SharedFiles implements AutoCloseable {
+    interface FileStat {StructStat read(FileDescriptor descriptor)throws android.system.ErrnoException;}
+    FileStat fileStat=Os::fstat;
     static final int LIST_SCAN_LIMIT=20000,LIST_SCAN_MILLISECONDS=2000;
     static final long SNAPSHOT_LIFETIME=120000;
     private static final int SNAPSHOT_LIMIT=4,SESSION_SCAN_LIMIT=40000,BROWSE_ID_LIMIT=10000;
@@ -67,6 +69,7 @@ final class SharedFiles implements AutoCloseable {
         Entry entry;
         String relative;
         long size,device,inode;
+        long modifiedSeconds,modifiedNanos,changedSeconds,changedNanos;
         boolean identity;
     }
     private static final class ArchiveDirectory {
@@ -183,7 +186,7 @@ final class SharedFiles implements AutoCloseable {
         if(!request.method.equals("GET")&&!request.method.equals("HEAD")&&!request.method.equals("POST"))throw new ToolsHttp.Failure(405,"不支持此操作");
         if(request.method.equals("GET")&&request.path.equals("/api/status")){
             boolean paired;synchronized(this){paired=!closed&&pairings.contains(cookie(request,pairCookie()),request.pairScope(scope));}
-            response.json(new JSONObject().put("remote",false).put("share",!closed).put("paired",paired).put("platform","android").put("listPaging",true).put("directoryArchive",true).toString(),"");return;
+            response.json(new JSONObject().put("remote",false).put("share",!closed).put("paired",paired).put("platform","android").put("listPaging",true).put("directoryArchive",true).put("entryCheck",true).toString(),"");return;
         }
         if(request.method.equals("POST")) {
             if(request.path.equals("/api/login")||request.path.equals("/api/reconnect")){login(request,response,request.path.equals("/api/reconnect"));return;}
@@ -192,6 +195,7 @@ final class SharedFiles implements AutoCloseable {
         }
         if(request.path.equals("/api/list")||request.path.equals("/api/files")){list(request,response,authorize(request));return;}
         if(request.path.equals("/api/share-status")){authorize(request);synchronized(this){response.json(new JSONObject().put("revision",revision).put("listPaging",true).put("directoryArchive",true).toString(),"");}return;}
+        if(request.path.equals("/api/entry")){authorize(request);synchronized(this){entry(request.parameter("id"));response.json("{\"ok\":true}","");}return;}
         if(request.path.equals("/file")){file(request,response,authorize(request));return;}
         if(request.path.equals("/favicon.ico")||request.path.startsWith("/native/")){response.bytes(204,"image/x-icon",new byte[0],"");return;}
         String asset=request.path.equals("/")?"index.html":request.path.substring(1);
@@ -421,11 +425,17 @@ final class SharedFiles implements AutoCloseable {
         if(source.size<0)throw new ToolsHttp.Failure(409,"文件提供方未提供长度，请逐件下载或先保存到手机本地文件夹");
         if(length>=0&&length!=source.size)throw new ToolsHttp.Failure(409,"原文件长度已变化，请重新下载目录");
         try {
-            StructStat stat=Os.fstat(input.descriptor.getFileDescriptor());
+            StructStat stat=fileStat.read(input.descriptor.getFileDescriptor());
             if(OsConstants.S_ISREG(stat.st_mode)) {
                 if(source.identity&&(source.device!=stat.st_dev||source.inode!=stat.st_ino))throw new ToolsHttp.Failure(409,"原文件已被替换，请重新下载目录");
+                long modifiedSeconds=stat.st_mtime,changedSeconds=stat.st_ctime,modifiedNanos=0,changedNanos=0;
+                if(Build.VERSION.SDK_INT>=27){modifiedSeconds=stat.st_mtim.tv_sec;modifiedNanos=stat.st_mtim.tv_nsec;changedSeconds=stat.st_ctim.tv_sec;changedNanos=stat.st_ctim.tv_nsec;}
+                else if(source.entry.modified<0)throw new ToolsHttp.Failure(409,"文件提供方未提供修改时间，当前系统无法精确复核，请逐件下载");
+                if(source.identity&&(source.modifiedSeconds!=modifiedSeconds||source.modifiedNanos!=modifiedNanos||source.changedSeconds!=changedSeconds||source.changedNanos!=changedNanos))throw new ToolsHttp.Failure(409,"原文件内容已变化，请重新下载目录");
                 source.device=stat.st_dev;source.inode=stat.st_ino;source.identity=true;
+                source.modifiedSeconds=modifiedSeconds;source.modifiedNanos=modifiedNanos;source.changedSeconds=changedSeconds;source.changedNanos=changedNanos;
             }
+            else if(source.identity||source.entry.modified<0)throw new ToolsHttp.Failure(409,"文件提供方未提供可靠修改时间或来源类型已变化，请逐件下载或先保存到手机本地文件夹");
         }catch(android.system.ErrnoException error){throw new IOException("无法复核共享文件句柄",error);}
         checkArchive(archive);
     }
@@ -451,6 +461,7 @@ final class SharedFiles implements AutoCloseable {
                     String document=cursor.getString(0);
                     if(document==null||!documents.add(document))throw new ToolsHttp.Failure(409,"文件提供方返回循环或重复文档，不能打包");
                     Entry entry=readEntry(directory.entry.tree,cursor);
+                    if(!Protocol.safeName(entry.name))throw new ToolsHttp.Failure(409,"文件提供方返回的名称包含路径分隔符或不安全字符，不能打包");
                     String relative=(directory.relative.isEmpty()?"":directory.relative+"/")+entry.name;
                     if(!Protocol.safeRelativePath(relative))throw new ToolsHttp.Failure(409,"目录中的文件路径不安全或过长，不能打包");
                     if(entry.directory) {
@@ -470,11 +481,17 @@ final class SharedFiles implements AutoCloseable {
         if(request.parameter("id").isEmpty()||target.uri==null||!target.directory)throw new ToolsHttp.Failure(404,"请选择真实的共享目录");
         if(!request.header("Range").isEmpty())throw new ToolsHttp.Failure(416,"目录打包不支持续传，请重新下载");
         response.disableReuse();ArchiveLease lease=new ArchiveLease();lease.target=target;lease.session=session;lease.response=response;
+        if(request.header("X-FQ-Archive-Progress").equals("1"))response.enableArchiveProgress();
         synchronized(this) {
             if(!valid(session)||!shared(target))throw new ToolsHttp.Failure(401,"共享目录已移除");
             if(archives.stream().filter(item->!item.cancelled).count()>=4||archives.stream().anyMatch(item->item.session==session&&!item.cancelled))throw new ToolsHttp.Failure(409,"已有目录打包下载正在进行，请等它完成后重试");
             archives.add(lease);
         }
+        TimerTask cancellationWatch=new TimerTask(){@Override public void run(){
+            try{response.checkConnection();}
+            catch(IOException error){synchronized(SharedFiles.this){cancelArchives(item->item==lease);}}
+        }};
+        deadlines.schedule(cancellationWatch,100,100);
         try {
             lease.observer=new android.database.ContentObserver(null){@Override public void onChange(boolean selfChange){synchronized(SharedFiles.this){cancelArchives(item->item==lease);}}};
             context.getContentResolver().registerContentObserver(target.tree,true,lease.observer);
@@ -494,6 +511,7 @@ final class SharedFiles implements AutoCloseable {
             response.begin(200,"application/zip",writer.contentLength(),"Accept-Ranges: none\r\nContent-Disposition: attachment; filename*=UTF-8''"+encoded+"\r\n");
             if(!request.method.equals("HEAD"))writer.write((bytes,length)->{checkArchive(lease);response.write(bytes,length);},()->checkArchive(lease));
         }finally {
+            cancellationWatch.cancel();deadlines.purge();
             if(lease.observer!=null)context.getContentResolver().unregisterContentObserver(lease.observer);
             synchronized(this){archives.remove(lease);if(lease.input!=null)lease.input.close();lease.input=null;}
         }

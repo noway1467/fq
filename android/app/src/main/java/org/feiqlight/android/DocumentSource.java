@@ -4,6 +4,7 @@ import android.content.*;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.ParcelFileDescriptor;
+import android.os.CancellationSignal;
 import android.provider.DocumentsContract;
 import org.feiqlight.android.core.LanNode;
 import java.io.*;
@@ -28,20 +29,23 @@ final class DocumentSource implements LanNode.Source {
         try(InputStream ignored=open(0)){}
     }
     public String key(){return uri.toString();}public String name(){return name;}public long size(){return size;}public long modified(){return modified;}
-    void check()throws IOException {
+    void check()throws IOException {check(null);}
+    void check(CancellationSignal cancellation)throws IOException {
+        if(cancellation!=null)cancellation.throwIfCanceled();
         boolean granted=false;
         for(UriPermission permission:resolver.getPersistedUriPermissions())if(permission.isReadPermission()&&permission.getUri().equals(grant))granted=true;
         if(!granted)throw new IOException("文件来源权限已失效");
-        try(Cursor cursor=resolver.query(uri,new String[]{DocumentsContract.Document.COLUMN_SIZE,DocumentsContract.Document.COLUMN_LAST_MODIFIED},null,null)){
+        try(Cursor cursor=resolver.query(uri,new String[]{DocumentsContract.Document.COLUMN_SIZE,DocumentsContract.Document.COLUMN_LAST_MODIFIED},null,cancellation)){
             if(cursor==null||!cursor.moveToFirst()||cursor.isNull(0)||cursor.isNull(1)||cursor.getLong(0)!=size||cursor.getLong(1)!=modified)throw new IOException("文件来源已改变，请重新选择发送");
         }catch(RuntimeException error){throw new IOException("文件来源权限已失效",error);}
     }
-    public InputStream open(long offset)throws IOException {
-        check();
+    public InputStream open(long offset)throws IOException {return open(offset,null);}
+    InputStream open(long offset,CancellationSignal cancellation)throws IOException {
+        check(cancellation);
         ParcelFileDescriptor descriptor;
-        try{descriptor=resolver.openFileDescriptor(uri,"r");}
+        try{descriptor=resolver.openFileDescriptor(uri,"r",cancellation);}
         catch(RuntimeException error){throw new IOException("文件来源权限已失效",error);}
         if(descriptor==null)throw new IOException("文件来源不可读");ParcelFileDescriptor.AutoCloseInputStream input=new ParcelFileDescriptor.AutoCloseInputStream(descriptor);
-        try{if(descriptor.getStatSize()!=size)throw new IOException("文件大小已改变");input.getChannel().position(offset);return input;}catch(IOException|RuntimeException e){input.close();throw new IOException("文件来源不支持续传或已变化",e);}
+        try{if(cancellation!=null)cancellation.throwIfCanceled();if(descriptor.getStatSize()!=size)throw new IOException("文件大小已改变");input.getChannel().position(offset);return input;}catch(IOException|RuntimeException e){input.close();throw new IOException("文件来源不支持续传或已变化",e);}
     }
 }

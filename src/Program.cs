@@ -17,12 +17,13 @@ namespace FeiqLight
             Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
             try
             {
-                int? requestedPort = null; bool loopback = false, autoStart = false;
+                int? requestedPort = null; bool loopback = false, autoStart = false, plainToolsForTests = false;
                 string root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FeiqLight"), name = null, peerAddress = null;
                 string[] shared=null;
                 for (int i = 0; i < args.Length; i++)
                 {
                     if (args[i] == "--loopback") loopback = true;
+                    else if(args[i]=="--test-plain-tools")plainToolsForTests=true;
                     else if (args[i] == "--autostart") autoStart = true;
                     else if (args[i] == "--port" && i + 1 < args.Length) requestedPort = Int32.Parse(args[++i]);
                     else if (args[i] == "--profile" && i + 1 < args.Length) root = args[++i];
@@ -32,6 +33,7 @@ namespace FeiqLight
                     else throw new ArgumentException("未知参数：" + args[i]);
                 }
                 if (requestedPort.HasValue && (requestedPort.Value < 1024 || requestedPort.Value > 65535)) throw new ArgumentException("端口须为 1024–65535。");
+                if(plainToolsForTests&&!loopback)throw new ArgumentException("明文工具测试入口只能与 --loopback 一起使用。");
                 bool created;
                 if(shared!=null)WindowsShare.Enqueue(root,shared);
                 string profileKey;
@@ -55,6 +57,7 @@ namespace FeiqLight
                         using (LanService network = new LanService(settings, port, loopback, loopback ? "test-" + port : null))
                         using (MainForm main = new MainForm(network, store, startup, autoStart))
                         {
+                            main.PlainToolsForTests=plainToolsForTests;
                             try
                             {
                                 // 通信生命周期不依赖窗口 Shown；隐藏启动或托盘运行也必须在线。

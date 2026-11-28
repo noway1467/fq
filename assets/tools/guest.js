@@ -12,6 +12,7 @@
   let textEnabled = false, textSending = false, textAfter = 0, textSentBytes = 0;
   const receivedTexts = [], sentTexts = [];
   let textPollTimer = 0, sessionTimer = 0;
+  let textPollAfter = 0, textPollFailures = 0;
   const textControllers = new Set();
   const size = bytes => bytes >= 1073741824 ? (bytes / 1073741824).toFixed(2) + ' GiB' : bytes >= 1048576 ? (bytes / 1048576).toFixed(1) + ' MiB' : bytes >= 1024 ? (bytes / 1024).toFixed(1) + ' KiB' : bytes + ' B';
   const message = (text, info = false) => {
@@ -40,8 +41,14 @@
       const response = await fetch(path, { method, headers, body, signal: controller.signal, cache: 'no-store', redirect: 'error' });
       const data = await response.json();
       if (!response.ok) {
-        if (response.status === 410) endSession('本次临时传输已结束');
-        throw Object.assign(new Error(data.error || '传输失败，请重试'), {status: response.status});
+        if (response.status === 410 && data.code !== 'taskCanceled') {
+          if (data.code === 'sessionEnded' || path === '/api/guest' || path.startsWith('/api/text')) endSession('本次临时传输已结束');
+          else {
+            // 旧端的 410 同时表示任务取消与会话结束，用只读状态请求核实归属。
+            try { await api('/api/guest'); data.code = 'taskCanceled'; } catch (_) { /* 只有明确的会话终态才清空页面。 */ }
+          }
+        }
+        throw Object.assign(new Error(data.error || '传输失败，请重试'), {status: response.status, code: data.code});
       }
       return data;
     } finally { clearTimeout(timer); if (signal) signal.removeEventListener('abort', abort); }
@@ -187,16 +194,29 @@
     copy.onclick = () => copyText(text, content); entry.append(content, copy); host.append(entry);
   }
   async function pollTexts() {
-    if (!textEnabled || ended || textControllers.size) return;
+    if (!textEnabled || ended || textControllers.size || performance.now() < textPollAfter) return;
     const controller = new AbortController(); textControllers.add(controller);
     try {
       const data = await api('/api/text?after=' + textAfter, 'GET', undefined, controller.signal);
       if (ended) return;
+      if (textPollFailures) textStatus('文本连接已恢复', true);
+      textPollFailures = 0; textPollAfter = 0;
       for (const item of data.items) {
         if (item.seq <= textAfter) continue;
         receivedTexts.push(item.text); textAfter = item.seq; appendText($('text-received'), item.text);
       }
-    } catch (error) { if (!ended) endSession(error.status === 403 ? '对方已关闭文本互传' : '连接已中断，本次临时传输已结束'); }
+    } catch (error) {
+      if (!ended) {
+        if (error.status === 403) {
+          textEnabled = false; $('text-send').disabled = true;
+          textStatus('对方未开放文本互传，草稿已保留');
+        } else {
+          textPollFailures++;
+          textPollAfter = performance.now() + Math.min(30000, 1000 * 2 ** Math.min(textPollFailures, 5));
+          textStatus('文本读取暂时失败，正在重试；草稿已保留');
+        }
+      }
+    }
     finally { textControllers.delete(controller); }
   }
   $('text-draft').oninput = () => {
@@ -217,9 +237,9 @@
       if ($('text-draft').value === text) $('text-draft').value = '';
       $('text-draft').oninput(); textStatus('文本已投递给对方', true);
     } catch (error) {
-      if (!ended && !error.status) endSession('连接已中断，文本投递结果未确认');
+      if (!ended && (!error.status || error.status >= 500)) textStatus('文本投递结果未确认，请先向对方确认是否收到；草稿已保留');
       else textStatus(error.message);
-    } finally { textControllers.delete(controller); textSending = false; if (!ended) $('text-send').disabled = false; }
+    } finally { textControllers.delete(controller); textSending = false; if (!ended) $('text-send').disabled = !textEnabled; }
   };
   window.addEventListener('pagehide', () => endSession('本次临时传输页面已关闭'));
   function drawQr() {
@@ -311,7 +331,18 @@
       task.view.meta.textContent = '正在校验保存…'; const saved = await api('/api/finish?id=' + task.id, 'POST', undefined, task.controller.signal);
       if(task.state!=='sending')return;
       task.state = 'done'; task.bar.value = task.file.size || 1; task.bar.classList.add('done'); task.view.meta.className = 'meta done'; task.view.meta.textContent = size(task.file.size) + ' · 对方已保存' + (saved.warning?' · '+saved.warning:''); task.cancel.hidden = true;
-    } catch (e) { if (task.state === 'sending') { task.state = 'failed'; task.view.meta.className = 'meta failed'; task.view.meta.textContent = ended ? '临时传输已到期，上传未完成' : '上传未完成 · ' + (e.name === 'AbortError' ? '连接超时，点击继续' : e.message); task.retry.hidden = ended; } }
+    } catch (e) {
+      if (task.state === 'sending') {
+        if (!ended && e.code === 'taskCanceled') {
+          task.state = 'canceled'; task.view.meta.className = 'meta'; task.view.meta.textContent = '已取消';
+          task.retry.hidden = task.cancel.hidden = true;
+        } else {
+          task.state = 'failed'; task.view.meta.className = 'meta failed';
+          task.view.meta.textContent = ended ? '临时传输已到期，上传未完成' : '上传未完成 · ' + (e.name === 'AbortError' ? '连接超时，点击继续' : e.message);
+          task.retry.hidden = ended;
+        }
+      }
+    }
     finally { task.controller = null; uploading = false; updateUploadSummary(); pump(); }
   }
   $('picker').onchange = e => { add(e.target.files); e.target.value = ''; };

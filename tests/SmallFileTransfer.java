@@ -61,6 +61,10 @@ public final class SmallFileTransfer {
         @Override public void close(){b.close();a.close();}
     }
     private static int offers(LanNode node)throws Exception {synchronized(field(node,"gate")){return ((Map<?,?>)field(node,"offers")).size();}}
+    @SuppressWarnings("unchecked")
+    private static void holdReverseSync(LanNode node,String deviceId)throws Exception {
+        waitFor(()->{synchronized(field(node,"gate")){return ((Set<String>)field(node,"activeSyncPeers")).add(deviceId);}},"已有同步连接未结束");
+    }
     private static int completed(LanNode node)throws Exception {
         synchronized(field(node,"gate")) {
             int count=0;for(Object offer:((Map<?,?>)field(node,"offers")).values())if((boolean)field(offer,"stored"))count++;return count;
@@ -77,6 +81,14 @@ public final class SmallFileTransfer {
         if("all".equals(selected)||"boundary".equals(selected))run("批量连接拒绝非F下一帧",()->boundary(root.resolve("boundary")));
         if("all".equals(selected)||"recovery".equals(selected))run("真实进程崩溃、截断确认日志恢复与损坏日志拒绝",()->recovery(root.resolve("recovery")));
         if("all".equals(selected)||"eviction".equals(selected))run("1105完成项淘汰与100待处理额度跨重启",()->eviction(root.resolve("eviction")));
+        if("all".equals(selected)||"phase2".equals(selected)) {
+            run("快照提交后日志清理失败仍保持发送撤销状态一致",()->journalCleanup(root.resolve("cleanup")));
+            run("确认日志失败不发送NEXT且保留本机已保存文件",()->journalFailure(root.resolve("journal-failure")));
+            run("关闭快照失败后迟到补刷不清空邀请及确认日志",()->closeFailure(root.resolve("close-failure")));
+            run("取消单邀请保留同联系人正反向批量连接",()->cancelIsolation(root.resolve("cancel-isolation")));
+            run("拨号及回连等待取消立即归还连接和票据",()->connectCancellation(root.resolve("connect-cancel")));
+            run("旧批量连接断开后单次操作经反向P完成",()->staleReverse(root.resolve("stale-reverse")));
+        }
         System.out.println("ANDROID SMALL FILE: "+passed+" passed, "+failed+" failed");System.exit(failed==0?0:1);
     }
     private static byte[] capability(byte[] hello,String value) {
@@ -195,6 +207,107 @@ public final class SmallFileTransfer {
         try(LanNode restored=node(root.resolve("a"),A_ID,false,QUIET)) {
             check(offers(restored)==1100&&completed(restored)==1000,"淘汰后的完成/待处理状态未跨重启保留");
             restored.setPendingFileLimit(100);boolean full=false;try{restored.checkOfferCapacity(1);}catch(IOException expected){full=true;}check(full,"重启后待处理额度失效");
+        }
+    }
+    private static void journalCleanup(Path root)throws Exception {
+        Path journal=root.resolve("a/transfer-offer-completions.log");
+        try(Pair pair=new Pair(root)) {
+            pair.send(1);Files.writeString(journal,"unfinished");Files.setAttribute(journal,"dos:readonly",true);
+            try {
+                Item second=pair.send(1).get(0);check(offers(pair.a)==2,"已提交的新邀请未进入内存");
+                check(pair.a.cancelOutgoing(pair.target.id(),second.packet,null,false),"日志清理失败误报撤销失败");
+                check(offers(pair.a)==1,"撤销未同步内存");
+            } finally {Files.setAttribute(journal,"dos:readonly",false);}
+        }
+        try(LanNode restored=node(root.resolve("a"),A_ID,false,QUIET)){check(offers(restored)==1,"重启授权与内存分叉");}
+    }
+    private static void journalFailure(Path root)throws Exception {
+        try(Pair pair=new Pair(root)) {
+            List<Item> files=pair.send(2);Path journal=root.resolve("a/transfer-offer-completions.log");Files.createDirectory(journal);
+            Path saved=root.resolve("saved.bin");Item first=files.get(0);
+            try {
+                pair.b.receiveFile(pair.back,first.packet,first.file,saved.toFile(),new LanNode.Transfer(),null);
+                check(Arrays.equals(Files.readAllBytes(saved),new byte[]{3,5,7,11}),"远端回执失败丢失正式文件");
+                check(field(pair.b,"idleFileConnection")==null,"日志失败仍发送NEXT并复用连接");check(completed(pair.a)==0,"日志失败却进入完成态");
+            }finally{Files.delete(journal);}
+            Item second=files.get(1);pair.b.receiveFile(pair.back,second.packet,second.file,root.resolve("second.bin").toFile(),new LanNode.Transfer(),null);
+            check(completed(pair.a)==1,"故障恢复后不能完成下一件");
+        }
+    }
+    private static void closeFailure(Path root)throws Exception {
+        Path saved=root.resolve("a/transfer-offers.dat"),blocker=root.resolve("a/transfer-offers.dat.new"),journal=root.resolve("a/transfer-offer-completions.log");
+        try(Pair pair=new Pair(root)) {
+            Item first=pair.send(3).get(0);byte[] before;
+            synchronized(field(pair.a,"gate")) {
+                before=Files.readAllBytes(saved);
+                Object offer=((Map<?,?>)field(pair.a,"offers")).get(first.packet+":"+first.file.id);
+                Method store=LanNode.class.getDeclaredMethod("storeOfferCompletion",offer.getClass());store.setAccessible(true);store.invoke(pair.a,offer);
+                Files.createDirectory(blocker);pair.a.close();
+            }
+            check(Arrays.equals(before,Files.readAllBytes(saved))&&Files.size(journal)>0,"失败的最终快照破坏原快照或日志");
+            Files.delete(blocker);
+            Method flush=LanNode.class.getDeclaredMethod("flushOfferCompletions");flush.setAccessible(true);flush.invoke(pair.a);
+            check(Arrays.equals(before,Files.readAllBytes(saved))&&Files.size(journal)>0,"清空后迟到补刷覆盖原快照");
+        }
+        java.util.concurrent.atomic.AtomicInteger replayed=new java.util.concurrent.atomic.AtomicInteger();
+        LanNode.Listener listener=new LanNode.Listener(){public void peersChanged(){}public void error(String text){}public void message(LanNode.Peer peer,LanNode.Message message,boolean update){}
+            public void fileProgress(LanNode.Peer peer,long packet,long file,int percent,String state){if(percent==100&&"对方已校验保存".equals(state))replayed.incrementAndGet();}};
+        try(LanNode restored=node(root.resolve("a"),A_ID,false,listener)) {
+            check(offers(restored)==3&&completed(restored)==1,"重启未恢复原有全部邀请与完成态");
+            restored.replayCompletedOutgoingStates();check(replayed.get()==1,"恢复完成态未通知历史同步入口");
+        }
+    }
+    private static void cancelIsolation(Path root)throws Exception {
+        try(Pair pair=new Pair(root)) {
+            List<Item> forward=pair.send(2);Item canceled=pair.send(1).get(0);
+            LanNode.Message reverse=pair.b.sendMessage(pair.back,"",Arrays.asList(pair.source.toFile(),pair.source.toFile()));
+            holdReverseSync(pair.a,B_ID);holdReverseSync(pair.b,A_ID);
+            Item first=forward.get(0);pair.b.receiveFile(pair.back,first.packet,first.file,root.resolve("forward1.bin").toFile(),new LanNode.Transfer(),null);
+            pair.a.receiveFile(pair.target,reverse.number,reverse.files.get(0),root.resolve("back1.bin").toFile(),new LanNode.Transfer(),null);
+            Object forwardRaw=field(field(pair.b,"idleFileConnection"),"raw"),backRaw=field(field(pair.a,"idleFileConnection"),"raw");
+            check(pair.a.cancelOutgoing(pair.target.id(),canceled.packet,null,false),"指定邀请未取消");
+            Method release=LanNode.class.getDeclaredMethod("sendReleaseFiles",LanNode.Peer.class,String.class);release.setAccessible(true);release.invoke(pair.a,pair.target,"cancel:"+canceled.packet);
+            Item second=forward.get(1);pair.b.receiveFile(pair.back,second.packet,second.file,root.resolve("forward2.bin").toFile(),new LanNode.Transfer(),null);
+            check(forwardRaw==field(field(pair.b,"idleFileConnection"),"raw"),"取消甲中断了无关乙连接");
+            pair.a.receiveFile(pair.target,reverse.number,reverse.files.get(1),root.resolve("back2.bin").toFile(),new LanNode.Transfer(),null);
+            check(backRaw==field(field(pair.a,"idleFileConnection"),"raw"),"取消出站误关反向接收");
+            check(Arrays.equals(Files.readAllBytes(root.resolve("forward2.bin")),Files.readAllBytes(pair.source))&&Arrays.equals(Files.readAllBytes(root.resolve("back2.bin")),Files.readAllBytes(pair.source)),"双向内容不符");
+        }
+    }
+    private static void connectCancellation(Path root)throws Exception {
+        for(boolean blockDial:new boolean[]{true,false})try(LanNode sender=node(root.resolve("a"+blockDial),A_ID,false,QUIET);LanNode target=node(root.resolve("b"+blockDial),B_ID,false,QUIET)) {
+            LanNode.Peer peer=new LanNode.Peer(new InetSocketAddress("127.0.0.1",target.port()),"test","host","target","");peer.deviceId=B_ID;peer.fingerprint=target.security().fingerprint;
+            sender.security().ensureTrusted(B_ID,peer.fingerprint,"target");
+            Field connector=LanNode.class.getDeclaredField("peerConnector");connector.setAccessible(true);CountDownLatch entered=new CountDownLatch(1);
+            Object hook=java.lang.reflect.Proxy.newProxyInstance(LanNode.class.getClassLoader(),new Class<?>[]{connector.getType()},(proxy,method,args)->{
+                entered.countDown();Socket socket=(Socket)args[0];
+                while(blockDial&&!socket.isClosed())Thread.sleep(1);
+                throw new SocketException("测试拨号被取消");
+            });connector.set(sender,hook);
+            ExecutorService worker=Executors.newSingleThreadExecutor();LanNode.ConnectCancellation cancellation=new LanNode.ConnectCancellation();
+            try {
+                Future<?> request=worker.submit(()->{try{sender.connectPeer(peer,target.port(),cancellation);throw new AssertionError("取消后仍返回socket");}catch(IOException expected){}});
+                check(entered.await(3,TimeUnit.SECONDS),"没有进入受控拨号");
+                if(!blockDial)waitFor(()->((Set<?>)field(sender,"connections")).isEmpty(),"没有进入回连等待");
+                long start=System.nanoTime();cancellation.close();request.get(500,TimeUnit.MILLISECONDS);
+                check(System.nanoTime()-start<TimeUnit.MILLISECONDS.toNanos(500),"取消超过500ms");
+                check(((Set<?>)field(sender,"connections")).isEmpty()&&((Map<?,?>)field(sender,"reverseRequests")).isEmpty(),"取消后连接额度或票据未归还");
+            }finally{cancellation.close();worker.shutdownNow();}
+        }
+    }
+    private static void staleReverse(Path root)throws Exception {
+        try(Pair pair=new Pair(root)) {
+            List<Item> files=pair.send(2);Item first=files.get(0),second=files.get(1);
+            holdReverseSync(pair.a,B_ID);
+            pair.b.receiveFile(pair.back,first.packet,first.file,root.resolve("first.bin").toFile(),new LanNode.Transfer(),null);
+            Object channel=field(pair.b,"idleFileConnection");check(channel!=null,"未预热批量连接");
+            ((ScheduledFuture<?>)field(channel,"idleTimeout")).cancel(false);
+            ((ServerSocket)field(pair.a,"tcp")).close();
+            synchronized(field(pair.a,"gate")){for(Object socket:((Map<?,?>)field(pair.a,"fileBatchPeers")).keySet())((Socket)socket).close();}
+            synchronized(field(pair.a,"gate")){((Set<?>)field(pair.a,"activeSyncPeers")).remove(B_ID);}
+            pair.b.receiveFile(pair.back,second.packet,second.file,root.resolve("reverse.bin").toFile(),new LanNode.Transfer(),null);
+            check(Arrays.equals(Files.readAllBytes(root.resolve("reverse.bin")),Files.readAllBytes(pair.source)),"反向重试内容不符");
+            check(field(pair.b,"idleFileConnection")==null,"反向P被误回收为批量连接");
         }
     }
 }

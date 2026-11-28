@@ -194,9 +194,9 @@ namespace FeiqLight.Tests
 
         private sealed class Reply { internal int Code;internal string Headers;internal byte[] Body; }
         private static Dictionary<string,object> Json(Reply reply) { return (Dictionary<string,object>)new JavaScriptSerializer{MaxJsonLength=32*1024*1024}.DeserializeObject(Encoding.UTF8.GetString(reply.Body)); }
-        private static void SendRequest(TcpClient client,int port,string path,string token,string extra="")
+        private static void SendRequest(TcpClient client,int port,string path,string token,string extra="",string method="GET")
         {
-            byte[] header=Encoding.ASCII.GetBytes("GET "+path+" HTTP/1.1\r\nHost: 127.0.0.1:"+port+"\r\nConnection: close\r\nContent-Length: 0\r\n"+extra+(token==null?"":"X-FQ-Guest: "+token+"\r\n")+"\r\n");
+            byte[] header=Encoding.ASCII.GetBytes(method+" "+path+" HTTP/1.1\r\nHost: 127.0.0.1:"+port+"\r\nConnection: close\r\nContent-Length: 0\r\n"+extra+(token==null?"":"X-FQ-Guest: "+token+"\r\n")+"\r\n");
             client.GetStream().Write(header,0,header.Length);
         }
         private static string ReadHeader(Stream stream)
@@ -215,10 +215,10 @@ namespace FeiqLight.Tests
                 return data.ToArray();
             }
         }
-        private static Reply Request(GuestTransfer server,string path,string token,string extra="")
+        private static Reply Request(GuestTransfer server,string path,string token,string extra="",string method="GET")
         {
             using(var client=new TcpClient("127.0.0.1",server.Port)) {
-                client.ReceiveTimeout=10000;SendRequest(client,server.Port,path,token,extra);Stream stream=client.GetStream();string header=ReadHeader(stream);
+                client.ReceiveTimeout=10000;SendRequest(client,server.Port,path,token,extra,method);Stream stream=client.GetStream();string header=ReadHeader(stream);
                 return new Reply{Code=Int32.Parse(header.Split(' ')[1]),Headers=header,Body=ReadRest(stream)};
             }
         }
@@ -291,6 +291,10 @@ namespace FeiqLight.Tests
         {
             string path=Path.Combine(root,"identity.txt"),outside=Path.Combine(root,"other.txt");File.WriteAllText(path,"original");File.WriteAllText(outside,"original");
             using(var server=new GuestTransfer(new[]{path},Path.Combine(root,"identity-receive"),false,true)) {
+                string id=(string)Download(server).GetType().GetField("Id",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(Download(server));
+                Check(Request(server,"/file?id="+id,server.Token).Code==200,"未替换的文件不能下载");
+                Check(Request(server,"/file?id="+id,server.Token,"Range: bytes=1-3\r\n").Code==206,"原文件不能续传");
+                Check(Request(server,"/file?id="+id,server.Token,"","HEAD").Code==200,"原文件HEAD失败");
                 MethodInfo validate=typeof(GuestTransfer).GetMethod("ValidateSource",BindingFlags.Static|BindingFlags.NonPublic);
                 using(var input=File.OpenRead(outside)) {
                     try{validate.Invoke(null,new[]{Download(server),input});throw new Exception("句柄路径离开授权位置仍接受");}
@@ -298,6 +302,9 @@ namespace FeiqLight.Tests
                 }
                 DateTime modified=File.GetLastWriteTimeUtc(path);File.Move(path,path+".old");File.Copy(outside,path);File.SetLastWriteTimeUtc(path,modified);
                 Reply reply=Request(server,"/archive?scope=all",server.Token);Check(reply.Code==409&&((string)Json(reply)["error"]).Contains("替换"),"同长度同修改时间的替换未检查文件 ID");
+                Check(Request(server,"/file?id="+id,server.Token).Code==409,"单文件入口接受同元数据替换");
+                Check(Request(server,"/file?id="+id,server.Token,"Range: bytes=1-3\r\n").Code==409,"Range入口接受同元数据替换");
+                Check(Request(server,"/file?id="+id,server.Token,"","HEAD").Code==409,"HEAD入口接受同元数据替换");
             }
         }
         private sealed class HookStream : MemoryStream

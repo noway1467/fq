@@ -6,8 +6,8 @@ const crypto=require('node:crypto');
 const {spawn}=require('node:child_process');
 const {chromium}=require('playwright');
 const root=path.resolve(__dirname,'..');
-const temp=process.env.FQ_BROWSER_TEMP||path.join(root,'build/tmp/guest-folder-browser');
-const output=process.env.FQ_VALIDATION_DIR||path.join(root,'build/guest-folder-browser');
+const temp=path.resolve(process.env.FQ_BROWSER_TEMP||path.join(root,'build/tmp/guest-folder-browser'));
+const output=path.resolve(process.env.FQ_VALIDATION_DIR||path.join(root,'build/guest-folder-browser'));
 const data=path.join(temp,'data'),serverOutput=path.join(temp,'server');
 for(const folder of [temp,output,data,serverOutput])fs.mkdirSync(folder,{recursive:true});
 const server=spawn(process.env.FQ_GUEST_TEST_EXE,[data,serverOutput,'server'],{windowsHide:true,env:process.env});
@@ -37,7 +37,7 @@ function archiveEntries(file){
     const urlFile=path.join(serverOutput,'guest-url.txt');
     for(let i=0;i<100&&!fs.existsSync(urlFile);i++){if(server.exitCode!==null)throw new Error(log);await new Promise(resolve=>setTimeout(resolve,100));}
     const url=fs.readFileSync(urlFile,'utf8').trim();
-    browser=await chromium.launchPersistentContext(path.join(temp,'profile'),{executablePath:process.env.EDGE_PATH,headless:true,downloadsPath:temp});
+    browser=await chromium.launchPersistentContext(path.join(temp,'profile'),{executablePath:process.env.EDGE_PATH,headless:true,acceptDownloads:true,downloadsPath:temp});
     const page=await browser.newPage();page.on('pageerror',error=>errors.push(error.message));
     page.on('console',event=>{if(['error','warning'].includes(event.type()))errors.push(event.text());});
     await page.addInitScript(()=>{
@@ -57,7 +57,15 @@ function archiveEntries(file){
     fs.writeFileSync(path.join(data,'browser-source','分享资料 中文 English','会话后新增.txt'),'must stay private');
     async function download(selector,name){
       const [result]=await Promise.all([page.waitForEvent('download'),page.locator(selector).click()]);
-      assert.equal(await result.failure(),null);check(`${name} uses ZIP attachment filename`,result.suggestedFilename().endsWith('.zip'));
+      const failure=await result.failure();
+      if(failure){
+        const probe=await page.request.get(result.url());
+        fs.writeFileSync(path.join(output,'download-failure.json'),JSON.stringify({failure,status:probe.status(),headers:probe.headers(),bodyBytes:(await probe.body()).length},null,2));
+        const diagnostics=await browser.newPage();await diagnostics.goto('edge://downloads/');
+        await diagnostics.screenshot({path:path.join(output,'download-failure.png'),fullPage:true});
+        fs.writeFileSync(path.join(output,'download-failure-dom.txt'),await diagnostics.locator('body').innerText());
+      }
+      assert.equal(failure,null);check(`${name} uses ZIP attachment filename`,result.suggestedFilename().endsWith('.zip'));
       const saved=path.join(temp,name+'.zip');await result.saveAs(saved);return archiveEntries(saved);
     }
     const all=await download('#download-all','all');

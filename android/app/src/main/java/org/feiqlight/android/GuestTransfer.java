@@ -2,6 +2,7 @@ package org.feiqlight.android;
 
 import android.content.Context;
 import android.net.Uri;
+import android.os.CancellationSignal;
 import org.feiqlight.android.core.*;
 import org.json.*;
 import java.io.*;
@@ -68,6 +69,7 @@ final class GuestTransfer implements AutoCloseable {
     private int activeUploads;
     private boolean archiveBusy;
     private InputStream archiveInput;
+    private volatile CancellationSignal archiveCancellation;
     final String token=SharedFiles.random(32);
     final long until;
     private final long deadline;
@@ -124,7 +126,7 @@ final class GuestTransfer implements AutoCloseable {
     boolean active(){boolean active=!closed&&System.nanoTime()<deadline;if(!active)clearTexts();return active;}
     long remainingMinutes(){return Math.max(0,(long)Math.ceil((deadline-System.nanoTime())/60000000000.0));}
     String url(String address){return "http://"+address+":"+port()+"/#"+token;}
-    private void check()throws ToolsHttp.Failure{if(!active())throw new ToolsHttp.Failure(410,"临时传输已结束，请让对方重新开启");}
+    private void check()throws ToolsHttp.Failure{if(!active())throw new ToolsHttp.Failure(410,"临时传输已结束，请让对方重新开启","sessionEnded");}
     private void authorize(ToolsHttp.Request request)throws IOException {
         check();String supplied=request.header("X-FQ-Guest");if(!request.path.equals("/api/text")&&supplied.isEmpty()&&(request.method.equals("GET")||request.method.equals("HEAD")))supplied=request.parameter("token");
         if(!token.equals(supplied))throw new ToolsHttp.Failure(403,"链接无效，请使用对方分享的完整链接");
@@ -160,7 +162,7 @@ final class GuestTransfer implements AutoCloseable {
             if(key!=null&&!key.matches("[a-f0-9]{32}")||relative!=null&&(!Protocol.safeRelativePath(relative)||!relative.substring(relative.lastIndexOf('/')+1).equals(name)))throw new ToolsHttp.Failure(400,"上传标识或目录结构无效");
             synchronized(this){check();
                 upload=key==null?null:requests.get(key);
-                if(upload!=null){if(upload.canceled)throw new ToolsHttp.Failure(410,"上传已取消");if(!upload.name.equals(name)||upload.size!=size||!Objects.equals(upload.relative,relative))throw new ToolsHttp.Failure(409,"上传标识已用于其他文件");response.json(new JSONObject().put("id",upload.id).put("offset",0).toString(),"");return;}
+                if(upload!=null){if(upload.canceled)throw new ToolsHttp.Failure(410,"上传已取消","taskCanceled");if(!upload.name.equals(name)||upload.size!=size||!Objects.equals(upload.relative,relative))throw new ToolsHttp.Failure(409,"上传标识已用于其他文件");response.json(new JSONObject().put("id",upload.id).put("offset",0).toString(),"");return;}
                 if(uploads.size()>=UPLOAD_TASK_LIMIT)throw new ToolsHttp.Failure(409,"本次上传任务过多，请重新开启临时传输");
                 if(activeUploads>=UPLOAD_FILE_LIMIT||size>UPLOAD_QUOTA-reserved)throw new ToolsHttp.Failure(409,"本次接收已达 1000 个文件或 100 GiB 上限，请重新开启");
                 LanNode.requireSpace(directory,size);upload=new Upload(name,size,directory,relative);Files.createFile(upload.partial.toPath());uploads.put(upload.id,upload);if(key!=null)requests.put(key,upload);reserved+=size;activeUploads++;}
@@ -173,7 +175,7 @@ final class GuestTransfer implements AutoCloseable {
                 // 取消先到时保留有界记录，迟到的准备请求不能重新占用配额。
                 upload=new Upload("",0,directory,null);upload.canceled=true;uploads.put(upload.id,upload);requests.put(cancelKey,upload);}}
         synchronized(upload) {
-            check();if(upload.canceled){if(cancelRequest){response.json("{\"ok\":true}","");return;}throw new ToolsHttp.Failure(410,"上传已取消");}
+            check();if(upload.canceled){if(cancelRequest){response.json("{\"ok\":true}","");return;}throw new ToolsHttp.Failure(410,"上传已取消","taskCanceled");}
             if(request.method.equals("GET")&&request.path.equals("/api/upload-status")){response.json(new JSONObject().put("offset",upload.offset).put("complete",upload.saved).toString(),"");return;}
             if(request.method.equals("POST")&&request.path.equals("/api/cancel")){
                 if(upload.saved||upload.moved)throw new ToolsHttp.Failure(409,"文件已保存");
@@ -220,7 +222,7 @@ final class GuestTransfer implements AutoCloseable {
     }
     private void checkText()throws ToolsHttp.Failure {
         check();
-        if(textsEnded)throw new ToolsHttp.Failure(410,"临时传输已结束，请让对方重新开启");
+        if(textsEnded)throw new ToolsHttp.Failure(410,"临时传输已结束，请让对方重新开启","sessionEnded");
         if(!allowText)throw new ToolsHttp.Failure(403,"对方未开启文本互传");
     }
     private void addText(boolean published,String text)throws IOException {
@@ -276,7 +278,7 @@ final class GuestTransfer implements AutoCloseable {
         check();
         if(!file.name.equals(file.source.name())||file.size!=file.source.size()||file.modified!=file.source.modified())
             throw new ToolsHttp.Failure(409,"原文件已变化，请让对方重新选择");
-        if(file.source instanceof DocumentSource)((DocumentSource)file.source).check();
+        if(file.source instanceof DocumentSource)((DocumentSource)file.source).check(archiveCancellation);
         else try(InputStream probe=file.source.open(0)) {
             if(probe instanceof FileInputStream&&((FileInputStream)probe).getChannel().size()!=file.size)
                 throw new IOException("原文件长度已变化");
@@ -286,10 +288,12 @@ final class GuestTransfer implements AutoCloseable {
     }
     private InputStream openArchiveSource(Download file)throws IOException {
         check();
-        InputStream input=file.source.open(0);
+        CancellationSignal cancellation=archiveCancellation;
+        if(cancellation!=null)cancellation.throwIfCanceled();
+        InputStream input=file.source instanceof DocumentSource?((DocumentSource)file.source).open(0,cancellation):file.source.open(0);
         try {
-            validateArchiveSource(file,input);
             synchronized(this){check();archiveInput=input;}
+            validateArchiveSource(file,input);
             return input;
         }catch(IOException|RuntimeException error){input.close();throw error;}
     }
@@ -304,12 +308,19 @@ final class GuestTransfer implements AutoCloseable {
         if(!request.header("Range").isEmpty())throw new ToolsHttp.Failure(416,"打包下载暂不支持续传，请重新下载");
         List<Download> files=new ArrayList<>(directory==null?downloads.values():directory.files);
         int prefix=directory==null?0:directory.path.lastIndexOf('/')+1;
+        CancellationSignal cancellation=new CancellationSignal();
         synchronized(this){
             check();
             if(archiveBusy)throw new ToolsHttp.Failure(409,"已有一个打包下载正在进行，请等它完成后重试");
-            archiveBusy=true;
+            archiveBusy=true;archiveCancellation=cancellation;
         }
+        ScheduledFuture<?> disconnectCheck=null;
         try {
+            // query/open 尚未返回时也能取消，不能等输入流登记之后才响应停止或浏览器断开。
+            disconnectCheck=expiry.scheduleWithFixedDelay(()->{
+                try{check();response.checkConnection();}
+                catch(IOException error){cancellation.cancel();}
+            },0,100,TimeUnit.MILLISECONDS);
             List<StoreZipWriter.Entry> entries=new ArrayList<>();
             for(Download file:files)entries.add(new StoreZipWriter.Entry(
                 directory==null?(file.relative==null?file.name:file.relative):file.relative.substring(prefix),file.size,file.modified,
@@ -326,7 +337,10 @@ final class GuestTransfer implements AutoCloseable {
             response.begin(200,"application/zip",writer.contentLength(),"Content-Disposition: attachment; filename*=UTF-8''"+encoded+"\r\n");
             StoreZipWriter.Check archiveCheck=()->{check();response.checkConnection();};
             writer.write((bytes,count)->{archiveCheck.check();response.write(bytes,count);},archiveCheck);
-        }finally{synchronized(this){archiveInput=null;archiveBusy=false;}}
+        }finally{
+            if(disconnectCheck!=null)disconnectCheck.cancel(false);
+            synchronized(this){archiveInput=null;archiveCancellation=null;archiveBusy=false;}
+        }
     }
     private void send(ToolsHttp.Request request,ToolsHttp.Response response)throws Exception {
         Download file=downloads.get(request.parameter("id"));if(file==null)throw new ToolsHttp.Failure(404,"文件不在本次分享中");
@@ -340,7 +354,9 @@ final class GuestTransfer implements AutoCloseable {
         }
     }
     @Override public void close() {
-        List<Upload> pending;InputStream input;synchronized(this){if(closed)return;closed=true;pending=new ArrayList<>(uploads.values());input=archiveInput;archiveInput=null;}
+        List<Upload> pending;InputStream input;CancellationSignal cancellation;
+        synchronized(this){if(closed)return;closed=true;pending=new ArrayList<>(uploads.values());input=archiveInput;archiveInput=null;cancellation=archiveCancellation;}
+        if(cancellation!=null)cancellation.cancel();
         clearTexts();
         http.close();expiry.shutdownNow();
         if(input!=null)try{input.close();}catch(IOException error){cleanupError="打包读取关闭失败："+error.getMessage();}

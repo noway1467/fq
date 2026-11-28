@@ -15,6 +15,16 @@ namespace FeiqLight
 {
     public sealed partial class LanService
     {
+        private readonly Dictionary<TcpClient,string> connectionFingerprints=new Dictionary<TcpClient,string>();
+        internal void RegisterConnectionFingerprint(TcpClient client,string fingerprint)
+        {
+            lock(gate)
+            {
+                foreach(TcpClient stale in connectionFingerprints.Keys.Where(value=>!connections.Contains(value)&&!probeSockets.Contains(value)).ToArray())
+                    connectionFingerprints.Remove(stale);
+                connectionFingerprints[client]=fingerprint;
+            }
+        }
         public void ConfigureSecurity(string root, Func<string,string,bool> confirmation)
         {
             if(udp!=null)throw new InvalidOperationException("安全身份必须在启动前配置。");
@@ -22,7 +32,33 @@ namespace FeiqLight
         }
         private void OnTransportRevoked(string fingerprint)
         {
-            lock(gate){foreach(TcpClient client in connections)client.Close();foreach(TcpClient client in probeSockets)client.Close();CancelReverseRequests();}
+            lock(gate)
+            {
+                foreach(TcpClient client in connectionFingerprints.Where(item=>item.Value==fingerprint).Select(item=>item.Key).ToArray())
+                {
+                    client.Close();
+                    connections.Remove(client);
+                    probeSockets.Remove(client);
+                    connectionFingerprints.Remove(client);
+                }
+                foreach(string ticket in reverseRequests.Where(item=>item.Value.Fingerprint==fingerprint).Select(item=>item.Key).ToArray())
+                {
+                    ReverseRequest request=reverseRequests[ticket];
+                    reverseRequests.Remove(ticket);
+                    request.Direct.Close();
+                    connections.Remove(request.Direct);
+                    if(request.Client!=null){request.Client.Close();connections.Remove(request.Client);}
+                    request.Ready.Set();
+                }
+                foreach(PendingDownload download in pendingDownloads.Where(item=>item.Fingerprint==fingerprint))
+                {
+                    if(download.DirectClient!=null)download.DirectClient.Close();
+                    if(download.PushedClient!=null)download.PushedClient.Close();
+                    download.Ready.Set();
+                }
+                foreach(Offer offer in offers.Values.Where(item=>item.Fingerprint==fingerprint))
+                    foreach(TcpClient client in offer.ActiveClients)client.Close();
+            }
         }
 
         private bool HasPendingFor(string targetDeviceId, string targetFingerprint)
@@ -54,6 +90,7 @@ namespace FeiqLight
             if (!LoopbackOnly && LanNetwork.Route(links, target.Address) == null) return;
             TcpClient client = new TcpClient(AddressFamily.InterNetwork);
             lock (gate) { if (disposed) { client.Close(); return; } probeSockets.Add(client); }
+            RegisterConnectionFingerprint(client,peer.Fingerprint);
             try
             {
                 using (client)
@@ -107,7 +144,7 @@ namespace FeiqLight
                 }
             }
             catch (Exception) { }
-            finally { lock (gate) probeSockets.Remove(client); }
+            finally { lock (gate) {probeSockets.Remove(client);connectionFingerprints.Remove(client);} }
         }
         private void PushSecureFile(Peer peer, long number, int fileId, long offset)
         {
@@ -118,7 +155,7 @@ namespace FeiqLight
             TcpClient connection = null;
             try
             {
-                using (TcpClient client = connection = SecureConnect(peer.Endpoint))
+                using (TcpClient client = connection = SecureConnect(peer.Endpoint,c=>RegisterConnectionFingerprint(c,peer.Fingerprint)))
                 using (SslStream stream = Security.Client(client, peer.Fingerprint))
                 {
                     client.ReceiveTimeout = 45000; stream.ReadTimeout = 45000;
@@ -151,6 +188,7 @@ namespace FeiqLight
             }, TaskScheduler.Default);
             try {
                 using(TcpClient client=connection=SecureConnect(item.Endpoint,c=>{
+                    RegisterConnectionFingerprint(c,item.Fingerprint);
                     lock(gate){
                         if(item.Canceled||item.Delivered){
                             c.Close();
@@ -221,6 +259,7 @@ namespace FeiqLight
             // 仅在握手的网络 IO 阶段归类为中断；后续身份校验和协议错误仍正常报告。
             catch(IOException) { ReportConnectionInterrupted(); return; }
             using(stream) {
+                RegisterConnectionFingerprint(client,SecureIdentity.RemoteFingerprint(stream));
                 client.ReceiveTimeout=45000;stream.ReadTimeout=45000;
                 Packet identity=AuthenticateSecureServer(stream);
                 if(identity==null)return;
@@ -411,7 +450,7 @@ namespace FeiqLight
                         Complete(item.Record,"设备信任已撤销，未确认送达");
                     }
                     foreach(string key in offers.Where(o=>o.Value.DeviceId==peer.DeviceId).Select(o=>o.Key).ToList())offers.Remove(key);
-                    foreach(TcpClient client in connections)client.Close();
+                    OnTransportRevoked(peer.Fingerprint);
                     SaveOffers();
                 }
             }

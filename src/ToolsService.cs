@@ -74,7 +74,7 @@ namespace FeiqLight
         private readonly Stopwatch clock = Stopwatch.StartNew();
         private readonly List<Session> sessions = new List<Session>();
         private readonly Dictionary<string, SharedEntry> entries = new Dictionary<string, SharedEntry>();
-        private readonly Dictionary<string, string> entryIds = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, string> entryIds = new Dictionary<string, string>(StringComparer.Ordinal);
         private readonly LinkedList<string> entryOrder = new LinkedList<string>();
         private readonly Dictionary<string, LinkedListNode<string>> entryNodes = new Dictionary<string, LinkedListNode<string>>();
         private readonly List<ArchiveLease> archives = new List<ArchiveLease>();
@@ -87,6 +87,7 @@ namespace FeiqLight
         private long shareUntil, remoteUntil, attemptsSince;
         private int attempts, remoteEpoch, shareEpoch, shareRevision;
         private bool closed, remoteEnabled, remotePending;
+        private string pendingRemoteFingerprint;
         internal Func<string, bool> ConfirmRemote;
         internal Func<string, int> ConfirmRemoteDevice;
         internal Func<int, byte[]> Capture;
@@ -115,8 +116,9 @@ namespace FeiqLight
                 bool remote=sessions.Any(session=>session.Mode=="remote"&&session.Fingerprint==fingerprint);
                 CancelArchives(archive=>archive.Session.Fingerprint==fingerprint);
                 sessions.RemoveAll(session=>session.Fingerprint==fingerprint);
-                // 撤信也使正在等待本机确认的登录失效；其他已认证会话保持可用。
-                remoteEpoch++;shareEpoch++;remotePending=false;Monitor.PulseAll(gate);
+                // 只撤销该证书正在等待确认的登录，不改变其他设备的登录代次。
+                if(remotePending&&pendingRemoteFingerprint==fingerprint){remoteEpoch++;remotePending=false;pendingRemoteFingerprint=null;}
+                Monitor.PulseAll(gate);
                 if(remote&&ReleaseInput!=null)ReleaseInput();
                 pairings.ForgetFingerprint(fingerprint);
             }
@@ -254,7 +256,7 @@ namespace FeiqLight
                 if (mode == "remote")
                 {
                     if (remotePending || sessions.Any(s => s.Mode == "remote")) throw new ToolsHttp.HttpError(409, "已有设备正在控制或等待确认");
-                    remotePending = true; if (!reconnect) { remoteCode = ""; remoteUntil = 0; }
+                    remotePending = true;pendingRemoteFingerprint=request.Fingerprint; if (!reconnect) { remoteCode = ""; remoteUntil = 0; }
                 }
             }
             try
@@ -265,13 +267,14 @@ namespace FeiqLight
                 lock (gate)
                 {
                     if (closed || (mode == "share" ? shareEpoch : remoteEpoch) != epoch) throw new ToolsHttp.HttpError(403, "共享或控制已关闭");
+                    if(security!=null&&!security.IsTrustedFingerprint(request.Fingerprint))throw new ToolsHttp.HttpError(403,"设备信任已撤销");
                     if (sessions.Count >= 8) throw new ToolsHttp.HttpError(409, "连接人数已满");
                     remembered = pairings.Remember(remembered, scope, approval == 2);
                     Session session = new Session { Mode = mode, Address = request.Address, Fingerprint=request.Fingerprint, Token = RandomToken(32), Last = clock.ElapsedMilliseconds };
                     sessions.Add(session); response.Json(new { token = session.Token, mode = mode }, "Set-Cookie: fq_" + mode + "=" + session.Token + "; Path=/; HttpOnly; SameSite=Strict\r\nSet-Cookie: " + PairCookie(mode) + "=" + remembered + "; Path=/; HttpOnly; SameSite=Strict; Max-Age=7776000\r\n");
                 }
             }
-            finally { if (mode == "remote") lock (gate) { if (remoteEpoch == epoch) remotePending = false; } }
+            finally { if (mode == "remote") lock (gate) { if (remoteEpoch == epoch) {remotePending = false;pendingRemoteFingerprint=null;} } }
         }
         internal static string Text(Dictionary<string, object> data, string key)
         {
@@ -307,7 +310,7 @@ namespace FeiqLight
                     string sharePair = Cookie(request, PairCookie("share")), remotePair = Cookie(request, PairCookie("remote"));
                     bool sharePaired = !closed && folders.Length > 0 && pairings.Contains(sharePair, request.PairScope(Scope("share")));
                     bool remotePaired = !closed && remoteEnabled && pairings.Contains(remotePair, request.PairScope(Scope("remote")));
-                    response.Json(new { remote = remoteEnabled, share = folders.Length > 0, paired = sharePaired, remotePaired = remotePaired, trusted = remotePaired && pairings.AlwaysAllows(remotePair, request.PairScope(Scope("remote"))), platform = "windows", listPaging = true, directoryArchive = true, clipboardWrite = true, clipboardRead = preferences.Value.RemoteClipboardRead });
+                    response.Json(new { remote = remoteEnabled, share = folders.Length > 0, paired = sharePaired, remotePaired = remotePaired, trusted = remotePaired && pairings.AlwaysAllows(remotePair, request.PairScope(Scope("remote"))), platform = "windows", listPaging = true, directoryArchive = true, entryCheck = true, clipboardWrite = true, clipboardRead = preferences.Value.RemoteClipboardRead });
                 }
                 return;
             }
@@ -377,6 +380,7 @@ namespace FeiqLight
             }
             if (request.Path == "/api/list" || request.Path == "/api/files") { ListDirectory(request, response, Authorize(request, "share")); return; }
             if(request.Path=="/api/share-status") {Authorize(request,"share");lock(gate)response.Json(new {revision=shareRevision,listPaging=true,directoryArchive=true});return;}
+            if(request.Path=="/api/entry") {Authorize(request,"share");lock(gate){Resolve(request.Parameter("id"));response.Json(new {ok=true});}return;}
             if (request.Path == "/file") { FileResponse(request, response, Authorize(request, "share")); return; }
             if (request.Path == "/favicon.ico" || request.Path.StartsWith("/native/", StringComparison.Ordinal)) { response.Bytes(new byte[0], "image/x-icon", 204); return; }
             string asset = request.Path == "/" ? "index.html" : request.Path.TrimStart('/');
@@ -524,42 +528,73 @@ namespace FeiqLight
         }
         private void ScanDirectory(ListSnapshot snapshot,Session session,ToolsHttp.Response response,bool paging)
         {
-            SharedEntry[] roots;
-            lock(gate)roots=folders.Select(root=>new SharedEntry {Path=root,Root=root}).ToArray();
-            if(snapshot.Parent!=null)
+            List<SafeFileHandle> pinned = new List<SafeFileHandle>();
+            try
             {
-                CheckNoLinks(snapshot.Parent.Path);
-                if(!Directory.Exists(snapshot.Parent.Path))throw new ToolsHttp.HttpError(404,"目录已不存在");
+                SharedEntry[] roots;
+                lock(gate)roots=folders.Select(root=>new SharedEntry {Path=root,Root=root}).ToArray();
+                if(snapshot.Parent!=null)
+                {
+                    pinned = PinDirectory(snapshot.Parent.Path);
+                    if(!Directory.Exists(snapshot.Parent.Path))throw new ToolsHttp.HttpError(404,"目录已不存在");
+                }
+                // 枚举和磁盘元数据读取都在授权锁外，慢目录不能挡住移根、视频或远控；
+                // 使用 DirectoryInfo.EnumerateFileSystemInfos 直接复用 FindNextFile 元数据，避免每项额外触发多次磁盘 stat。
+                IEnumerable<KeyValuePair<SharedEntry,FileSystemInfo>> sources=snapshot.Parent==null
+                    ? roots.Select(root=>new KeyValuePair<SharedEntry,FileSystemInfo>(root,new DirectoryInfo(root.Path)))
+                    : new DirectoryInfo(snapshot.Parent.Path).EnumerateFileSystemInfos().Select(info=>new KeyValuePair<SharedEntry,FileSystemInfo>(new SharedEntry {Path=info.FullName,Root=snapshot.Parent.Root},info));
+                Stopwatch scan=Stopwatch.StartNew();int characters=0;
+                foreach(KeyValuePair<SharedEntry,FileSystemInfo> entry in sources)
+                {
+                    SharedEntry source=entry.Key;FileSystemInfo info=entry.Value;
+                    CheckListing(session,snapshot.Revision);response.CheckConnection();
+                    if(!paging&&snapshot.Scanned>=1000)throw new ToolsHttp.HttpError(409,"此目录超过 1000 项，请使用支持分页的网页或共享更小的文件夹");
+                    if(snapshot.Scanned>=ListScanLimit||scan.ElapsedMilliseconds>=ListScanMilliseconds||characters>=4*1024*1024)
+                    {
+                        if(!paging)throw new ToolsHttp.HttpError(409,"目录读取超过预算，请使用支持分页的网页");
+                        snapshot.Truncated=true;break;
+                    }
+                    snapshot.Scanned++;characters+=source.Path.Length;
+                    try
+                    {
+                        FileAttributes attributes=info.Attributes;
+                        if((attributes&FileAttributes.ReparsePoint)!=0)continue;
+                        ListItem item=ReadListItem(source,info);characters+=item.Name.Length;
+                        if(!paging||item.NormalName.Contains(snapshot.Query))snapshot.Items.Add(item);
+                    }
+                    catch(FileNotFoundException){snapshot.Truncated=true;}
+                    catch(DirectoryNotFoundException){snapshot.Truncated=true;}
+                }
+                if(scan.ElapsedMilliseconds>=ListScanMilliseconds){if(!paging)throw new ToolsHttp.HttpError(409,"目录读取超过预算，请使用支持分页的网页");snapshot.Truncated=true;}
+                CheckListing(session,snapshot.Revision);
             }
-            // 枚举和磁盘元数据读取都在授权锁外，慢目录不能挡住移根、视频或远控；
-            // 使用 DirectoryInfo.EnumerateFileSystemInfos 直接复用 FindNextFile 元数据，避免每项额外触发多次磁盘 stat。
-            IEnumerable<KeyValuePair<SharedEntry,FileSystemInfo>> sources=snapshot.Parent==null
-                ? roots.Select(root=>new KeyValuePair<SharedEntry,FileSystemInfo>(root,new DirectoryInfo(root.Path)))
-                : new DirectoryInfo(snapshot.Parent.Path).EnumerateFileSystemInfos().Select(info=>new KeyValuePair<SharedEntry,FileSystemInfo>(new SharedEntry {Path=info.FullName,Root=snapshot.Parent.Root},info));
-            Stopwatch scan=Stopwatch.StartNew();int characters=0;
-            foreach(KeyValuePair<SharedEntry,FileSystemInfo> entry in sources)
+            finally { foreach(SafeFileHandle handle in pinned)handle.Dispose(); }
+        }
+        [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+        private static extern SafeFileHandle CreateFile(string path,uint access,uint share,IntPtr security,uint creation,uint flags,IntPtr template);
+        private static List<SafeFileHandle> PinDirectory(string path)
+        {
+            List<SafeFileHandle> handles=new List<SafeFileHandle>();
+            try
             {
-                SharedEntry source=entry.Key;FileSystemInfo info=entry.Value;
-                CheckListing(session,snapshot.Revision);response.CheckConnection();
-                if(!paging&&snapshot.Scanned>=1000)throw new ToolsHttp.HttpError(409,"此目录超过 1000 项，请使用支持分页的网页或共享更小的文件夹");
-                if(snapshot.Scanned>=ListScanLimit||scan.ElapsedMilliseconds>=ListScanMilliseconds||characters>=4*1024*1024)
+                List<string> parents=new List<string>();
+                for(string current=Path.GetFullPath(path);!String.IsNullOrEmpty(current);current=Path.GetDirectoryName(current))parents.Add(current);
+                parents.Reverse();
+                foreach(string current in parents)
                 {
-                    if(!paging)throw new ToolsHttp.HttpError(409,"目录读取超过预算，请使用支持分页的网页");
-                    snapshot.Truncated=true;break;
+                    // 不共享删除权限：固定每一级目录，枚举期间不能改名或替换任一祖先。
+                    SafeFileHandle handle=CreateFile(current,0x81,1,IntPtr.Zero,3,0x02200000,IntPtr.Zero);
+                    if(handle.IsInvalid){handle.Dispose();throw new IOException("无法固定共享目录，请关闭正在修改目录的程序后重试。");}
+                    handles.Add(handle);HandleInfo info;
+                    if(!GetFileInformationByHandle(handle,out info)||(info.Attributes&(uint)FileAttributes.ReparsePoint)!=0||(info.Attributes&(uint)FileAttributes.Directory)==0)throw new ToolsHttp.HttpError(403,"目录已变化或包含目录联接");
+                    StringBuilder actual=new StringBuilder(32768);uint count=GetFinalPathNameByHandle(handle,actual,(uint)actual.Capacity,0);
+                    string resolved=actual.ToString();
+                    if(resolved.StartsWith("\\\\?\\UNC\\"))resolved="\\\\"+resolved.Substring(8);else if(resolved.StartsWith("\\\\?\\"))resolved=resolved.Substring(4);
+                    if(count==0||count>=actual.Capacity||!String.Equals(resolved.TrimEnd('\\'),current.TrimEnd('\\'),StringComparison.OrdinalIgnoreCase))throw new ToolsHttp.HttpError(403,"目录已离开授权路径");
                 }
-                snapshot.Scanned++;characters+=source.Path.Length;
-                try
-                {
-                    FileAttributes attributes=info.Attributes;
-                    if((attributes&FileAttributes.ReparsePoint)!=0)continue;
-                    ListItem item=ReadListItem(source,info);characters+=item.Name.Length;
-                    if(!paging||item.NormalName.Contains(snapshot.Query))snapshot.Items.Add(item);
-                }
-                catch(FileNotFoundException){snapshot.Truncated=true;}
-                catch(DirectoryNotFoundException){snapshot.Truncated=true;}
+                return handles;
             }
-            if(scan.ElapsedMilliseconds>=ListScanMilliseconds){if(!paging)throw new ToolsHttp.HttpError(409,"目录读取超过预算，请使用支持分页的网页");snapshot.Truncated=true;}
-            CheckListing(session,snapshot.Revision);
+            catch {foreach(SafeFileHandle handle in handles)handle.Dispose();throw;}
         }
         internal static void CheckNoLinks(string path)
         {
@@ -667,6 +702,7 @@ namespace FeiqLight
             if(request.Parameter("id").Length==0||!Directory.Exists(target.Path))throw new ToolsHttp.HttpError(404,"请选择真实的共享目录");
             if(request.Header("Range").Length>0)throw new ToolsHttp.HttpError(416,"目录打包不支持续传，请重新下载");
             response.KeepAlive=false;
+            response.ArchiveProgress=request.Header("X-FQ-Archive-Progress")=="1";
             ArchiveLease lease=new ArchiveLease {Target=target,Session=session,Response=response};
             CheckArchive(lease);
             lock(gate)
@@ -675,6 +711,12 @@ namespace FeiqLight
                 if(archives.Count(archive=>!archive.Cancelled)>=4||archives.Any(archive=>archive.Session==session&&!archive.Cancelled))throw new ToolsHttp.HttpError(409,"已有目录打包下载正在进行，请等它完成后重试");
                 archives.Add(lease);
             }
+            Timer cancellationWatch=new Timer(_=>{
+                try{response.CheckConnection();}
+                catch(IOException){lock(gate)CancelArchives(archive=>archive==lease);}
+                catch(ObjectDisposedException){lock(gate)CancelArchives(archive=>archive==lease);}
+                catch(System.Net.Sockets.SocketException){lock(gate)CancelArchives(archive=>archive==lease);}
+            },null,100,100);
             try
             {
                 StoreZipStream writer;
@@ -689,7 +731,7 @@ namespace FeiqLight
                     lock(gate){if(lease.Cancelled){watcher.Dispose();throw new ToolsHttp.HttpError(401,"共享目录已移除");}lease.Watcher=watcher;}
                     watcher.EnableRaisingEvents=true;
                     writer=new StoreZipStream(files.Select(file=>new StoreZipStream.Entry(file.Relative,file.Item.Size,new DateTime(file.Item.ModifiedTicks,DateTimeKind.Utc),()=>OpenArchiveSource(lease,file),input=>ValidateArchiveSource(lease,file,input))));
-                    writer.Prepare(()=>CheckArchive(lease));
+                    writer.Prepare(()=>{CheckArchive(lease);response.Processing();});
                 }
                 catch(InvalidDataException error){throw new ToolsHttp.HttpError(409,error.Message);}
                 catch(IOException){throw new ToolsHttp.HttpError(409,"原文件已变化或无法读取，请重新下载目录");}
@@ -699,7 +741,7 @@ namespace FeiqLight
                 response.Begin(200,"application/zip",writer.ContentLength,"Accept-Ranges: none\r\nContent-Disposition: attachment; filename*=UTF-8''"+encoded+"\r\n");
                 if(request.Method!="HEAD")writer.Write((bytes,count)=>{CheckArchive(lease);response.Write(bytes,count);},()=>CheckArchive(lease));
             }
-            finally {lock(gate){archives.Remove(lease);if(lease.Watcher!=null)lease.Watcher.Dispose();if(lease.Input!=null)lease.Input.Dispose();lease.Input=null;}}
+            finally {cancellationWatch.Dispose();lock(gate){archives.Remove(lease);if(lease.Watcher!=null)lease.Watcher.Dispose();if(lease.Input!=null)lease.Input.Dispose();lease.Input=null;}}
         }
         private void FileResponse(ToolsHttp.Request request, ToolsHttp.Response response, Session session)
         {

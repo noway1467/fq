@@ -39,7 +39,7 @@ namespace FeiqLight.Tests
             private readonly Dictionary<TcpClient, SslStream> sockets = new Dictionary<TcpClient, SslStream>();
             private readonly object gate = new object();
             private bool closed;
-            internal bool Legacy;
+            internal bool Legacy, CompactCookie, NoRequestId;
             internal int Handshakes, Screens, Inputs, DropInput, DropScreen, Reject, HoldLogin;
             internal int ScreenDelay;
             internal string Fault = "", Token = "";
@@ -88,7 +88,7 @@ namespace FeiqLight.Tests
                         {
                             Token = "remote-session-" + Interlocked.Increment(ref session);
                             string body = "{\"token\":\"" + Token + "\",\"mode\":\"remote\"}";
-                            string extra = "Set-Cookie: fq_remote=" + Token + "; Path=/; HttpOnly; SameSite=Strict\r\n";
+                            string extra = "Set-Cookie:"+(CompactCookie?"":" ")+"fq_remote=" + Token + "; Path=/; HttpOnly; SameSite=Strict\r\n";
                             if (Interlocked.Exchange(ref HoldLogin, 0) != 0)
                             {
                                 Write(tls, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + body.Length + "\r\nConnection: close\r\n" + extra + "\r\n");
@@ -112,12 +112,15 @@ namespace FeiqLight.Tests
                             Interlocked.Increment(ref Inputs);
                             if (Interlocked.Exchange(ref DropInput, 0) != 0) return;
                         }
-                        if (Reject != 0) { Send(tls, Reject, "{}", false); return; }
+                        if (Reject != 0) { Send(tls, Reject, "{}", false,"X-FQ-Request-ID: "+request.Header("X-FQ-Request-ID")+"\r\n"); return; }
                         string fault = Interlocked.Exchange(ref Fault, "");
                         if (fault == "duplicate") { Write(tls, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\n{}"); return; }
-                        if (fault == "truncated") { Write(tls, "HTTP/1.1 200 OK\r\nContent-Length: 20\r\nConnection: keep-alive\r\n\r\n{}"); return; }
+                        if (fault == "truncated") { Write(tls, "HTTP/1.1 200 OK\r\nContent-Length: 20\r\nX-FQ-Request-ID: "+request.Header("X-FQ-Request-ID")+"\r\nConnection: keep-alive\r\n\r\n{}"); return; }
+                        if(fault=="oversize"){Write(tls,"HTTP/1.1 200 OK\r\nContent-Length: "+((screen?ToolsGateway.ScreenResponseLimit:ToolsGateway.InputResponseLimit)+1)+"\r\nConnection: keep-alive\r\n\r\n");return;}
+                        if(fault=="wrong-id"){Send(tls,200,"{}",true,"X-FQ-Request-ID: "+Guid.NewGuid().ToString("N")+"\r\n");return;}
                         bool reuse = !Legacy && (screen || input) && index < 15 && request.Header("Connection") == "keep-alive";
-                        Send(tls, 200, "{}", reuse);
+                        string responseId=NoRequestId?"":"X-FQ-Request-ID: "+request.Header("X-FQ-Request-ID")+"\r\n";
+                        Send(tls, 200, fault=="limit"?new string('x',(int)(screen?ToolsGateway.ScreenResponseLimit:ToolsGateway.InputResponseLimit)):"{}", reuse,responseId);
                         if (!reuse) return;
                     }
                 }
@@ -191,6 +194,63 @@ namespace FeiqLight.Tests
         private static string Profile(string root) { return Path.Combine(root, "remote-tls-" + Guid.NewGuid().ToString("N")); }
         internal static void Run(Action<string, Action> run, string root)
         {
+            run("阶段二：响应在写前拒绝超长正文",()=>{
+                using(MemoryStream bytes=new MemoryStream()){
+                    var response=new ToolsHttp.Response(bytes,false);response.Begin(200,"text/plain",2,"");long header=bytes.Length;
+                    bool refused=false;try{response.Write(new byte[3],3);}catch(IOException){refused=true;}
+                    Check(refused&&bytes.Length==header,"超长正文已经污染底层流");response.Write(new byte[2],2);Check(response.Complete,"恰好长度未完成");
+                }
+            });
+            run("阶段二：远控长度边界、请求归属与旧端回退",()=>{
+                using(TlsPeer peer=new TlsPeer(Profile(root)))using(ToolsGateway gateway=peer.Gateway()){
+                    string cookie=Login(gateway);
+                    foreach(string path in new[]{"/api/screen","/api/input"}){
+                        string body=path=="/api/input"?"{}":null;
+                        peer.Fault="limit";Reply exact=Call(gateway,path,cookie,body,peer.Token);Check(exact.Code==200&&exact.Body.LongLength==(body==null?ToolsGateway.ScreenResponseLimit:ToolsGateway.InputResponseLimit),"边界长度被拒绝");
+                        foreach(string fault in new[]{"oversize","wrong-id"}){peer.Fault=fault;int inputs=peer.Inputs;Check(Call(gateway,path,cookie,body,peer.Token).Code!=200,"异常响应未拒绝："+fault);if(body!=null)Check(peer.Inputs==inputs+1,"输入发生重放");Check(Call(gateway,path,cookie,body,peer.Token).Code==200,"异常后新连接仍错位");}
+                    }
+                    peer.NoRequestId=true;Call(gateway,"/api/screen",cookie);int before=peer.Handshakes;Call(gateway,"/api/screen",cookie);Check(peer.Handshakes==before+1,"无请求ID的旧端被复用");
+                }
+            });
+            run("阶段二：Cookie紧凑头改写且换证隔离",()=>{
+                using(TlsPeer peer=new TlsPeer(Profile(root)))using(ToolsGateway gateway=peer.Gateway()){
+                    peer.CompactCookie=true;string cookie=Login(gateway);Check(!cookie.Split(';').Any(value=>value.Trim().StartsWith("fq_remote=")),"紧凑Set-Cookie未加前缀");Check(Call(gateway,"/api/screen",cookie).Code==200,"紧凑Cookie不可用");
+                    string old=(string)typeof(ToolsGateway).GetField("cookiePrefix",System.Reflection.BindingFlags.NonPublic|System.Reflection.BindingFlags.Instance).GetValue(gateway);
+                    using(SecureIdentity next=new SecureIdentity(Profile(root))){peer.Client.Forget(ServerId);peer.Client.EnsureTrusted(ServerId,next.Fingerprint,"changed");using(ToolsGateway fresh=new ToolsGateway(peer.Client,new Peer{DeviceId=ServerId,Fingerprint=next.Fingerprint,Endpoint=new IPEndPoint(IPAddress.Loopback,peer.Port)},peer.Port,true))Check(old!=(string)typeof(ToolsGateway).GetField("cookiePrefix",System.Reflection.BindingFlags.NonPublic|System.Reflection.BindingFlags.Instance).GetValue(fresh),"换证沿用旧Cookie前缀");}
+                }
+            });
+            run("阶段二：拨号取消立即归还额度和回连票据",()=>{
+                string profile=Profile(root);
+                using(TlsPeer peer=new TlsPeer(profile))using(LanService node=new LanService(new AppSettings{DeviceId=ClientId,ReceiveFolder=Path.Combine(profile,"received")},LoopbackPorts.Chat(),true,"cancel"))using(ManualResetEvent entered=new ManualResetEvent(false)){
+                    node.ConfigureSecurity(Path.Combine(profile,"client"),(name,code)=>true);node.Start();
+                    node.PeerConnector=(raw,target)=>{entered.Set();while(raw.Client!=null)Thread.Sleep(5);throw new IOException("已取消");};
+                    using(ToolsGateway gateway=peer.Gateway(node)){
+                        Task<Reply> call=Task.Run(()=>Call(gateway,"/api/status"));Check(entered.WaitOne(2000),"未进入拨号");Stopwatch watch=Stopwatch.StartNew();gateway.Dispose();
+                        var sockets=(HashSet<TcpClient>)typeof(LanService).GetField("connections",System.Reflection.BindingFlags.NonPublic|System.Reflection.BindingFlags.Instance).GetValue(node);
+                        var tickets=(System.Collections.IDictionary)typeof(LanService).GetField("reverseRequests",System.Reflection.BindingFlags.NonPublic|System.Reflection.BindingFlags.Instance).GetValue(node);
+                        Check(sockets.Count==0&&tickets.Count==0&&watch.ElapsedMilliseconds<500,"取消未同步释放配额或票据");Check(call.Wait(1000)&&call.Result.Code!=200,"旧任务仍发业务请求");
+                    }
+                }
+            });
+            run("阶段二：联系人撤信不重置其他设备，重复打开100次复用入口",()=>{
+                string profile=Profile(root),otherId=new string('f',32);
+                using(TlsPeer peer=new TlsPeer(profile))using(SecureIdentity other=new SecureIdentity(Path.Combine(profile,"other")))
+                using(LanService node=new LanService(new AppSettings{DeviceId=ClientId,ReceiveFolder=Path.Combine(profile,"received")},LoopbackPorts.Chat(),true,"revoke")){
+                    node.ConfigureSecurity(Path.Combine(profile,"client"),(name,code)=>true);node.Security.EnsureTrusted(otherId,other.Fingerprint,"A");node.Start();int epoch=node.TransportEpoch,resets=0;node.NetworkReset+=()=>resets++;
+                    Peer targetB=new Peer{DeviceId=ServerId,Fingerprint=peer.Server.Fingerprint,Endpoint=new IPEndPoint(IPAddress.Loopback,peer.Port)},targetA=new Peer{DeviceId=otherId,Fingerprint=other.Fingerprint,Endpoint=targetB.Endpoint};
+                    using(MainForm form=new MainForm(node,new LocalStore(Path.Combine(profile,"ui")))){
+                        ToolsGateway first=form.GetToolGateway(targetB,peer.Port);string cookie=Login(first);Check(Call(first,"/api/screen",cookie).Code==200,"B预热失败");
+                        for(int index=0;index<100;index++)Check(Object.ReferenceEquals(first,form.GetToolGateway(targetB,peer.Port)),"重复打开分配了新监听器");
+                        using(TcpClient activeA=node.ConnectPeer(targetA,peer.Port)){
+                            form.RevokeDeviceTrust(targetA);Check(node.TransportEpoch==epoch&&resets==0&&activeA.Client==null,"单设备撤信仍触发全局重置或未关闭A");
+                            Check(Call(first,"/api/screen",cookie).Code==200,"撤信A影响B会话");
+                        }
+                        typeof(ToolsGateway).GetField("lastActivity",System.Reflection.BindingFlags.NonPublic|System.Reflection.BindingFlags.Instance).SetValue(first,-600001L);
+                        typeof(ToolsGateway).GetMethod("ExpireIdle",System.Reflection.BindingFlags.NonPublic|System.Reflection.BindingFlags.Instance).Invoke(first,null);Check(first.IsClosed,"长期空闲入口未回收");
+                        Check(!Object.ReferenceEquals(first,form.GetToolGateway(targetB,peer.Port)),"回收后无法重新打开");
+                    }
+                }
+            });
             run("WP-4 TLS：24 次画面/输入请求握手由 24 次降为 2 次，浏览器头仍为 close", () => {
                 int legacy, pooled;
                 using (TlsPeer peer = new TlsPeer(Profile(root))) using (ToolsGateway gateway = peer.Gateway())

@@ -40,7 +40,7 @@ public final class RemoteReuseTest {
         final CountDownLatch screenEntered=new CountDownLatch(1);
         volatile CountDownLatch releaseScreen=new CountDownLatch(0);
         volatile CountDownLatch releaseLogin=new CountDownLatch(0);
-        volatile boolean legacy,closed;
+        volatile boolean legacy,closed,noRequestId;
         volatile int screenDelay,reject;
         volatile String token="";
         private final ServerSocket listener=new ServerSocket(0,12,InetAddress.getByName("127.0.0.1"));
@@ -77,11 +77,14 @@ public final class RemoteReuseTest {
                     boolean screen=request.method.equals("GET")&&request.path.equals("/api/screen"),input=request.method.equals("POST")&&request.path.equals("/api/input");
                     if(screen){screens.incrementAndGet();screenEntered.countDown();releaseScreen.await(5,TimeUnit.SECONDS);if(screenDelay>0)Thread.sleep(screenDelay);if(dropScreen.getAndSet(0)!=0)return;}
                     if(input){if(!request.header("X-FQ-Token").equals(token)){send(output,403,"{}",false,"");return;}inputs.incrementAndGet();if(dropInput.getAndSet(0)!=0)return;}
-                    if(reject!=0){send(output,reject,"{}",false,"");return;}
+                    if(reject!=0){send(output,reject,"{}",false,"X-FQ-Request-ID: "+request.header("X-FQ-Request-ID")+"\r\n");return;}
                     String next=fault.getAndSet("");
                     if(next.equals("duplicate")){write(output,"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\n{}");return;}
-                    if(next.equals("truncated")){write(output,"HTTP/1.1 200 OK\r\nContent-Length: 20\r\nConnection: keep-alive\r\n\r\n{}");return;}
-                    boolean reuse=!legacy&&(screen||input)&&index<15&&request.header("Connection").equals("keep-alive");send(output,200,"{}",reuse,"");if(!reuse)return;
+                    if(next.equals("truncated")){write(output,"HTTP/1.1 200 OK\r\nContent-Length: 20\r\nX-FQ-Request-ID: "+request.header("X-FQ-Request-ID")+"\r\nConnection: keep-alive\r\n\r\n{}");return;}
+                    if(next.equals("oversize")){write(output,"HTTP/1.1 200 OK\r\nContent-Length: "+((screen?ToolsGateway.SCREEN_RESPONSE_LIMIT:ToolsGateway.INPUT_RESPONSE_LIMIT)+1)+"\r\nConnection: keep-alive\r\n\r\n");return;}
+                    if(next.equals("wrong-id")){send(output,200,"{}",true,"X-FQ-Request-ID: "+UUID.randomUUID().toString().replace("-","")+"\r\n");return;}
+                    String responseId=noRequestId?"":"X-FQ-Request-ID: "+request.header("X-FQ-Request-ID")+"\r\n";
+                    boolean reuse=!legacy&&(screen||input)&&index<15&&request.header("Connection").equals("keep-alive");send(output,200,next.equals("limit")?"x".repeat((int)(screen?ToolsGateway.SCREEN_RESPONSE_LIMIT:ToolsGateway.INPUT_RESPONSE_LIMIT)):"{}",reuse,responseId);if(!reuse)return;
                 }
             }catch(IOException ignored){/* 测试主动制造 EOF、撤销与截断。 */}
             catch(InterruptedException error){Thread.currentThread().interrupt();}
@@ -125,6 +128,25 @@ public final class RemoteReuseTest {
     private static String login(String url)throws Exception{Reply reply=call(url,"/api/login","","{\"mode\":\"remote\"}","");assertEquals(200,reply.code);return reply.cookies();}
     private static Reply screen(String url,String cookie)throws Exception{return call(url,"/api/screen",cookie,null,"");}
     private static Reply input(String url,String cookie,String token)throws Exception{return call(url,"/api/input",cookie,"{}",token);}
+    @Test public void oversizedWriteDoesNotPolluteStream()throws Exception{
+        ByteArrayOutputStream bytes=new ByteArrayOutputStream();ToolsHttp.Response response=new ToolsHttp.Response(bytes,false,new AtomicLong(),true);
+        response.begin(200,"text/plain",2,"");int header=bytes.size();try{response.write(new byte[3],3);fail("超长正文未拒绝");}catch(IOException expected){}assertEquals(header,bytes.size());response.write(new byte[2],2);assertEquals(header+2,bytes.size());
+    }
+    @Test public void remoteLimitsRequestOwnershipAndLegacyFallback()throws Exception{
+        try(Peer peer=new Peer(temporary.newFolder());ToolsGateway gateway=peer.gateway()){
+            String url=gateway.url(),cookie=login(url);
+            for(String path:new String[]{"/api/screen","/api/input"}){
+                String body=path.equals("/api/input")?"{}":null;peer.fault.set("limit");Reply exact=call(url,path,cookie,body,peer.token);assertEquals(200,exact.code);assertEquals(body==null?ToolsGateway.SCREEN_RESPONSE_LIMIT:ToolsGateway.INPUT_RESPONSE_LIMIT,exact.body.length);
+                for(String fault:new String[]{"oversize","wrong-id"}){peer.fault.set(fault);int inputs=peer.inputs.get();assertNotEquals(200,call(url,path,cookie,body,peer.token).code);if(body!=null)assertEquals(inputs+1,peer.inputs.get());assertEquals(200,call(url,path,cookie,body,peer.token).code);}
+            }
+            peer.noRequestId=true;screen(url,cookie);int before=peer.handshakes.get();screen(url,cookie);assertEquals(before+1,peer.handshakes.get());
+        }
+    }
+    @Test public void onlyExplicitStaleDisconnectsRetry(){
+        assertTrue(ToolsGateway.staleConnection(new EOFException()));assertTrue(ToolsGateway.staleConnection(new SocketException("Connection reset")));
+        assertTrue(ToolsGateway.staleConnection(new SocketException("你的主机中的软件中止了一个已建立的连接。")));
+        assertFalse(ToolsGateway.staleConnection(new SocketException("Unknown socket error")));assertFalse(ToolsGateway.staleConnection(new SocketTimeoutException()));
+    }
     @Test public void realTlsHandshakesFallFrom24To2AndLegacyCloseWorks()throws Exception{
         int legacy,pooled;
         try(Peer peer=new Peer(temporary.newFolder());ToolsGateway gateway=peer.gateway()){

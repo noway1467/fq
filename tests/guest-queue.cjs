@@ -45,19 +45,24 @@ function browser(minutes = 60, legacy = false, options = {}) {
   const response = data => ({ ok: true, json: async () => data });
   let failCancel=options.failCancel;
   let failChunkOnce=options.failChunkOnce;
+  let failTextPoll=options.failTextPoll;
+  let cancelPrepare=options.cancelPrepare;
   const fetch = async (url, init) => {
     if (url === '/api/guest') return response({ files: options.files || [], directories: options.directories || [], archive: {enabled:true}, text: options.text === true, upload: true, until: new Date(until).toISOString(), ...(legacy?{}:{remainingMilliseconds:minutes*60000,limit:100*1024**3,countLimit:1000,requestIds:true,folders:true}) });
     if (url.startsWith('/api/text?')) {
+      if(failTextPoll){failTextPoll=false;return {ok:false,status:503,json:async()=>({error:'暂时不可用'})};}
       if(options.delayTextPoll)return new Promise(resolve=>resolveTextPoll=value=>resolve(response(value)));
       return response({items:(options.hostTexts || []).filter(item=>item.seq>Number(url.split('=')[1])),last:(options.hostTexts || []).length});
     }
     if (url === '/api/text') {
       textPosts.push({url,body:JSON.parse(init.body),headers:init.headers});
+      if(options.failTextPost)throw new Error('回复丢失');
       if(options.delayTextPost)return new Promise(resolve=>resolveTextPost=()=>resolve(response({ok:true})));
       return response({ok:true});
     }
     if (url === '/api/prepare') {
       prepared.push(JSON.parse(init.body));
+      if(cancelPrepare){cancelPrepare=false;return {ok:false,status:410,json:async()=>({error:'上传已取消',...(options.legacyCancel?{}:{code:'taskCanceled'})})};}
       if(options.delayPrepare)return new Promise((resolve,reject)=>{init.signal.addEventListener('abort',()=>reject(Object.assign(new Error('aborted'),{name:'AbortError'})),{once:true});});
       return response({ id: String(prepared.length), offset: 0 });
     }
@@ -97,6 +102,7 @@ function browser(minutes = 60, legacy = false, options = {}) {
     resolveTextPost() { resolveTextPost(); },
     expire() { elapsed=minutes*60000; now = until; intervals.forEach(callback => callback()); },
     shiftClock(milliseconds) { now+=milliseconds; intervals.forEach(callback=>callback()); },
+    advance(milliseconds) { elapsed+=milliseconds; now+=milliseconds; intervals.forEach(callback=>callback()); },
     async dispose() {
       await Promise.all(rows().filter(row => !row.children[2].children[1].hidden).map(cancelRow));
       events.pagehide();
@@ -249,5 +255,33 @@ async function run(name, test) {
       if(posting)await posting;await tick();assert.equal(late.element('text-received').children.length,0);assert.equal(late.element('text-sent').children.length,0);assert.equal(late.element('text-status').textContent,'');assert.equal(late.element('text-transfer').hidden,true);pass('文本结束后迟到 '+direction+' 回调不能恢复内容');
     } finally { await late.dispose(); }
   }
+  for(const legacyCancel of [false,true]) {
+    const recovering=browser(60,false,{text:true,files:[{id:'file',name:'仍可下载.txt',size:1}],cancelPrepare:true,legacyCancel});
+    try {
+      await tick();recovering.element('text-draft').value='保留这段草稿';
+      recovering.add([file('被取消的任务',1),file('正常上传',1)]);await tick();
+      assert.equal(recovering.element('text-draft').value,'保留这段草稿');
+      assert.notEqual(recovering.element('download-search').disabled,true);
+      assert.equal(recovering.prepared.length,2);assert.equal(recovering.rows()[1].children[2].children[1].hidden,false);
+      assert.equal(recovering.rows()[0].children[1].children[1].textContent,'已取消');assert.equal(recovering.rows()[0].children[2].children[0].hidden,true);
+      pass((legacyCancel?'旧端':'新版')+'单任务410保留文本与其他上传下载');
+    } finally {await recovering.dispose();}
+  }
+  const retryPoll=browser(60,false,{text:true,failTextPoll:true,hostTexts:[{seq:1,text:'恢复后的文本'}]});
+  try {
+    await tick();retryPoll.element('text-draft').value='仍在编辑';
+    assert.equal(retryPoll.element('text-transfer').hidden,false);
+    retryPoll.advance(2500);await tick();
+    assert.equal(retryPoll.element('text-draft').value,'仍在编辑');
+    assert.equal(retryPoll.element('text-received').children[0].children[0].textContent,'恢复后的文本');
+    pass('一次轮询503退避后恢复且保留草稿');
+  } finally {await retryPoll.dispose();}
+  const ambiguousPost=browser(60,false,{text:true,failTextPost:true});
+  try {
+    await tick();ambiguousPost.element('text-draft').value='结果未知';await ambiguousPost.element('text-send').onclick();
+    ambiguousPost.advance(10000);await tick();
+    assert.equal(ambiguousPost.textPosts.length,1);assert.equal(ambiguousPost.element('text-draft').value,'结果未知');
+    assert.ok(ambiguousPost.element('text-status').textContent.includes('确认'));pass('文本POST结果不明保留草稿且绝不自动重发');
+  } finally {await ambiguousPost.dispose();}
   console.log('TOTAL '+passed+' passed, 0 failed');
 })().catch(error => { console.error(error); process.exitCode = 1; });
